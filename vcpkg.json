@@ -1,0 +1,15 @@
+{
+    "name": "flexedge-service",
+    "version-string": "0.1.0",
+    "description": "FlexEdge",
+    "dependencies": [
+        "asio",
+        "brotli",
+        "hiredis",
+        "libpq",
+        "openssl",
+        "protobuf",
+        "zlib",
+        "zstd"
+    ]
+}

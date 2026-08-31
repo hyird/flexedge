@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package service.log_ingest.v2;
+
+import "node/proto/edge_control.proto";
+
+message QueuedLogDelivery {
+    string tenant_id = 1;
+    flexedge.node.v2.LogDelivery delivery = 2;
+    string agent_id = 3;
+}

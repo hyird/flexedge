@@ -1,0 +1,295 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VCPKG_COMMIT: 4bca8fd8654e5ba76f92661db7bfe954768ad8ef
+  BUILD_TYPE: Release
+
+jobs:
+  ubuntu_build:
+    name: Ubuntu build
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang-18
+      CXX: clang++-18
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.cache/vcpkg/archives
+    steps:
+      - name: Checkout FlexEdge
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 ninja-build
+          clang-18 --version
+          clang++-18 --version
+
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-clang18-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
+          restore-keys: |
+            vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-clang18-${{ env.VCPKG_COMMIT }}-
+
+      - name: Bootstrap vcpkg
+        run: |
+          set -euo pipefail
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+          git init "$VCPKG_ROOT"
+          git -C "$VCPKG_ROOT" remote add origin https://github.com/microsoft/vcpkg.git
+          git -C "$VCPKG_ROOT" fetch --depth 1 origin "$VCPKG_COMMIT"
+          git -C "$VCPKG_ROOT" checkout --detach FETCH_HEAD
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+
+      - name: Configure
+        run: |
+          cmake -S . -B build/ci -G Ninja \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Save vcpkg binary cache
+        if: ${{ !cancelled() && steps.vcpkg-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      - name: Build
+        run: cmake --build build/ci --parallel
+
+      - name: Test
+        run: ctest --test-dir build/ci --output-on-failure --build-config "$BUILD_TYPE"
+
+      - name: Stage Server artifact
+        run: cmake --install build/ci --component Server --prefix build/artifact
+
+      - name: Verify Server artifact layout
+        run: |
+          set -euo pipefail
+          test -x build/artifact/server
+          test -x build/artifact/node
+          test -x build/artifact/install-node.sh
+          test -f build/artifact/node-release.manifest
+          test -f build/artifact/systemd/flexedge.service
+          bash -n build/artifact/install-node.sh
+          grep -q '/api/agent/node' build/artifact/install-node.sh
+          expected_sha256="$(awk -F= '$1 == "sha256" { print $2 }' build/artifact/node-release.manifest)"
+          actual_sha256="$(sha256sum build/artifact/node | awk '{ print $1 }')"
+          test "$actual_sha256" = "$expected_sha256"
+
+      - name: Package artifact
+        run: tar -C build/artifact -czf "build/flexedge-${RUNNER_OS}-${RUNNER_ARCH}.tar.gz" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: flexedge-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          path: build/flexedge-${{ runner.os }}-${{ runner.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  macos_build:
+    name: macOS build
+    runs-on: macos-26
+    env:
+      CC: /usr/bin/clang
+      CXX: /usr/bin/clang++
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.cache/vcpkg/archives
+    steps:
+      - name: Checkout FlexEdge
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install build tools
+        run: |
+          brew install ninja
+          /usr/bin/clang++ --version
+
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-appleclang-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
+          restore-keys: |
+            vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-appleclang-${{ env.VCPKG_COMMIT }}-
+
+      - name: Bootstrap vcpkg
+        run: |
+          set -euo pipefail
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+          git init "$VCPKG_ROOT"
+          git -C "$VCPKG_ROOT" remote add origin https://github.com/microsoft/vcpkg.git
+          git -C "$VCPKG_ROOT" fetch --depth 1 origin "$VCPKG_COMMIT"
+          git -C "$VCPKG_ROOT" checkout --detach FETCH_HEAD
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+
+      - name: Configure
+        run: |
+          cmake -S . -B build/ci -G Ninja \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Save vcpkg binary cache
+        if: ${{ !cancelled() && steps.vcpkg-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      - name: Build
+        run: cmake --build build/ci --parallel
+
+      - name: Test
+        run: ctest --test-dir build/ci --output-on-failure --build-config "$BUILD_TYPE"
+
+      - name: Stage Server artifact
+        run: cmake --install build/ci --component Server --prefix build/artifact
+
+      - name: Verify Server artifact layout
+        run: |
+          set -euo pipefail
+          test -x build/artifact/server
+          test -x build/artifact/node
+          test -x build/artifact/install-node.sh
+          test -f build/artifact/node-release.manifest
+          test -f build/artifact/systemd/flexedge.service
+          bash -n build/artifact/install-node.sh
+          grep -q '/api/agent/node' build/artifact/install-node.sh
+          expected_sha256="$(awk -F= '$1 == "sha256" { print $2 }' build/artifact/node-release.manifest)"
+          actual_sha256="$(shasum -a 256 build/artifact/node | awk '{ print $1 }')"
+          test "$actual_sha256" = "$expected_sha256"
+
+      - name: Package artifact
+        run: tar -C build/artifact -czf "build/flexedge-${RUNNER_OS}-${RUNNER_ARCH}.tar.gz" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: flexedge-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          path: build/flexedge-${{ runner.os }}-${{ runner.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  windows_build:
+    name: Windows MSVC build
+    runs-on: windows-2025
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\.cache\vcpkg\archives
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+      VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+    steps:
+      - name: Checkout FlexEdge
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-msvc-x64-windows-static-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
+          restore-keys: |
+            vcpkg-binaries-${{ runner.os }}-${{ runner.arch }}-msvc-x64-windows-static-${{ env.VCPKG_COMMIT }}-
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          git init $env:VCPKG_ROOT
+          git -C $env:VCPKG_ROOT remote add origin https://github.com/microsoft/vcpkg.git
+          git -C $env:VCPKG_ROOT fetch --depth 1 origin $env:VCPKG_COMMIT
+          git -C $env:VCPKG_ROOT checkout --detach FETCH_HEAD
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build/ci -G "Visual Studio 17 2022" -A x64 `
+            -DBUILD_TESTING=ON `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DVCPKG_HOST_TRIPLET=x64-windows-static `
+            -DCMAKE_COMPILE_WARNING_AS_ERROR=ON `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
+
+      - name: Save vcpkg binary cache
+        if: ${{ !cancelled() && steps.vcpkg-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      - name: Build
+        run: cmake --build build/ci --config ${{ env.BUILD_TYPE }} --parallel
+
+      - name: Test
+        run: ctest --test-dir build/ci --output-on-failure --build-config ${{ env.BUILD_TYPE }}
+
+      - name: Stage Server artifact
+        shell: pwsh
+        run: cmake --install build/ci --config $env:BUILD_TYPE --component Server --prefix build/artifact
+
+      - name: Verify Server artifact layout
+        shell: pwsh
+        run: |
+          $requiredFiles = @(
+            'build/artifact/server.exe',
+            'build/artifact/node.exe',
+            'build/artifact/install-node.sh',
+            'build/artifact/node-release.manifest',
+            'build/artifact/systemd/flexedge.service'
+          )
+          foreach ($file in $requiredFiles) {
+            if (!(Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Missing Server artifact file: $file"
+            }
+          }
+          if (!(Select-String -Quiet -LiteralPath 'build/artifact/install-node.sh' -Pattern '/api/agent/node')) {
+            throw 'One-click Node installer does not download the Server Node artifact'
+          }
+          $expectedSha256 = (Get-Content -LiteralPath 'build/artifact/node-release.manifest' |
+            Where-Object { $_ -like 'sha256=*' } |
+            Select-Object -First 1) -replace '^sha256=', ''
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath 'build/artifact/node.exe').Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "Node release manifest digest mismatch: $actualSha256"
+          }
+
+      - name: Package artifact
+        shell: pwsh
+        run: Compress-Archive -Path build/artifact/* -DestinationPath "build/flexedge-$env:RUNNER_OS-$env:RUNNER_ARCH.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: flexedge-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          path: build/flexedge-${{ runner.os }}-${{ runner.arch }}.zip
+          if-no-files-found: error
+          retention-days: 14

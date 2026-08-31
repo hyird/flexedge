@@ -1,0 +1,337 @@
+syntax = "proto3";
+
+package flexedge.node.v2;
+
+message ClientEnvelope {
+    string request_id = 1;
+    oneof payload {
+        Authenticate authenticate = 10;
+        Heartbeat heartbeat = 12;
+        ObjectRequest object_request = 13;
+        ApplyResult apply_result = 14;
+        LogDelivery log_delivery = 15;
+        ReleaseProbe release_probe = 16;
+    }
+}
+
+message ServerEnvelope {
+    string request_id = 1;
+    oneof payload {
+        Welcome welcome = 11;
+        DesiredState desired_state = 12;
+        ObjectBatch object_batch = 13;
+        Error error = 14;
+        HeartbeatAck heartbeat_ack = 15;
+        LogDeliveryAck log_delivery_ack = 16;
+        ReleaseProbeAck release_probe_ack = 17;
+    }
+}
+
+message Authenticate {
+    string node_id = 1;
+    string secret = 2;
+    int64 applied_node_spec_revision = 5;
+    string active_release_id = 6;
+    string active_manifest_digest = 7;
+    string agent_version = 8;
+    AgentSessionPurpose session_purpose = 10;
+    reserved 9;
+}
+
+enum AgentSessionPurpose {
+    AGENT_SESSION_PURPOSE_UNSPECIFIED = 0;
+    AGENT_SESSION_PURPOSE_CONTROL = 1;
+    AGENT_SESSION_PURPOSE_LOG_INGEST = 2;
+}
+
+message Welcome {
+    string node_id = 1;
+    int64 desired_node_spec_revision = 2;
+    string desired_release_id = 3;
+    string desired_manifest_digest = 4;
+    uint32 heartbeat_interval_seconds = 5;
+    string node_binary_sha256 = 6;
+}
+
+message Heartbeat {
+    string node_id = 1;
+    int64 applied_node_spec_revision = 2;
+    string active_release_id = 3;
+    string active_manifest_digest = 4;
+    string agent_version = 5;
+    double cpu_usage = 6;
+    double memory_usage = 7;
+    int64 traffic_out_bps = 8;
+    int64 connection_count = 9;
+    double load_1m = 10;
+    string health = 11;
+    string last_error = 12;
+    uint64 queued_log_events = 13;
+    uint64 dropped_log_events = 14;
+    repeated OriginHealth origin_health = 15;
+}
+
+message OriginHealth {
+    string website_id = 1;
+    string origin_id = 2;
+    string status = 3;
+    int64 checked_at_unix_millis = 4;
+    uint32 latency_millis = 5;
+    string last_error = 6;
+}
+
+message HeartbeatAck {
+    int64 desired_node_spec_revision = 1;
+    string desired_release_id = 2;
+    string desired_manifest_digest = 3;
+    uint32 next_interval_seconds = 4;
+    string node_binary_sha256 = 5;
+}
+
+message ReleaseProbe {}
+
+message ReleaseProbeAck {
+    string node_binary_sha256 = 1;
+    int64 desired_node_spec_revision = 2;
+    string desired_release_id = 3;
+    string desired_manifest_digest = 4;
+}
+
+enum ApplyPhase {
+    APPLY_PHASE_UNSPECIFIED = 0;
+    APPLY_PHASE_STAGE = 1;
+    APPLY_PHASE_VALIDATE = 2;
+    APPLY_PHASE_ACTIVATE = 3;
+}
+
+message ApplyResult {
+    string node_id = 1;
+    int64 node_spec_revision = 2;
+    string release_id = 3;
+    string manifest_digest = 4;
+    bool applied = 5;
+    ApplyPhase failed_phase = 6;
+    string error_code = 7;
+    string error = 8;
+    bool retryable = 9;
+}
+
+message LogDelivery {
+    string node_id = 1;
+    repeated LogEvent events = 2;
+}
+
+message LogDeliveryAck {}
+
+message LogEvent {
+    oneof entry {
+        AccessLog access_log = 1;
+        NodeLog node_log = 2;
+    }
+}
+
+message AccessLog {
+    string id = 1;
+    uint64 occurred_unix_ms = 2;
+    string website_id = 3;
+    string client_ip = 4;
+    string protocol = 5;
+    string method = 6;
+    string host = 7;
+    string target = 8;
+    uint32 status_code = 9;
+    uint64 response_bytes = 10;
+    uint64 duration_ms = 11;
+    string user_agent = 12;
+    string referer = 13;
+    string request_headers = 14;
+    string request_body = 15;
+    bool request_body_truncated = 16;
+    string tls_fingerprint = 17;
+    string response_headers = 18;
+    string query_string = 19;
+    string cookies = 20;
+}
+
+message NodeLog {
+    string id = 1;
+    uint64 occurred_unix_ms = 2;
+    string level = 3;
+    string category = 4;
+    string message = 5;
+}
+
+message DesiredState {
+    NodeSpec node_spec = 1;
+    ClusterReleaseManifest release = 2;
+}
+
+message NodeSpec {
+    string digest_sha256 = 1;
+    NodeSpecContent content = 2;
+}
+
+message NodeSpecContent {
+    string node_id = 1;
+    uint32 schema_version = 2;
+    int64 revision = 3;
+    string name = 4;
+    bool enabled = 5;
+    repeated Endpoint endpoints = 6;
+}
+
+message ClusterReleaseManifest {
+    string digest_sha256 = 1;
+    ClusterReleaseContent content = 2;
+}
+
+message ClusterReleaseContent {
+    string cluster_id = 1;
+    string release_id = 2;
+    int64 generation = 3;
+    string access_domain = 4;
+    bool enabled = 5;
+    repeated ObjectRef objects = 6;
+    uint32 schema_version = 7;
+}
+
+enum ObjectKind {
+    OBJECT_KIND_UNSPECIFIED = 0;
+    OBJECT_KIND_WEBSITE = 1;
+    OBJECT_KIND_CERTIFICATE = 2;
+}
+
+message ObjectRef {
+    ObjectKind kind = 1;
+    string digest_sha256 = 2;
+}
+
+message ObjectRequest {
+    string node_id = 1;
+    string release_id = 2;
+    repeated string digest_sha256 = 3;
+}
+
+message ObjectBatch {
+    string release_id = 1;
+    repeated DeliveryObject objects = 2;
+}
+
+message DeliveryObject {
+    string digest_sha256 = 1;
+    DeliveryObjectContent content = 2;
+}
+
+message DeliveryObjectContent {
+    oneof payload {
+        Website website = 10;
+        Certificate certificate = 11;
+    }
+}
+
+message Endpoint {
+    string id = 1;
+    string ip_address = 2;
+    string line_code = 3;
+    string line_name = 4;
+    uint32 http_port = 5;
+    uint32 https_port = 6;
+}
+
+message Website {
+    string id = 1;
+    bool enabled = 2;
+    int64 revision = 3;
+    repeated Domain domains = 4;
+    repeated Origin origins = 5;
+    string origin_host_header = 6;
+    uint32 origin_connect_timeout_seconds = 7;
+    uint32 origin_read_timeout_seconds = 8;
+    bool pass_client_ip = 9;
+    bool health_check_enabled = 10;
+    bool https_enabled = 11;
+    string minimum_tls_version = 12;
+    bool force_https = 13;
+    bool http2_enabled = 14;
+    bool hsts_enabled = 15;
+    string health_check_path = 16;
+    uint32 health_check_interval_seconds = 17;
+    uint32 health_check_timeout_seconds = 18;
+    uint32 healthy_threshold = 19;
+    uint32 unhealthy_threshold = 20;
+    bool response_compression_enabled = 21;
+    uint32 response_compression_min_bytes = 22;
+    repeated string response_compression_algorithms = 23;
+    repeated string response_compression_mime_types = 24;
+    repeated string response_compression_extensions = 25;
+    repeated string response_compression_excluded_extensions = 26;
+    uint32 response_compression_max_bytes = 27;
+    bool access_log_request_headers = 28;
+    bool access_log_request_body = 29;
+    bool access_log_enabled = 30;
+    bool access_log_response_headers = 31;
+    bool access_log_query_params = 32;
+    bool access_log_cookies = 33;
+    bool access_log_referer = 34;
+    bool access_log_user_agent = 35;
+    repeated string access_log_status_code_ranges = 36;
+    bool access_log_client_abort = 37;
+    repeated RouteRule route_rules = 38;
+    uint32 health_check_expected_status = 39;
+    string default_origin_group = 40;
+}
+
+message RouteRule {
+    string id = 1;
+    bool enabled = 2;
+    string match_type = 3;
+    string path = 4;
+    repeated string methods = 5;
+    string action = 6;
+    string rewrite_path = 7;
+    string redirect_url = 8;
+    uint32 redirect_status = 9;
+    repeated HeaderMutation request_headers = 10;
+    repeated HeaderMutation response_headers = 11;
+    repeated string origin_ids = 12;
+    string origin_group = 13;
+}
+
+message HeaderMutation {
+    string name = 1;
+    string value = 2;
+}
+
+message Domain {
+    string hostname = 1;
+    bool https_enabled = 2;
+    string certificate_digest = 3;
+}
+
+message Origin {
+    string id = 1;
+    string protocol = 2;
+    string host = 3;
+    uint32 port = 4;
+    string role = 5;
+    uint32 weight = 6;
+    bool enabled = 7;
+    string group = 8;
+}
+
+message Certificate {
+    string id = 1;
+    string certificate_chain_pem = 2;
+    string private_key_pem = 3;
+}
+
+message Error {
+    uint32 code = 1;
+    string message = 2;
+    bool retryable = 3;
+}
+
+message ActiveState {
+    NodeSpec node_spec = 1;
+    ClusterReleaseManifest release = 2;
+}
