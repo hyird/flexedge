@@ -276,6 +276,26 @@ bool waitUntil(Predicate predicate, std::chrono::milliseconds timeout) {
     return predicate();
 }
 
+bool acceptUntilStopped(asio::ip::tcp::acceptor& acceptor, asio::ip::tcp::socket& socket,
+                        std::stop_token stopToken) {
+    std::error_code error;
+    acceptor.non_blocking(true, error);
+    if (error) {
+        throw std::system_error(error, "could not make test acceptor non-blocking");
+    }
+    while (!stopToken.stop_requested()) {
+        acceptor.accept(socket, error);
+        if (!error) {
+            return true;
+        }
+        if (error != asio::error::would_block && error != asio::error::try_again) {
+            throw std::system_error(error, "could not accept test origin connection");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+}
+
 struct PemIdentity final {
     std::string certificate;
     std::string privateKey;
@@ -1077,6 +1097,7 @@ int main(int argc, char* argv[]) {
         REQUIRE(runtime.config() != previous);
         REQUIRE(runtime.appliedNodeSpecRevision() == 4);
         REQUIRE(previous->website("www.example.com") != nullptr);
+        std::int64_t nextGeneration{5};
 
         ruvia::EventLoopPool loops({.loopCount = 2});
         flexedge::node::OriginHealthRegistry listenerHealth;
@@ -1131,14 +1152,14 @@ int main(int argc, char* argv[]) {
         REQUIRE(observedMetrics.memoryUsage >= 0 && observedMetrics.memoryUsage <= 1);
 
         auto redirectSnapshot = snapshot(true);
-        redirectSnapshot.setGeneration(5);
+        redirectSnapshot.setGeneration(nextGeneration++);
         apply(runtime, std::move(redirectSnapshot));
         const auto redirectResponse = request(port);
         REQUIRE(redirectResponse.starts_with("HTTP/1.1 301 Moved Permanently\r\n"));
         REQUIRE(redirectResponse.contains("Location: https://www.example.com/a?q=1\r\n"));
 
         auto routeSnapshot = snapshot(false);
-        routeSnapshot.setGeneration(6);
+        routeSnapshot.setGeneration(nextGeneration++);
         auto* route = routeSnapshot.mutableWebsite()->add_route_rules();
         route->set_id("route-1");
         route->set_enabled(true);
@@ -1165,9 +1186,11 @@ int main(int argc, char* argv[]) {
             originContext, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto unavailablePort = unavailableAcceptor.local_endpoint().port();
         unavailableAcceptor.close();
-        std::jthread originServer([&] {
+        std::jthread originServer([&](std::stop_token stopToken) {
             asio::ip::tcp::socket originSocket(originContext);
-            originAcceptor.accept(originSocket);
+            if (!acceptUntilStopped(originAcceptor, originSocket, stopToken)) {
+                return;
+            }
             std::array<char, 4096> originRequest{};
             std::error_code ignored;
             (void)originSocket.read_some(asio::buffer(originRequest), ignored);
@@ -1178,7 +1201,7 @@ int main(int argc, char* argv[]) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         });
         auto proxySnapshot = snapshot(false);
-        proxySnapshot.setGeneration(7);
+        proxySnapshot.setGeneration(nextGeneration++);
         proxySnapshot.mutableWebsite()->mutable_origins(0)->set_host("127.0.0.1");
         proxySnapshot.mutableWebsite()->mutable_origins(0)->set_port(unavailablePort);
         auto* backup = proxySnapshot.mutableWebsite()->add_origins();
@@ -1214,9 +1237,11 @@ int main(int argc, char* argv[]) {
         asio::ip::tcp::acceptor compressionAcceptor(
             originContext, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto compressionPort = compressionAcceptor.local_endpoint().port();
-        std::jthread compressionServer([&] {
+        std::jthread compressionServer([&](std::stop_token stopToken) {
             asio::ip::tcp::socket socket(originContext);
-            compressionAcceptor.accept(socket);
+            if (!acceptUntilStopped(compressionAcceptor, socket, stopToken)) {
+                return;
+            }
             std::array<char, 4096> originRequest{};
             std::error_code ignored;
             (void)socket.read_some(asio::buffer(originRequest), ignored);
@@ -1228,7 +1253,7 @@ int main(int argc, char* argv[]) {
             asio::write(socket, asio::buffer(response));
         });
         auto compressionSnapshot = snapshot(false);
-        compressionSnapshot.setGeneration(7);
+        compressionSnapshot.setGeneration(nextGeneration++);
         auto* compressionOrigin = compressionSnapshot.mutableWebsite()->mutable_origins(0);
         compressionOrigin->set_host("127.0.0.1");
         compressionOrigin->set_port(compressionPort);
@@ -1250,10 +1275,12 @@ int main(int argc, char* argv[]) {
             originContext, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto healthPort = healthAcceptor.local_endpoint().port();
         std::atomic<int> healthRequests{};
-        std::jthread healthServer([&] {
+        std::jthread healthServer([&](std::stop_token stopToken) {
             for (int requestIndex = 0; requestIndex < 1; ++requestIndex) {
                 asio::ip::tcp::socket healthSocket(originContext);
-                healthAcceptor.accept(healthSocket);
+                if (!acceptUntilStopped(healthAcceptor, healthSocket, stopToken)) {
+                    return;
+                }
                 std::array<char, 4096> healthRequest{};
                 std::error_code ignored;
                 (void)healthSocket.read_some(asio::buffer(healthRequest), ignored);
@@ -1264,7 +1291,7 @@ int main(int argc, char* argv[]) {
             }
         });
         auto healthSnapshot = snapshot(false);
-        healthSnapshot.setGeneration(8);
+        healthSnapshot.setGeneration(nextGeneration++);
         auto* healthWebsite = healthSnapshot.mutableWebsite();
         healthWebsite->set_health_check_enabled(true);
         healthWebsite->set_healthy_threshold(1);
@@ -1291,10 +1318,12 @@ int main(int argc, char* argv[]) {
         asio::ip::tcp::acceptor tlsOriginAcceptor(
             originContext, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto tlsOriginPort = tlsOriginAcceptor.local_endpoint().port();
-        std::jthread tlsOriginServer([&] {
+        std::jthread tlsOriginServer([&](std::stop_token stopToken) {
             for (int requestIndex = 0; requestIndex < 5; ++requestIndex) {
                 asio::ip::tcp::socket originSocket(originContext);
-                tlsOriginAcceptor.accept(originSocket);
+                if (!acceptUntilStopped(tlsOriginAcceptor, originSocket, stopToken)) {
+                    return;
+                }
                 std::array<char, 4096> originRequest{};
                 std::error_code ignored;
                 const auto requestSize =
@@ -1314,7 +1343,7 @@ int main(int argc, char* argv[]) {
             }
         });
         auto tlsSnapshot = snapshot(false);
-        tlsSnapshot.setGeneration(9);
+        tlsSnapshot.setGeneration(nextGeneration++);
         auto* tlsWebsite = tlsSnapshot.mutableWebsite();
         tlsWebsite->set_hsts_enabled(true);
         tlsWebsite->set_http2_enabled(true);
@@ -1367,7 +1396,7 @@ int main(int argc, char* argv[]) {
 
         const auto refreshedIdentity = makeIdentity("refreshed.example.com", 3);
         auto refreshedSnapshot = snapshot(false);
-        refreshedSnapshot.setGeneration(10);
+        refreshedSnapshot.setGeneration(nextGeneration++);
         auto* refreshedWebsite = refreshedSnapshot.mutableWebsite();
         refreshedWebsite->set_hsts_enabled(true);
         refreshedWebsite->mutable_origins(0)->set_host("127.0.0.1");
@@ -1391,10 +1420,12 @@ int main(int argc, char* argv[]) {
         asio::ip::tcp::acceptor secureOriginAcceptor(
             originContext, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto secureOriginPort = secureOriginAcceptor.local_endpoint().port();
-        std::jthread secureOriginServer([&] {
+        std::jthread secureOriginServer([&](std::stop_token stopToken) {
             for (int requestIndex = 0; requestIndex < 2; ++requestIndex) {
                 asio::ip::tcp::socket socket(originContext);
-                secureOriginAcceptor.accept(socket);
+                if (!acceptUntilStopped(secureOriginAcceptor, socket, stopToken)) {
+                    return;
+                }
                 asio::ssl::stream<asio::ip::tcp::socket> stream(std::move(socket),
                                                                 tlsOriginServerContext);
                 std::error_code error;
@@ -1413,7 +1444,7 @@ int main(int argc, char* argv[]) {
             }
         });
         auto secureOriginSnapshot = snapshot(false);
-        secureOriginSnapshot.setGeneration(11);
+        secureOriginSnapshot.setGeneration(nextGeneration++);
         auto* secureOriginWebsite = secureOriginSnapshot.mutableWebsite();
         secureOriginWebsite->set_http2_enabled(true);
         secureOriginWebsite->set_health_check_enabled(true);
@@ -1457,9 +1488,11 @@ int main(int argc, char* argv[]) {
         std::atomic<int> bufferedOriginConnections{};
         std::atomic<int> bufferedOriginRequests{};
         std::atomic<bool> bufferedOriginUsedHttp1{};
-        std::jthread bufferedOriginServer([&] {
+        std::jthread bufferedOriginServer([&](std::stop_token stopToken) {
             asio::ip::tcp::socket socket(originContext);
-            bufferedOriginAcceptor.accept(socket);
+            if (!acceptUntilStopped(bufferedOriginAcceptor, socket, stopToken)) {
+                return;
+            }
             asio::ssl::stream<asio::ip::tcp::socket> stream(std::move(socket),
                                                             bufferedOriginServerContext);
             stream.handshake(asio::ssl::stream_base::server);
@@ -1482,7 +1515,7 @@ int main(int argc, char* argv[]) {
             }
         });
         auto bufferedOriginSnapshot = snapshot(false);
-        bufferedOriginSnapshot.setGeneration(12);
+        bufferedOriginSnapshot.setGeneration(nextGeneration++);
         auto* bufferedOriginWebsite = bufferedOriginSnapshot.mutableWebsite();
         bufferedOriginWebsite->set_http2_enabled(true);
         bufferedOriginWebsite->set_response_compression_enabled(true);
@@ -1511,16 +1544,18 @@ int main(int argc, char* argv[]) {
         asio::ip::tcp::acceptor untrustedOriginAcceptor(
             originContext, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto untrustedOriginPort = untrustedOriginAcceptor.local_endpoint().port();
-        std::jthread untrustedOriginServer([&] {
+        std::jthread untrustedOriginServer([&](std::stop_token stopToken) {
             asio::ip::tcp::socket socket(originContext);
-            untrustedOriginAcceptor.accept(socket);
+            if (!acceptUntilStopped(untrustedOriginAcceptor, socket, stopToken)) {
+                return;
+            }
             asio::ssl::stream<asio::ip::tcp::socket> stream(std::move(socket),
                                                             tlsOriginServerContext);
             std::error_code ignored;
             stream.handshake(asio::ssl::stream_base::server, ignored);
         });
         auto untrustedOriginSnapshot = snapshot(false);
-        untrustedOriginSnapshot.setGeneration(13);
+        untrustedOriginSnapshot.setGeneration(nextGeneration++);
         auto* untrustedOrigin = untrustedOriginSnapshot.mutableWebsite()->mutable_origins(0);
         untrustedOrigin->set_protocol("https");
         untrustedOrigin->set_host("localhost");
@@ -1533,9 +1568,11 @@ int main(int argc, char* argv[]) {
             originContext, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto webSocketPort = webSocketAcceptor.local_endpoint().port();
         std::atomic<bool> upgradeHeadersPreserved{};
-        std::jthread webSocketOrigin([&] {
+        std::jthread webSocketOrigin([&](std::stop_token stopToken) {
             asio::ip::tcp::socket socket(originContext);
-            webSocketAcceptor.accept(socket);
+            if (!acceptUntilStopped(webSocketAcceptor, socket, stopToken)) {
+                return;
+            }
             std::string handshake;
             std::array<char, 1024> buffer{};
             while (!handshake.contains("\r\n\r\n")) {
@@ -1559,7 +1596,7 @@ int main(int argc, char* argv[]) {
             }
         });
         auto webSocketSnapshot = snapshot(false);
-        webSocketSnapshot.setGeneration(14);
+        webSocketSnapshot.setGeneration(nextGeneration++);
         auto* webSocketOriginConfig = webSocketSnapshot.mutableWebsite()->mutable_origins(0);
         webSocketOriginConfig->set_host("127.0.0.1");
         webSocketOriginConfig->set_port(webSocketPort);
@@ -1572,9 +1609,11 @@ int main(int argc, char* argv[]) {
         const auto reusableOriginPort = reusableOriginAcceptor.local_endpoint().port();
         std::atomic<int> reusableOriginConnections{};
         std::atomic<int> reusableOriginRequests{};
-        std::jthread reusableOriginServer([&] {
+        std::jthread reusableOriginServer([&](std::stop_token stopToken) {
             asio::ip::tcp::socket socket(originContext);
-            reusableOriginAcceptor.accept(socket);
+            if (!acceptUntilStopped(reusableOriginAcceptor, socket, stopToken)) {
+                return;
+            }
             ++reusableOriginConnections;
             for (int requestIndex = 0; requestIndex < 2; ++requestIndex) {
                 std::string input;
@@ -1591,7 +1630,7 @@ int main(int argc, char* argv[]) {
             }
         });
         auto reusableOriginSnapshot = snapshot(false);
-        reusableOriginSnapshot.setGeneration(15);
+        reusableOriginSnapshot.setGeneration(nextGeneration++);
         auto* reusableWebsite = reusableOriginSnapshot.mutableWebsite();
         reusableWebsite->set_http2_enabled(false);
         reusableWebsite->set_response_compression_enabled(false);

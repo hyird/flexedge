@@ -51,7 +51,7 @@ set(RUVIA_ENABLE_REDIS ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
     ruvia
     GIT_REPOSITORY https://github.com/hyird/Ruvia.git
-    GIT_TAG 610849b1366052f486ee029fdd6d46574c589564 # main, 2026-08-31
+    GIT_TAG 8a4a02eb5559213fb012c3a2c4c34c9b6535dfe7 # main, 2026-08-31
 )
 FetchContent_MakeAvailable(ruvia)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
