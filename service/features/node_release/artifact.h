@@ -40,37 +40,37 @@ struct Manifest final {
 };
 
 inline std::optional<Manifest> parseManifest(std::string_view value) {
-    constexpr std::string_view header{"flexedge-node-release-v1\n"};
     constexpr std::string_view versionPrefix{"version="};
     constexpr std::string_view digestPrefix{"sha256="};
-    if (!value.starts_with(header)) {
+    const auto takeLine = [&value]() -> std::optional<std::string_view> {
+        const auto lineEnd = value.find('\n');
+        if (lineEnd == std::string_view::npos) {
+            return std::nullopt;
+        }
+        auto line = value.substr(0, lineEnd);
+        value.remove_prefix(lineEnd + 1);
+        if (line.ends_with('\r')) {
+            line.remove_suffix(1);
+        }
+        return line;
+    };
+
+    const auto headerLine = takeLine();
+    const auto versionLine = takeLine();
+    const auto digestLine = takeLine();
+    if (!headerLine || *headerLine != "flexedge-node-release-v1" || !versionLine || !digestLine ||
+        !value.empty()) {
         return std::nullopt;
     }
-    value.remove_prefix(header.size());
-    const auto versionEnd = value.find('\n');
-    if (versionEnd == std::string_view::npos) {
+    if (!versionLine->starts_with(versionPrefix)) {
         return std::nullopt;
     }
-    const auto versionLine = value.substr(0, versionEnd);
-    if (!versionLine.starts_with(versionPrefix)) {
-        return std::nullopt;
-    }
-    value.remove_prefix(versionEnd + 1);
-    const auto digestEnd = value.find('\n');
-    if (digestEnd == std::string_view::npos) {
-        return std::nullopt;
-    }
-    const auto digestLine = value.substr(0, digestEnd);
-    if (!digestLine.starts_with(digestPrefix)) {
-        return std::nullopt;
-    }
-    value.remove_prefix(digestEnd + 1);
-    if (!value.empty()) {
+    if (!digestLine->starts_with(digestPrefix)) {
         return std::nullopt;
     }
 
-    Manifest result{.version = std::string(versionLine.substr(versionPrefix.size())),
-                    .digest = std::string(digestLine.substr(digestPrefix.size()))};
+    Manifest result{.version = std::string(versionLine->substr(versionPrefix.size())),
+                    .digest = std::string(digestLine->substr(digestPrefix.size()))};
     if (!flexedge::node::validNodeReleaseVersion(result.version) ||
         !flexedge::node::validNodeReleaseDigest(result.digest)) {
         return std::nullopt;

@@ -1,4 +1,4 @@
-foreach(REQUIRED_VARIABLE BUILD_DIR STAGE_DIR)
+foreach(REQUIRED_VARIABLE BUILD_DIR STAGE_DIR EXPECT_WEB)
     if(NOT DEFINED ${REQUIRED_VARIABLE})
         message(FATAL_ERROR "missing ${REQUIRED_VARIABLE}")
     endif()
@@ -31,6 +31,9 @@ set(EXPECTED_FILES
     "server${EXECUTABLE_SUFFIX}"
     "systemd/flexedge.service"
 )
+if(EXPECT_WEB)
+    list(APPEND EXPECTED_FILES "web/index.html")
+endif()
 list(SORT EXPECTED_FILES)
 
 file(GLOB_RECURSE ACTUAL_FILES

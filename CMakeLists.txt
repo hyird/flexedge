@@ -34,6 +34,8 @@ if(MSVC AND VCPKG_TARGET_TRIPLET MATCHES "static")
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
+option(FLEXEDGE_BUILD_WEB "Build the frontend as part of the service build" ON)
+
 # Ruvia exposes three targets (core/http/web); we consume ruvia::web.
 set(RUVIA_BUILD_CORE ON CACHE BOOL "" FORCE)
 set(RUVIA_BUILD_HTTP ON CACHE BOOL "" FORCE)
@@ -49,7 +51,7 @@ set(RUVIA_ENABLE_REDIS ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
     ruvia
     GIT_REPOSITORY https://github.com/hyird/Ruvia.git
-    GIT_TAG 936b39946da438518a136d3bfb8b4bf4ef05b5ec # main, 2026-08-30
+    GIT_TAG 610849b1366052f486ee029fdd6d46574c589564 # main, 2026-08-31
 )
 FetchContent_MakeAvailable(ruvia)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
@@ -82,6 +84,30 @@ target_include_directories(flexedge_log_ingest_protocol
     PUBLIC "${FLEXEDGE_GENERATED_DIR}")
 target_link_libraries(flexedge_log_ingest_protocol
     PUBLIC flexedge_node_protocol protobuf::libprotobuf)
+
+if(FLEXEDGE_BUILD_WEB)
+    find_program(BUN_EXECUTABLE NAMES bun bun.exe)
+    if(NOT BUN_EXECUTABLE)
+        message(FATAL_ERROR "Bun is required to build the frontend")
+    endif()
+
+    set(FLEXEDGE_WEB_OUTPUT_DIR "${CMAKE_BINARY_DIR}/web")
+    message(STATUS "Using Bun: ${BUN_EXECUTABLE}")
+
+    add_custom_target(flexedge_web ALL
+        COMMAND "${CMAKE_COMMAND}" -E env
+            NO_COLOR=1
+            FORCE_COLOR=0
+            "${BUN_EXECUTABLE}" run build --
+                --clearScreen false
+                --logLevel warn
+                --outDir "${FLEXEDGE_WEB_OUTPUT_DIR}"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        BYPRODUCTS "${FLEXEDGE_WEB_OUTPUT_DIR}/index.html"
+        COMMENT "Building frontend"
+        VERBATIM
+    )
+endif()
 
 # Domain controllers are currently header-only. Feature .cpp files must be listed explicitly here.
 add_executable(flexedge_service
@@ -130,6 +156,10 @@ endif()
 
 if(WIN32)
     target_link_libraries(flexedge_service PRIVATE crypt32)
+endif()
+
+if(FLEXEDGE_BUILD_WEB)
+    add_dependencies(flexedge_service flexedge_web)
 endif()
 
 if(MSVC)
@@ -253,6 +283,12 @@ install(FILES "${FLEXEDGE_NODE_RELEASE_MANIFEST}"
     DESTINATION .
     COMPONENT Server
 )
+if(FLEXEDGE_BUILD_WEB)
+    install(FILES "${FLEXEDGE_WEB_OUTPUT_DIR}/index.html"
+        DESTINATION web
+        COMPONENT Server
+    )
+endif()
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/service/config/flexedge.service"
     DESTINATION systemd
     COMPONENT Server
@@ -270,6 +306,7 @@ if(BUILD_TESTING)
             "-DSTAGE_DIR=${CMAKE_BINARY_DIR}/test-install-layout"
             "-DCONFIG=$<CONFIG>"
             "-DEXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+            "-DEXPECT_WEB=${FLEXEDGE_BUILD_WEB}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/install_layout_test.cmake"
     )
     if(UNIX)

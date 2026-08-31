@@ -71,7 +71,7 @@ int main() {
         writeFile(installerPath, "installer-release-one");
         const auto firstDigest = flexedge::node::binarySha256(binaryPath);
         writeFile(manifestPath,
-                  "flexedge-node-release-v1\nversion=1.0.0\nsha256=" + firstDigest + "\n");
+                  "flexedge-node-release-v1\r\nversion=1.0.0\r\nsha256=" + firstDigest + "\r\n");
 
         service::node_release::Catalog catalog(std::chrono::nanoseconds::zero());
         catalog.configure(binaryPath, installerPath, manifestPath);

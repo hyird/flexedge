@@ -25,6 +25,7 @@
 #include <openssl/x509.h>
 
 #include <ruvia/core/Task.h>
+#include <ruvia/http/HttpKnownMethod.h>
 #include <ruvia/http/HttpStatus.h>
 #include <ruvia/web/App.h>
 #include <ruvia/web/Context.h>
@@ -88,6 +89,31 @@ std::filesystem::path executableDir(const char* executablePath) {
 
     const auto dir = path.parent_path();
     return dir.empty() ? std::filesystem::current_path() : dir;
+}
+
+std::filesystem::path& webRootPath() {
+    static std::filesystem::path path;
+    return path;
+}
+
+void configureDocumentRoot(ruvia::App& app, const std::filesystem::path& runtimeDir) {
+    auto webRoot = runtimeDir / "web";
+    if (!std::filesystem::is_directory(webRoot)) {
+        return;
+    }
+
+    ruvia::DocumentRootConfig config{
+        .root = std::move(webRoot),
+        .staticOptions =
+            {
+                .cacheControl = "no-store",
+                .indexFile = "index.html",
+            },
+        .precompressGzip = true,
+        .precompressMaxBytes = 64u * 1024u * 1024u,
+    };
+    webRootPath() = config.root;
+    app.documentRoot(std::move(config));
 }
 
 void logMigrationReport(const ruvia::DbMigrationReport& report) {
@@ -169,7 +195,36 @@ void configureOutboundOrigins(ruvia::App& app, const std::filesystem::path& runt
     service::config::configureOutboundOrigins(std::move(origins));
 }
 
+bool isSpaRequest(ruvia::Context& c) {
+    if (webRootPath().empty()) {
+        return false;
+    }
+    if (c.req().knownMethod() != ruvia::HttpKnownMethod::kGet &&
+        c.req().knownMethod() != ruvia::HttpKnownMethod::kHead) {
+        return false;
+    }
+
+    auto path = c.req().path();
+    if (path.starts_with("/api/") || path == "/api" || path.starts_with("/assets/")) {
+        return false;
+    }
+
+    const auto lastSlash = path.rfind('/');
+    const auto lastSegment =
+        lastSlash == std::string_view::npos ? path : path.substr(lastSlash + 1);
+    return lastSegment.find('.') == std::string_view::npos;
+}
+
+bool isSpaFallbackRequest(ruvia::Context& c, ruvia::HttpErrorInfo info) {
+    return info.status() == ruvia::http_status::kNotFound && isSpaRequest(c);
+}
+
 ruvia::Task<ruvia::HttpResponse> handleNotFound(ruvia::Context& c) {
+    if (isSpaRequest(c)) {
+        c.header("cache-control", "no-store");
+        co_return c.file(
+            {.path = webRootPath() / "index.html", .contentType = "text/html; charset=UTF-8"});
+    }
     c.status(ruvia::http_status::kNotFound);
     co_return c.json(service::common::error(
         c, service::common::normalizeBusinessErrorCode({}, ruvia::http_status::kNotFound.value()),
@@ -178,6 +233,12 @@ ruvia::Task<ruvia::HttpResponse> handleNotFound(ruvia::Context& c) {
 
 // 与 ruvia::HttpErrorHandler 签名匹配；运行时把业务 HttpError 转成统一响应 DTO。
 ruvia::Task<ruvia::HttpResponse> handleError(ruvia::Context& c, ruvia::HttpErrorInfo info) {
+    if (isSpaFallbackRequest(c, info)) {
+        c.header("cache-control", "no-store");
+        co_return c.file(
+            {.path = webRootPath() / "index.html", .contentType = "text/html; charset=UTF-8"});
+    }
+
     const auto status = info.status();
     if (status.isServerError()) {
         std::string diagnostic;
@@ -241,7 +302,12 @@ int main(int argc, char* argv[]) {
         auto& app = ruvia::app();
         service::logging::Session loggingSession;
         const auto runtimeDir = executableDir(argc > 0 ? argv[0] : nullptr);
-        service::node_release::configure(runtimeDir / "node", runtimeDir / "install-node.sh",
+#ifdef _WIN32
+        const auto nodeBinaryPath = runtimeDir / "node.exe";
+#else
+        const auto nodeBinaryPath = runtimeDir / "node";
+#endif
+        service::node_release::configure(nodeBinaryPath, runtimeDir / "install-node.sh",
                                          runtimeDir / "node-release.manifest");
         const auto envPath = service::config::dotenvPath(runtimeDir);
         app.loadDotenv(envPath, {.missingFile = ruvia::DotenvMissingFilePolicy::kRequire});
@@ -251,6 +317,7 @@ int main(int argc, char* argv[]) {
         service::utils::configureSecretKey(app.env().get("SECRET_MASTER_KEY").value_or(""));
         service::auth::validateAuthSessionConfiguration();
         auto initialAdmin = service::initial_admin::initialAdminConfig(app.env());
+        configureDocumentRoot(app, runtimeDir);
         auto database = configureDatabase(app);
         service::initial_admin::initialize(database, std::move(initialAdmin));
         configureRedis(app);
