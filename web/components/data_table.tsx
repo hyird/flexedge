@@ -78,13 +78,11 @@ export function DataTable<T extends object>({
                 pagination={false}
                 sticky
                 onHeaderRow={captureHeaderRow}
-                size="middle"
                 scroll={{ x: 'max-content', y: '100%' }}
                 className={tableClassName}
                 locale={{
                     emptyText: (
                         <Empty
-                            image={Empty.PRESENTED_IMAGE_SIMPLE}
                             description={
                                 <div>
                                     <div>{emptyTitle}</div>

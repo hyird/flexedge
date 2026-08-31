@@ -2,18 +2,14 @@
 @import "antd/dist/reset.css" layer(antd);
 @import "tailwindcss/theme" layer(theme);
 @import "tailwindcss/utilities" layer(utilities);
-@import "@fontsource-variable/inter";
-
-@custom-variant dark (&:is(.dark *));
 
 @theme inline {
-    --font-heading: var(--font-sans);
-    --font-sans: "Inter Variable", sans-serif;
-    --color-background: var(--app-background);
+    --font-sans: var(--ant-font-family);
+    --color-background: var(--ant-color-bg-layout);
     --color-foreground: var(--ant-color-text);
-    --color-card: var(--app-card);
+    --color-card: var(--ant-color-bg-container);
     --color-card-foreground: var(--ant-color-text);
-    --color-popover: var(--app-popover);
+    --color-popover: var(--ant-color-bg-elevated);
     --color-popover-foreground: var(--ant-color-text);
     --color-primary: var(--ant-color-primary);
     --color-primary-foreground: var(--ant-color-white);
@@ -27,59 +23,26 @@
     --color-border: var(--ant-color-border-secondary);
     --color-input: var(--ant-color-border);
     --color-ring: var(--ant-color-primary-border);
-    --color-sidebar: var(--app-sidebar);
-    --color-sidebar-foreground: var(--app-sidebar-foreground);
-    --color-sidebar-primary: var(--ant-color-primary);
-    --color-sidebar-primary-foreground: var(--ant-color-white);
-    --color-sidebar-accent: var(--app-sidebar-accent);
-    --color-sidebar-accent-foreground: var(--app-sidebar-foreground);
-    --color-sidebar-border: var(--app-sidebar-border);
-    --color-sidebar-ring: var(--ant-color-primary-border);
     --radius-antd: var(--ant-border-radius);
-    --color-chart-1: var(--app-chart-1);
-    --color-chart-2: var(--app-chart-2);
-    --color-chart-3: var(--app-chart-3);
-    --color-chart-4: var(--app-chart-4);
-    --color-chart-5: var(--app-chart-5);
 }
 
 :root {
-    --app-background: var(--ant-color-bg-layout);
-    --app-card: var(--ant-color-bg-container);
-    --app-popover: var(--ant-color-bg-elevated);
     --app-sidebar: #001529;
-    --app-sidebar-foreground: rgb(255 255 255 / 85%);
-    --app-sidebar-accent: rgb(255 255 255 / 12%);
-    --app-sidebar-border: rgb(255 255 255 / 10%);
-    --app-chart-1: oklch(0.809 0.105 251.813);
-    --app-chart-2: oklch(0.623 0.214 259.815);
-    --app-chart-3: oklch(0.546 0.245 262.881);
-    --app-chart-4: oklch(0.488 0.243 264.376);
-    --app-chart-5: oklch(0.424 0.199 265.638);
 }
 
 @layer base {
-    * {
-        @apply border-border outline-ring/50;
+    *,
+    ::before,
+    ::after {
+        border-color: var(--ant-color-border-secondary);
     }
 
-    html {
-        @apply font-sans;
-        color-scheme: light;
-    }
-
-    body {
-        @apply m-0 bg-background text-foreground antialiased;
-    }
-
-    button,
-    input,
-    textarea,
-    select {
+    button {
+        margin: 0;
+        padding: 0;
+        color: inherit;
         font: inherit;
-    }
-
-    ::selection {
-        @apply bg-primary/20 text-foreground;
+        background: transparent;
+        border: 0;
     }
 }

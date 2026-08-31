@@ -317,7 +317,7 @@ export default function CertificateProviderManager({
                                 添加供应商
                             </Button>
                         </div>
-                        <div className="min-h-0 flex-1 overflow-hidden rounded-xl border bg-card">
+                        <div className="min-h-0 flex-1 overflow-hidden rounded-antd border bg-card">
                             <DataTable
                                 className="h-full rounded-none border-0"
                                 columns={columns}

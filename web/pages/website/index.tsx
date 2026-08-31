@@ -217,7 +217,7 @@ export default function WebsitePage() {
     };
 
     return (
-        <div className="mx-auto flex h-full w-full max-w-[1680px] flex-col gap-4 overflow-y-auto p-4 sm:p-6 md:overflow-hidden">
+        <div className="flex h-full w-full flex-col gap-4 overflow-y-auto p-4 md:overflow-hidden">
             <PageHeader
                 eyebrow="Traffic delivery"
                 title="网站管理"
@@ -230,7 +230,7 @@ export default function WebsitePage() {
                 }
             />
 
-            <section className="grid shrink-0 gap-3 rounded-xl border bg-card p-3 lg:grid-cols-[auto_minmax(180px,240px)_minmax(220px,1fr)_auto] lg:items-end">
+            <section className="grid shrink-0 gap-3 lg:grid-cols-3 lg:items-end 2xl:grid-cols-[auto_minmax(180px,240px)_minmax(220px,1fr)_auto]">
                 <div className="space-y-1.5">
                     <p className="text-xs font-medium text-muted-foreground">启用状态</p>
                     <ChoiceGroup
@@ -271,7 +271,7 @@ export default function WebsitePage() {
                         />
                     </div>
                 </form>
-                <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+                <div className="flex flex-wrap items-center gap-2 lg:col-span-3 lg:justify-end 2xl:col-span-1">
                     <Button
                         type="button"
                         variant="outline"
@@ -304,7 +304,7 @@ export default function WebsitePage() {
                 </div>
             </section>
 
-            <div className="flex min-h-[28rem] flex-none flex-col overflow-hidden rounded-xl border bg-card md:min-h-0 md:flex-1">
+            <div className="flex min-h-[28rem] flex-none flex-col overflow-hidden md:min-h-0 md:flex-1">
                 <DataTable
                     columns={columns}
                     data={websites.data?.list ?? []}

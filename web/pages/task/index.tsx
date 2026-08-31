@@ -216,7 +216,7 @@ export default function TaskEntry() {
                             </Alert>
                         )}
 
-                        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border bg-card">
+                        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-antd border bg-card">
                             <TaskTable items={tasks.data?.list ?? []} loading={tasks.isLoading} />
                             <PaginationBar
                                 page={Number(query.page) || 1}

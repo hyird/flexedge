@@ -99,26 +99,20 @@ export default function AdminLayout() {
     };
     const navigation = (isCollapsed: boolean) => (
         <div className="flex h-full min-h-0 flex-col">
-            <div className="flex h-14 shrink-0 items-center justify-center border-b border-white/10 px-3 text-white">
-                <div className="flex size-8 items-center justify-center rounded-antd bg-primary font-bold">
-                    FX
-                </div>
-                {!isCollapsed && (
-                    <div className="ml-3 min-w-0">
-                        <div className="truncate font-semibold">{APP_NAME}</div>
-                        <div className="truncate text-[11px] text-white/45">边缘交付控制面</div>
-                    </div>
-                )}
+            <div className="m-2 flex h-12 shrink-0 items-center justify-center rounded font-medium text-white">
+                <span>{isCollapsed ? 'FX' : APP_NAME}</span>
             </div>
             {!isCollapsed && (
-                <div className="px-3 py-3">
+                <div className="mb-2 px-3">
                     <Input
                         allowClear
-                        prefix={<SearchOutlined />}
+                        prefix={<SearchOutlined className="text-white/30" />}
                         placeholder="搜索菜单"
+                        variant="borderless"
                         value={menuKeyword}
                         onChange={(event) => setMenuKeyword(event.target.value)}
-                        className="sider-search"
+                        className="bg-white/10 text-white"
+                        classNames={{ input: 'text-white placeholder:text-white/30' }}
                     />
                 </div>
             )}
@@ -142,8 +136,8 @@ export default function AdminLayout() {
         <Layout className="h-dvh min-h-0 overflow-hidden">
             {screens.md && (
                 <Sider
-                    width={224}
-                    collapsedWidth={64}
+                    width={220}
+                    collapsedWidth={80}
                     collapsed={collapsed}
                     trigger={null}
                     theme="dark"
@@ -162,7 +156,7 @@ export default function AdminLayout() {
                 {navigation(false)}
             </Drawer>
             <Layout className="min-w-0 bg-background">
-                <Header className="flex h-14 shrink-0 items-center gap-3 bg-white px-4 shadow-[0_1px_4px_rgba(0,0,0,0.08)]">
+                <Header className="relative z-10 flex h-12 shrink-0 items-center gap-3 bg-card px-4 shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
                     <Button
                         type="text"
                         icon={
@@ -198,7 +192,7 @@ export default function AdminLayout() {
                         </Button>
                     </Dropdown>
                 </Header>
-                <Content className="m-4 min-h-0 flex-1 overflow-hidden rounded-lg bg-white shadow-sm">
+                <Content className="m-4 min-h-0 flex-1 overflow-hidden rounded-lg bg-card">
                     <main className="min-h-0 h-full flex-1 overflow-hidden">
                         <div key={adminId} className="h-full min-h-0 min-w-0 overflow-hidden">
                             {outlet}

@@ -1,5 +1,8 @@
+import { Typography } from 'antd';
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/utils';
+
+const { Title } = Typography;
 
 interface PageHeaderProps {
     title: string;
@@ -9,7 +12,7 @@ interface PageHeaderProps {
     className?: string;
 }
 
-export function PageHeader({ title, description, eyebrow, actions, className }: PageHeaderProps) {
+export function PageHeader({ title, actions, className }: PageHeaderProps) {
     return (
         <header
             className={cn(
@@ -18,17 +21,9 @@ export function PageHeader({ title, description, eyebrow, actions, className }: 
             )}
         >
             <div className="min-w-0">
-                {eyebrow && (
-                    <p className="mb-1 text-xs font-semibold uppercase tracking-[0.14em] text-primary">
-                        {eyebrow}
-                    </p>
-                )}
-                <h1 className="truncate text-xl font-semibold tracking-tight text-foreground sm:text-2xl">
+                <Title level={5} className="truncate" style={{ margin: 0 }}>
                     {title}
-                </h1>
-                {description && (
-                    <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{description}</p>
-                )}
+                </Title>
             </div>
             {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
         </header>

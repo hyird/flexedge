@@ -50,15 +50,16 @@ export function Select({ children, onValueChange, className, size, ...props }: R
         id?: string;
     } = { options: [] };
     collect(children, state);
+    const resolvedClassName = className ?? state.className;
     return (
         <AntSelect
             options={state.options}
             placeholder={state.placeholder}
-            className={className ?? state.className}
+            className={resolvedClassName}
             id={state.id}
             size={size === 'sm' ? 'small' : 'middle'}
             onChange={onValueChange}
-            style={{ width: '100%' }}
+            style={resolvedClassName ? undefined : { width: '100%' }}
             {...props}
         />
     );

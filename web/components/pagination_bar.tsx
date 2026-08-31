@@ -18,7 +18,7 @@ export function PaginationBar({
     pageSizeOptions = [10, 20, 50],
 }: PaginationBarProps) {
     return (
-        <div className="flex shrink-0 justify-end border-t bg-card px-4 py-3">
+        <div className="flex shrink-0 justify-end px-4 py-3">
             <Pagination
                 current={page}
                 pageSize={pageSize}

@@ -10,7 +10,7 @@ type Variant =
     | 'info'
     | 'neutral';
 const colors: Record<Variant, string | undefined> = {
-    default: 'blue',
+    default: undefined,
     secondary: 'default',
     destructive: 'red',
     outline: undefined,

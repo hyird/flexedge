@@ -25,12 +25,6 @@ ReactDOM.createRoot(rootElement).render(
             locale={zhCN}
             theme={{
                 cssVar: { prefix: 'ant', key: 'flexedge' },
-                token: {
-                    colorPrimary: '#1677ff',
-                    borderRadius: 6,
-                    fontFamily:
-                        'Inter Variable, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif',
-                },
             }}
         >
             <App>

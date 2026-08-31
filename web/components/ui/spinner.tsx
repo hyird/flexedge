@@ -1,7 +1,7 @@
 import { Spin } from 'antd';
 import type { ComponentProps } from 'react';
 export function Spinner(props: ComponentProps<typeof Spin>) {
-    return <Spin size="small" {...props} />;
+    return <Spin {...props} />;
 }
 export function LoadingScreen() {
     return (

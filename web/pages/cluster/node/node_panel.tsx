@@ -192,7 +192,7 @@ interface NodeInstallScriptPanelProps {
 function NodeInstallScriptPanel({ credentials, description, onCopy }: NodeInstallScriptPanelProps) {
     const command = buildInstallCommand(credentials);
     return (
-        <div className="space-y-3 rounded-xl border border-blue-200 bg-blue-50/60 p-4">
+        <div className="space-y-3 rounded-antd border border-blue-200 bg-blue-50/60 p-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="flex min-w-0 gap-3">
                     <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-blue-100 text-blue-700">
@@ -280,7 +280,7 @@ function VirtualNodeLogTable({ logs, loading }: VirtualNodeLogTableProps) {
     ];
 
     return (
-        <div ref={observeHost} className="h-full min-h-40 overflow-hidden rounded-xl border">
+        <div ref={observeHost} className="h-full min-h-40 overflow-hidden rounded-antd border">
             <AntTable<NodeLog>
                 rowKey="id"
                 columns={columns}
@@ -625,7 +625,7 @@ export default function NodePanel({ cluster, createRequest }: NodePanelProps) {
                 </Alert>
             )}
 
-            <div className="flex min-h-[28rem] flex-none flex-col overflow-hidden rounded-xl border bg-card md:min-h-0 md:flex-1">
+            <div className="flex min-h-[28rem] flex-none flex-col overflow-hidden rounded-antd border bg-card md:min-h-0 md:flex-1">
                 <DataTable
                     columns={nodeColumns}
                     data={list.data?.list}
@@ -767,7 +767,7 @@ export default function NodePanel({ cluster, createRequest }: NodePanelProps) {
 
                                     <section className="space-y-2">
                                         <h3 className="text-sm font-semibold">IP 与 DNS 线路</h3>
-                                        <div className="overflow-hidden rounded-xl border">
+                                        <div className="overflow-hidden rounded-antd border">
                                             <AntTable<NodeEndpoint>
                                                 rowKey={(endpoint) =>
                                                     endpoint.id ?? endpoint.ip_address
@@ -1132,7 +1132,7 @@ export default function NodePanel({ cluster, createRequest }: NodePanelProps) {
                                             return (
                                                 <div
                                                     key={endpointField.fieldKey}
-                                                    className="grid gap-3 rounded-xl border bg-muted/20 p-3 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)_auto]"
+                                                    className="grid gap-3 rounded-antd border bg-muted/20 p-3 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)_auto]"
                                                 >
                                                     <Field data-invalid={Boolean(ipError)}>
                                                         <FieldLabel
@@ -1280,7 +1280,7 @@ export default function NodePanel({ cluster, createRequest }: NodePanelProps) {
                                                 </AlertDescription>
                                             </Alert>
                                         )}
-                                        <div className="flex flex-col gap-3 rounded-xl border border-amber-200 bg-amber-50/60 p-4 sm:flex-row sm:items-center sm:justify-between">
+                                        <div className="flex flex-col gap-3 rounded-antd border border-amber-200 bg-amber-50/60 p-4 sm:flex-row sm:items-center sm:justify-between">
                                             <div>
                                                 <p className="text-sm font-medium text-amber-950">
                                                     重置节点凭据
@@ -1355,7 +1355,7 @@ export default function NodePanel({ cluster, createRequest }: NodePanelProps) {
                                                 删除操作不可撤销，并会使现有节点凭据失效。
                                             </p>
                                         </div>
-                                        <div className="flex flex-col gap-3 rounded-xl border border-destructive/25 bg-destructive/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+                                        <div className="flex flex-col gap-3 rounded-antd border border-destructive/25 bg-destructive/5 p-4 sm:flex-row sm:items-center sm:justify-between">
                                             <div>
                                                 <p className="text-sm font-medium text-destructive">
                                                     删除节点

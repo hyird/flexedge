@@ -572,7 +572,7 @@ export default function DnsZonePage() {
     });
 
     return (
-        <div className="mx-auto flex h-full w-full max-w-[1680px] flex-col gap-4 overflow-y-auto p-4 sm:p-6 md:overflow-hidden">
+        <div className="flex h-full w-full flex-col gap-4 overflow-y-auto p-4 md:overflow-hidden">
             <PageHeader
                 eyebrow="域名与证书"
                 title="DNS 托管"
@@ -589,7 +589,7 @@ export default function DnsZonePage() {
             />
 
             <form
-                className="flex flex-col gap-3 rounded-xl border bg-card p-3 sm:flex-row sm:items-center"
+                className="flex flex-col gap-3 sm:flex-row sm:items-center"
                 onSubmit={(event) => {
                     event.preventDefault();
                     applyFilters();
@@ -641,7 +641,7 @@ export default function DnsZonePage() {
                 </Alert>
             )}
 
-            <div className="flex min-h-[28rem] flex-none flex-col overflow-hidden rounded-xl border bg-card md:min-h-0 md:flex-1">
+            <div className="flex min-h-[28rem] flex-none flex-col overflow-hidden md:min-h-0 md:flex-1">
                 <DataTable
                     className="min-h-0 flex-1 rounded-none border-0"
                     columns={zoneColumns}

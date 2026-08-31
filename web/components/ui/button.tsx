@@ -51,7 +51,11 @@ export function Button({
             htmlType={htmlType}
             danger={danger ?? variant === 'destructive'}
             size={sizes[size]}
-            className={cn(size.startsWith('icon') && 'ant-btn-icon-only', className)}
+            className={cn(
+                '[&_svg]:size-4',
+                size.startsWith('icon') && 'ant-btn-icon-only',
+                className
+            )}
             {...props}
         >
             {children}

@@ -42,6 +42,16 @@ describe('frontend architecture boundaries', () => {
         ]);
         expect(source('main.tsx')).toContain('<StyleProvider layer>');
         expect(source('main.tsx')).toContain("cssVar: { prefix: 'ant', key: 'flexedge' }");
+        expect(source('main.tsx')).not.toContain('colorPrimary:');
+        expect(source('main.tsx')).not.toContain('borderRadius:');
+        expect(source('main.tsx')).not.toContain('fontFamily:');
+        expect(packageJson.dependencies['@fontsource-variable/inter']).toBeUndefined();
+        expect(source('styles/index.css')).not.toContain('@fontsource');
+        expect(source('styles/index.css')).not.toContain('--app-chart-');
+        expect(source('styles/index.css')).toContain(
+            'border-color: var(--ant-color-border-secondary);'
+        );
+        expect(source('styles/index.css')).toContain('background: transparent;');
         expect(existsSync(join(webRoot, 'components', 'ui', 'button.tsx'))).toBe(true);
         expect(existsSync(join(webRoot, 'components', 'ui', 'sheet.tsx'))).toBe(true);
         expect(existsSync(join(webRoot, 'components', 'ui', 'table.tsx'))).toBe(false);
@@ -319,11 +329,37 @@ describe('frontend architecture boundaries', () => {
         expect(layout).not.toContain('tenants.map');
     });
 
-    test('the app shell leaves content spacing and surface styling to business pages', () => {
+    test('the app shell follows the Ant Design admin content-surface structure', () => {
         const layout = source('layouts/AdminLayout.tsx');
         expect(layout).toContain('<main className="min-h-0 h-full flex-1 overflow-hidden">');
-        expect(layout).not.toContain('bg-muted/35 p-2 sm:p-4');
-        expect(layout).not.toContain('rounded-xl border bg-card shadow-xs');
+        expect(layout).toContain(
+            '<Content className="m-4 min-h-0 flex-1 overflow-hidden rounded-lg bg-card">'
+        );
+        expect(layout).toContain('h-12 shrink-0 items-center');
+        expect(layout).toContain('shadow-[0_2px_8px_rgba(0,0,0,0.06)]');
+    });
+
+    test('shared presentation uses Ant Design defaults where available', () => {
+        expect(source('components/page_header.tsx')).toContain("import { Typography } from 'antd'");
+        expect(source('components/empty_state.tsx')).toContain("import { Empty } from 'antd'");
+        expect(source('components/description_list.tsx')).toContain(
+            "import { Descriptions } from 'antd'"
+        );
+        expect(source('components/data_table.tsx')).not.toContain('PRESENTED_IMAGE_SIMPLE');
+        expect(source('components/pagination_bar.tsx')).not.toContain('border-t bg-card');
+        const overview = source('pages/overview/index.tsx');
+        expect(moduleReferences(overview, /^antd$/)).toEqual(['antd']);
+        expect(overview).toContain('<Statistic');
+        expect(overview).not.toContain('<button');
+    });
+
+    test('login values are owned by Ant Design Form', () => {
+        const loginPage = source('pages/auth/index.tsx');
+        expect(moduleReferences(loginPage, /^antd$/)).toEqual(['antd']);
+        expect(loginPage).toContain('<Form<LoginRequest>');
+        expect(loginPage).toContain('onFinish={submit}');
+        expect(loginPage).not.toContain('react-hook-form');
+        expect(loginPage).not.toContain("register('username')");
     });
 
     test('sync markers use the generic task boundary', () => {

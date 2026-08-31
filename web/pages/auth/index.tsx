@@ -1,17 +1,12 @@
-import { zodResolver } from '@hookform/resolvers/zod';
-import { LoaderCircle, LockKeyhole, LogIn, ShieldCheck, UserRound } from 'lucide-react';
+import { LockOutlined, SafetyCertificateOutlined, UserOutlined } from '@ant-design/icons';
+import { Button, Card, Form, Input, Typography } from 'antd';
 import { useEffect } from 'react';
-import { useForm } from 'react-hook-form';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Field, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field';
-import { Input, PasswordInput } from '@/components/ui/input';
 import { APP_NAME, getAppTitle } from '@/config/app';
 import { useLogin } from '@/features/auth/auth.service';
 import { useAuthStore } from '@/features/auth/auth.store';
 import type { LoginRequest } from '@/features/auth/auth.types';
-import { loginSchema, PASSWORD_MAX_LENGTH, USERNAME_MAX_LENGTH } from './auth.schema';
+import { PASSWORD_MAX_LENGTH, USERNAME_MAX_LENGTH } from './auth.schema';
 
 interface LocationState {
     from?: {
@@ -20,20 +15,14 @@ interface LocationState {
 }
 
 const pageTitle = getAppTitle('登录系统');
+const { Text, Title } = Typography;
 
 export function LoginPage() {
+    const [form] = Form.useForm<LoginRequest>();
     const navigate = useNavigate();
     const location = useLocation();
     const user = useAuthStore((state) => state.user);
     const mutation = useLogin();
-    const {
-        register,
-        handleSubmit,
-        formState: { errors },
-    } = useForm<LoginRequest>({
-        resolver: zodResolver(loginSchema),
-        defaultValues: { username: '', password: '' },
-    });
 
     useEffect(() => {
         if (user && !mutation.isPending) {
@@ -56,76 +45,103 @@ export function LoginPage() {
     };
 
     return (
-        <main className="relative flex min-h-dvh w-full items-center justify-center overflow-hidden bg-[radial-gradient(circle_at_top_left,color-mix(in_oklab,var(--primary)_18%,transparent),transparent_38%),linear-gradient(180deg,var(--background),color-mix(in_oklab,var(--muted)_62%,white))] p-4 sm:p-6">
-            <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/50 to-transparent" />
-            <Card className="relative w-full max-w-md border-border/70 bg-card/95 shadow-2xl shadow-primary/10 backdrop-blur">
-                <CardHeader className="pb-1">
-                    <div className="mb-3 flex size-11 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/15">
-                        <ShieldCheck className="size-6" />
+        <main className="relative flex min-h-dvh w-full items-center justify-center overflow-hidden bg-[linear-gradient(180deg,#fbfdff_0%,#eef4ff_48%,#f8fbff_100%)] p-6 sm:p-12">
+            <div
+                aria-hidden="true"
+                className="pointer-events-none absolute -top-44 -left-44 size-[520px] rounded-full bg-[radial-gradient(circle,rgba(59,130,246,0.18),rgba(59,130,246,0.04)_64%,transparent_76%)] opacity-75 blur-[30px]"
+            />
+            <div
+                aria-hidden="true"
+                className="pointer-events-none absolute -right-56 -bottom-60 size-[620px] rounded-full bg-[radial-gradient(circle,rgba(37,99,235,0.12),rgba(37,99,235,0.03)_66%,transparent_78%)] opacity-75 blur-[30px]"
+            />
+            <div
+                aria-hidden="true"
+                className="pointer-events-none absolute top-[10%] right-[12%] size-[min(38vw,460px)] min-h-[300px] min-w-[300px] rounded-full bg-[radial-gradient(circle,rgba(255,255,255,0.82)_0%,rgba(255,255,255,0.26)_40%,transparent_72%)] opacity-85 blur-[14px]"
+            />
+            <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 bg-[linear-gradient(135deg,transparent_0%,rgba(255,255,255,0.16)_42%,rgba(255,255,255,0.3)_52%,transparent_68%)] opacity-70 [mask-image:radial-gradient(circle_at_center,black_0%,transparent_76%)]"
+            />
+
+            <div className="relative z-10 w-full max-w-[440px]">
+                <Card
+                    className="border-white/70 bg-white/95 shadow-[0_18px_44px_rgba(15,23,42,0.08)] backdrop-blur-xl"
+                    styles={{ body: { padding: 'clamp(28px, 4vw, 36px)' } }}
+                >
+                    <div className="mb-5 flex items-center gap-3">
+                        <div className="flex size-11 items-center justify-center rounded-antd border border-blue-200/50 bg-blue-50 text-primary">
+                            <SafetyCertificateOutlined className="text-xl" />
+                        </div>
+                        <div>
+                            <Text className="text-xs tracking-[0.08em] text-gray-500 uppercase">
+                                {APP_NAME}
+                            </Text>
+                            <Title level={3} style={{ margin: 0 }}>
+                                登录系统
+                            </Title>
+                        </div>
                     </div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">
-                        {APP_NAME}
-                    </p>
-                    <CardTitle className="text-2xl">登录系统</CardTitle>
-                    <CardDescription>使用管理员账户进入边缘交付控制面</CardDescription>
-                </CardHeader>
-                <CardContent>
-                    <form
-                        className="mt-3"
+
+                    <Text type="secondary">使用管理员账户进入边缘交付控制面</Text>
+
+                    <Form<LoginRequest>
+                        form={form}
+                        layout="vertical"
+                        className="mt-6"
                         autoComplete="on"
-                        noValidate
-                        onSubmit={handleSubmit(submit)}
+                        onFinish={submit}
                     >
-                        <FieldGroup>
-                            <Field data-invalid={Boolean(errors.username)}>
-                                <FieldLabel htmlFor="username">用户名</FieldLabel>
-                                <div className="relative">
-                                    <UserRound className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                                    <Input
-                                        id="username"
-                                        autoComplete="username"
-                                        maxLength={USERNAME_MAX_LENGTH}
-                                        placeholder="请输入用户名"
-                                        className="pl-9"
-                                        aria-invalid={Boolean(errors.username)}
-                                        {...register('username')}
-                                    />
-                                </div>
-                                <FieldError>{errors.username?.message}</FieldError>
-                            </Field>
-                            <Field data-invalid={Boolean(errors.password)}>
-                                <FieldLabel htmlFor="password">密码</FieldLabel>
-                                <div className="relative">
-                                    <LockKeyhole className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                                    <PasswordInput
-                                        id="password"
-                                        autoComplete="current-password"
-                                        maxLength={PASSWORD_MAX_LENGTH}
-                                        placeholder="请输入密码"
-                                        className="px-9"
-                                        aria-invalid={Boolean(errors.password)}
-                                        {...register('password')}
-                                    />
-                                </div>
-                                <FieldError>{errors.password?.message}</FieldError>
-                            </Field>
+                        <Form.Item
+                            label="用户名"
+                            name="username"
+                            rules={[
+                                { required: true, message: '用户名不能为空' },
+                                {
+                                    max: USERNAME_MAX_LENGTH,
+                                    message: `用户名最多${USERNAME_MAX_LENGTH}个字符`,
+                                },
+                            ]}
+                        >
+                            <Input
+                                autoComplete="username"
+                                maxLength={USERNAME_MAX_LENGTH}
+                                placeholder="请输入用户名"
+                                prefix={<UserOutlined />}
+                            />
+                        </Form.Item>
+                        <Form.Item
+                            label="密码"
+                            name="password"
+                            rules={[
+                                { required: true, message: '密码不能为空' },
+                                {
+                                    max: PASSWORD_MAX_LENGTH,
+                                    message: `密码最多${PASSWORD_MAX_LENGTH}个字符`,
+                                },
+                            ]}
+                        >
+                            <Input.Password
+                                autoComplete="current-password"
+                                maxLength={PASSWORD_MAX_LENGTH}
+                                placeholder="请输入密码"
+                                prefix={<LockOutlined />}
+                            />
+                        </Form.Item>
+                        <Form.Item className="mb-0 mt-2">
                             <Button
-                                type="submit"
-                                size="lg"
-                                className="mt-1 w-full"
+                                type="primary"
+                                htmlType="submit"
+                                block
+                                size="large"
                                 disabled={mutation.isPending}
+                                loading={mutation.isPending}
                             >
-                                {mutation.isPending ? (
-                                    <LoaderCircle className="animate-spin" />
-                                ) : (
-                                    <LogIn />
-                                )}
-                                {mutation.isPending ? '正在登录' : '登录系统'}
+                                登录系统
                             </Button>
-                        </FieldGroup>
-                    </form>
-                </CardContent>
-            </Card>
+                        </Form.Item>
+                    </Form>
+                </Card>
+            </div>
         </main>
     );
 }

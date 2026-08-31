@@ -506,7 +506,7 @@ export default function CertificatePage() {
     const item = detail.data;
 
     return (
-        <div className="mx-auto flex h-full min-h-0 w-full max-w-[1680px] flex-col gap-4 overflow-y-auto p-4 sm:p-6 md:overflow-hidden">
+        <div className="flex h-full min-h-0 w-full flex-col gap-4 overflow-y-auto p-4 md:overflow-hidden">
             <PageHeader
                 title="证书管理"
                 description="统一管理 ACME 账户、DNS-01 验证、证书签发和续签策略"
@@ -598,7 +598,7 @@ export default function CertificatePage() {
                 </div>
             </form>
 
-            <div className="flex min-h-[28rem] flex-none flex-col overflow-hidden rounded-xl border bg-card md:min-h-0 md:flex-1">
+            <div className="flex min-h-[28rem] flex-none flex-col overflow-hidden md:min-h-0 md:flex-1">
                 <DataTable
                     className="min-h-0 flex-1 rounded-none border-0"
                     tableClassName="min-w-[1280px]"

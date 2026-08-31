@@ -151,7 +151,7 @@ export default function ClusterPage() {
     });
 
     return (
-        <div className="mx-auto flex h-full w-full max-w-[1680px] flex-col gap-4 overflow-y-auto p-4 sm:p-6 md:overflow-hidden">
+        <div className="flex h-full w-full flex-col gap-4 overflow-y-auto p-4 md:overflow-hidden">
             <PageHeader
                 eyebrow="基础设施"
                 title="边缘集群"
@@ -165,7 +165,7 @@ export default function ClusterPage() {
             />
 
             <div className="flex min-h-0 flex-none flex-col gap-4 md:flex-1 lg:flex-row">
-                <aside className="flex max-h-52 shrink-0 flex-col overflow-hidden rounded-xl border bg-card lg:max-h-none lg:w-56">
+                <aside className="flex max-h-52 shrink-0 flex-col overflow-hidden rounded-antd border bg-card lg:max-h-none lg:w-56">
                     <div className="flex items-center justify-between border-b px-4 py-3">
                         <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                             集群列表
@@ -237,10 +237,10 @@ export default function ClusterPage() {
 
                 {selectedCluster ? (
                     <section className="flex min-h-0 min-w-0 flex-none flex-col gap-4 md:flex-1">
-                        <div className="rounded-xl border bg-card p-4 shadow-xs">
+                        <div className="rounded-antd border bg-card p-4">
                             <div className="flex flex-col gap-4 xl:flex-row xl:items-center">
                                 <div className="flex min-w-0 items-center gap-3">
-                                    <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                                    <div className="flex size-10 shrink-0 items-center justify-center rounded-antd bg-primary/10 text-primary">
                                         <Server className="size-5" />
                                     </div>
                                     <div className="min-w-0">
@@ -308,7 +308,7 @@ export default function ClusterPage() {
                         <NodePanel cluster={selectedCluster} createRequest={nodeCreateRequest} />
                     </section>
                 ) : (
-                    <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed bg-card">
+                    <div className="flex flex-1 items-center justify-center rounded-antd border border-dashed bg-card">
                         <EmptyState
                             title="还没有边缘集群"
                             description="创建集群后即可添加节点并生成网站接入域名。"
