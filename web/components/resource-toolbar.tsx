@@ -12,6 +12,7 @@ type Props = {
   refreshing?: boolean
   placeholder?: string
   filters?: ReactNode
+  actions?: ReactNode
 }
 
 export function ResourceToolbar({
@@ -23,6 +24,7 @@ export function ResourceToolbar({
   refreshing,
   placeholder = '搜索…',
   filters,
+  actions,
 }: Props) {
   return (
     <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
@@ -55,6 +57,7 @@ export function ResourceToolbar({
         >
           <RotateCw className={refreshing ? 'animate-spin' : undefined} />
         </Button>
+        {actions}
       </div>
     </div>
   )

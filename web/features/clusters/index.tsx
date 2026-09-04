@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
+import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import type { ColumnDef } from '@tanstack/react-table'
 import { Pencil, Plus, Server, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -38,6 +38,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTableColumnHeader } from '@/components/data-table'
 import { FeatureShell } from '@/components/feature-shell'
@@ -45,6 +46,7 @@ import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
 import { RowActions } from '@/components/row-actions'
 import { StatusBadge } from '@/components/status-badge'
+import { NodesPanel } from '@/features/nodes'
 
 const schema = z.object({
   name: z.string().trim().min(1, '请输入集群名称').max(100),
@@ -64,6 +66,47 @@ const schema = z.object({
 type Values = z.infer<typeof schema>
 
 export function Clusters() {
+  const navigate = useNavigate()
+  const search = useSearch({ from: '/_authenticated/clusters' })
+
+  return (
+    <FeatureShell
+      title='集群与节点'
+      description='在同一工作区管理资源分组、节点接入与运行状态。'
+    >
+      <Tabs
+        value={search.view}
+        onValueChange={(view) =>
+          void navigate({
+            to: '/clusters',
+            search:
+              view === 'nodes'
+                ? { view: 'nodes', cluster_id: search.cluster_id }
+                : { view: 'clusters', cluster_id: undefined },
+            replace: true,
+          })
+        }
+        className='gap-3'
+      >
+        <TabsList>
+          <TabsTrigger value='clusters'>集群</TabsTrigger>
+          <TabsTrigger value='nodes'>节点</TabsTrigger>
+        </TabsList>
+        <TabsContent value='clusters' className='space-y-3'>
+          <ClustersPanel />
+        </TabsContent>
+        <TabsContent value='nodes' className='space-y-3'>
+          <NodesPanel
+            key={search.cluster_id ?? 'all'}
+            initialClusterId={search.cluster_id}
+          />
+        </TabsContent>
+      </Tabs>
+    </FeatureShell>
+  )
+}
+
+function ClustersPanel() {
   const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
@@ -145,7 +188,10 @@ export function Clusters() {
         cell: ({ row }) => (
           <RowActions>
             <DropdownMenuItem asChild>
-              <Link to='/nodes' search={{ cluster_id: row.original.id }}>
+              <Link
+                to='/clusters'
+                search={{ view: 'nodes', cluster_id: row.original.id }}
+              >
                 <Server /> 查看节点
               </Link>
             </DropdownMenuItem>
@@ -167,15 +213,7 @@ export function Clusters() {
   )
 
   return (
-    <FeatureShell
-      title='集群'
-      description='按接入域名组织边缘节点和配置分发。'
-      actions={
-        <Button onClick={() => setDialog('new')}>
-          <Plus /> 创建集群
-        </Button>
-      }
-    >
+    <>
       <ResourceToolbar
         value={draftKeyword}
         onChange={setDraftKeyword}
@@ -191,6 +229,11 @@ export function Clusters() {
         onRefresh={() => query.refetch()}
         refreshing={query.isFetching}
         placeholder='搜索集群名称…'
+        actions={
+          <Button size='sm' onClick={() => setDialog('new')}>
+            <Plus /> 创建集群
+          </Button>
+        }
         filters={
           <Select
             value={status}
@@ -245,7 +288,7 @@ export function Clusters() {
         isLoading={remove.isPending}
         handleConfirm={() => removeTarget && remove.mutate(removeTarget)}
       />
-    </FeatureShell>
+    </>
   )
 }
 

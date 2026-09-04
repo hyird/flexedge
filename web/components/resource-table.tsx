@@ -72,7 +72,7 @@ export function ResourceTable<T>({
   })
 
   return (
-    <div className='min-w-0 space-y-4'>
+    <div className='min-w-0 space-y-3'>
       <div className='overflow-hidden rounded-md border'>
         <div className='overflow-x-auto'>
           <Table style={{ minWidth }}>
@@ -97,7 +97,7 @@ export function ResourceTable<T>({
                 <TableRow>
                   <TableCell
                     colSpan={columns.length}
-                    className='h-64 text-center'
+                    className='h-48 text-center'
                   >
                     <div
                       role='alert'
@@ -157,7 +157,7 @@ export function ResourceTable<T>({
                 <TableRow>
                   <TableCell
                     colSpan={columns.length}
-                    className='h-64 text-center'
+                    className='h-48 text-center'
                   >
                     <div className='mx-auto flex max-w-sm flex-col items-center'>
                       <div className='mb-3 flex size-10 items-center justify-center rounded-full bg-muted'>

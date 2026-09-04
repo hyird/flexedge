@@ -1,10 +1,15 @@
-import { createFileRoute } from '@tanstack/react-router'
-import { Nodes } from '@/features/nodes'
+import { createFileRoute, redirect } from '@tanstack/react-router'
 
 export const Route = createFileRoute('/_authenticated/nodes')({
   validateSearch: (search: Record<string, unknown>) => ({
     cluster_id:
       typeof search.cluster_id === 'string' ? search.cluster_id : undefined,
   }),
-  component: Nodes,
+  beforeLoad: ({ search }) => {
+    throw redirect({
+      to: '/clusters',
+      search: { view: 'nodes', cluster_id: search.cluster_id },
+      replace: true,
+    })
+  },
 })

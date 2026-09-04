@@ -9,9 +9,6 @@ import {
 import { createRouter, RouterProvider } from '@tanstack/react-router'
 import { toast } from 'sonner'
 import { apiErrorMessage } from '@/lib/api'
-import { DirectionProvider } from '@/context/direction-provider'
-import { FontProvider } from '@/context/font-provider'
-import { ThemeProvider } from '@/context/theme-provider'
 import { routeTree } from './routeTree.gen'
 import './styles/index.css'
 
@@ -57,13 +54,7 @@ if (!rootElement.innerHTML) {
   ReactDOM.createRoot(rootElement).render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
-        <ThemeProvider>
-          <FontProvider>
-            <DirectionProvider>
-              <RouterProvider router={router} />
-            </DirectionProvider>
-          </FontProvider>
-        </ThemeProvider>
+        <RouterProvider router={router} />
       </QueryClientProvider>
     </StrictMode>
   )

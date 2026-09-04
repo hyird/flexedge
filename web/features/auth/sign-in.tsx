@@ -25,7 +25,6 @@ import {
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import { PasswordInput } from '@/components/password-input'
-import { ThemeSwitch } from '@/components/theme-switch'
 
 const schema = z.object({
   username: z.string().trim().min(1, '请输入用户名'),
@@ -54,9 +53,6 @@ export function SignIn() {
 
   return (
     <div className='relative grid min-h-svh lg:grid-cols-2'>
-      <div className='absolute end-5 top-5 z-10'>
-        <ThemeSwitch />
-      </div>
       <div className='flex items-center justify-center px-6 py-12'>
         <div className='w-full max-w-sm space-y-8'>
           <div className='flex items-center gap-3'>

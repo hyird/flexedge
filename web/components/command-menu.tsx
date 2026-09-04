@@ -1,8 +1,7 @@
 import { useCallback } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { ArrowRight, Laptop, Moon, Sun } from 'lucide-react'
+import { ArrowRight } from 'lucide-react'
 import { useSearch } from '@/context/search-provider'
-import { useTheme } from '@/context/theme-provider'
 import {
   CommandDialog,
   CommandEmpty,
@@ -10,14 +9,12 @@ import {
   CommandInput,
   CommandItem,
   CommandList,
-  CommandSeparator,
 } from '@/components/ui/command'
 import { sidebarData } from './layout/data/sidebar-data'
 import { ScrollArea } from './ui/scroll-area'
 
 export function CommandMenu() {
   const navigate = useNavigate()
-  const { setTheme } = useTheme()
   const { open, setOpen } = useSearch()
   const run = useCallback(
     (command: () => unknown) => {
@@ -60,18 +57,6 @@ export function CommandMenu() {
               )}
             </CommandGroup>
           ))}
-          <CommandSeparator />
-          <CommandGroup heading='主题'>
-            <CommandItem onSelect={() => run(() => setTheme('light'))}>
-              <Sun /> 亮色
-            </CommandItem>
-            <CommandItem onSelect={() => run(() => setTheme('dark'))}>
-              <Moon /> 暗色
-            </CommandItem>
-            <CommandItem onSelect={() => run(() => setTheme('system'))}>
-              <Laptop /> 跟随系统
-            </CommandItem>
-          </CommandGroup>
         </ScrollArea>
       </CommandList>
     </CommandDialog>

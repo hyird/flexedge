@@ -3,7 +3,6 @@ import { z } from 'zod'
 import { useFieldArray, useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useSearch } from '@tanstack/react-router'
 import type { ColumnDef } from '@tanstack/react-table'
 import {
   Clipboard,
@@ -58,7 +57,6 @@ import {
 } from '@/components/ui/sheet'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTableColumnHeader } from '@/components/data-table'
-import { FeatureShell } from '@/components/feature-shell'
 import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
 import { RowActions } from '@/components/row-actions'
@@ -87,14 +85,17 @@ type NodeLog = {
   message: string
 }
 
-export function Nodes() {
-  const search = useSearch({ from: '/_authenticated/nodes' })
+export function NodesPanel({
+  initialClusterId,
+}: {
+  initialClusterId?: string
+}) {
   const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
   const [draftKeyword, setDraftKeyword] = useState('')
   const [keyword, setKeyword] = useState('')
-  const [clusterId, setClusterId] = useState(search.cluster_id ?? 'all')
+  const [clusterId, setClusterId] = useState(initialClusterId ?? 'all')
   const [status, setStatus] = useState('all')
   const [dialog, setDialog] = useState<Node | 'new' | null>(null)
   const [removeTarget, setRemoveTarget] = useState<Node | null>(null)
@@ -231,15 +232,7 @@ export function Nodes() {
   )
 
   return (
-    <FeatureShell
-      title='节点'
-      description='管理边缘节点接入、Endpoint 与运行状态。'
-      actions={
-        <Button onClick={() => setDialog('new')}>
-          <Plus /> 添加节点
-        </Button>
-      }
-    >
+    <>
       <ResourceToolbar
         value={draftKeyword}
         onChange={setDraftKeyword}
@@ -255,6 +248,11 @@ export function Nodes() {
         onRefresh={() => query.refetch()}
         refreshing={query.isFetching}
         placeholder='搜索节点名称…'
+        actions={
+          <Button size='sm' onClick={() => setDialog('new')}>
+            <Plus /> 添加节点
+          </Button>
+        }
         filters={
           <>
             <Select
@@ -345,7 +343,7 @@ export function Nodes() {
         isLoading={remove.isPending}
         handleConfirm={() => removeTarget && remove.mutate(removeTarget)}
       />
-    </FeatureShell>
+    </>
   )
 }
 

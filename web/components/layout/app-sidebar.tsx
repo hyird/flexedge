@@ -1,6 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
 import { sessionQueryOptions } from '@/lib/auth'
-import { useLayout } from '@/context/layout-provider'
 import {
   Sidebar,
   SidebarContent,
@@ -14,11 +13,10 @@ import { NavGroup } from './nav-group'
 import { NavUser } from './nav-user'
 
 export function AppSidebar() {
-  const { collapsible, variant } = useLayout()
   const { data: user } = useQuery(sessionQueryOptions)
 
   return (
-    <Sidebar collapsible={collapsible} variant={variant}>
+    <Sidebar collapsible='icon' variant='inset'>
       <SidebarHeader>
         <AppTitle />
       </SidebarHeader>
