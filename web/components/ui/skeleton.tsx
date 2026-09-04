@@ -1,5 +1,13 @@
-import { Skeleton as AntSkeleton } from 'antd';
-import type { HTMLAttributes } from 'react';
-export function Skeleton({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-    return <AntSkeleton.Input active block className={className} {...props} />;
+import { cn } from '@/lib/utils'
+
+function Skeleton({ className, ...props }: React.ComponentProps<'div'>) {
+  return (
+    <div
+      data-slot='skeleton'
+      className={cn('animate-pulse rounded-md bg-accent', className)}
+      {...props}
+    />
+  )
 }
+
+export { Skeleton }
