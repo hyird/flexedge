@@ -28,6 +28,11 @@ export const api = axios.create({
 
 let refreshRequest: Promise<void> | null = null
 
+export function normalizeApiPath(url: string) {
+  const normalized = url.replace(/\/+((?:[?#].*)?)$/, '$1')
+  return normalized || '/'
+}
+
 api.interceptors.response.use(undefined, async (error: AxiosError) => {
   const request = error.config as RetryableRequest | undefined
   const path = request?.url ?? ''
@@ -56,7 +61,9 @@ export async function getData<T>(
   url: string,
   params?: Record<string, unknown>
 ) {
-  const response = await api.get<ApiEnvelope<T>>(url, { params })
+  const response = await api.get<ApiEnvelope<T>>(normalizeApiPath(url), {
+    params,
+  })
   return response.data.data
 }
 
@@ -70,7 +77,7 @@ export async function sendData<T = unknown>(
     revision === undefined ? undefined : { 'If-Match': `"${revision}"` }
   const response = await api.request<ApiEnvelope<T>>({
     method,
-    url,
+    url: normalizeApiPath(url),
     data,
     headers,
   })
