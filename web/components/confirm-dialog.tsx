@@ -58,7 +58,7 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
             disabled={isLoading}
             onClick={() => actions.onOpenChange(false)}
           >
-            {cancelBtnText ?? 'Cancel'}
+            {cancelBtnText ?? '取消'}
           </Button>
           <Button
             type={form ? 'submit' : 'button'}
@@ -67,7 +67,7 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
             variant={destructive ? 'destructive' : 'default'}
             disabled={disabled || isLoading}
           >
-            {confirmText ?? 'Continue'}
+            {confirmText ?? '继续'}
           </Button>
         </SheetFooter>
       </SheetContent>
