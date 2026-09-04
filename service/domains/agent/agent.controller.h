@@ -231,6 +231,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
             .droppedLogEvents = static_cast<std::int64_t>(value.dropped_log_events()),
             .health = value.health(),
             .lastError = value.last_error(),
+            .originHealth = {},
         };
         result.originHealth.reserve(value.origin_health_size());
         for (const auto& item : value.origin_health()) {
