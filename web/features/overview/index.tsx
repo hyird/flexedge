@@ -9,7 +9,7 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import { getData } from '@/lib/api'
-import { fromNow } from '@/lib/format'
+import { formatDate } from '@/lib/format'
 import type { OverviewData } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import {
@@ -169,7 +169,7 @@ export function Overview() {
                           <StatusBadge status={task.status} />
                         </div>
                         <p className='mt-1 truncate text-xs text-muted-foreground'>
-                          {task.operation} · {fromNow(task.updated_at)}
+                          {task.operation} · {formatDate(task.updated_at)}
                         </p>
                       </div>
                     </div>

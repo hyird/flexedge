@@ -11,14 +11,6 @@ import { getData, sendData } from '@/lib/api'
 import type { Cluster, DnsZoneOption, PageData } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
@@ -38,6 +30,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTableColumnHeader } from '@/components/data-table'
@@ -71,7 +71,7 @@ export function Clusters() {
 
   return (
     <FeatureShell
-      title='集群与节点'
+      title='集群管理'
       description='在同一工作区管理资源分组、节点接入与运行状态。'
     >
       <Tabs
@@ -331,18 +331,18 @@ function ClusterDialog({
   })
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{cluster ? '编辑集群' : '创建集群'}</DialogTitle>
-          <DialogDescription>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className='overflow-y-auto'>
+        <SheetHeader>
+          <SheetTitle>{cluster ? '编辑集群' : '创建集群'}</SheetTitle>
+          <SheetDescription>
             接入域名由主机前缀和托管域名组合生成。
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
         <Form {...form}>
           <form
             id='cluster-form'
-            className='grid gap-4'
+            className='grid gap-4 px-4'
             onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
           >
             <FormField
@@ -418,7 +418,7 @@ function ClusterDialog({
             />
           </form>
         </Form>
-        <DialogFooter>
+        <SheetFooter>
           <Button variant='outline' onClick={() => onOpenChange(false)}>
             取消
           </Button>
@@ -429,8 +429,8 @@ function ClusterDialog({
           >
             {mutation.isPending ? '正在保存…' : '保存'}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }

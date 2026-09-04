@@ -1,14 +1,13 @@
 import { cn } from '@/lib/utils'
-import {
-  AlertDialog,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet'
 
 type ConfirmDialogProps = {
   open: boolean
@@ -43,19 +42,24 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
     ...actions
   } = props
   return (
-    <AlertDialog {...actions}>
-      <AlertDialogContent className={cn(className && className)}>
-        <AlertDialogHeader className='text-start'>
-          <AlertDialogTitle>{title}</AlertDialogTitle>
-          <AlertDialogDescription asChild>
+    <Sheet {...actions}>
+      <SheetContent className={cn('sm:max-w-md', className)}>
+        <SheetHeader>
+          <SheetTitle>{title}</SheetTitle>
+          <SheetDescription asChild>
             <div>{desc}</div>
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        {children}
-        <AlertDialogFooter>
-          <AlertDialogCancel disabled={isLoading}>
+          </SheetDescription>
+        </SheetHeader>
+        {children && <div className='px-4'>{children}</div>}
+        <SheetFooter>
+          <Button
+            type='button'
+            variant='outline'
+            disabled={isLoading}
+            onClick={() => actions.onOpenChange(false)}
+          >
             {cancelBtnText ?? 'Cancel'}
-          </AlertDialogCancel>
+          </Button>
           <Button
             type={form ? 'submit' : 'button'}
             form={form}
@@ -65,8 +69,8 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
           >
             {confirmText ?? 'Continue'}
           </Button>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }

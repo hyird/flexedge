@@ -15,18 +15,10 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { getData, sendData, type ApiEnvelope } from '@/lib/api'
-import { formatBytesPerSecond, formatDate, fromNow } from '@/lib/format'
+import { formatBytesPerSecond, formatDate } from '@/lib/format'
 import type { Cluster, Node, PageData } from '@/lib/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
 import {
   DropdownMenuItem,
   DropdownMenuSeparator,
@@ -52,6 +44,7 @@ import {
   Sheet,
   SheetContent,
   SheetDescription,
+  SheetFooter,
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
@@ -160,7 +153,7 @@ export function NodesPanel({
           <div className='space-y-1'>
             <StatusBadge status={row.original.runtime.connection_status} />
             <div className='text-xs text-muted-foreground'>
-              {fromNow(row.original.runtime.last_heartbeat_at)}
+              {formatDate(row.original.runtime.last_heartbeat_at)}
             </div>
           </div>
         ),
@@ -185,15 +178,11 @@ export function NodesPanel({
         id: 'metrics',
         header: '实时负载',
         cell: ({ row }) => (
-          <div className='text-xs leading-5 text-muted-foreground'>
-            <div>
-              CPU {row.original.runtime.cpu_usage?.toFixed(1) ?? '—'}% · 内存{' '}
-              {row.original.runtime.memory_usage?.toFixed(1) ?? '—'}%
-            </div>
-            <div>
-              {formatBytesPerSecond(row.original.runtime.traffic_out_bps)} ·{' '}
-              {row.original.runtime.connection_count ?? '—'} 连接
-            </div>
+          <div className='text-xs whitespace-nowrap text-muted-foreground'>
+            CPU {row.original.runtime.cpu_usage?.toFixed(1) ?? '—'}% · 内存{' '}
+            {row.original.runtime.memory_usage?.toFixed(1) ?? '—'}% ·{' '}
+            {formatBytesPerSecond(row.original.runtime.traffic_out_bps)} ·{' '}
+            {row.original.runtime.connection_count ?? '—'} 连接
           </div>
         ),
       },
@@ -308,7 +297,6 @@ export function NodesPanel({
         }}
         emptyTitle='暂无节点'
         emptyDescription='添加节点后会生成一次性接入凭据。'
-        minWidth='1040px'
       />
       {dialog && (
         <NodeDialog
@@ -404,18 +392,18 @@ function NodeDialog({
   })
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className='max-h-[90svh] overflow-y-auto sm:max-w-2xl'>
-        <DialogHeader>
-          <DialogTitle>{node ? '编辑节点' : '添加节点'}</DialogTitle>
-          <DialogDescription>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className='overflow-y-auto sm:max-w-2xl'>
+        <SheetHeader>
+          <SheetTitle>{node ? '编辑节点' : '添加节点'}</SheetTitle>
+          <SheetDescription>
             每个节点可配置最多 8 个唯一 IP 与 DNS 线路。
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
         <Form {...form}>
           <form
             id='node-form'
-            className='grid gap-4'
+            className='grid gap-4 px-4'
             onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
           >
             <div className='grid gap-4 sm:grid-cols-2'>
@@ -547,16 +535,16 @@ function NodeDialog({
             </div>
           </form>
         </Form>
-        <DialogFooter>
+        <SheetFooter>
           <Button variant='outline' onClick={() => onOpenChange(false)}>
             取消
           </Button>
           <Button type='submit' form='node-form' disabled={mutation.isPending}>
             {mutation.isPending ? '正在保存…' : '保存'}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }
 
@@ -568,15 +556,15 @@ function CredentialsDialog({
   onOpenChange: (open: boolean) => void
 }) {
   return (
-    <Dialog open={!!credentials} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>节点接入凭据</DialogTitle>
-          <DialogDescription>
+    <Sheet open={!!credentials} onOpenChange={onOpenChange}>
+      <SheetContent>
+        <SheetHeader>
+          <SheetTitle>节点接入凭据</SheetTitle>
+          <SheetDescription>
             请安全保存密钥，不要通过公开渠道传输。
-          </DialogDescription>
-        </DialogHeader>
-        <div className='space-y-3'>
+          </SheetDescription>
+        </SheetHeader>
+        <div className='space-y-3 px-4'>
           <div>
             <div className='mb-1 text-xs text-muted-foreground'>Node ID</div>
             <code className='block rounded-md bg-muted p-3 text-xs break-all'>
@@ -590,7 +578,7 @@ function CredentialsDialog({
             </code>
           </div>
         </div>
-        <DialogFooter>
+        <SheetFooter>
           <Button
             variant='outline'
             onClick={async () => {
@@ -604,9 +592,9 @@ function CredentialsDialog({
             <Clipboard /> 复制凭据
           </Button>
           <Button onClick={() => onOpenChange(false)}>完成</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }
 

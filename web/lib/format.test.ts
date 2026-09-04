@@ -14,6 +14,10 @@ describe('format helpers', () => {
     expect(formatDate('invalid-timestamp')).toBe('invalid-timestamp')
   })
 
+  it('formats timestamps consistently through seconds', () => {
+    expect(formatDate('2026-09-05T00:25:10')).toBe('2026-09-05 00:25:10')
+  })
+
   it('derives compact avatar initials', () => {
     expect(initials(' flexedge ')).toBe('FL')
     expect(initials()).toBe('FE')

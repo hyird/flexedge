@@ -34,7 +34,6 @@ type Props<T> = {
   onPaginationChange: (page: number, pageSize: number) => void
   emptyTitle?: string
   emptyDescription?: string
-  minWidth?: string
 }
 
 export function ResourceTable<T>({
@@ -49,7 +48,6 @@ export function ResourceTable<T>({
   onPaginationChange,
   emptyTitle = '暂无数据',
   emptyDescription = '调整筛选条件或创建第一条记录。',
-  minWidth = '760px',
 }: Props<T>) {
   const [sorting, setSorting] = useState<SortingState>([])
   const pagination: PaginationState = {
@@ -75,7 +73,7 @@ export function ResourceTable<T>({
     <div className='min-w-0 space-y-3'>
       <div className='overflow-hidden rounded-md border'>
         <div className='overflow-x-auto'>
-          <Table style={{ minWidth }}>
+          <Table>
             <TableHeader>
               {table.getHeaderGroups().map((group) => (
                 <TableRow key={group.id}>

@@ -11,14 +11,6 @@ import { formatDate } from '@/lib/format'
 import type { CertificateProvider, DnsProvider, PageData } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
@@ -38,6 +30,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTableColumnHeader } from '@/components/data-table'
@@ -445,20 +445,20 @@ function DnsProviderDialog({
   })
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className='overflow-y-auto'>
+        <SheetHeader>
+          <SheetTitle>
             {provider ? '编辑 DNS 账号' : '添加 DNS 账号'}
-          </DialogTitle>
-          <DialogDescription>
+          </SheetTitle>
+          <SheetDescription>
             凭据只会提交给 FlexEdge 服务端，保存后仅显示脱敏提示。
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
         <Form {...form}>
           <form
             id='dns-provider-form'
-            className='grid gap-4'
+            className='grid gap-4 px-4'
             onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
           >
             <FormField
@@ -533,7 +533,7 @@ function DnsProviderDialog({
             />
           </form>
         </Form>
-        <DialogFooter>
+        <SheetFooter>
           <Button variant='outline' onClick={() => onOpenChange(false)}>
             取消
           </Button>
@@ -544,9 +544,9 @@ function DnsProviderDialog({
           >
             {mutation.isPending ? '正在保存…' : '保存'}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }
 
@@ -604,18 +604,18 @@ function CertificateProviderDialog({
   })
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className='overflow-y-auto'>
+        <SheetHeader>
+          <SheetTitle>
             {provider ? '编辑证书供应商' : '添加证书供应商'}
-          </DialogTitle>
-          <DialogDescription>配置 ACME 账户接入方式。</DialogDescription>
-        </DialogHeader>
+          </SheetTitle>
+          <SheetDescription>配置 ACME 账户接入方式。</SheetDescription>
+        </SheetHeader>
         <Form {...form}>
           <form
             id='certificate-provider-form'
-            className='grid gap-4'
+            className='grid gap-4 px-4'
             onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
           >
             <FormField
@@ -703,7 +703,7 @@ function CertificateProviderDialog({
             )}
           </form>
         </Form>
-        <DialogFooter>
+        <SheetFooter>
           <Button variant='outline' onClick={() => onOpenChange(false)}>
             取消
           </Button>
@@ -715,8 +715,8 @@ function CertificateProviderDialog({
             <ShieldCheck />
             {mutation.isPending ? '正在保存…' : '保存'}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }

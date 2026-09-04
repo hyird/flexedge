@@ -13,14 +13,6 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -46,11 +38,13 @@ import {
   Sheet,
   SheetContent,
   SheetDescription,
+  SheetFooter,
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTableColumnHeader } from '@/components/data-table'
+import { DnsLineSelect, DnsLineTree } from '@/components/dns-line-tree'
 import { FeatureShell } from '@/components/feature-shell'
 import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
@@ -294,7 +288,6 @@ export function DnsZones() {
         }}
         emptyTitle='暂无托管域名'
         emptyDescription='先添加 DNS 服务商，再导入可用域名。'
-        minWidth='920px'
       />
       <CreateZoneDialog
         open={createOpen}
@@ -364,18 +357,18 @@ function CreateZoneDialog({
   })
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>添加托管域名</DialogTitle>
-          <DialogDescription>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className='overflow-y-auto'>
+        <SheetHeader>
+          <SheetTitle>添加托管域名</SheetTitle>
+          <SheetDescription>
             从 DNS 服务商账号中选择一个可用区域。
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
         <Form {...form}>
           <form
             id='create-zone-form'
-            className='grid gap-4'
+            className='grid gap-4 px-4'
             onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
           >
             <FormField
@@ -444,7 +437,7 @@ function CreateZoneDialog({
             />
           </form>
         </Form>
-        <DialogFooter>
+        <SheetFooter>
           <Button variant='outline' onClick={() => onOpenChange(false)}>
             取消
           </Button>
@@ -455,9 +448,9 @@ function CreateZoneDialog({
           >
             {mutation.isPending ? '正在添加…' : '添加并同步'}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }
 
@@ -496,14 +489,14 @@ function RecordsDialog({
   })
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className='max-h-[92svh] overflow-hidden p-0 sm:max-w-4xl'>
-        <DialogHeader className='px-6 pt-6'>
-          <DialogTitle>{zone.domain} · DNS 记录</DialogTitle>
-          <DialogDescription>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className='w-full overflow-hidden p-0 sm:max-w-4xl'>
+        <SheetHeader className='px-6 pt-6'>
+          <SheetTitle>{zone.domain} · DNS 记录</SheetTitle>
+          <SheetDescription>
             保存后会自动提交同步任务。记录 ID 由控制台生成并保持稳定。
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
         <Form {...form}>
           <form
             id='zone-records-form'
@@ -597,8 +590,13 @@ function RecordsDialog({
                         <FormItem>
                           <FormLabel className='md:sr-only'>线路</FormLabel>
                           <FormControl>
-                            <Input placeholder='default' {...field} />
+                            <DnsLineSelect
+                              lines={zone.runtime.lines}
+                              value={field.value}
+                              onValueChange={field.onChange}
+                            />
                           </FormControl>
+                          <FormMessage />
                         </FormItem>
                       )}
                     />
@@ -639,7 +637,7 @@ function RecordsDialog({
             </ScrollArea>
           </form>
         </Form>
-        <DialogFooter className='border-t px-6 py-4'>
+        <SheetFooter className='px-6 py-4'>
           <Button
             variant='outline'
             onClick={() =>
@@ -667,9 +665,9 @@ function RecordsDialog({
           >
             {mutation.isPending ? '正在保存…' : '保存并同步'}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }
 
@@ -705,22 +703,7 @@ function ZoneDetailSheet({
             </div>
             <div>
               <h3 className='mb-2 text-sm font-semibold'>DNS 线路</h3>
-              <div className='space-y-2'>
-                {zone.runtime.lines.map((line) => (
-                  <div
-                    key={line.code}
-                    className='flex items-center justify-between rounded-md border p-3 text-sm'
-                  >
-                    <div>
-                      <div>{line.display_name || line.name}</div>
-                      <code className='text-xs text-muted-foreground'>
-                        {line.code}
-                      </code>
-                    </div>
-                    <StatusBadge status={line.status} />
-                  </div>
-                ))}
-              </div>
+              <DnsLineTree lines={zone.runtime.lines} />
             </div>
             <div>
               <h3 className='mb-2 text-sm font-semibold'>

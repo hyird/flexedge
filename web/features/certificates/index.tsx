@@ -18,14 +18,6 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
@@ -50,6 +42,7 @@ import {
   Sheet,
   SheetContent,
   SheetDescription,
+  SheetFooter,
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
@@ -287,7 +280,6 @@ export function Certificates() {
         }}
         emptyTitle='暂无证书'
         emptyDescription='申请证书后，签发进度会显示在这里。'
-        minWidth='960px'
       />
       {dialog && (
         <CertificateDialog
@@ -371,18 +363,18 @@ function CertificateDialog({
   })
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{certificate ? '续期设置' : '申请证书'}</DialogTitle>
-          <DialogDescription>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className='overflow-y-auto'>
+        <SheetHeader>
+          <SheetTitle>{certificate ? '续期设置' : '申请证书'}</SheetTitle>
+          <SheetDescription>
             使用 DNS-01 验证申请证书，任务将在后台执行。
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
         <Form {...form}>
           <form
             id='certificate-form'
-            className='grid gap-4'
+            className='grid gap-4 px-4'
             onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
           >
             <FormField
@@ -484,7 +476,7 @@ function CertificateDialog({
             />
           </form>
         </Form>
-        <DialogFooter>
+        <SheetFooter>
           <Button variant='outline' onClick={() => onOpenChange(false)}>
             取消
           </Button>
@@ -495,9 +487,9 @@ function CertificateDialog({
           >
             {mutation.isPending ? '正在提交…' : certificate ? '保存' : '申请'}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }
 

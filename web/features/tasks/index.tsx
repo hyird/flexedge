@@ -173,7 +173,6 @@ export function Tasks() {
         }}
         emptyTitle='暂无后台任务'
         emptyDescription='资源变更提交后，任务会显示在这里。'
-        minWidth='980px'
       />
     </FeatureShell>
   )

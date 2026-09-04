@@ -41,7 +41,7 @@ export const sidebarData: SidebarData = {
           icon: Globe2,
         },
         {
-          title: '集群与节点',
+          title: '集群管理',
           url: '/clusters',
           icon: Boxes,
         },

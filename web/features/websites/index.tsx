@@ -19,14 +19,6 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
@@ -52,6 +44,7 @@ import {
   Sheet,
   SheetContent,
   SheetDescription,
+  SheetFooter,
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
@@ -395,7 +388,6 @@ export function Websites() {
         }}
         emptyTitle='暂无网站'
         emptyDescription='创建网站并将流量分发到边缘集群。'
-        minWidth='980px'
       />
       {dialog && (
         <WebsiteDialog
@@ -540,14 +532,14 @@ function WebsiteDialog({
   })
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className='max-h-[94svh] overflow-hidden p-0 sm:max-w-4xl'>
-        <DialogHeader className='px-6 pt-6'>
-          <DialogTitle>{website ? '编辑网站' : '创建网站'}</DialogTitle>
-          <DialogDescription>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className='w-full overflow-hidden p-0 sm:max-w-4xl'>
+        <SheetHeader className='px-6 pt-6'>
+          <SheetTitle>{website ? '编辑网站' : '创建网站'}</SheetTitle>
+          <SheetDescription>
             配置会通过后台任务安全分发到目标集群。
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
         <Form {...form}>
           <form
             id='website-form'
@@ -1049,7 +1041,7 @@ function WebsiteDialog({
             </Tabs>
           </form>
         </Form>
-        <DialogFooter className='border-t px-6 py-4'>
+        <SheetFooter className='px-6 py-4'>
           <Button variant='outline' onClick={() => onOpenChange(false)}>
             取消
           </Button>
@@ -1060,9 +1052,9 @@ function WebsiteDialog({
           >
             {mutation.isPending ? '正在保存…' : '保存并分发'}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }
 
