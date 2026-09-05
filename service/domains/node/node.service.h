@@ -116,12 +116,8 @@ class NodeService {
         NodeCredentialsDto result(c);
         try {
             auto transaction = co_await c.db().beginTransaction();
-            const auto credentialRows =
-                co_await transaction.query("SELECT replace(gen_random_uuid()::text, '-', ''), "
-                                           "encode(gen_random_bytes(16), 'hex')");
-            const auto agentId = std::string(credentialRows.front()[0].value().value_or(""));
-            service::utils::SensitiveString secret(
-                std::string(credentialRows.front()[1].value().value_or("")));
+            const auto agentId = service::utils::randomToken().substr(0, 32);
+            service::utils::SensitiveString secret(service::utils::randomToken());
             const auto secretHash = service::utils::tokenHash(secret.view());
             const auto secretEnvelope = service::utils::sealSecret(secret.view());
             co_await requireCluster(transaction, tenantId, clusterId, storedConfig);
@@ -353,12 +349,8 @@ class NodeService {
         const auto currentClusterId = currentRows.front()[1].value().value_or("");
         co_await service::node_dispatch::ensureClusterRelease(transaction, tenantId,
                                                               currentClusterId);
-        const auto credentialRows =
-            co_await transaction.query("SELECT replace(gen_random_uuid()::text, '-', ''), "
-                                       "encode(gen_random_bytes(16), 'hex')");
-        const auto agentId = std::string(credentialRows.front()[0].value().value_or(""));
-        service::utils::SensitiveString secret(
-            std::string(credentialRows.front()[1].value().value_or("")));
+        const auto agentId = service::utils::randomToken().substr(0, 32);
+        service::utils::SensitiveString secret(service::utils::randomToken());
         const auto hash = service::utils::tokenHash(secret.view());
         const auto envelope = service::utils::sealSecret(secret.view());
         const auto rows = co_await transaction.query(

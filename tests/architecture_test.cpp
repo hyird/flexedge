@@ -30,6 +30,7 @@
 #include "service/features/node_release/artifact.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
+#include "service/utils/token.h"
 #include "node/data/origin_selection.h"
 #include "node/data/origin_health.h"
 #include "node/data/route_rules.h"
@@ -113,6 +114,12 @@ int main() {
     tampered.back() = tampered.back() == 'a' ? 'b' : 'a';
     REQUIRE(throwsRuntimeError([&] { (void)service::utils::openSecret(tampered); }));
 
+    const auto firstToken = service::utils::randomToken();
+    const auto secondToken = service::utils::randomToken();
+    REQUIRE(firstToken.size() == 64);
+    REQUIRE(std::ranges::all_of(firstToken, [](unsigned char ch) { return std::isxdigit(ch); }));
+    REQUIRE(firstToken != secondToken);
+
     service::overview::OverviewResourceCountsDto resources;
     resources.set<"websiteCount">(2);
     resources.set<"domainCount">(3);
@@ -194,6 +201,9 @@ int main() {
     REQUIRE(nodeDispatch.contains("sys_node_release_target"));
     REQUIRE(!nodeDispatch.contains("sys_task"));
     REQUIRE(!nodeDispatch.contains("parent_task_id"));
+    const auto nodeService = source("service/domains/node/node.service.h");
+    REQUIRE(nodeService.contains("service::utils::randomToken().substr(0, 32)"));
+    REQUIRE(!nodeService.contains("gen_random_bytes"));
     const auto agentService = source("service/domains/agent/agent.service.h");
     REQUIRE(!agentService.contains("reconcileReleaseTask"));
     REQUIRE(!agentService.contains("sys_task"));
