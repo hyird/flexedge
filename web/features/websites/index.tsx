@@ -2960,7 +2960,7 @@ function AccessLogSheet({
               return (
                 <div
                   key={log.id}
-                  className='grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 border-b px-3 py-2.5 last:border-b-0 hover:bg-muted/50'
+                  className='grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-0 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50'
                 >
                   <div className='flex min-w-0 items-center gap-2'>
                     <Badge
@@ -2981,27 +2981,21 @@ function AccessLogSheet({
                       {request}
                     </code>
                   </div>
-                  <div className='flex flex-col items-end gap-0.5 text-end tabular-nums'>
+                  <div className='row-span-2 flex self-center flex-col items-end gap-0 text-end text-[11px] leading-4 text-muted-foreground tabular-nums'>
                     <span
                       className='font-medium text-muted-foreground'
                       title={`${log.duration_ms} 毫秒`}
                     >
                       {log.duration_ms} ms
                     </span>
-                    <span
-                      className='text-[11px] text-muted-foreground'
-                      title={`请求体大小：${formatAccessLogBytes(log.request_bytes)}`}
-                    >
+                    <span title={`请求体大小：${formatAccessLogBytes(log.request_bytes)}`}>
                       请求体 {formatAccessLogBytes(log.request_bytes)}
                     </span>
-                    <span
-                      className='text-[11px] text-muted-foreground'
-                      title={`响应大小：${formatAccessLogBytes(log.response_bytes)}`}
-                    >
+                    <span title={`响应大小：${formatAccessLogBytes(log.response_bytes)}`}>
                       响应 {formatAccessLogBytes(log.response_bytes)}
                     </span>
                   </div>
-                  <div className='col-span-2 overflow-x-auto text-muted-foreground'>
+                  <div className='col-start-1 min-w-0 overflow-x-auto text-muted-foreground'>
                     <div className='flex min-w-max items-center gap-x-3 whitespace-nowrap'>
                       <time dateTime={log.occurred_at}>
                         {formatDate(log.occurred_at)}
