@@ -1,0 +1,149 @@
+#pragma once
+
+#include <algorithm>
+#include <cctype>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <ranges>
+#include <string>
+#include <string_view>
+
+#include <ruvia/web/WebSocket.h>
+
+#include "node/proto/artifact.h"
+#include "node/proto/edge_control.pb.h"
+#include "service/common/http.h"
+#include "service/domains/agent/agent.types.h"
+
+namespace service::agent {
+
+inline bool validReleaseId(std::string_view value) {
+    return service::common::parseUuid(value).has_value();
+}
+
+inline bool validRequestId(std::string_view value) {
+    return !value.empty() && value.size() <= 96 && std::ranges::all_of(value, [](unsigned char ch) {
+        return std::isalnum(ch) != 0 || ch == '-';
+    });
+}
+
+inline bool validAuthenticate(const flexedge::node::v2::Authenticate& value) {
+    const bool validNodeId =
+        value.node_id().size() == 32 && std::ranges::all_of(value.node_id(), [](unsigned char ch) {
+            return std::isdigit(ch) != 0 || (ch >= 'a' && ch <= 'f');
+        });
+    const bool validSecret = value.secret().size() >= 32 && value.secret().size() <= 128 &&
+                             std::ranges::all_of(value.secret(), [](unsigned char ch) {
+                                 return ch >= 0x21 && ch <= 0x7e;
+                             });
+    const bool hasActiveRelease = !value.active_release_id().empty();
+    const bool validSessionPurpose =
+        value.session_purpose() == flexedge::node::v2::AGENT_SESSION_PURPOSE_CONTROL ||
+        value.session_purpose() == flexedge::node::v2::AGENT_SESSION_PURPOSE_LOG_INGEST;
+    return validNodeId && validSecret && value.applied_node_spec_revision() >= 0 &&
+           hasActiveRelease == !value.active_manifest_digest().empty() &&
+           (!hasActiveRelease ||
+            (validReleaseId(value.active_release_id()) &&
+             flexedge::node::isSha256Digest(value.active_manifest_digest()))) &&
+           value.agent_version().size() <= 64 && validSessionPurpose;
+}
+
+inline bool parseClientEnvelope(const ruvia::WebSocketMessage& message,
+                                flexedge::node::v2::ClientEnvelope& envelope) {
+    if (!message.binary() ||
+        message.payload().size() > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
+        return false;
+    }
+    return envelope.ParseFromArray(message.payload().data(),
+                                   static_cast<int>(message.payload().size()));
+}
+
+inline bool validAuthenticationEnvelope(const flexedge::node::v2::ClientEnvelope& envelope) {
+    return validRequestId(envelope.request_id()) && envelope.has_authenticate() &&
+           validAuthenticate(envelope.authenticate());
+}
+
+inline bool validHeartbeat(const flexedge::node::v2::Heartbeat& value) {
+    return service::common::parseUuid(value.node_id()) && value.applied_node_spec_revision() >= 1 &&
+           validReleaseId(value.active_release_id()) &&
+           flexedge::node::isSha256Digest(value.active_manifest_digest()) &&
+           value.agent_version().size() <= 64 && value.cpu_usage() >= 0 && value.cpu_usage() <= 1 &&
+           value.memory_usage() >= 0 && value.memory_usage() <= 1 && value.traffic_out_bps() >= 0 &&
+           value.connection_count() >= 0 && value.load_1m() >= 0 &&
+           value.queued_log_events() <=
+               static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) &&
+           value.dropped_log_events() <=
+               static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) &&
+           value.health().size() <= 64 && value.last_error().size() <= 1000 &&
+           value.origin_health_size() <= 10000 &&
+           std::ranges::all_of(value.origin_health(), [](const auto& item) {
+               return service::common::parseUuid(item.website_id()) &&
+                      service::common::parseUuid(item.origin_id()) &&
+                      (item.status() == "healthy" || item.status() == "unhealthy" ||
+                       item.status() == "unknown") &&
+                      item.checked_at_unix_millis() >= 0 && item.latency_millis() <= 600000 &&
+                      item.last_error().size() <= 1000;
+           });
+}
+
+inline bool validObjectRequest(const flexedge::node::v2::ObjectRequest& value) {
+    if (!service::common::parseUuid(value.node_id()) || !validReleaseId(value.release_id()) ||
+        value.digest_sha256().empty() || value.digest_sha256().size() > 64) {
+        return false;
+    }
+    return std::ranges::all_of(value.digest_sha256(), [](const auto& digest) {
+        return flexedge::node::isSha256Digest(digest);
+    });
+}
+
+inline bool validApplyPhase(flexedge::node::v2::ApplyPhase phase) {
+    return phase == flexedge::node::v2::APPLY_PHASE_STAGE ||
+           phase == flexedge::node::v2::APPLY_PHASE_VALIDATE ||
+           phase == flexedge::node::v2::APPLY_PHASE_ACTIVATE;
+}
+
+inline bool validApplyResult(const flexedge::node::v2::ApplyResult& value) {
+    if (!service::common::parseUuid(value.node_id()) || value.node_spec_revision() < 1 ||
+        !validReleaseId(value.release_id()) ||
+        !flexedge::node::isSha256Digest(value.manifest_digest()) ||
+        value.error_code().size() > 64 || value.error().size() > 1000) {
+        return false;
+    }
+    return value.applied() ? value.failed_phase() == flexedge::node::v2::APPLY_PHASE_UNSPECIFIED &&
+                                 value.error_code().empty() && value.error().empty()
+                           : validApplyPhase(value.failed_phase()) && !value.error_code().empty() &&
+                                 !value.error().empty();
+}
+
+inline HeartbeatReport toHeartbeatReport(const flexedge::node::v2::Heartbeat& value) {
+    HeartbeatReport result{
+        .nodeId = value.node_id(),
+        .appliedNodeSpecRevision = value.applied_node_spec_revision(),
+        .activeReleaseId = value.active_release_id(),
+        .activeManifestDigest = value.active_manifest_digest(),
+        .agentVersion = value.agent_version(),
+        .cpuUsage = value.cpu_usage(),
+        .memoryUsage = value.memory_usage(),
+        .trafficOutBps = value.traffic_out_bps(),
+        .connectionCount = value.connection_count(),
+        .load1m = value.load_1m(),
+        .queuedLogEvents = static_cast<std::int64_t>(value.queued_log_events()),
+        .droppedLogEvents = static_cast<std::int64_t>(value.dropped_log_events()),
+        .health = value.health(),
+        .lastError = value.last_error(),
+        .originHealth = {},
+    };
+    result.originHealth.reserve(value.origin_health_size());
+    for (const auto& item : value.origin_health()) {
+        result.originHealth.push_back({.websiteId = item.website_id(),
+                                       .originId = item.origin_id(),
+                                       .status = item.status(),
+                                       .checkedAtUnixMillis = item.checked_at_unix_millis(),
+                                       .latencyMillis = item.latency_millis(),
+                                       .lastError = item.last_error()});
+    }
+    return result;
+}
+
+} // namespace service::agent

@@ -357,6 +357,15 @@ int main() {
     REQUIRE(!agentDomainService.contains("NodeRuntimeOutput runtime"));
     const auto agentRuntimeMapper = source("service/domains/agent/agent_runtime.mapper.h");
     REQUIRE(agentRuntimeMapper.contains("inline std::string heartbeatRuntimeJson"));
+    const auto agentController = source("service/domains/agent/agent.controller.h");
+    REQUIRE(agentController.contains("agent_protocol.h"));
+    REQUIRE(!agentController.contains("static bool validHeartbeat"));
+    REQUIRE(!agentController.contains("static bool parseEnvelope"));
+    REQUIRE(!agentController.contains("static HeartbeatReport report"));
+    const auto agentProtocol = source("service/domains/agent/agent_protocol.h");
+    REQUIRE(agentProtocol.contains("inline bool parseClientEnvelope"));
+    REQUIRE(agentProtocol.contains("inline bool validHeartbeat"));
+    REQUIRE(agentProtocol.contains("inline HeartbeatReport toHeartbeatReport"));
     REQUIRE(!acme.contains("struct AcmeSettings final"));
     const auto acmeTypes = source("service/features/certificate/acme_types.h");
     REQUIRE(acmeTypes.contains("struct AcmeSettings final"));
