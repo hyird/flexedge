@@ -53,9 +53,10 @@ export function ResourceToolbar({
           disabled={refreshing}
           aria-busy={refreshing}
         >
-          {refreshing && (
-            <Loader2 className='animate-spin' aria-hidden='true' />
-          )}
+          <Loader2
+            className={refreshing ? 'animate-spin' : 'invisible'}
+            aria-hidden='true'
+          />
           查询
         </Button>
       </div>
