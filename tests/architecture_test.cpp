@@ -705,8 +705,23 @@ int main() {
     const auto providerVerificationWorker =
         source("service/features/provider_verification/worker.h");
     REQUIRE(providerVerificationWorker.contains("provider_verification/failure.h"));
+    REQUIRE(providerVerificationWorker.contains("provider_verification/task.h"));
+    REQUIRE(providerVerificationWorker.contains("provider_verification/verification.h"));
     REQUIRE(!providerVerificationWorker.contains("class VerificationError final"));
     REQUIRE(!providerVerificationWorker.contains("inline TaskFailure classifyTaskFailure"));
+    REQUIRE(!providerVerificationWorker.contains("struct VerificationTask final"));
+    REQUIRE(!providerVerificationWorker.contains("struct VerificationResult final"));
+    REQUIRE(!providerVerificationWorker.contains("parseRuntimeEab"));
+    REQUIRE(!providerVerificationWorker.contains("fetchZeroSslEab"));
+    const auto providerVerificationTask = source("service/features/provider_verification/task.h");
+    REQUIRE(providerVerificationTask.contains("struct VerificationTask final"));
+    const auto providerVerification =
+        source("service/features/provider_verification/verification.h");
+    REQUIRE(providerVerification.contains("struct VerificationResult final"));
+    REQUIRE(providerVerification.contains("parseRuntimeEab"));
+    REQUIRE(providerVerification.contains("fetchZeroSslEab"));
+    REQUIRE(providerVerification.contains("verifyDns"));
+    REQUIRE(providerVerification.contains("verifyCertificate"));
     const auto providerVerificationFailure =
         source("service/features/provider_verification/failure.h");
     REQUIRE(providerVerificationFailure.contains("class VerificationError final"));
