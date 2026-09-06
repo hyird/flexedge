@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -24,6 +23,7 @@
 #include "service/features/dns_sync/queue.h"
 #include "service/features/node_dispatch/queue.h"
 #include "service/features/logging/logger.h"
+#include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/utils/secret.h"
 
@@ -56,11 +56,6 @@ struct CertificateWork final {
     std::string zoneDomain;
     std::int64_t dnsMinimumRecordTtl;
 };
-
-inline std::string boundedError(std::string_view value) {
-    constexpr std::size_t limit{1000};
-    return std::string(value.substr(0, std::min(value.size(), limit)));
-}
 
 inline ruvia::Task<void> recoverStaleMarkers(service::background::WorkerContext& context) {
     co_await service::sync_runtime::recoverStaleRunning(
@@ -349,7 +344,7 @@ inline ruvia::Task<void> execute(service::background::WorkerContext& context,
 
 inline ruvia::Task<void> fail(service::background::WorkerContext& context,
                               const CertificateTask& task, std::string_view error, bool permanent) {
-    const auto message = boundedError(error);
+    const auto message = service::sync_runtime::boundedError(error);
     const auto lease = service::sync_runtime::makeRunningLease(task.tenantId, task.id, task.version,
                                                                context.leaseOwner());
     auto transaction = co_await context.db().beginTransaction();
@@ -389,10 +384,10 @@ inline ruvia::Task<void> processClaimedTask(service::background::WorkerContext& 
     try {
         co_await execute(context, task);
     } catch (const AcmeError& error) {
-        taskError = boundedError(error.what());
+        taskError = service::sync_runtime::boundedError(error.what());
         permanent = error.permanent();
     } catch (const std::exception& error) {
-        taskError = boundedError(error.what());
+        taskError = service::sync_runtime::boundedError(error.what());
     } catch (...) {
         taskError = "证书任务发生未知错误";
     }
@@ -431,7 +426,7 @@ inline ruvia::Task<void> runMaintenance(service::background::WorkerContext& cont
 inline ruvia::Task<void> run(service::background::WorkerContext& context) {
     co_await service::background::runMarkerWorkerLoop(
         context, kIdlePollInterval, "Certificate worker failure: ", "未知证书同步错误",
-        runMaintenance, processAvailableTasks, boundedError);
+        runMaintenance, processAvailableTasks, service::sync_runtime::boundedError);
     co_return;
 }
 

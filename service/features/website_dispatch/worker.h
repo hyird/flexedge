@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -13,6 +12,7 @@
 #include "service/features/background/marker_worker_loop.h"
 #include "service/features/background/worker_pool.h"
 #include "service/features/logging/logger.h"
+#include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/website_dns/runtime.h"
 
@@ -32,10 +32,6 @@ struct WebsiteMarker final {
     std::int64_t version{};
     std::int64_t failures{};
 };
-
-inline std::string boundedError(std::string_view value) {
-    return std::string(value.substr(0, std::min<std::size_t>(value.size(), 1000)));
-}
 
 inline ruvia::Task<void> reconcileMarkers(service::background::WorkerContext& context) {
     const auto missing = co_await context.db().query(
@@ -110,14 +106,14 @@ inline ruvia::Task<void> fail(service::background::WorkerContext& context,
         marker.tenantId, marker.id, marker.version, context.leaseOwner());
     auto transaction = co_await context.db().beginTransaction();
     const auto resultTransition = co_await service::sync_runtime::failRunningAndRecordEvent(
-        transaction, lease, boundedError(error));
+        transaction, lease, service::sync_runtime::boundedError(error));
     co_await transaction.commit();
     if (resultTransition.eventRecorded) {
         service::sync_runtime::publishResultEvent(lease);
     }
     if (resultTransition.markerTransitioned) {
         service::logging::error("Website sync marker " + marker.id +
-                                " failed: " + boundedError(error));
+                                " failed: " + service::sync_runtime::boundedError(error));
     }
     co_return;
 }
@@ -128,7 +124,7 @@ inline ruvia::Task<void> processMarker(service::background::WorkerContext& conte
     try {
         co_await execute(context, marker);
     } catch (const std::exception& error) {
-        markerError = boundedError(error.what());
+        markerError = service::sync_runtime::boundedError(error.what());
     } catch (...) {
         markerError = "网站同步发生未知错误";
     }
@@ -167,7 +163,7 @@ inline ruvia::Task<void> runMaintenance(service::background::WorkerContext& cont
 inline ruvia::Task<void> run(service::background::WorkerContext& context) {
     co_await service::background::runMarkerWorkerLoop(
         context, kIdlePollInterval, "Website sync worker failure: ", "网站同步发生未知错误",
-        runMaintenance, processMarkers, boundedError);
+        runMaintenance, processMarkers, service::sync_runtime::boundedError);
     co_return;
 }
 

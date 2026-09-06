@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -26,6 +25,7 @@
 #include "service/features/logging/logger.h"
 #include "service/features/provider_verification/model.h"
 #include "service/features/provider_verification/queue.h"
+#include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
@@ -69,11 +69,6 @@ struct VerificationResult final {
     std::optional<std::string> dnsRuntime{};
     std::optional<service::certificate_issuance::EabCredentials> eab{};
 };
-
-inline std::string boundedError(std::string_view value) {
-    constexpr std::size_t limit{1000};
-    return std::string(value.substr(0, std::min(value.size(), limit)));
-}
 
 inline ruvia::Task<void> reconcile(service::background::WorkerContext& context) {
     const auto rows = co_await context.db().query(
@@ -336,7 +331,7 @@ inline ruvia::Task<void> execute(service::background::WorkerContext& context,
 inline ruvia::Task<void> fail(service::background::WorkerContext& context,
                               const VerificationTask& task, std::string_view error,
                               bool permanent) {
-    const auto message = boundedError(error);
+    const auto message = service::sync_runtime::boundedError(error);
     const auto lease = service::sync_runtime::makeRunningLease(
         task.tenantId, task.id, task.generation, context.leaseOwner());
     auto transaction = co_await context.db().beginTransaction();
@@ -370,7 +365,7 @@ inline TaskFailure classifyTaskFailure(const std::exception_ptr& exception) {
     } catch (const std::exception& error) {
         if (const auto* cloudflare = dynamic_cast<const service::dns::CloudflareError*>(&error)) {
             return {
-                .message = boundedError(cloudflare->what()),
+                .message = service::sync_runtime::boundedError(cloudflare->what()),
                 .permanent =
                     cloudflare->code() == service::dns::CloudflareErrorCode::credentialInvalid ||
                     cloudflare->code() == service::dns::CloudflareErrorCode::authorizationFailed,
@@ -378,7 +373,7 @@ inline TaskFailure classifyTaskFailure(const std::exception_ptr& exception) {
         }
         if (const auto* aliyun = dynamic_cast<const service::dns::AliyunError*>(&error)) {
             return {
-                .message = boundedError(aliyun->what()),
+                .message = service::sync_runtime::boundedError(aliyun->what()),
                 .permanent = aliyun->code() == service::dns::AliyunErrorCode::credentialInvalid ||
                              aliyun->code() == service::dns::AliyunErrorCode::authorizationFailed,
             };
@@ -387,20 +382,21 @@ inline TaskFailure classifyTaskFailure(const std::exception_ptr& exception) {
                 dynamic_cast<const service::certificate_issuance::CertificateProviderClientError*>(
                     &error)) {
             return {
-                .message = boundedError(certificate->what()),
+                .message = service::sync_runtime::boundedError(certificate->what()),
                 .permanent = !certificate->retryable(),
             };
         }
         if (const auto* verification = dynamic_cast<const VerificationError*>(&error)) {
             return {
-                .message = boundedError(verification->what()),
+                .message = service::sync_runtime::boundedError(verification->what()),
                 .permanent = verification->permanent(),
             };
         }
         if (dynamic_cast<const std::invalid_argument*>(&error) != nullptr) {
-            return {.message = boundedError(error.what()), .permanent = true};
+            return {.message = service::sync_runtime::boundedError(error.what()),
+                    .permanent = true};
         }
-        return {.message = boundedError(error.what()), .permanent = false};
+        return {.message = service::sync_runtime::boundedError(error.what()), .permanent = false};
     } catch (...) {
         return {.message = "供应商检测发生未知错误", .permanent = false};
     }
@@ -450,7 +446,7 @@ inline ruvia::Task<void> runMaintenance(service::background::WorkerContext& cont
 inline ruvia::Task<void> run(service::background::WorkerContext& context) {
     co_await service::background::runMarkerWorkerLoop(
         context, kIdlePollInterval, "Provider verification worker failure: ", "未知供应商检测错误",
-        runMaintenance, processMarkers, boundedError);
+        runMaintenance, processMarkers, service::sync_runtime::boundedError);
     co_return;
 }
 
