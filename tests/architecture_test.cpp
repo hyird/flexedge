@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -25,6 +26,7 @@
 #include "service/features/log_ingest/tail.h"
 #include "service/features/node_dispatch/protocol.h"
 #include "service/features/provider_verification/worker.h"
+#include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/website_dispatch/worker.h"
 #include "service/features/website_dns/model.h"
@@ -493,6 +495,26 @@ int main() {
     const auto syncRuntimeError = source("service/features/sync_runtime/error.h");
     REQUIRE(syncRuntimeError.contains("kMaxErrorMessageLength{1000}"));
     REQUIRE(syncRuntimeError.contains("inline std::string boundedError"));
+    const auto providerVerificationWorker =
+        source("service/features/provider_verification/worker.h");
+    REQUIRE(providerVerificationWorker.contains("provider_verification/failure.h"));
+    REQUIRE(!providerVerificationWorker.contains("class VerificationError final"));
+    REQUIRE(!providerVerificationWorker.contains("inline TaskFailure classifyTaskFailure"));
+    const auto providerVerificationFailure =
+        source("service/features/provider_verification/failure.h");
+    REQUIRE(providerVerificationFailure.contains("class VerificationError final"));
+    REQUIRE(providerVerificationFailure.contains("inline TaskFailure classifyTaskFailure"));
+    REQUIRE(service::sync_runtime::boundedError(
+                std::string(service::sync_runtime::kMaxErrorMessageLength + 1, 'x'))
+                .size() == service::sync_runtime::kMaxErrorMessageLength);
+    const auto invalidProviderFailure = service::provider_verification::detail::classifyTaskFailure(
+        std::make_exception_ptr(std::invalid_argument("invalid provider config")));
+    REQUIRE(invalidProviderFailure.permanent);
+    const auto retryableProviderFailure =
+        service::provider_verification::detail::classifyTaskFailure(
+            std::make_exception_ptr(service::certificate_issuance::CertificateProviderClientError(
+                "upstream unavailable", true)));
+    REQUIRE(!retryableProviderFailure.permanent);
     for (const auto workerPath : {
              "service/features/provider_verification/worker.h",
              "service/features/certificate/worker.h",
