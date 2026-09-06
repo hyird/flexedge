@@ -296,12 +296,18 @@ int main() {
     const auto acme = source("service/features/certificate/acme.h");
     REQUIRE(acme.contains("certificate/acme_types.h"));
     REQUIRE(acme.contains("certificate/acme_jws.h"));
+    REQUIRE(acme.contains("certificate/certificate_inspection.h"));
     REQUIRE(!acme.contains("inline std::string hmacSha256"));
     REQUIRE(!acme.contains("inline std::string jwkThumbprint"));
+    REQUIRE(!acme.contains("inline IssuedCertificate inspectCertificate"));
     const auto acmeJws = source("service/features/certificate/acme_jws.h");
     REQUIRE(acmeJws.contains("inline std::string hmacSha256"));
     REQUIRE(acmeJws.contains("inline std::string jwkThumbprint"));
     REQUIRE(acmeJws.contains("inline EvpPkeyPtr generateRsaKey"));
+    const auto certificateInspection =
+        source("service/features/certificate/certificate_inspection.h");
+    REQUIRE(certificateInspection.contains("inline IssuedCertificate inspectCertificate"));
+    REQUIRE(certificateInspection.contains("inline void validateCertificateDomains"));
     REQUIRE(!acme.contains("struct AcmeSettings final"));
     const auto acmeTypes = source("service/features/certificate/acme_types.h");
     REQUIRE(acmeTypes.contains("struct AcmeSettings final"));
