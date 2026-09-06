@@ -725,11 +725,14 @@ int main() {
     REQUIRE(providerVerificationWorker.contains("provider_verification/failure.h"));
     REQUIRE(providerVerificationWorker.contains("provider_verification/persistence.h"));
     REQUIRE(providerVerificationWorker.contains("provider_verification/task.h"));
+    REQUIRE(providerVerificationWorker.contains("provider_verification/task_loader.h"));
     REQUIRE(providerVerificationWorker.contains("provider_verification/verification.h"));
     REQUIRE(!providerVerificationWorker.contains("class VerificationError final"));
     REQUIRE(!providerVerificationWorker.contains("inline TaskFailure classifyTaskFailure"));
     REQUIRE(!providerVerificationWorker.contains("struct VerificationTask final"));
     REQUIRE(!providerVerificationWorker.contains("struct VerificationResult final"));
+    REQUIRE(!providerVerificationWorker.contains(
+        "inline ruvia::Task<std::optional<VerificationTask>>"));
     REQUIRE(!providerVerificationWorker.contains("parseRuntimeEab"));
     REQUIRE(!providerVerificationWorker.contains("fetchZeroSslEab"));
     REQUIRE(!providerVerificationWorker.contains("inline ruvia::Task<void> completeMarker"));
@@ -738,6 +741,12 @@ int main() {
     REQUIRE(!providerVerificationWorker.contains("eventRecorded"));
     const auto providerVerificationTask = source("service/features/provider_verification/task.h");
     REQUIRE(providerVerificationTask.contains("struct VerificationTask final"));
+    const auto providerVerificationTaskLoader =
+        source("service/features/provider_verification/task_loader.h");
+    REQUIRE(providerVerificationTaskLoader.contains(
+        "inline ruvia::Task<std::optional<VerificationTask>>"));
+    REQUIRE(providerVerificationTaskLoader.contains("FOR UPDATE OF marker SKIP"));
+    REQUIRE(providerVerificationTaskLoader.contains("LOCKED LIMIT 1"));
     const auto providerVerification =
         source("service/features/provider_verification/verification.h");
     REQUIRE(providerVerification.contains("struct VerificationResult final"));
