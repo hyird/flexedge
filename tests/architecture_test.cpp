@@ -726,6 +726,10 @@ int main() {
     REQUIRE(nodeService.contains("service::utils::randomToken().substr(0, 32)"));
     REQUIRE(!nodeService.contains("gen_random_bytes"));
     REQUIRE(nodeService.contains("node.mapper.h"));
+    REQUIRE(nodeService.contains("node_read.service.h"));
+    REQUIRE(nodeService.contains("nodeReadService().list"));
+    REQUIRE(nodeService.contains("nodeReadService().credentials"));
+    REQUIRE(nodeService.contains("nodeReadService().logs"));
     REQUIRE(!nodeService.contains("static void fillNode"));
     REQUIRE(!nodeService.contains("static NodeRuntimeDto toRuntime"));
     REQUIRE(!nodeService.contains("static std::string serializeConfig"));
@@ -733,6 +737,11 @@ int main() {
     REQUIRE(nodeResponseMapper.contains("inline void fillNode"));
     REQUIRE(nodeResponseMapper.contains("inline NodeRuntimeDto nodeRuntimeDto"));
     REQUIRE(nodeResponseMapper.contains("inline std::string serializeNodeConfig"));
+    const auto nodeReadService = source("service/domains/node/node_read.service.h");
+    REQUIRE(nodeReadService.contains("class NodeReadService final"));
+    REQUIRE(nodeReadService.contains("SELECT node.id, node.cluster_id"));
+    REQUIRE(nodeReadService.contains("node_secret_envelope"));
+    REQUIRE(nodeReadService.contains("FROM sys_node_log entry"));
     const auto agentService = source("service/domains/agent/agent.service.h");
     REQUIRE(!agentService.contains("reconcileReleaseTask"));
     REQUIRE(!agentService.contains("sys_task"));
