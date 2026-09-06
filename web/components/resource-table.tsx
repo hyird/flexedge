@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import {
   flexRender,
   getCoreRowModel,
@@ -52,7 +52,7 @@ export function ResourceTable<T>({
   emptyDescription = '调整筛选条件或创建第一条记录。',
 }: Props<T>) {
   const tableContainerRef = useRef<HTMLDivElement>(null)
-  const [containerWidth, setContainerWidth] = useState(0)
+  const [useContentWidth, setUseContentWidth] = useState(false)
   const pagination: PaginationState = {
     pageIndex: Math.max(0, page - 1),
     pageSize,
@@ -75,28 +75,29 @@ export function ResourceTable<T>({
     (total, column) => total + column.getSize(),
     0
   )
-  const useContentWidth =
-    fixedLayout &&
-    containerWidth > 0 &&
-    fixedColumnsTotal > containerWidth
   const fixedColumnWidth = (column: (typeof visibleColumns)[number]) =>
     fixedLayout && !useContentWidth && fixedColumnsTotal > 0
       ? { width: `${(column.getSize() / fixedColumnsTotal) * 100}%` }
       : undefined
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const container = tableContainerRef.current
     if (!container) return
 
-    const updateWidth = () => setContainerWidth(container.clientWidth)
-    updateWidth()
+    const updateLayout = () => {
+      const overflowed = container.scrollWidth > container.clientWidth + 1
+      setUseContentWidth((current) =>
+        current === overflowed ? current : overflowed
+      )
+    }
+    updateLayout()
 
     if (typeof ResizeObserver === 'undefined') return
 
-    const observer = new ResizeObserver(updateWidth)
+    const observer = new ResizeObserver(updateLayout)
     observer.observe(container)
     return () => observer.disconnect()
-  }, [])
+  }, [columns, data, error, fixedLayout, loading])
 
   return (
     <div className='min-w-0 space-y-3' aria-busy={loading}>
