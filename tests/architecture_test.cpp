@@ -349,6 +349,8 @@ int main() {
     REQUIRE(!acme.contains("inline std::string jwkThumbprint"));
     REQUIRE(!acme.contains("inline IssuedCertificate inspectCertificate"));
     REQUIRE(!acme.contains("inline CertificateRequest createCertificateRequest"));
+    REQUIRE(!acme.contains("ensureAcmeAccount"));
+    REQUIRE(!acme.contains("parseCertificateProviderRuntime"));
     const auto acmeJws = source("service/features/certificate/acme_jws.h");
     REQUIRE(acmeJws.contains("inline std::string hmacSha256"));
     REQUIRE(acmeJws.contains("inline std::string jwkThumbprint"));
@@ -448,9 +450,19 @@ int main() {
     const auto acmeTypes = source("service/features/certificate/acme_types.h");
     REQUIRE(acmeTypes.contains("struct AcmeSettings final"));
     REQUIRE(acmeTypes.contains("class AcmeError final"));
+    REQUIRE(acmeTypes.contains("struct EabCredentials final"));
+    const auto certificateProviderConfig = source("service/features/certificate/provider_config.h");
+    REQUIRE(certificateProviderConfig.contains("certificate/acme_types.h"));
+    REQUIRE(!certificateProviderConfig.contains("struct EabCredentials final"));
     const auto certificateProvider = source("service/features/certificate/provider.h");
     REQUIRE(certificateProvider.contains("certificate/acme_types.h"));
     REQUIRE(!certificateProvider.contains("certificate/acme.h"));
+    const auto acmeAccount = source("service/features/certificate/acme_account.h");
+    REQUIRE(acmeAccount.contains("ensureAcmeAccount"));
+    REQUIRE(acmeAccount.contains("parseCertificateProviderRuntime"));
+    REQUIRE(acmeAccount.contains("SELECT revision, runtime::text FROM sys_provider"));
+    const auto certificateWorker = source("service/features/certificate/worker.h");
+    REQUIRE(certificateWorker.contains("certificate/acme_account.h"));
     const auto websitePage = source("web/features/websites/index.tsx");
     REQUIRE(websitePage.contains("import { AccessLogSheet } from './access-log-sheet'"));
     REQUIRE(websitePage.contains("import { WebsiteDialog } from './website-dialog'"));

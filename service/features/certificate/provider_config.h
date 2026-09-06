@@ -9,16 +9,11 @@
 
 #include <ruvia/web/ModelJson.h>
 
+#include "service/features/certificate/acme_types.h"
 #include "service/features/certificate/model.h"
 #include "service/utils/secret.h"
-#include "service/utils/sensitive_string.h"
 
 namespace service::certificate_issuance {
-
-struct EabCredentials final {
-    std::string keyId;
-    service::utils::SensitiveString hmacKey;
-};
 
 RUVIA_REQUEST_MODEL(CertificateProviderEabRuntimeInput, RUVIA_OPTIONAL_FIELD(kid, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("hmac_key_envelope", hmacKeyEnvelope, ruvia::String));
