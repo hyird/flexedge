@@ -636,11 +636,11 @@ class WebsiteService {
         item.set<"method">(row[6].value().value_or(""));
         item.set<"host">(row[7].value().value_or(""));
         item.set<"target">(row[8].value().value_or(""));
-        item.set<"statusCode">(row[9].as<std::int64_t>().value_or(0));
-        item.set<"requestBytes">(row[10].as<std::int64_t>().value_or(0));
-        item.set<"responseBytes">(row[11].as<std::int64_t>().value_or(0));
-        item.set<"durationMs">(row[12].as<std::int64_t>().value_or(0));
-        item.set<"requestBodyTruncated">(row[17].as<bool>().value_or(false));
+        item.set<"statusCode">(row[9].template as<std::int64_t>().value_or(0));
+        item.set<"requestBytes">(row[10].template as<std::int64_t>().value_or(0));
+        item.set<"responseBytes">(row[11].template as<std::int64_t>().value_or(0));
+        item.set<"durationMs">(row[12].template as<std::int64_t>().value_or(0));
+        item.set<"requestBodyTruncated">(row[17].template as<bool>().value_or(false));
         if (const auto value = row[4].value()) {
             item.set<"clientIp">(*value);
             if (const auto location = service::geoip::xdbDatabase().lookup(*value)) {
