@@ -5,15 +5,18 @@ function Table({
   className,
   containerClassName,
   containerLabel,
+  containerRef,
   ...props
 }: React.ComponentProps<'table'> & {
   containerClassName?: string
   containerLabel?: string
+  containerRef?: React.Ref<HTMLDivElement>
 }) {
   return (
     <div
       data-slot='table-container'
       className={cn('relative w-full overflow-x-auto', containerClassName)}
+      ref={containerRef}
       role={containerLabel ? 'region' : undefined}
       aria-label={containerLabel}
       tabIndex={containerLabel ? 0 : undefined}
@@ -21,7 +24,7 @@ function Table({
       <table
         data-slot='table'
         className={cn(
-          'w-max min-w-full table-auto caption-bottom text-sm',
+          'w-full min-w-max table-auto caption-bottom text-sm',
           className
         )}
         {...props}
