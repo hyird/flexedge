@@ -53,8 +53,8 @@ class OverviewService final {
             issues.set<"dnsZoneIssueCount">(0);
             issues.set<"certificateExpiringCount">(0);
             issues.set<"certificateFailedCount">(0);
-            issues.set<"activeTaskCount">(0);
-            issues.set<"failedTaskCount">(0);
+            issues.set<"activeMarkerCount">(0);
+            issues.set<"retryMarkerCount">(0);
         } else {
             const auto& row = summaryRows.front();
             resources.set<"websiteCount">(count(row, 0));
@@ -64,15 +64,14 @@ class OverviewService final {
             issues.set<"dnsZoneIssueCount">(count(row, 4));
             issues.set<"certificateExpiringCount">(count(row, 5));
             issues.set<"certificateFailedCount">(count(row, 6));
-            issues.set<"activeTaskCount">(count(row, 7));
-            issues.set<"failedTaskCount">(count(row, 8));
+            issues.set<"activeMarkerCount">(count(row, 7));
+            issues.set<"retryMarkerCount">(count(row, 8));
         }
         result.set<"resources">(std::move(resources));
         result.set<"issues">(std::move(issues));
 
-        const auto taskRows = co_await c.db().query(
-            "SELECT marker.id, CASE marker.resource_type WHEN 'dns_zone' THEN 'dns' ELSE "
-            "marker.resource_type END, marker.resource_type, marker.resource_id, CASE "
+        const auto markerRows = co_await c.db().query(
+            "SELECT marker.id, marker.resource_type, marker.resource_id, CASE "
             "marker.resource_type WHEN 'provider' THEN COALESCE((SELECT CASE provider.kind WHEN "
             "'dns' THEN COALESCE(provider.name, provider.provider) ELSE provider.provider END "
             "FROM sys_provider provider WHERE provider.tenant_id = marker.tenant_id AND "
@@ -96,19 +95,18 @@ class OverviewService final {
             "marker "
             "WHERE marker.tenant_id = $1 ORDER BY marker.updated_at DESC, marker.id DESC LIMIT 8",
             tenantId);
-        auto& recentTasks = result.ensure<"recentTasks">();
-        for (const auto& row : taskRows) {
-            auto& task = recentTasks.emplace_back(c);
-            task.set<"id">(row[0].value().value_or(""));
-            task.set<"kind">(row[1].value().value_or(""));
-            task.set<"resourceType">(row[2].value().value_or(""));
-            task.set<"resourceId">(row[3].value().value_or(""));
-            task.set<"resourceName">(row[4].value().value_or(""));
-            task.set<"operation">(row[5].value().value_or(""));
-            task.set<"status">(row[6].value().value_or("pending"));
-            task.set<"updatedAt">(row[8].value().value_or(""));
-            if (const auto& lastError = row[7].value()) {
-                task.set<"lastError">(*lastError);
+        auto& recentMarkers = result.ensure<"recentMarkers">();
+        for (const auto& row : markerRows) {
+            auto& marker = recentMarkers.emplace_back(c);
+            marker.set<"id">(row[0].value().value_or(""));
+            marker.set<"resourceType">(row[1].value().value_or(""));
+            marker.set<"resourceId">(row[2].value().value_or(""));
+            marker.set<"resourceName">(row[3].value().value_or(""));
+            marker.set<"operation">(row[4].value().value_or(""));
+            marker.set<"status">(row[5].value().value_or("pending"));
+            marker.set<"updatedAt">(row[7].value().value_or(""));
+            if (const auto& lastError = row[6].value()) {
+                marker.set<"lastError">(*lastError);
             }
         }
         co_return result;

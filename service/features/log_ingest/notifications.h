@@ -14,20 +14,47 @@
 
 namespace service::log_ingest::notifications {
 
-inline constexpr std::string_view kStreamKey{"flexedge:log-notifications:v1"};
-inline constexpr std::string_view kKindAccess{"access"};
-inline constexpr std::string_view kKindNode{"node"};
+inline constexpr std::string_view kStreamKey{"flexedge:log-notifications:v2"};
 inline constexpr std::int64_t kMaxEntries{200000};
 inline constexpr std::uint64_t kReadBatchSize{64};
 inline constexpr auto kReadBlock = std::chrono::seconds(15);
 inline constexpr auto kReadTimeout = std::chrono::seconds(20);
 
+enum class LogResourceType {
+    access,
+    node,
+};
+
+[[nodiscard]] inline constexpr std::string_view resourceTypeName(LogResourceType resourceType) {
+    switch (resourceType) {
+    case LogResourceType::access:
+        return "access";
+    case LogResourceType::node:
+        return "node";
+    }
+    throw std::invalid_argument("unsupported log notification resource type");
+}
+
+[[nodiscard]] inline std::optional<LogResourceType> parseResourceType(std::string_view value) {
+    if (value == "access") {
+        return LogResourceType::access;
+    }
+    if (value == "node") {
+        return LogResourceType::node;
+    }
+    return std::nullopt;
+}
+
 struct Notification final {
     std::string id;
     std::string tenantId;
-    std::string kind;
-    std::string websiteId;
-    std::string nodeId;
+    LogResourceType resourceType{};
+    std::string resourceId;
+};
+
+struct ReadBatch final {
+    std::vector<Notification> notifications;
+    std::optional<std::string> cursor;
 };
 
 inline void requireNoError(const ruvia::RedisValue& value, std::string_view operation) {
@@ -36,33 +63,18 @@ inline void requireNoError(const ruvia::RedisValue& value, std::string_view oper
     }
 }
 
-inline ruvia::Task<void> publishAccess(ruvia::RedisHandle redis, std::string_view tenantId,
-                                       std::string_view websiteId) {
-    if (tenantId.empty() || websiteId.empty()) {
+inline ruvia::Task<void> publish(ruvia::RedisHandle redis, LogResourceType resourceType,
+                                 std::string_view tenantId, std::string_view resourceId) {
+    if (tenantId.empty() || resourceId.empty()) {
         co_return;
     }
     const auto maximumEntries = std::to_string(kMaxEntries);
-    const auto result =
-        co_await redis.command("XADD", kStreamKey, "MAXLEN", "~", maximumEntries, "*", "tenant_id",
-                               tenantId, "kind", kKindAccess, "website_id", websiteId);
-    requireNoError(result, "could not publish access log notification");
+    const auto result = co_await redis.command(
+        "XADD", kStreamKey, "MAXLEN", "~", maximumEntries, "*", "tenant_id", tenantId,
+        "resource_type", resourceTypeName(resourceType), "resource_id", resourceId);
+    requireNoError(result, "could not publish log notification");
     if (result.kind() != ruvia::RedisValue::Kind::kString || result.string().empty()) {
-        throw std::runtime_error("unexpected access log notification publish reply");
-    }
-}
-
-inline ruvia::Task<void> publishNode(ruvia::RedisHandle redis, std::string_view tenantId,
-                                     std::string_view nodeId) {
-    if (tenantId.empty() || nodeId.empty()) {
-        co_return;
-    }
-    const auto maximumEntries = std::to_string(kMaxEntries);
-    const auto result =
-        co_await redis.command("XADD", kStreamKey, "MAXLEN", "~", maximumEntries, "*", "tenant_id",
-                               tenantId, "kind", kKindNode, "node_id", nodeId);
-    requireNoError(result, "could not publish node log notification");
-    if (result.kind() != ruvia::RedisValue::Kind::kString || result.string().empty()) {
-        throw std::runtime_error("unexpected node log notification publish reply");
+        throw std::runtime_error("unexpected log notification publish reply");
     }
 }
 
@@ -90,44 +102,65 @@ inline ruvia::Task<std::string> currentCursor(ruvia::RedisHandle redis) {
         co_await redis.command("XREVRANGE", kStreamKey, "+", "-", "COUNT", "1"));
 }
 
-inline std::string fieldValue(std::span<const ruvia::RedisValue> fields, std::string_view name) {
+inline std::optional<std::string> fieldValue(std::span<const ruvia::RedisValue> fields,
+                                             std::string_view name) {
     if (fields.size() % 2 != 0) {
-        throw std::runtime_error("unexpected log notification field list");
+        return std::nullopt;
     }
     for (std::size_t index = 0; index < fields.size(); index += 2) {
         if (fields[index].kind() != ruvia::RedisValue::Kind::kString ||
             fields[index + 1].kind() != ruvia::RedisValue::Kind::kString) {
-            throw std::runtime_error("unexpected log notification field value");
+            return std::nullopt;
         }
         if (fields[index].string() == name) {
             return std::string(fields[index + 1].string());
         }
     }
-    return {};
+    return std::nullopt;
 }
 
-inline Notification parseEntry(const ruvia::RedisValue& value) {
+inline std::optional<Notification> parseEntry(const ruvia::RedisValue& value) {
     if (value.kind() != ruvia::RedisValue::Kind::kArray) {
-        throw std::runtime_error("unexpected log notification entry");
+        return std::nullopt;
     }
     const auto entry = value.array();
     if (entry.size() != 2 || entry[0].kind() != ruvia::RedisValue::Kind::kString ||
         entry[1].kind() != ruvia::RedisValue::Kind::kArray) {
-        throw std::runtime_error("unexpected log notification entry");
+        return std::nullopt;
     }
     const auto fields = entry[1].array();
-    return {
+    const auto tenantId = fieldValue(fields, "tenant_id");
+    const auto resourceType = fieldValue(fields, "resource_type");
+    const auto resourceId = fieldValue(fields, "resource_id");
+    if (!tenantId || !resourceType || !resourceId || tenantId->empty() || resourceId->empty()) {
+        return std::nullopt;
+    }
+    const auto parsedResourceType = parseResourceType(*resourceType);
+    if (!parsedResourceType) {
+        return std::nullopt;
+    }
+    return Notification{
         .id = std::string(entry[0].string()),
-        .tenantId = fieldValue(fields, "tenant_id"),
-        .kind = fieldValue(fields, "kind"),
-        .websiteId = fieldValue(fields, "website_id"),
-        .nodeId = fieldValue(fields, "node_id"),
+        .tenantId = std::move(*tenantId),
+        .resourceType = *parsedResourceType,
+        .resourceId = std::move(*resourceId),
     };
 }
 
-inline std::vector<Notification> parseReadResult(const ruvia::RedisValue& value) {
+inline std::optional<std::string> entryId(const ruvia::RedisValue& value) {
+    if (value.kind() != ruvia::RedisValue::Kind::kArray) {
+        return std::nullopt;
+    }
+    const auto entry = value.array();
+    if (entry.size() != 2 || entry[0].kind() != ruvia::RedisValue::Kind::kString) {
+        return std::nullopt;
+    }
+    return std::string(entry[0].string());
+}
+
+inline ReadBatch parseReadResult(const ruvia::RedisValue& value) {
     requireNoError(value, "could not read log notifications");
-    std::vector<Notification> output;
+    ReadBatch output;
     if (value.null()) {
         return output;
     }
@@ -147,35 +180,27 @@ inline std::vector<Notification> parseReadResult(const ruvia::RedisValue& value)
         throw std::runtime_error("unexpected log notification stream reply");
     }
     const auto entries = stream[1].array();
-    output.reserve(entries.size());
+    output.notifications.reserve(entries.size());
     for (const auto& entry : entries) {
-        output.push_back(parseEntry(entry));
+        const auto id = entryId(entry);
+        if (!id) {
+            throw std::runtime_error("unexpected log notification entry");
+        }
+        output.cursor = *id;
+        if (const auto parsed = parseEntry(entry)) {
+            output.notifications.push_back(*parsed);
+        }
     }
     return output;
 }
 
-inline ruvia::Task<std::vector<Notification>> read(ruvia::RedisHandle redis,
-                                                   std::string_view cursor) {
+inline ruvia::Task<ReadBatch> read(ruvia::RedisHandle redis, std::string_view cursor) {
     const auto blockMs =
         std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(kReadBlock).count());
     const auto count = std::to_string(kReadBatchSize);
     const auto redisWithTimeout = redis.withOptions({.timeout = kReadTimeout});
     co_return parseReadResult(co_await redisWithTimeout.command(
         "XREAD", "BLOCK", blockMs, "COUNT", count, "STREAMS", kStreamKey, cursor));
-}
-
-inline bool matchesAccess(const Notification& notification, std::string_view tenantId,
-                          std::string_view websiteId) {
-    return std::string_view{notification.kind} == kKindAccess &&
-           std::string_view{notification.tenantId} == tenantId &&
-           std::string_view{notification.websiteId} == websiteId;
-}
-
-inline bool matchesNode(const Notification& notification, std::string_view tenantId,
-                        std::string_view nodeId) {
-    return std::string_view{notification.kind} == kKindNode &&
-           std::string_view{notification.tenantId} == tenantId &&
-           std::string_view{notification.nodeId} == nodeId;
 }
 
 } // namespace service::log_ingest::notifications

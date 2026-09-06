@@ -1,8 +1,6 @@
 #pragma once
 
-#include <chrono>
 #include <cstdint>
-#include <exception>
 #include <optional>
 #include <string>
 #include <utility>
@@ -17,6 +15,7 @@
 #include "service/domains/website/website.schema.h"
 #include "service/domains/website/website.service.h"
 #include "service/features/log_ingest/fanout.h"
+#include "service/features/log_ingest/sse_tail.h"
 #include "service/features/log_ingest/tail.h"
 #include "service/middleware/auth.h"
 
@@ -56,24 +55,6 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
 
     static std::int64_t expectedRevision(ruvia::Context& c) {
         return service::common::requireExpectedRevision(c);
-    }
-
-    static std::optional<std::string> cursorValue(const WebsiteAccessLogTailDataDto& data) {
-        const auto& cursor = data.get<"cursor">();
-        if (!cursor) {
-            return std::nullopt;
-        }
-        return std::string(cursor->view());
-    }
-
-    static void advanceCursor(std::optional<service::log_ingest::TailCursor>& target,
-                              const std::optional<std::string>& cursor) {
-        if (!cursor) {
-            return;
-        }
-        if (const auto parsed = service::log_ingest::parseTailCursor(*cursor)) {
-            target = *parsed;
-        }
     }
 
     static ruvia::Task<void> writeLogEvent(ruvia::Context& c, ruvia::SseWriter& events,
@@ -128,9 +109,8 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
         const auto keyword = service::common::requireKeyword(c.req().query("keyword"));
         std::optional<std::string> method;
         if (const auto value = c.req().query("method")) {
-            if (*value != "GET" && *value != "POST" && *value != "PUT" &&
-                *value != "PATCH" && *value != "DELETE" && *value != "HEAD" &&
-                *value != "OPTIONS") {
+            if (*value != "GET" && *value != "POST" && *value != "PUT" && *value != "PATCH" &&
+                *value != "DELETE" && *value != "HEAD" && *value != "OPTIONS") {
                 service::common::throwAppError(service::common::kValidationErrorCode,
                                                "method 不正确", 400);
             }
@@ -138,68 +118,36 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
         }
         std::optional<std::string> statusClass;
         if (const auto value = c.req().query("status_class")) {
-            if (*value != "1xx" && *value != "2xx" && *value != "3xx" &&
-                *value != "4xx" && *value != "5xx") {
+            if (*value != "1xx" && *value != "2xx" && *value != "3xx" && *value != "4xx" &&
+                *value != "5xx") {
                 service::common::throwAppError(service::common::kValidationErrorCode,
                                                "status_class 不正确", 400);
             }
             statusClass.emplace(*value);
         }
         co_return c.json(service::common::ok<WebsiteAccessLogPageResponse>(
-            c, co_await websiteService().accessLogHistory(c, tenantId(c), requireId(c), page,
-                                                          pageSize, skip, keyword, method,
-                                                          statusClass)));
+            c,
+            co_await websiteService().accessLogHistory(c, tenantId(c), requireId(c), page, pageSize,
+                                                       skip, keyword, method, statusClass)));
     }
 
     ruvia::Task<void> accessLogStream(ruvia::Context& c) {
-        try {
-            co_await accessLogStreamBody(c);
-        } catch (const std::exception& error) {
-            if (service::log_ingest::sseClientDisconnected(error)) {
-                co_return;
-            }
-            throw;
-        }
-    }
-
-    static ruvia::Task<void> accessLogStreamBody(ruvia::Context& c) {
         const auto tenant = tenantId(c);
         const auto id = requireId(c);
         const auto limit = service::log_ingest::requireTailLimit(c);
-        auto after = service::log_ingest::optionalSseTailCursor(c);
-        auto subscription =
-            service::log_ingest::fanout::hub().subscribeAccess(c.worker(), tenant, id);
-        auto initial = co_await websiteService().accessLogs(c, tenant, id, limit, after);
-        const auto initialCursor = cursorValue(initial);
-        advanceCursor(after, initialCursor);
-
-        auto events = c.streamSse();
-        co_await events.write(
-            {.data = "{}", .event = "ready", .retry = std::chrono::milliseconds{3000}});
-        co_await writeLogEvent(c, events, std::move(initial), initialCursor);
-
-        while (!events.aborted()) {
-            const auto signal = co_await subscription.receiveFor(
-                service::log_ingest::fanout::kSseHeartbeatInterval, c.stopToken());
-            if (events.aborted()) {
-                co_return;
-            }
-            if (!signal.hasValue()) {
-                if (signal.status() != ruvia::WorkerWaitStatus::kTimedOut) {
-                    co_return;
-                }
-                co_await events.write({.event = "heartbeat"});
-                continue;
-            }
-
-            auto update = co_await websiteService().accessLogs(c, tenant, id, limit, after);
-            const auto updateCursor = cursorValue(update);
-            if (!updateCursor) {
-                continue;
-            }
-            advanceCursor(after, updateCursor);
-            co_await writeLogEvent(c, events, std::move(update), updateCursor);
-        }
+        co_await service::log_ingest::streamSseTail(
+            c,
+            service::log_ingest::fanout::hub().subscribe(
+                c.worker(), service::log_ingest::notifications::LogResourceType::access, tenant,
+                id),
+            service::log_ingest::optionalSseTailCursor(c),
+            [&c, tenant, id, limit](const std::optional<service::log_ingest::TailCursor>& after) {
+                return websiteService().accessLogs(c, tenant, id, limit, after);
+            },
+            [](const WebsiteAccessLogTailDataDto& data) {
+                return service::log_ingest::tailResponseCursor(data);
+            },
+            writeLogEvent);
     }
 
     ruvia::Task<ruvia::HttpResponse> create(ruvia::Context& c) {

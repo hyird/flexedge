@@ -22,15 +22,17 @@ inline ruvia::Task<void> markCurrent(ruvia::DbTransaction& transaction, std::str
     if (rows.empty()) {
         co_return;
     }
-    co_await service::sync_runtime::upsertMarker(transaction, tenantId, "provider", providerId,
-                                                 "verify",
-                                                 rows.front()[1].as<std::int64_t>().value_or(1));
+    co_await service::sync_runtime::upsertMarker(
+        transaction, tenantId, service::sync_runtime::MarkerResourceType::provider, providerId,
+        service::sync_runtime::MarkerOperation::verify,
+        rows.front()[1].as<std::int64_t>().value_or(1));
     co_return;
 }
 
 inline ruvia::Task<void> remove(ruvia::DbTransaction& transaction, std::string_view tenantId,
                                 std::string_view providerId) {
-    co_await service::sync_runtime::removeMarker(transaction, tenantId, "provider", providerId);
+    co_await service::sync_runtime::removeMarker(
+        transaction, tenantId, service::sync_runtime::MarkerResourceType::provider, providerId);
     co_return;
 }
 
@@ -45,9 +47,10 @@ inline ruvia::Task<bool> enqueueDns(ruvia::DbTransaction& transaction, std::stri
     if (rows.empty()) {
         co_return false;
     }
-    co_await service::sync_runtime::upsertMarker(transaction, tenantId, "provider", providerId,
-                                                 "verify",
-                                                 rows.front()[0].as<std::int64_t>().value_or(1));
+    co_await service::sync_runtime::upsertMarker(
+        transaction, tenantId, service::sync_runtime::MarkerResourceType::provider, providerId,
+        service::sync_runtime::MarkerOperation::verify,
+        rows.front()[0].as<std::int64_t>().value_or(1));
     co_return true;
 }
 
@@ -63,9 +66,10 @@ inline ruvia::Task<bool> enqueueCertificate(ruvia::DbTransaction& transaction,
     if (rows.empty()) {
         co_return false;
     }
-    co_await service::sync_runtime::upsertMarker(transaction, tenantId, "provider", providerId,
-                                                 "verify",
-                                                 rows.front()[0].as<std::int64_t>().value_or(1));
+    co_await service::sync_runtime::upsertMarker(
+        transaction, tenantId, service::sync_runtime::MarkerResourceType::provider, providerId,
+        service::sync_runtime::MarkerOperation::verify,
+        rows.front()[0].as<std::int64_t>().value_or(1));
     co_return true;
 }
 

@@ -1,18 +1,15 @@
 import { useState } from 'react'
-import { z } from 'zod'
-import { useForm } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
 import {
   useInfiniteQuery,
   useMutation,
-  useQuery,
   useQueryClient,
 } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { FolderTree, Pencil, Plus, Server, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { getData, sendData } from '@/lib/api'
-import type { Cluster, DnsZoneOption, PageData } from '@/lib/types'
+import { queryKeys } from '@/lib/query-keys'
+import type { Cluster, PageData } from '@/lib/types'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -20,53 +17,13 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
-import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from '@/components/ui/form'
-import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { FeatureShell } from '@/components/feature-shell'
 import { RowActions } from '@/components/row-actions'
 import { StatusBadge } from '@/components/status-badge'
 import { NodesPanel } from '@/features/nodes'
-
-const schema = z.object({
-  name: z.string().trim().min(1, '请输入集群名称').max(100),
-  dns_zone_id: z.string().uuid('请选择托管域名'),
-  hostname_prefix: z
-    .string()
-    .trim()
-    .min(1, '请输入主机前缀')
-    .max(63)
-    .regex(
-      /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/,
-      '仅支持字母、数字和连字符'
-    ),
-  status: z.enum(['enabled', 'disabled']),
-})
-
-type Values = z.infer<typeof schema>
+import { ClusterDialog } from './cluster-dialog'
 
 export function Clusters() {
   const navigate = useNavigate()
@@ -76,7 +33,7 @@ export function Clusters() {
   const [removeTarget, setRemoveTarget] = useState<Cluster | null>(null)
   const [createNodeOpen, setCreateNodeOpen] = useState(false)
   const clustersQuery = useInfiniteQuery({
-    queryKey: ['clusters', 'tree'],
+    queryKey: [...queryKeys.clusters, 'tree'],
     initialPageParam: 1,
     queryFn: ({ pageParam }) =>
       getData<PageData<Cluster>>('/clusters/', {
@@ -107,7 +64,7 @@ export function Clusters() {
       toast.success(response.message)
       setRemoveTarget(null)
       if (search.cluster_id === cluster.id) selectCluster()
-      await queryClient.invalidateQueries({ queryKey: ['clusters'] })
+      await queryClient.invalidateQueries({ queryKey: queryKeys.clusters })
     },
   })
   return (
@@ -308,147 +265,5 @@ export function Clusters() {
         handleConfirm={() => removeTarget && remove.mutate(removeTarget)}
       />
     </FeatureShell>
-  )
-}
-function ClusterDialog({
-  cluster,
-  open,
-  onOpenChange,
-}: {
-  cluster?: Cluster
-  open: boolean
-  onOpenChange: (open: boolean) => void
-}) {
-  const queryClient = useQueryClient()
-  const optionsQuery = useQuery({
-    queryKey: ['dns-zones', 'options'],
-    queryFn: () =>
-      getData<{ list: DnsZoneOption[] }>('/dns-zones/options').then(
-        (data) => data.list
-      ),
-  })
-  const form = useForm<Values>({
-    resolver: zodResolver(schema),
-    defaultValues: {
-      name: cluster?.name ?? '',
-      dns_zone_id: cluster?.dns_zone_id ?? '',
-      hostname_prefix: cluster?.hostname_prefix ?? '',
-      status: (cluster?.status as Values['status']) ?? 'enabled',
-    },
-  })
-  const mutation = useMutation({
-    mutationFn: (values: Values) =>
-      cluster
-        ? sendData('put', `/clusters/${cluster.id}`, values, cluster.revision)
-        : sendData('post', '/clusters/', values),
-    onSuccess: async (response) => {
-      toast.success(response.message)
-      onOpenChange(false)
-      await queryClient.invalidateQueries({ queryKey: ['clusters'] })
-    },
-  })
-
-  return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className='overflow-y-auto'>
-        <SheetHeader>
-          <SheetTitle>{cluster ? '编辑集群' : '创建集群'}</SheetTitle>
-          <SheetDescription>
-            接入域名由主机前缀和托管域名组合生成。
-          </SheetDescription>
-        </SheetHeader>
-        <Form {...form}>
-          <form
-            id='cluster-form'
-            className='grid gap-4 px-4'
-            onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
-          >
-            <FormField
-              control={form.control}
-              name='name'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>集群名称</FormLabel>
-                  <FormControl>
-                    <Input placeholder='华东边缘集群' {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name='dns_zone_id'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>托管域名</FormLabel>
-                  <Select value={field.value} onValueChange={field.onChange}>
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue placeholder='选择托管域名' />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      {optionsQuery.data?.map((option) => (
-                        <SelectItem key={option.id} value={option.id}>
-                          {option.domain}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name='hostname_prefix'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>主机前缀</FormLabel>
-                  <FormControl>
-                    <Input placeholder='edge' {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name='status'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>状态</FormLabel>
-                  <Select value={field.value} onValueChange={field.onChange}>
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      <SelectItem value='enabled'>启用</SelectItem>
-                      <SelectItem value='disabled'>停用</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-          </form>
-        </Form>
-        <SheetFooter>
-          <Button variant='outline' onClick={() => onOpenChange(false)}>
-            取消
-          </Button>
-          <Button
-            form='cluster-form'
-            type='submit'
-            disabled={mutation.isPending}
-          >
-            {mutation.isPending ? '正在保存…' : '保存'}
-          </Button>
-        </SheetFooter>
-      </SheetContent>
-    </Sheet>
   )
 }

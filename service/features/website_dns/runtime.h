@@ -109,17 +109,24 @@ inline ruvia::Task<void> probeWebsite(service::background::WorkerContext& contex
         "UPDATE sys_website SET runtime = $2::jsonb WHERE id = $1 AND revision = $3 AND "
         "tenant_id = $4 AND deleted_at IS NULL",
         websiteId, std::string_view(json), expectedRevision, marker.marker.tenantId);
+    bool emittedResultEvent{};
     if (updated.affectedRows() == 0) {
         (void)co_await service::sync_runtime::releaseRunning(completion, marker);
     } else {
         if (!co_await service::sync_runtime::renewRunningLease(completion, marker)) {
             throw std::runtime_error("网站同步标记 lease 已失效");
         }
-        if (!co_await service::sync_runtime::completeRunning(completion, marker)) {
+        const auto resultTransition =
+            co_await service::sync_runtime::completeRunningAndRecordEvent(completion, marker);
+        if (!resultTransition.markerTransitioned) {
             throw std::runtime_error("网站同步标记 lease 已失效");
         }
+        emittedResultEvent = resultTransition.eventRecorded;
     }
     co_await completion.commit();
+    if (emittedResultEvent) {
+        service::sync_runtime::publishResultEvent(marker);
+    }
     co_return;
 }
 

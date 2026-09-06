@@ -293,9 +293,9 @@ class DnsZoneService {
         }
         co_await service::dns_sync::enqueueZoneRevision(
             transaction, tenantId, id, rows.front()[0].as<std::int64_t>().value_or(1),
-            conflictPolicy == "remote"  ? "sync_remote"
-            : conflictPolicy == "local" ? "sync_local"
-                                        : "sync");
+            conflictPolicy == "remote"  ? service::sync_runtime::MarkerOperation::syncRemote
+            : conflictPolicy == "local" ? service::sync_runtime::MarkerOperation::syncLocal
+                                        : service::sync_runtime::MarkerOperation::sync);
         co_await transaction.commit();
         co_return;
     }

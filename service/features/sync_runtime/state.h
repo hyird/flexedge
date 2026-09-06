@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -9,7 +10,116 @@
 #include <ruvia/core/Task.h>
 #include <ruvia/web/db/DbTransaction.h>
 
+#include "service/features/sync_event/fanout.h"
+
 namespace service::sync_runtime {
+
+enum class MarkerResourceType {
+    provider,
+    dnsZone,
+    certificate,
+    website,
+};
+
+enum class MarkerOperation {
+    verify,
+    sync,
+    syncLocal,
+    syncRemote,
+    remove,
+    issue,
+    renew,
+    apply,
+};
+
+[[nodiscard]] inline constexpr std::string_view resourceTypeName(MarkerResourceType resourceType) {
+    switch (resourceType) {
+    case MarkerResourceType::provider:
+        return "provider";
+    case MarkerResourceType::dnsZone:
+        return "dns_zone";
+    case MarkerResourceType::certificate:
+        return "certificate";
+    case MarkerResourceType::website:
+        return "website";
+    }
+    throw std::invalid_argument("unsupported sync marker resource type");
+}
+
+[[nodiscard]] inline constexpr std::string_view markerOperationName(MarkerOperation operation) {
+    switch (operation) {
+    case MarkerOperation::verify:
+        return "verify";
+    case MarkerOperation::sync:
+        return "sync";
+    case MarkerOperation::syncLocal:
+        return "sync_local";
+    case MarkerOperation::syncRemote:
+        return "sync_remote";
+    case MarkerOperation::remove:
+        return "delete";
+    case MarkerOperation::issue:
+        return "issue";
+    case MarkerOperation::renew:
+        return "renew";
+    case MarkerOperation::apply:
+        return "apply";
+    }
+    throw std::invalid_argument("unsupported sync marker operation");
+}
+
+[[nodiscard]] inline std::optional<MarkerOperation>
+parseMarkerOperation(std::string_view operation) {
+    if (operation == "verify") {
+        return MarkerOperation::verify;
+    }
+    if (operation == "sync") {
+        return MarkerOperation::sync;
+    }
+    if (operation == "sync_local") {
+        return MarkerOperation::syncLocal;
+    }
+    if (operation == "sync_remote") {
+        return MarkerOperation::syncRemote;
+    }
+    if (operation == "delete") {
+        return MarkerOperation::remove;
+    }
+    if (operation == "issue") {
+        return MarkerOperation::issue;
+    }
+    if (operation == "renew") {
+        return MarkerOperation::renew;
+    }
+    if (operation == "apply") {
+        return MarkerOperation::apply;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline MarkerOperation requireMarkerOperation(std::string_view operation) {
+    const auto parsed = parseMarkerOperation(operation);
+    if (!parsed) {
+        throw std::invalid_argument("invalid sync marker operation");
+    }
+    return *parsed;
+}
+
+[[nodiscard]] inline constexpr bool supportsMarkerOperation(MarkerResourceType resourceType,
+                                                             MarkerOperation operation) {
+    switch (resourceType) {
+    case MarkerResourceType::provider:
+        return operation == MarkerOperation::verify;
+    case MarkerResourceType::dnsZone:
+        return operation == MarkerOperation::sync || operation == MarkerOperation::syncLocal ||
+               operation == MarkerOperation::syncRemote || operation == MarkerOperation::remove;
+    case MarkerResourceType::certificate:
+        return operation == MarkerOperation::issue || operation == MarkerOperation::renew;
+    case MarkerResourceType::website:
+        return operation == MarkerOperation::apply;
+    }
+    return false;
+}
 
 // A sync task is a coalesced, current-state marker. It is deliberately not a
 // historical workflow node: the aggregate remains the source of truth and
@@ -25,21 +135,41 @@ struct RunningMarkerLease final {
     std::string_view owner;
 };
 
+struct RunningResultTransition final {
+    bool markerTransitioned{};
+    bool eventRecorded{};
+};
+
 inline constexpr std::int64_t kRetryDelaySeconds{15};
 inline constexpr std::int64_t kLeaseTimeoutSeconds{60};
 inline constexpr std::string_view kLeaseRecoveryRetryError{"同步租约超时，已回收重试"};
+inline constexpr std::string_view kEventOutcomeCompleted{"completed"};
+inline constexpr std::string_view kEventOutcomeFailed{"failed"};
 
-[[nodiscard]] inline std::string_view resourceColumn(std::string_view resourceType) {
-    if (resourceType == "provider") {
+[[nodiscard]] inline RunningMarkerLease makeRunningLease(std::string_view tenantId,
+                                                         std::string_view markerId,
+                                                         std::int64_t version,
+                                                         std::string_view owner) {
+    if (tenantId.empty() || markerId.empty() || owner.empty() || version <= 0) {
+        throw std::invalid_argument("invalid running marker lease");
+    }
+    return {.marker = {.tenantId = tenantId, .markerId = markerId, .version = version},
+            .owner = owner};
+}
+
+inline void publishResultEvent(const RunningMarkerLease& lease) {
+    service::sync_event::fanout::hub().publish(lease.marker.tenantId);
+}
+
+[[nodiscard]] inline std::string_view resourceColumn(MarkerResourceType resourceType) {
+    switch (resourceType) {
+    case MarkerResourceType::provider:
         return "provider_id";
-    }
-    if (resourceType == "dns_zone") {
+    case MarkerResourceType::dnsZone:
         return "dns_zone_id";
-    }
-    if (resourceType == "certificate") {
+    case MarkerResourceType::certificate:
         return "certificate_id";
-    }
-    if (resourceType == "website") {
+    case MarkerResourceType::website:
         return "website_id";
     }
     throw std::invalid_argument("unsupported sync marker resource type");
@@ -47,13 +177,18 @@ inline constexpr std::string_view kLeaseRecoveryRetryError{"同步租约超时�
 
 inline ruvia::Task<std::string> upsertMarker(ruvia::DbTransaction& transaction,
                                              std::string_view tenantId,
-                                             std::string_view resourceType,
+                                             MarkerResourceType resourceType,
                                              std::string_view resourceId,
-                                             std::string_view operation, std::int64_t version) {
+                                             MarkerOperation operation, std::int64_t version) {
     if (version <= 0) {
         throw std::invalid_argument("sync marker version must be positive");
     }
+    if (!supportsMarkerOperation(resourceType, operation)) {
+        throw std::invalid_argument("sync marker operation is not valid for this resource");
+    }
     const auto column = resourceColumn(resourceType);
+    const auto resourceTypeValue = resourceTypeName(resourceType);
+    const auto operationValue = markerOperationName(operation);
     const auto rows = co_await transaction.query(
         "INSERT INTO sys_sync_task (tenant_id, resource_type, " + std::string(column) +
             ", operation, version, processed_version, is_done, is_ok, error, count_fails, "
@@ -75,7 +210,7 @@ inline ruvia::Task<std::string> upsertMarker(ruvia::DbTransaction& transaction,
             "sys_sync_task.version THEN NULL ELSE sys_sync_task.lease_owner END, lease_until = "
             "CASE WHEN EXCLUDED.version > sys_sync_task.version THEN NULL ELSE "
             "sys_sync_task.lease_until END RETURNING id",
-        tenantId, resourceType, resourceId, operation, version);
+        tenantId, resourceTypeValue, resourceId, operationValue, version);
     if (rows.empty()) {
         throw std::runtime_error("sync marker could not be created");
     }
@@ -83,23 +218,25 @@ inline ruvia::Task<std::string> upsertMarker(ruvia::DbTransaction& transaction,
 }
 
 inline ruvia::Task<void> removeMarker(ruvia::DbTransaction& transaction, std::string_view tenantId,
-                                      std::string_view resourceType, std::string_view resourceId) {
+                                      MarkerResourceType resourceType,
+                                      std::string_view resourceId) {
     const auto column = resourceColumn(resourceType);
     (void)co_await transaction.execute(
         "DELETE FROM sys_sync_task WHERE tenant_id = $1 AND resource_type = $2 AND " +
             std::string(column) + " = $3",
-        tenantId, resourceType, resourceId);
+        tenantId, resourceTypeName(resourceType), resourceId);
     co_return;
 }
 
 template <typename Database>
-inline ruvia::Task<void> recoverStaleRunning(Database& database, std::string_view resourceType) {
+inline ruvia::Task<void> recoverStaleRunning(Database& database, MarkerResourceType resourceType) {
     (void)co_await database.execute(
         "UPDATE sys_sync_task SET is_done = FALSE, is_ok = FALSE, count_fails = count_fails + 1, "
         "error = $2, next_attempt_at = NOW() + CAST($3 AS BIGINT) * INTERVAL '1 second', "
         "lease_owner = NULL, lease_until = NULL, updated_at = NOW() WHERE resource_type = $1 "
         "AND lease_until IS NOT NULL AND lease_until <= NOW()",
-        resourceType, std::string_view{kLeaseRecoveryRetryError}, kRetryDelaySeconds);
+        resourceTypeName(resourceType), std::string_view{kLeaseRecoveryRetryError},
+        kRetryDelaySeconds);
     co_return;
 }
 
@@ -125,6 +262,41 @@ inline ruvia::Task<bool> completeRunning(Database& database, const RunningMarker
         "lease_owner = $4 AND lease_until IS NOT NULL",
         lease.marker.tenantId, lease.marker.markerId, lease.marker.version, lease.owner);
     co_return result.affectedRows() != 0;
+}
+
+template <typename Database>
+inline ruvia::Task<bool> recordRunningResultEvent(Database& database,
+                                                  const RunningMarkerLease& lease,
+                                                  std::string_view outcome) {
+    if (outcome != kEventOutcomeCompleted && outcome != kEventOutcomeFailed) {
+        throw std::invalid_argument("invalid sync marker event outcome");
+    }
+    const auto result = co_await database.execute(
+        "INSERT INTO sys_sync_event (tenant_id, task_id, resource_type, resource_id, operation, "
+        "version, outcome) SELECT tenant_id, id, resource_type, resource_id, operation, version, "
+        "$4 FROM sys_sync_task WHERE tenant_id = $1 AND id = $2 AND version = $3 AND "
+        "(($4 = 'completed' AND is_done AND is_ok) OR ($4 = 'failed' AND NOT is_done AND NOT "
+        "is_ok AND count_fails > 0))",
+        lease.marker.tenantId, lease.marker.markerId, lease.marker.version, outcome);
+    co_return result.affectedRows() != 0;
+}
+
+template <typename Database> inline ruvia::Task<void> pruneResultEvents(Database& database) {
+    (void)co_await database.execute(
+        "DELETE FROM sys_sync_event WHERE emitted_at < NOW() - INTERVAL '7 days'");
+    co_return;
+}
+
+template <typename Database>
+inline ruvia::Task<RunningResultTransition>
+completeRunningAndRecordEvent(Database& database, const RunningMarkerLease& lease) {
+    if (!co_await completeRunning(database, lease)) {
+        co_return RunningResultTransition{};
+    }
+    co_return RunningResultTransition{
+        .markerTransitioned = true,
+        .eventRecorded = co_await recordRunningResultEvent(database, lease, kEventOutcomeCompleted),
+    };
 }
 
 template <typename Database>
@@ -157,6 +329,19 @@ inline ruvia::Task<bool> failRunning(Database& database, const RunningMarkerLeas
         lease.marker.tenantId, lease.marker.markerId, lease.marker.version, lease.owner, error,
         kRetryDelaySeconds);
     co_return result.affectedRows() != 0;
+}
+
+template <typename Database>
+inline ruvia::Task<RunningResultTransition>
+failRunningAndRecordEvent(Database& database, const RunningMarkerLease& lease,
+                          std::string_view error) {
+    if (!co_await failRunning(database, lease, error)) {
+        co_return RunningResultTransition{};
+    }
+    co_return RunningResultTransition{
+        .markerTransitioned = true,
+        .eventRecorded = co_await recordRunningResultEvent(database, lease, kEventOutcomeFailed),
+    };
 }
 
 } // namespace service::sync_runtime

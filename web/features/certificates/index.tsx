@@ -1,37 +1,18 @@
 import { useMemo, useState } from 'react'
-import { z } from 'zod'
-import { useForm } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
 import { Download, Eye, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { api, getData, sendData } from '@/lib/api'
 import { formatDate } from '@/lib/format'
-import type {
-  Certificate,
-  CertificateProvider,
-  DnsZoneOption,
-  PageData,
-} from '@/lib/types'
+import { queryKeys } from '@/lib/query-keys'
+import type { Certificate, PageData } from '@/lib/types'
 import { useResourceFilters } from '@/hooks/use-resource-filters'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
 import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
-import {
-  Form,
-  FormControl,
-  FormDescription,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from '@/components/ui/form'
-import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
@@ -39,14 +20,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTableColumnHeader } from '@/components/data-table'
 import { DataTableCellContent } from '@/components/data-table/cell-content'
@@ -55,20 +28,8 @@ import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
 import { RowActions } from '@/components/row-actions'
 import { StatusBadge } from '@/components/status-badge'
-
-const createSchema = z.object({
-  domain: z
-    .string()
-    .trim()
-    .min(1, '请输入证书域名')
-    .max(253)
-    .regex(/^(?:\*\.)?([A-Za-z0-9-]+\.)+[A-Za-z]{2,63}$/, '域名格式不正确'),
-  certificate_provider_id: z.string().uuid('请选择证书供应商'),
-  dns_zone_id: z.string().uuid('请选择托管域名'),
-  auto_renew: z.boolean(),
-})
-
-type CreateValues = z.infer<typeof createSchema>
+import { CertificateDetailSheet } from './certificate-detail-sheet'
+import { CertificateDialog } from './certificate-dialog'
 
 export function Certificates() {
   const queryClient = useQueryClient()
@@ -81,7 +42,7 @@ export function Certificates() {
   const [removeTarget, setRemoveTarget] = useState<Certificate | null>(null)
 
   const query = useQuery({
-    queryKey: ['certificates', page, pageSize, keyword, status],
+    queryKey: [...queryKeys.certificates, page, pageSize, keyword, status],
     queryFn: () =>
       getData<PageData<Certificate>>('/certificates/', {
         page,
@@ -100,7 +61,7 @@ export function Certificates() {
       ),
     onSuccess: async (response) => {
       toast.success(response.message)
-      await queryClient.invalidateQueries({ queryKey: ['certificates'] })
+      await queryClient.invalidateQueries({ queryKey: queryKeys.certificates })
     },
   })
   const remove = useMutation({
@@ -109,7 +70,7 @@ export function Certificates() {
     onSuccess: async (response) => {
       toast.success(response.message)
       setRemoveTarget(null)
-      await queryClient.invalidateQueries({ queryKey: ['certificates'] })
+      await queryClient.invalidateQueries({ queryKey: queryKeys.certificates })
     },
   })
 
@@ -318,240 +279,5 @@ export function Certificates() {
         handleConfirm={() => removeTarget && remove.mutate(removeTarget)}
       />
     </FeatureShell>
-  )
-}
-
-function CertificateDialog({
-  certificate,
-  open,
-  onOpenChange,
-}: {
-  certificate?: Certificate
-  open: boolean
-  onOpenChange: (open: boolean) => void
-}) {
-  const queryClient = useQueryClient()
-  const providersQuery = useQuery({
-    queryKey: ['providers', 'certificate'],
-    queryFn: () => getData<CertificateProvider[]>('/providers/certificate'),
-    enabled: !certificate,
-  })
-  const zonesQuery = useQuery({
-    queryKey: ['dns-zones', 'options'],
-    queryFn: () =>
-      getData<{ list: DnsZoneOption[] }>('/dns-zones/options').then(
-        (data) => data.list
-      ),
-    enabled: !certificate,
-  })
-  const form = useForm<CreateValues>({
-    resolver: zodResolver(createSchema),
-    defaultValues: {
-      domain: certificate?.domains[0] ?? '',
-      certificate_provider_id: certificate?.certificate_provider_id ?? '',
-      dns_zone_id: certificate?.dns_zone_id ?? '',
-      auto_renew: certificate?.config.auto_renew ?? true,
-    },
-  })
-  const mutation = useMutation({
-    mutationFn: (values: CreateValues) =>
-      certificate
-        ? sendData(
-            'put',
-            `/certificates/${certificate.id}`,
-            { auto_renew: values.auto_renew },
-            certificate.revision
-          )
-        : sendData('post', '/certificates/', {
-            domain: values.domain,
-            certificate_provider_id: values.certificate_provider_id,
-            dns_zone_id: values.dns_zone_id,
-            config: { auto_renew: values.auto_renew },
-          }),
-    onSuccess: async (response) => {
-      toast.success(response.message)
-      onOpenChange(false)
-      await queryClient.invalidateQueries({ queryKey: ['certificates'] })
-    },
-  })
-
-  return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className='overflow-y-auto'>
-        <SheetHeader>
-          <SheetTitle>{certificate ? '续期设置' : '申请证书'}</SheetTitle>
-          <SheetDescription>
-            使用 DNS-01 验证申请证书，任务将在后台执行。
-          </SheetDescription>
-        </SheetHeader>
-        <Form {...form}>
-          <form
-            id='certificate-form'
-            className='grid gap-4 px-4'
-            onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
-          >
-            <FormField
-              control={form.control}
-              name='domain'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>证书域名</FormLabel>
-                  <FormControl>
-                    <Input
-                      disabled={!!certificate}
-                      placeholder='*.example.com'
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            {!certificate && (
-              <>
-                <FormField
-                  control={form.control}
-                  name='certificate_provider_id'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>证书供应商</FormLabel>
-                      <Select
-                        value={field.value}
-                        onValueChange={field.onChange}
-                      >
-                        <FormControl>
-                          <SelectTrigger>
-                            <SelectValue placeholder='选择供应商' />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent>
-                          {providersQuery.data?.map((provider) => (
-                            <SelectItem key={provider.id} value={provider.id}>
-                              {provider.provider === 'letsencrypt'
-                                ? "Let's Encrypt"
-                                : 'ZeroSSL'}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name='dns_zone_id'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>DNS 验证域名</FormLabel>
-                      <Select
-                        value={field.value}
-                        onValueChange={field.onChange}
-                      >
-                        <FormControl>
-                          <SelectTrigger>
-                            <SelectValue placeholder='选择托管域名' />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent>
-                          {zonesQuery.data?.map((zone) => (
-                            <SelectItem key={zone.id} value={zone.id}>
-                              {zone.domain}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              </>
-            )}
-            <FormField
-              control={form.control}
-              name='auto_renew'
-              render={({ field }) => (
-                <FormItem className='flex items-start gap-3 rounded-md border p-4'>
-                  <FormControl>
-                    <Checkbox
-                      checked={field.value}
-                      onCheckedChange={field.onChange}
-                    />
-                  </FormControl>
-                  <div>
-                    <FormLabel>自动续期</FormLabel>
-                    <FormDescription>
-                      到期前自动提交续签任务并分发到关联网站。
-                    </FormDescription>
-                  </div>
-                </FormItem>
-              )}
-            />
-          </form>
-        </Form>
-        <SheetFooter>
-          <Button variant='outline' onClick={() => onOpenChange(false)}>
-            取消
-          </Button>
-          <Button
-            type='submit'
-            form='certificate-form'
-            disabled={mutation.isPending}
-          >
-            {mutation.isPending ? '正在提交…' : certificate ? '保存' : '申请'}
-          </Button>
-        </SheetFooter>
-      </SheetContent>
-    </Sheet>
-  )
-}
-
-function CertificateDetailSheet({
-  certificate,
-  onOpenChange,
-}: {
-  certificate: Certificate | null
-  onOpenChange: (open: boolean) => void
-}) {
-  return (
-    <Sheet open={!!certificate} onOpenChange={onOpenChange}>
-      <SheetContent className='w-full overflow-y-auto sm:max-w-xl'>
-        <SheetHeader className='text-start'>
-          <SheetTitle>{certificate?.domains[0]}</SheetTitle>
-          <SheetDescription>证书签发与分发详情。</SheetDescription>
-        </SheetHeader>
-        {certificate && (
-          <div className='space-y-5 px-4 pb-6'>
-            <div className='flex flex-wrap gap-2'>
-              <StatusBadge status={certificate.status} />
-              <Badge variant='outline'>
-                {certificate.config.auto_renew ? '自动续期' : '手动续期'}
-              </Badge>
-              <Badge variant='outline'>
-                {certificate.website_count} 个网站使用
-              </Badge>
-            </div>
-            {[
-              ['签发机构', certificate.issuer],
-              ['有效期开始', formatDate(certificate.not_before)],
-              ['有效期结束', formatDate(certificate.expires_at)],
-              ['最近签发', formatDate(certificate.last_issued_at)],
-              ['序列号', certificate.serial_number || '—'],
-              ['SHA-256 指纹', certificate.fingerprint_sha256 || '—'],
-            ].map(([label, value]) => (
-              <div key={label} className='grid gap-1'>
-                <div className='text-xs text-muted-foreground'>{label}</div>
-                <div className='text-sm break-all'>{value}</div>
-              </div>
-            ))}
-            {certificate.last_error && (
-              <div className='rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive'>
-                {certificate.last_error}
-              </div>
-            )}
-          </div>
-        )}
-      </SheetContent>
-    </Sheet>
   )
 }

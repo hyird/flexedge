@@ -33,7 +33,7 @@ class Hub final {
   private:
     struct Topic final {
         std::string tenantId;
-        std::string kind;
+        notifications::LogResourceType resourceType;
         std::string resourceId;
 
         friend bool operator==(const Topic&, const Topic&) = default;
@@ -86,19 +86,12 @@ class Hub final {
         std::optional<ruvia::ChannelReceiver<std::uint64_t>> receiver_;
     };
 
-    [[nodiscard]] Subscription subscribeAccess(const ruvia::WorkerHandle& worker,
-                                               std::string_view tenantId,
-                                               std::string_view websiteId) {
-        return subscribe(worker, {.tenantId = std::string(tenantId),
-                                  .kind = std::string(notifications::kKindAccess),
-                                  .resourceId = std::string(websiteId)});
-    }
-
-    [[nodiscard]] Subscription subscribeNode(const ruvia::WorkerHandle& worker,
-                                             std::string_view tenantId, std::string_view nodeId) {
-        return subscribe(worker, {.tenantId = std::string(tenantId),
-                                  .kind = std::string(notifications::kKindNode),
-                                  .resourceId = std::string(nodeId)});
+    [[nodiscard]] Subscription subscribe(const ruvia::WorkerHandle& worker,
+                                         notifications::LogResourceType resourceType,
+                                         std::string_view tenantId, std::string_view resourceId) {
+        return subscribeTopic(worker, {.tenantId = std::string(tenantId),
+                                       .resourceType = resourceType,
+                                       .resourceId = std::string(resourceId)});
     }
 
     void publish(const notifications::Notification& notification) {
@@ -154,7 +147,7 @@ class Hub final {
     struct TopicHash final {
         [[nodiscard]] std::size_t operator()(const Topic& value) const noexcept {
             const auto first = std::hash<std::string>{}(value.tenantId);
-            const auto second = std::hash<std::string>{}(value.kind);
+            const auto second = std::hash<int>{}(static_cast<int>(value.resourceType));
             const auto third = std::hash<std::string>{}(value.resourceId);
             return first ^ (second << 1U) ^ (third << 2U);
         }
@@ -167,23 +160,15 @@ class Hub final {
 
     [[nodiscard]] static std::optional<Topic>
     topicFor(const notifications::Notification& notification) {
-        if (notification.tenantId.empty()) {
+        if (notification.tenantId.empty() || notification.resourceId.empty()) {
             return std::nullopt;
         }
-        if (notification.kind == notifications::kKindAccess && !notification.websiteId.empty()) {
-            return Topic{.tenantId = notification.tenantId,
-                         .kind = std::string(notifications::kKindAccess),
-                         .resourceId = notification.websiteId};
-        }
-        if (notification.kind == notifications::kKindNode && !notification.nodeId.empty()) {
-            return Topic{.tenantId = notification.tenantId,
-                         .kind = std::string(notifications::kKindNode),
-                         .resourceId = notification.nodeId};
-        }
-        return std::nullopt;
+        return Topic{.tenantId = notification.tenantId,
+                     .resourceType = notification.resourceType,
+                     .resourceId = notification.resourceId};
     }
 
-    [[nodiscard]] Subscription subscribe(const ruvia::WorkerHandle& worker, Topic topic) {
+    [[nodiscard]] Subscription subscribeTopic(const ruvia::WorkerHandle& worker, Topic topic) {
         if (topic.tenantId.empty() || topic.resourceId.empty()) {
             throw std::invalid_argument("log notification subscription requires a resource");
         }
@@ -246,9 +231,11 @@ inline ruvia::Task<void> run(ruvia::WebWorkerContext& context) {
                 hub().markReady();
                 initialized = true;
             }
-            auto notifications = co_await notifications::read(context.redis(), cursor);
-            for (const auto& notification : notifications) {
-                cursor = notification.id;
+            auto batch = co_await notifications::read(context.redis(), cursor);
+            if (batch.cursor) {
+                cursor = *batch.cursor;
+            }
+            for (const auto& notification : batch.notifications) {
                 hub().publish(notification);
             }
         } catch (const std::exception& error) {

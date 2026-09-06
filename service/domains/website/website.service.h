@@ -174,12 +174,10 @@ class WebsiteService {
         co_return result;
     }
 
-    ruvia::Task<WebsiteAccessLogPageDataDto>
-    accessLogHistory(ruvia::Context& c, const std::string& tenantId, const std::string& id,
-                     std::int64_t page, std::int64_t pageSize, std::int64_t skip,
-                     const std::optional<std::string>& keyword,
-                     const std::optional<std::string>& method,
-                     const std::optional<std::string>& statusClass) {
+    ruvia::Task<WebsiteAccessLogPageDataDto> accessLogHistory(
+        ruvia::Context& c, const std::string& tenantId, const std::string& id, std::int64_t page,
+        std::int64_t pageSize, std::int64_t skip, const std::optional<std::string>& keyword,
+        const std::optional<std::string>& method, const std::optional<std::string>& statusClass) {
         const auto website = co_await c.db().query(
             "SELECT 1 FROM sys_website WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL "
             "LIMIT 1",
@@ -188,10 +186,9 @@ class WebsiteService {
             service::common::throwAppError(WebsiteError::NOT_FOUND);
         }
 
-        std::string where =
-            " FROM sys_website_access_log access LEFT JOIN sys_node node ON "
-            "node.tenant_id = access.tenant_id AND node.id = access.node_id WHERE "
-            "access.tenant_id = $1 AND access.website_id = $2";
+        std::string where = " FROM sys_website_access_log access LEFT JOIN sys_node node ON "
+                            "node.tenant_id = access.tenant_id AND node.id = access.node_id WHERE "
+                            "access.tenant_id = $1 AND access.website_id = $2";
         std::vector<ruvia::DbValue> params{ruvia::DbValue{tenantId}, ruvia::DbValue{id}};
         std::optional<std::string> keywordPattern;
         if (keyword) {
@@ -244,7 +241,7 @@ class WebsiteService {
     }
 
     ruvia::Task<WebsiteDashboardDto> dashboard(ruvia::Context& c, const std::string& tenantId,
-                                                const std::string& id) {
+                                               const std::string& id) {
         const auto website = co_await c.db().query(
             "SELECT 1 FROM sys_website WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL "
             "LIMIT 1",
@@ -347,10 +344,8 @@ class WebsiteService {
                 }
                 auto& item = output.emplace_back(c);
                 item.template set<"label">(label);
-                item.template set<"requestCount">(
-                    row[1].template as<std::int64_t>().value_or(0));
-                item.template set<"responseBytes">(
-                    row[2].template as<std::int64_t>().value_or(0));
+                item.template set<"requestCount">(row[1].template as<std::int64_t>().value_or(0));
+                item.template set<"responseBytes">(row[2].template as<std::int64_t>().value_or(0));
             }
         };
         if (geoDatabase.available()) {
@@ -404,7 +399,8 @@ class WebsiteService {
             }
         }
         const auto statusCodeRows = co_await c.db().query(
-            "SELECT access.status_code::text, COUNT(*)::bigint, COALESCE(SUM(access.response_bytes), "
+            "SELECT access.status_code::text, COUNT(*)::bigint, "
+            "COALESCE(SUM(access.response_bytes), "
             "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
             "access.website_id = $2 AND access.occurred_at >= NOW() - INTERVAL '24 hours' GROUP "
             "BY access.status_code ORDER BY COUNT(*) DESC, access.status_code ASC LIMIT 10",
@@ -492,8 +488,9 @@ class WebsiteService {
                                                 config);
             co_await service::node_dispatch::publishClusterRelease(transaction, tenantId,
                                                                    clusterId);
-            (void)co_await service::sync_runtime::upsertMarker(transaction, tenantId, "website",
-                                                               websiteId, "apply", 1);
+            (void)co_await service::sync_runtime::upsertMarker(
+                transaction, tenantId, service::sync_runtime::MarkerResourceType::website,
+                websiteId, service::sync_runtime::MarkerOperation::apply, 1);
             co_await service::website_dns::reconcileConfigChange(transaction, tenantId,
                                                                  std::nullopt, configJson);
             co_await transaction.commit();
@@ -558,8 +555,9 @@ class WebsiteService {
             }
             co_await service::node_dispatch::publishClusterRelease(transaction, tenantId,
                                                                    clusterId);
-            (void)co_await service::sync_runtime::upsertMarker(transaction, tenantId, "website", id,
-                                                               "apply", revision);
+            (void)co_await service::sync_runtime::upsertMarker(
+                transaction, tenantId, service::sync_runtime::MarkerResourceType::website, id,
+                service::sync_runtime::MarkerOperation::apply, revision);
             co_await service::website_dns::reconcileConfigChange(transaction, tenantId,
                                                                  previousConfig, configJson);
             co_await transaction.commit();
@@ -600,7 +598,8 @@ class WebsiteService {
             "DELETE FROM sys_website_domain_claim WHERE tenant_id = $1 AND website_id = $2",
             tenantId, id);
         co_await service::node_dispatch::publishClusterRelease(transaction, tenantId, clusterId);
-        co_await service::sync_runtime::removeMarker(transaction, tenantId, "website", id);
+        co_await service::sync_runtime::removeMarker(
+            transaction, tenantId, service::sync_runtime::MarkerResourceType::website, id);
         co_await service::website_dns::reconcileConfigChange(transaction, tenantId, previousConfig,
                                                              std::nullopt);
         co_await transaction.commit();
@@ -627,8 +626,7 @@ class WebsiteService {
         service::node_runtime::NodeRuntimeData::OriginHealth health;
     };
 
-    template <typename Row>
-    static void fillAccessLog(WebsiteAccessLogDto& item, const Row& row) {
+    template <typename Row> static void fillAccessLog(WebsiteAccessLogDto& item, const Row& row) {
         item.set<"id">(row[0].value().value_or(""));
         item.set<"occurredAt">(row[1].value().value_or(""));
         item.set<"nodeId">(row[2].value().value_or(""));

@@ -15,11 +15,10 @@ RUVIA_RESPONSE_MODEL(
     RUVIA_REQUIRED_FIELD_NAME("dns_zone_issue_count", dnsZoneIssueCount, ruvia::Int64),
     RUVIA_REQUIRED_FIELD_NAME("certificate_expiring_count", certificateExpiringCount, ruvia::Int64),
     RUVIA_REQUIRED_FIELD_NAME("certificate_failed_count", certificateFailedCount, ruvia::Int64),
-    RUVIA_REQUIRED_FIELD_NAME("active_task_count", activeTaskCount, ruvia::Int64),
-    RUVIA_REQUIRED_FIELD_NAME("failed_task_count", failedTaskCount, ruvia::Int64));
+    RUVIA_REQUIRED_FIELD_NAME("active_marker_count", activeMarkerCount, ruvia::Int64),
+    RUVIA_REQUIRED_FIELD_NAME("retry_marker_count", retryMarkerCount, ruvia::Int64));
 
-RUVIA_RESPONSE_MODEL(OverviewTaskDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(kind, ruvia::String),
+RUVIA_RESPONSE_MODEL(OverviewMarkerDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("resource_type", resourceType, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("resource_id", resourceId, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("resource_name", resourceName, ruvia::String),
@@ -31,8 +30,8 @@ RUVIA_RESPONSE_MODEL(OverviewTaskDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
 
 RUVIA_RESPONSE_MODEL(OverviewDataDto, RUVIA_REQUIRED_FIELD(resources, OverviewResourceCountsDto),
                      RUVIA_REQUIRED_FIELD(issues, OverviewIssueCountsDto),
-                     RUVIA_REQUIRED_FIELD_NAME("recent_tasks", recentTasks,
-                                               ruvia::Array<OverviewTaskDto>));
+                     RUVIA_REQUIRED_FIELD_NAME("recent_markers", recentMarkers,
+                                               ruvia::Array<OverviewMarkerDto>));
 
 RUVIA_RESPONSE_MODEL(OverviewResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),

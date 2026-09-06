@@ -2,6 +2,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <optional>
 #include <stdexcept>
@@ -60,16 +61,36 @@ std::string source(std::string_view relativePath) {
 #define REQUIRE(condition)                                                                         \
     do {                                                                                           \
         if (!(condition)) {                                                                        \
+            std::cerr << "requirement failed: " #condition << '\n';                                \
             throw std::runtime_error("requirement failed: " #condition);                           \
         }                                                                                          \
     } while (false)
 
 int main() {
-    REQUIRE(service::sync_runtime::resourceColumn("provider") == "provider_id");
-    REQUIRE(service::sync_runtime::resourceColumn("dns_zone") == "dns_zone_id");
-    REQUIRE(service::sync_runtime::resourceColumn("certificate") == "certificate_id");
-    REQUIRE(service::sync_runtime::resourceColumn("website") == "website_id");
-    REQUIRE(throwsRuntimeError([] { (void)service::sync_runtime::resourceColumn("cluster"); }));
+    using service::sync_runtime::MarkerResourceType;
+    REQUIRE(service::sync_runtime::resourceTypeName(MarkerResourceType::provider) == "provider");
+    REQUIRE(service::sync_runtime::resourceTypeName(MarkerResourceType::dnsZone) == "dns_zone");
+    REQUIRE(service::sync_runtime::resourceTypeName(MarkerResourceType::certificate) ==
+            "certificate");
+    REQUIRE(service::sync_runtime::resourceTypeName(MarkerResourceType::website) == "website");
+    REQUIRE(service::sync_runtime::resourceColumn(MarkerResourceType::provider) == "provider_id");
+    REQUIRE(service::sync_runtime::resourceColumn(MarkerResourceType::dnsZone) == "dns_zone_id");
+    REQUIRE(service::sync_runtime::resourceColumn(MarkerResourceType::certificate) ==
+            "certificate_id");
+    REQUIRE(service::sync_runtime::resourceColumn(MarkerResourceType::website) == "website_id");
+    REQUIRE(throwsRuntimeError([] {
+        (void)service::sync_runtime::resourceTypeName(static_cast<MarkerResourceType>(99));
+    }));
+    REQUIRE(throwsRuntimeError(
+        [] { (void)service::sync_runtime::resourceColumn(static_cast<MarkerResourceType>(99)); }));
+    const auto markerLease =
+        service::sync_runtime::makeRunningLease("tenant", "marker", 7, "worker");
+    REQUIRE(markerLease.marker.tenantId == "tenant");
+    REQUIRE(markerLease.marker.markerId == "marker");
+    REQUIRE(markerLease.marker.version == 7);
+    REQUIRE(markerLease.owner == "worker");
+    REQUIRE(throwsRuntimeError(
+        [] { (void)service::sync_runtime::makeRunningLease("tenant", "marker", 0, "worker"); }));
 
     static_assert(service::dns::kDnsProviders.size() == 2);
     static_assert(service::dns::findDnsProvider("cloudflare")->supportsProxy);
@@ -129,13 +150,13 @@ int main() {
     issues.set<"dnsZoneIssueCount">(1);
     issues.set<"certificateExpiringCount">(2);
     issues.set<"certificateFailedCount">(0);
-    issues.set<"activeTaskCount">(3);
-    issues.set<"failedTaskCount">(1);
+    issues.set<"activeMarkerCount">(3);
+    issues.set<"retryMarkerCount">(1);
     service::overview::OverviewDataDto overview;
     overview.set<"resources">(std::move(resources));
     overview.set<"issues">(std::move(issues));
-    (void)overview.ensure<"recentTasks">();
-    REQUIRE(ruvia::toJson(overview).contains("\"recent_tasks\":[]"));
+    (void)overview.ensure<"recentMarkers">();
+    REQUIRE(ruvia::toJson(overview).contains("\"recent_markers\":[]"));
 
     const auto sourceRoot = std::filesystem::path(FLEXEDGE_SOURCE_DIR);
     REQUIRE(!std::filesystem::exists(sourceRoot / "service/features/task_runtime/state.h"));
@@ -146,66 +167,307 @@ int main() {
     REQUIRE(!std::filesystem::exists(sourceRoot / "service/features/website_dispatch/queue.h"));
     REQUIRE(!std::filesystem::exists(sourceRoot / "service/features/website_dispatch/model.h"));
 
-    REQUIRE(service::config::kSchemaMigrations.size() == 19);
-    REQUIRE(service::config::kSchemaMigrations.back().id() == "0019_access_log_request_bytes");
-    const auto syncMigration =
-        std::ranges::find_if(service::config::kSchemaMigrations, [](const auto& migration) {
-            return migration.id() == "0015_edgeadmin_sync_markers";
-        });
-    REQUIRE(syncMigration != service::config::kSchemaMigrations.end());
-    REQUIRE(syncMigration->sql().contains("CREATE TABLE public.sys_sync_task"));
-    REQUIRE(syncMigration->sql().contains("uk_sync_task_resource"));
-    REQUIRE(syncMigration->sql().contains("DROP TABLE IF EXISTS public.sys_task"));
-    REQUIRE(syncMigration->sql().contains("version bigint NOT NULL"));
-    REQUIRE(syncMigration->sql().contains("processed_version bigint DEFAULT 0 NOT NULL"));
-    REQUIRE(syncMigration->sql().contains("lease_until timestamptz"));
-    REQUIRE(syncMigration->sql().contains(
+    REQUIRE(service::config::kSchemaMigrations.size() == 1);
+    REQUIRE(service::config::kSchemaMigrations.front().id() == "0001");
+    const auto& schemaBaseline = service::config::kSchemaMigrations.front().sql();
+    REQUIRE(!schemaBaseline.contains("sys_task"));
+    REQUIRE(!schemaBaseline.contains("node_key_"));
+    REQUIRE(!schemaBaseline.contains("device_key_"));
+    REQUIRE(!schemaBaseline.contains("DROP TABLE"));
+    REQUIRE(!schemaBaseline.contains("UPDATE public."));
+    REQUIRE(!schemaBaseline.contains("migrate_data"));
+    REQUIRE(schemaBaseline.contains("node_secret_envelope text"));
+    REQUIRE(schemaBaseline.contains("schema_version integer NOT NULL"));
+    REQUIRE(schemaBaseline.contains("CREATE TABLE public.sys_sync_task"));
+    REQUIRE(schemaBaseline.contains("CREATE TABLE public.sys_sync_event"));
+    REQUIRE(schemaBaseline.contains("uk_sync_task_resource"));
+    REQUIRE(schemaBaseline.contains("idx_sync_event_tenant_id"));
+    REQUIRE(schemaBaseline.contains("version bigint NOT NULL"));
+    REQUIRE(schemaBaseline.contains("processed_version bigint DEFAULT 0 NOT NULL"));
+    REQUIRE(schemaBaseline.contains("lease_until timestamptz"));
+    REQUIRE(schemaBaseline.contains(
         "num_nonnulls(provider_id, dns_zone_id, certificate_id, website_id) = 1"));
-    const auto infiniteRetryMigration =
-        std::ranges::find_if(service::config::kSchemaMigrations, [](const auto& migration) {
-            return migration.id() == "0016_sync_task_infinite_retry";
-        });
-    REQUIRE(infiniteRetryMigration != service::config::kSchemaMigrations.end());
-    REQUIRE(infiniteRetryMigration->sql().contains("is_done = FALSE"));
-    const auto routeRulesMigration =
-        std::ranges::find_if(service::config::kSchemaMigrations, [](const auto& migration) {
-            return migration.id() == "0017_website_route_rules";
-        });
-    REQUIRE(routeRulesMigration != service::config::kSchemaMigrations.end());
-    REQUIRE(routeRulesMigration->sql().contains("\"route_rules\": []"));
-    const auto requestBytesMigration =
-        std::ranges::find_if(service::config::kSchemaMigrations, [](const auto& migration) {
-            return migration.id() == "0019_access_log_request_bytes";
-        });
-    REQUIRE(requestBytesMigration != service::config::kSchemaMigrations.end());
-    REQUIRE(requestBytesMigration->sql().contains("request_bytes bigint DEFAULT 0 NOT NULL"));
+    REQUIRE(schemaBaseline.contains("request_bytes bigint DEFAULT 0 NOT NULL"));
+    REQUIRE(schemaBaseline.contains("idx_website_access_log_website_ingested"));
+    REQUIRE(schemaBaseline.contains("idx_node_log_node_ingested"));
+
+    const auto websiteConfig = source("service/features/website_config/model.h");
+    REQUIRE(websiteConfig.contains("!defaultOriginGroup"));
+    REQUIRE(websiteConfig.contains("!healthCheckPath"));
+    REQUIRE(websiteConfig.contains("!healthyThreshold"));
+    REQUIRE(websiteConfig.contains("!group || !protocol"));
+    REQUIRE(!websiteConfig.contains("legacyRouteRules"));
+    REQUIRE(websiteConfig.contains("website_config/transport.h"));
+    REQUIRE(!websiteConfig.contains("RUVIA_REQUEST_MODEL(WebsiteDomainInput"));
+    const auto websiteConfigTransport = source("service/features/website_config/transport.h");
+    REQUIRE(websiteConfigTransport.contains("RUVIA_REQUEST_MODEL(WebsiteDomainInput"));
+    REQUIRE(websiteConfigTransport.contains("WebsiteConfigOutput, RUVIA_OPTIONAL_FIELD(name"));
+
+    const auto websitePage = source("web/features/websites/index.tsx");
+    REQUIRE(websitePage.contains("import { AccessLogSheet } from './access-log-sheet'"));
+    REQUIRE(websitePage.contains("import { WebsiteDialog } from './website-dialog'"));
+    REQUIRE(websitePage.contains("import { WebsiteDetailSheet } from './website-detail-sheet'"));
+    REQUIRE(websitePage.contains("import { originGroupLabel } from './website-display'"));
+    REQUIRE(!websitePage.contains("function AccessLogSheet"));
+    REQUIRE(!websitePage.contains("function WebsiteDialog"));
+    REQUIRE(!websitePage.contains("function WebsiteDetailSheet"));
+    REQUIRE(!websitePage.contains("function originGroupLabel"));
+    REQUIRE(!websitePage.contains("useFieldArray"));
+    const auto websiteTypes = source("web/features/websites/types.ts");
+    REQUIRE(websiteTypes.contains("export type WebsiteConfig"));
+    REQUIRE(websiteTypes.contains("export type WebsiteDashboard"));
+    const auto frontendSharedTypes = source("web/lib/types.ts");
+    REQUIRE(!frontendSharedTypes.contains("export type WebsiteConfig"));
+    REQUIRE(!frontendSharedTypes.contains("export type WebsiteDashboard"));
+    const auto websiteDialog = source("web/features/websites/website-dialog.tsx");
+    REQUIRE(websiteDialog.contains("export function WebsiteDialog"));
+    REQUIRE(websiteDialog.contains("useFieldArray"));
+    REQUIRE(websiteDialog.contains("from './website-form'"));
+    REQUIRE(websiteDialog.contains("from './website-basic-tab'"));
+    REQUIRE(websiteDialog.contains("from './website-domains-tab'"));
+    REQUIRE(websiteDialog.contains("from './website-features-tab'"));
+    REQUIRE(websiteDialog.contains("from './website-origins-tab'"));
+    REQUIRE(websiteDialog.contains("from './website-routes-tab'"));
+    REQUIRE(!websiteDialog.contains("const domainSchema"));
+    REQUIRE(!websiteDialog.contains("function defaultConfig"));
+    REQUIRE(!websiteDialog.contains("<TabsContent value='basic'"));
+    REQUIRE(!websiteDialog.contains("<TabsContent value='domains'"));
+    REQUIRE(!websiteDialog.contains("<TabsContent value='features'"));
+    REQUIRE(!websiteDialog.contains("<TabsContent value='origins'"));
+    REQUIRE(!websiteDialog.contains("<TabsContent value='routes'"));
+    const auto websiteDisplay = source("web/features/websites/website-display.ts");
+    REQUIRE(websiteDisplay.contains("export function originGroupLabel"));
+    const auto websiteForm = source("web/features/websites/website-form.ts");
+    REQUIRE(websiteForm.contains("export const websiteFormSchema"));
+    REQUIRE(websiteForm.contains("export function defaultWebsiteConfig"));
+    REQUIRE(websiteForm.contains("export function parseRouteHeaders"));
+    REQUIRE(websiteForm.contains("export function valuesToLines"));
+    REQUIRE(websiteForm.contains("export const routeMethods"));
+    const auto websiteBasicTab = source("web/features/websites/website-basic-tab.tsx");
+    REQUIRE(websiteBasicTab.contains("export function WebsiteBasicTab"));
+    REQUIRE(websiteBasicTab.contains("<TabsContent value='basic'"));
+    const auto websiteDomainsTab = source("web/features/websites/website-domains-tab.tsx");
+    REQUIRE(websiteDomainsTab.contains("export function WebsiteDomainsTab"));
+    REQUIRE(websiteDomainsTab.contains("<TabsContent value='domains'"));
+    const auto websiteFeaturesTab = source("web/features/websites/website-features-tab.tsx");
+    REQUIRE(websiteFeaturesTab.contains("export function WebsiteFeaturesTab"));
+    REQUIRE(websiteFeaturesTab.contains("<TabsContent value='features'"));
+    const auto websiteOriginsTab = source("web/features/websites/website-origins-tab.tsx");
+    REQUIRE(websiteOriginsTab.contains("export function WebsiteOriginsTab"));
+    REQUIRE(websiteOriginsTab.contains("<TabsContent value='origins'"));
+    const auto websiteRoutesTab = source("web/features/websites/website-routes-tab.tsx");
+    REQUIRE(websiteRoutesTab.contains("export function WebsiteRoutesTab"));
+    REQUIRE(websiteRoutesTab.contains("<TabsContent value='routes'"));
+
+    const auto dnsZonesPage = source("web/features/dns-zones/index.tsx");
+    REQUIRE(dnsZonesPage.contains("import { CreateZoneDialog } from './create-zone-dialog'"));
+    REQUIRE(dnsZonesPage.contains("import { RecordsDialog } from './records-dialog'"));
+    REQUIRE(dnsZonesPage.contains("import { ZoneDetailSheet } from './zone-detail-sheet'"));
+    REQUIRE(!dnsZonesPage.contains("function CreateZoneDialog"));
+    REQUIRE(!dnsZonesPage.contains("function RecordsDialog"));
+    REQUIRE(!dnsZonesPage.contains("function ZoneDetailSheet"));
+    REQUIRE(!dnsZonesPage.contains("useFieldArray"));
+    const auto createZoneDialog = source("web/features/dns-zones/create-zone-dialog.tsx");
+    REQUIRE(createZoneDialog.contains("export function CreateZoneDialog"));
+    REQUIRE(createZoneDialog.contains("createSchema"));
+    const auto recordsDialog = source("web/features/dns-zones/records-dialog.tsx");
+    REQUIRE(recordsDialog.contains("export function RecordsDialog"));
+    REQUIRE(recordsDialog.contains("useFieldArray"));
+    const auto zoneDetailSheet = source("web/features/dns-zones/zone-detail-sheet.tsx");
+    REQUIRE(zoneDetailSheet.contains("export function ZoneDetailSheet"));
+    const auto dnsZoneDisplay = source("web/features/dns-zones/dns-zone-display.ts");
+    REQUIRE(dnsZoneDisplay.contains("export function displaySyncStatus"));
+    REQUIRE(dnsZoneDisplay.contains("export function hasMeaningfulConflicts"));
+
+    const auto providersPage = source("web/features/providers/index.tsx");
+    REQUIRE(providersPage.contains("import { DnsProviderDialog } from './dns-provider-dialog'"));
+    REQUIRE(providersPage.contains(
+        "import { CertificateProviderDialog } from './certificate-provider-dialog'"));
+    REQUIRE(providersPage.contains("import { providerLabel } from './provider-display'"));
+    REQUIRE(!providersPage.contains("function DnsProviderDialog"));
+    REQUIRE(!providersPage.contains("function CertificateProviderDialog"));
+    REQUIRE(!providersPage.contains("function providerLabel"));
+    const auto dnsProviderDialog = source("web/features/providers/dns-provider-dialog.tsx");
+    REQUIRE(dnsProviderDialog.contains("export function DnsProviderDialog"));
+    REQUIRE(dnsProviderDialog.contains("dnsSchema"));
+    const auto certificateProviderDialog =
+        source("web/features/providers/certificate-provider-dialog.tsx");
+    REQUIRE(certificateProviderDialog.contains("export function CertificateProviderDialog"));
+    REQUIRE(certificateProviderDialog.contains("certificateSchema"));
+    const auto providerDisplay = source("web/features/providers/provider-display.ts");
+    REQUIRE(providerDisplay.contains("export function providerLabel"));
+
+    const auto nodesPage = source("web/features/nodes/index.tsx");
+    REQUIRE(nodesPage.contains("import { CredentialsDialog } from './credentials-dialog'"));
+    REQUIRE(nodesPage.contains("import { NodeDialog, type NodeCredentials } from './node-dialog'"));
+    REQUIRE(nodesPage.contains("import { NodeLogSheet } from './node-log-sheet'"));
+    REQUIRE(!nodesPage.contains("function NodeDialog"));
+    REQUIRE(!nodesPage.contains("function CredentialsDialog"));
+    REQUIRE(!nodesPage.contains("function NodeLogSheet"));
+    REQUIRE(!nodesPage.contains("useFieldArray"));
+    const auto nodeDialog = source("web/features/nodes/node-dialog.tsx");
+    REQUIRE(nodeDialog.contains("export function NodeDialog"));
+    REQUIRE(nodeDialog.contains("export type NodeCredentials"));
+    REQUIRE(nodeDialog.contains("useFieldArray"));
+    const auto credentialsDialog = source("web/features/nodes/credentials-dialog.tsx");
+    REQUIRE(credentialsDialog.contains("export function CredentialsDialog"));
+    const auto nodeLogSheet = source("web/features/nodes/node-log-sheet.tsx");
+    REQUIRE(nodeLogSheet.contains("export function NodeLogSheet"));
+    REQUIRE(nodeLogSheet.contains("new EventSource"));
+
+    const auto certificatesPage = source("web/features/certificates/index.tsx");
+    REQUIRE(certificatesPage.contains("import { CertificateDialog } from './certificate-dialog'"));
+    REQUIRE(certificatesPage.contains(
+        "import { CertificateDetailSheet } from './certificate-detail-sheet'"));
+    REQUIRE(!certificatesPage.contains("function CertificateDialog"));
+    REQUIRE(!certificatesPage.contains("function CertificateDetailSheet"));
+    const auto certificateDialog = source("web/features/certificates/certificate-dialog.tsx");
+    REQUIRE(certificateDialog.contains("export function CertificateDialog"));
+    REQUIRE(certificateDialog.contains("createSchema"));
+    const auto certificateDetailSheet =
+        source("web/features/certificates/certificate-detail-sheet.tsx");
+    REQUIRE(certificateDetailSheet.contains("export function CertificateDetailSheet"));
+    REQUIRE(certificateDetailSheet.contains("fingerprint_sha256"));
+
+    const auto clustersPage = source("web/features/clusters/index.tsx");
+    REQUIRE(clustersPage.contains("import { ClusterDialog } from './cluster-dialog'"));
+    REQUIRE(!clustersPage.contains("function ClusterDialog"));
+    REQUIRE(!clustersPage.contains("useForm"));
+    const auto clusterDialog = source("web/features/clusters/cluster-dialog.tsx");
+    REQUIRE(clusterDialog.contains("export function ClusterDialog"));
+    REQUIRE(clusterDialog.contains("const schema = z.object"));
 
     const auto syncRuntime = source("service/features/sync_runtime/state.h");
     REQUIRE(syncRuntime.contains("namespace service::sync_runtime"));
+    REQUIRE(syncRuntime.contains("enum class MarkerResourceType"));
+    REQUIRE(syncRuntime.contains("resourceTypeName(MarkerResourceType resourceType)"));
+    REQUIRE(syncRuntime.contains("resourceColumn(MarkerResourceType resourceType)"));
+    REQUIRE(!syncRuntime.contains("resourceColumn(std::string_view"));
     REQUIRE(syncRuntime.contains("ON CONFLICT (tenant_id, resource_type, "));
     REQUIRE(syncRuntime.contains("resource_id) DO UPDATE SET"));
     REQUIRE(syncRuntime.contains("GREATEST(sys_sync_task.version, "));
     REQUIRE(syncRuntime.contains("EXCLUDED.version), operation"));
     REQUIRE(syncRuntime.contains("renewRunningLease"));
     REQUIRE(syncRuntime.contains("completeRunning"));
+    REQUIRE(syncRuntime.contains("completeRunningAndRecordEvent"));
+    REQUIRE(syncRuntime.contains("failRunningAndRecordEvent"));
+    REQUIRE(syncRuntime.contains("recordRunningResultEvent"));
+    REQUIRE(syncRuntime.contains("struct RunningResultTransition final"));
+    REQUIRE(syncRuntime.contains("bool eventRecorded"));
+    REQUIRE(syncRuntime.contains("pruneResultEvents"));
     REQUIRE(syncRuntime.contains("removeRunning"));
     REQUIRE(syncRuntime.contains("recoverStaleRunning"));
+    REQUIRE(syncRuntime.contains("makeRunningLease"));
     REQUIRE(!syncRuntime.contains("kMaximumFailures"));
 
-    const auto taskService = source("service/domains/task/task.service.h");
-    REQUIRE(taskService.contains("WITH marker_view AS"));
-    REQUIRE(taskService.contains("FROM sys_sync_task marker"));
-    REQUIRE(taskService.contains("marker.updated_at, marker.tenant_id"));
-    REQUIRE(!taskService.contains("parent_task_id"));
-    REQUIRE(!taskService.contains("spec_snapshot"));
-    const auto taskTypes = source("service/domains/task/task.types.h");
-    REQUIRE(taskTypes.contains("processed_version"));
-    REQUIRE(taskTypes.contains("count_fails"));
-    REQUIRE(!taskTypes.contains("children"));
-    REQUIRE(!taskTypes.contains("parent_task_id"));
-    const auto taskController = source("service/domains/task/task.controller.h");
-    REQUIRE(taskController.contains("\"pending\", \"running\", \"retry\""));
-    REQUIRE(!taskController.contains("\"waiting\""));
+    for (const auto* markerWriterPath : {
+             "service/features/provider_verification/queue.h",
+             "service/features/dns_sync/queue.h",
+             "service/features/certificate/queue.h",
+             "service/domains/website/website.service.h",
+             "service/domains/certificate/certificate.service.h",
+         }) {
+        const auto markerWriter = source(markerWriterPath);
+        REQUIRE(markerWriter.contains("MarkerResourceType::"));
+        REQUIRE(!markerWriter.contains("upsertMarker(transaction, tenantId, \""));
+        REQUIRE(!markerWriter.contains("removeMarker(transaction, tenantId, \""));
+    }
+
+    const auto dnsSyncWorker = source("service/features/dns_sync/worker.h");
+    REQUIRE(dnsSyncWorker.contains("dns_sync/reconciliation.h"));
+    REQUIRE(!dnsSyncWorker.contains("struct ManagedRecord final"));
+    REQUIRE(!dnsSyncWorker.contains("inline RemoteMergePlan\nplanRemoteMerge"));
+    const auto dnsReconciliation = source("service/features/dns_sync/reconciliation.h");
+    REQUIRE(dnsReconciliation.contains("struct ManagedRecord final"));
+    REQUIRE(dnsReconciliation.contains("inline RemoteMergePlan\nplanRemoteMerge"));
+    REQUIRE(dnsReconciliation.contains("kMaxReconciliationRecords"));
+
+    const auto markerWorkerLoop = source("service/features/background/marker_worker_loop.h");
+    REQUIRE(markerWorkerLoop.contains("runMarkerWorkerLoop"));
+    REQUIRE(markerWorkerLoop.contains("nextLeaseRecovery"));
+    REQUIRE(markerWorkerLoop.contains("nextReconciliation"));
+    REQUIRE(markerWorkerLoop.contains("nextEventPrune"));
+    for (const auto workerPath : {
+             "service/features/provider_verification/worker.h",
+             "service/features/dns_sync/worker.h",
+             "service/features/certificate/worker.h",
+             "service/features/website_dispatch/worker.h",
+         }) {
+        const auto worker = source(workerPath);
+        REQUIRE(worker.contains("background/marker_worker_loop.h"));
+        REQUIRE(worker.contains("runMarkerWorkerLoop"));
+    }
+
+    const auto logNotifications = source("service/features/log_ingest/notifications.h");
+    REQUIRE(logNotifications.contains("flexedge:log-notifications:v2"));
+    REQUIRE(logNotifications.contains("enum class LogResourceType"));
+    REQUIRE(logNotifications.contains("resource_type"));
+    REQUIRE(logNotifications.contains("resource_id"));
+    REQUIRE(logNotifications.contains("struct ReadBatch final"));
+    REQUIRE(!logNotifications.contains("publishAccess"));
+    REQUIRE(!logNotifications.contains("publishNode"));
+    REQUIRE(!logNotifications.contains("websiteId"));
+    REQUIRE(!logNotifications.contains("nodeId"));
+    const auto logFanout = source("service/features/log_ingest/fanout.h");
+    REQUIRE(logFanout.contains("LogResourceType resourceType"));
+    REQUIRE(logFanout.contains("subscribeTopic"));
+    REQUIRE(logFanout.contains("batch.notifications"));
+    REQUIRE(!logFanout.contains("subscribeAccess"));
+    REQUIRE(!logFanout.contains("subscribeNode"));
+    const auto logSseTail = source("service/features/log_ingest/sse_tail.h");
+    REQUIRE(logSseTail.contains("streamSseTail"));
+    REQUIRE(logSseTail.contains("tailResponseCursor"));
+    REQUIRE(logSseTail.contains("advanceTailCursor"));
+    REQUIRE(logSseTail.contains("sseClientDisconnected"));
+    for (const auto* logControllerPath : {
+             "service/domains/node/node.controller.h",
+             "service/domains/website/website.controller.h",
+         }) {
+        const auto controller = source(logControllerPath);
+        REQUIRE(controller.contains("log_ingest/sse_tail.h"));
+        REQUIRE(controller.contains("streamSseTail"));
+        REQUIRE(!controller.contains("receiveFor("));
+        REQUIRE(!controller.contains("advanceCursor("));
+    }
+
+    REQUIRE(!std::filesystem::exists(sourceRoot / "service/domains/task/task.controller.h"));
+    REQUIRE(!std::filesystem::exists(sourceRoot / "service/domains/task/task.service.h"));
+    REQUIRE(!std::filesystem::exists(sourceRoot / "service/domains/task/task.types.h"));
+    REQUIRE(!std::filesystem::exists(sourceRoot / "web/features/tasks/index.tsx"));
+    REQUIRE(!std::filesystem::exists(sourceRoot / "web/routes/_authenticated/tasks.tsx"));
+    const auto syncEventService = source("service/domains/sync_event/sync_event.service.h");
+    REQUIRE(syncEventService.contains("SyncEventPageDataDto"));
+    REQUIRE(syncEventService.contains("FROM sys_sync_event"));
+    REQUIRE(syncEventService.contains("ORDER BY id ASC"));
+    const auto syncEventTypes = source("service/domains/sync_event/sync_event.types.h");
+    REQUIRE(syncEventTypes.contains("SyncEventDto"));
+    REQUIRE(syncEventTypes.contains("has_more"));
+    const auto syncEventController = source("service/domains/sync_event/sync_event.controller.h");
+    REQUIRE(syncEventController.contains("/api/sync-events"));
+    REQUIRE(syncEventController.contains("after 必须是非负事件游标"));
+    REQUIRE(!std::filesystem::exists(sourceRoot / "web/components/task-completion-monitor.tsx"));
+    const auto syncEventMonitor = source("web/components/sync-event-monitor.tsx");
+    REQUIRE(syncEventMonitor.contains("/sync-events/"));
+    REQUIRE(syncEventMonitor.contains("queryKeysForSyncEvents"));
+    const auto syncEvents = source("web/lib/sync-events.ts");
+    REQUIRE(syncEvents.contains("syncEventRefreshKeys"));
+    REQUIRE(syncEvents.contains("queryKeys.providers"));
+    REQUIRE(syncEvents.contains("queryKeys.dnsZones"));
+    REQUIRE(syncEvents.contains("queryKeys.certificates"));
+    REQUIRE(syncEvents.contains("queryKeys.websites"));
+    REQUIRE(!syncEvents.contains("[['tasks']"));
+    REQUIRE(syncEvents.contains("provider:"));
+    REQUIRE(syncEvents.contains("dns_zone:"));
+    REQUIRE(syncEvents.contains("certificate:"));
+    REQUIRE(syncEvents.contains("website:"));
+    const auto queryKeys = source("web/lib/query-keys.ts");
+    REQUIRE(queryKeys.contains("syncEvents: ['sync-event-monitor']"));
+    for (const auto* featurePath :
+         {"web/features/certificates/index.tsx", "web/features/clusters/index.tsx",
+          "web/features/dns-zones/index.tsx", "web/features/nodes/index.tsx",
+          "web/features/providers/index.tsx", "web/features/websites/index.tsx"}) {
+        REQUIRE(source(featurePath).contains("queryKeys"));
+    }
 
     const auto nodeDispatch = source("service/features/node_dispatch/queue.h");
     REQUIRE(nodeDispatch.contains("publishClusterRelease"));
@@ -228,9 +490,12 @@ int main() {
         const auto worker = source(path);
         REQUIRE(worker.contains("sys_sync_task"));
         REQUIRE(worker.contains("recoverStaleRunning"));
+        REQUIRE(worker.contains("publishResultEvent"));
+        REQUIRE(worker.contains("eventRecorded"));
         REQUIRE(!worker.contains("sys_task"));
         REQUIRE(!worker.contains("task_runtime"));
         REQUIRE(!worker.contains("spec_snapshot"));
+        REQUIRE(!worker.contains("RunningMarkerLease lease"));
     }
     const auto dnsSnapshot = source("service/features/dns_sync/snapshot.h");
     REQUIRE(dnsSnapshot.contains("challenge_records"));

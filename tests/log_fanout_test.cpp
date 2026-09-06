@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -17,6 +18,7 @@ namespace {
 
 using Subscription = service::log_ingest::fanout::Hub::Subscription;
 using Notification = service::log_ingest::notifications::Notification;
+using LogResourceType = service::log_ingest::notifications::LogResourceType;
 
 ruvia::Task<ruvia::WorkerWaitResult<std::uint64_t>> receive(Subscription& subscription,
                                                             std::chrono::milliseconds timeout) {
@@ -31,8 +33,15 @@ int main() {
         const auto accessLoop = loops.loop(0);
         const auto nodeLoop = loops.loop(1);
         service::log_ingest::fanout::Hub fanout;
-        auto access = fanout.subscribeAccess(accessLoop.handle(), "tenant-a", "website-a");
-        auto node = fanout.subscribeNode(nodeLoop.handle(), "tenant-a", "node-a");
+        REQUIRE(service::log_ingest::notifications::resourceTypeName(LogResourceType::access) ==
+                "access");
+        REQUIRE(service::log_ingest::notifications::resourceTypeName(LogResourceType::node) ==
+                "node");
+        REQUIRE(service::log_ingest::notifications::parseResourceType("invalid") == std::nullopt);
+        auto access =
+            fanout.subscribe(accessLoop.handle(), LogResourceType::access, "tenant-a", "website-a");
+        auto node =
+            fanout.subscribe(nodeLoop.handle(), LogResourceType::node, "tenant-a", "node-a");
         loops.start();
 
         fanout.markReady();
@@ -43,9 +52,8 @@ int main() {
 
         fanout.publish({.id = "1-0",
                         .tenantId = "tenant-a",
-                        .kind = std::string(service::log_ingest::notifications::kKindAccess),
-                        .websiteId = "website-b",
-                        .nodeId = {}});
+                        .resourceType = LogResourceType::access,
+                        .resourceId = "website-b"});
         const auto unrelated =
             accessLoop.start(receive(access, std::chrono::milliseconds(20))).get();
         REQUIRE(unrelated.status() == ruvia::WorkerWaitStatus::kTimedOut);
@@ -53,9 +61,8 @@ int main() {
         const Notification accessNotification{
             .id = "2-0",
             .tenantId = "tenant-a",
-            .kind = std::string(service::log_ingest::notifications::kKindAccess),
-            .websiteId = "website-a",
-            .nodeId = {},
+            .resourceType = LogResourceType::access,
+            .resourceId = "website-a",
         };
         fanout.publish(accessNotification);
         fanout.publish(accessNotification);
@@ -68,9 +75,8 @@ int main() {
 
         fanout.publish({.id = "3-0",
                         .tenantId = "tenant-a",
-                        .kind = std::string(service::log_ingest::notifications::kKindNode),
-                        .websiteId = {},
-                        .nodeId = "node-a"});
+                        .resourceType = LogResourceType::node,
+                        .resourceId = "node-a"});
         const auto nodeSignal = nodeLoop.start(receive(node, std::chrono::seconds(1))).get();
         REQUIRE(nodeSignal.hasValue());
 

@@ -8,172 +8,11 @@
 #include <utility>
 #include <vector>
 
-#include <ruvia/web/Model.h>
 #include <ruvia/web/ModelJson.h>
 
+#include "service/features/website_config/transport.h"
+
 namespace service::website_config {
-
-RUVIA_REQUEST_MODEL(WebsiteDomainInput, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(hostname, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("dns_mode", dnsMode, ruvia::String));
-RUVIA_REQUEST_MODEL(WebsiteOriginInput, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("group", group, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(protocol, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(host, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(port, ruvia::Int64),
-                    RUVIA_OPTIONAL_FIELD(role, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(weight, ruvia::Int64),
-                    RUVIA_OPTIONAL_FIELD(status, ruvia::String));
-RUVIA_REQUEST_MODEL(WebsiteRouteHeaderInput, RUVIA_OPTIONAL_FIELD(name, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(value, ruvia::String));
-RUVIA_REQUEST_MODEL(WebsiteRouteRuleInput, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(status, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("match_type", matchType, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(path, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(methods, ruvia::Array<ruvia::String>),
-                    RUVIA_OPTIONAL_FIELD(action, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("rewrite_path", rewritePath, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("redirect_url", redirectUrl, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("redirect_status", redirectStatus, ruvia::Int64),
-                    RUVIA_OPTIONAL_FIELD_NAME("origin_group", originGroup, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("request_headers", requestHeaders,
-                                              ruvia::Array<WebsiteRouteHeaderInput>),
-                    RUVIA_OPTIONAL_FIELD_NAME("response_headers", responseHeaders,
-                                              ruvia::Array<WebsiteRouteHeaderInput>));
-RUVIA_REQUEST_MODEL(
-    WebsiteConfigInput, RUVIA_OPTIONAL_FIELD(name, ruvia::String),
-    RUVIA_OPTIONAL_FIELD(domains, ruvia::Array<WebsiteDomainInput>),
-    RUVIA_OPTIONAL_FIELD(origins, ruvia::Array<WebsiteOriginInput>),
-    RUVIA_OPTIONAL_FIELD_NAME("default_origin_group", defaultOriginGroup, ruvia::String),
-    RUVIA_OPTIONAL_FIELD_NAME("origin_host_header", originHostHeader, ruvia::String),
-    RUVIA_OPTIONAL_FIELD_NAME("origin_connect_timeout_seconds", originConnectTimeoutSeconds,
-                              ruvia::Int64),
-    RUVIA_OPTIONAL_FIELD_NAME("origin_read_timeout_seconds", originReadTimeoutSeconds,
-                              ruvia::Int64),
-    RUVIA_OPTIONAL_FIELD_NAME("pass_client_ip", passClientIp, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("health_check_enabled", healthCheckEnabled, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("health_check_path", healthCheckPath, ruvia::String),
-    RUVIA_OPTIONAL_FIELD_NAME("health_check_interval_seconds", healthCheckIntervalSeconds,
-                              ruvia::Int64),
-    RUVIA_OPTIONAL_FIELD_NAME("health_check_timeout_seconds", healthCheckTimeoutSeconds,
-                              ruvia::Int64),
-    RUVIA_OPTIONAL_FIELD_NAME("health_check_expected_status", healthCheckExpectedStatus,
-                              ruvia::Int64),
-    RUVIA_OPTIONAL_FIELD_NAME("healthy_threshold", healthyThreshold, ruvia::Int64),
-    RUVIA_OPTIONAL_FIELD_NAME("unhealthy_threshold", unhealthyThreshold, ruvia::Int64),
-    RUVIA_OPTIONAL_FIELD_NAME("access_log_enabled", accessLogEnabled, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("access_log_request_headers", accessLogRequestHeaders, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("access_log_request_body", accessLogRequestBody, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("access_log_response_headers", accessLogResponseHeaders, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("access_log_query_params", accessLogQueryParams, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("access_log_cookies", accessLogCookies, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("access_log_referer", accessLogReferer, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("access_log_user_agent", accessLogUserAgent, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("access_log_status_code_ranges", accessLogStatusCodeRanges,
-                              ruvia::Array<ruvia::String>),
-    RUVIA_OPTIONAL_FIELD_NAME("access_log_client_abort", accessLogClientAbort, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("https_enabled", httpsEnabled, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("certificate_ids", certificateIds, ruvia::Array<ruvia::String>),
-    RUVIA_OPTIONAL_FIELD_NAME("minimum_tls_version", minimumTlsVersion, ruvia::String),
-    RUVIA_OPTIONAL_FIELD_NAME("force_https", forceHttps, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("http2_enabled", http2Enabled, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("hsts_enabled", hstsEnabled, ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("response_compression_enabled", responseCompressionEnabled,
-                              ruvia::Bool),
-    RUVIA_OPTIONAL_FIELD_NAME("response_compression_min_bytes", responseCompressionMinBytes,
-                              ruvia::Int64),
-    RUVIA_OPTIONAL_FIELD_NAME("response_compression_max_bytes", responseCompressionMaxBytes,
-                              ruvia::Int64),
-    RUVIA_OPTIONAL_FIELD_NAME("response_compression_algorithms", responseCompressionAlgorithms,
-                              ruvia::Array<ruvia::String>),
-    RUVIA_OPTIONAL_FIELD_NAME("response_compression_mime_types", responseCompressionMimeTypes,
-                              ruvia::Array<ruvia::String>),
-    RUVIA_OPTIONAL_FIELD_NAME("response_compression_extensions", responseCompressionExtensions,
-                              ruvia::Array<ruvia::String>),
-    RUVIA_OPTIONAL_FIELD_NAME("response_compression_excluded_extensions",
-                              responseCompressionExcludedExtensions, ruvia::Array<ruvia::String>),
-    RUVIA_OPTIONAL_FIELD_NAME("route_rules", routeRules, ruvia::Array<WebsiteRouteRuleInput>));
-
-RUVIA_RESPONSE_MODEL(WebsiteDomainOutput, RUVIA_REQUIRED_FIELD(id, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(hostname, ruvia::String),
-                     RUVIA_REQUIRED_FIELD_NAME("dns_mode", dnsMode, ruvia::String));
-RUVIA_RESPONSE_MODEL(WebsiteOriginOutput, RUVIA_REQUIRED_FIELD(id, ruvia::String),
-                     RUVIA_REQUIRED_FIELD_NAME("group", group, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(protocol, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(host, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(port, ruvia::Int64),
-                     RUVIA_REQUIRED_FIELD(role, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(weight, ruvia::Int64),
-                     RUVIA_REQUIRED_FIELD(status, ruvia::String));
-RUVIA_RESPONSE_MODEL(WebsiteRouteHeaderOutput, RUVIA_REQUIRED_FIELD(name, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(value, ruvia::String));
-RUVIA_RESPONSE_MODEL(WebsiteRouteRuleOutput, RUVIA_REQUIRED_FIELD(id, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(status, ruvia::String),
-                     RUVIA_REQUIRED_FIELD_NAME("match_type", matchType, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(path, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(methods, ruvia::Array<ruvia::String>),
-                     RUVIA_REQUIRED_FIELD(action, ruvia::String),
-                     RUVIA_REQUIRED_FIELD_NAME("rewrite_path", rewritePath, ruvia::String),
-                     RUVIA_REQUIRED_FIELD_NAME("redirect_url", redirectUrl, ruvia::String),
-                     RUVIA_REQUIRED_FIELD_NAME("redirect_status", redirectStatus, ruvia::Int64),
-                     RUVIA_REQUIRED_FIELD_NAME("origin_group", originGroup, ruvia::String),
-                     RUVIA_REQUIRED_FIELD_NAME("request_headers", requestHeaders,
-                                               ruvia::Array<WebsiteRouteHeaderOutput>),
-                     RUVIA_REQUIRED_FIELD_NAME("response_headers", responseHeaders,
-                                               ruvia::Array<WebsiteRouteHeaderOutput>));
-RUVIA_RESPONSE_MODEL(
-    WebsiteConfigOutput, RUVIA_OPTIONAL_FIELD(name, ruvia::String),
-    RUVIA_REQUIRED_FIELD(domains, ruvia::Array<WebsiteDomainOutput>),
-    RUVIA_REQUIRED_FIELD(origins, ruvia::Array<WebsiteOriginOutput>),
-    RUVIA_REQUIRED_FIELD_NAME("default_origin_group", defaultOriginGroup, ruvia::String),
-    RUVIA_REQUIRED_FIELD_NAME("origin_host_header", originHostHeader, ruvia::String),
-    RUVIA_REQUIRED_FIELD_NAME("origin_connect_timeout_seconds", originConnectTimeoutSeconds,
-                              ruvia::Int64),
-    RUVIA_REQUIRED_FIELD_NAME("origin_read_timeout_seconds", originReadTimeoutSeconds,
-                              ruvia::Int64),
-    RUVIA_REQUIRED_FIELD_NAME("pass_client_ip", passClientIp, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("health_check_enabled", healthCheckEnabled, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("health_check_path", healthCheckPath, ruvia::String),
-    RUVIA_REQUIRED_FIELD_NAME("health_check_interval_seconds", healthCheckIntervalSeconds,
-                              ruvia::Int64),
-    RUVIA_REQUIRED_FIELD_NAME("health_check_timeout_seconds", healthCheckTimeoutSeconds,
-                              ruvia::Int64),
-    RUVIA_REQUIRED_FIELD_NAME("health_check_expected_status", healthCheckExpectedStatus,
-                              ruvia::Int64),
-    RUVIA_REQUIRED_FIELD_NAME("healthy_threshold", healthyThreshold, ruvia::Int64),
-    RUVIA_REQUIRED_FIELD_NAME("unhealthy_threshold", unhealthyThreshold, ruvia::Int64),
-    RUVIA_REQUIRED_FIELD_NAME("access_log_enabled", accessLogEnabled, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("access_log_request_headers", accessLogRequestHeaders, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("access_log_request_body", accessLogRequestBody, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("access_log_response_headers", accessLogResponseHeaders, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("access_log_query_params", accessLogQueryParams, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("access_log_cookies", accessLogCookies, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("access_log_referer", accessLogReferer, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("access_log_user_agent", accessLogUserAgent, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("access_log_status_code_ranges", accessLogStatusCodeRanges,
-                              ruvia::Array<ruvia::String>),
-    RUVIA_REQUIRED_FIELD_NAME("access_log_client_abort", accessLogClientAbort, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("https_enabled", httpsEnabled, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("certificate_ids", certificateIds, ruvia::Array<ruvia::String>),
-    RUVIA_REQUIRED_FIELD_NAME("minimum_tls_version", minimumTlsVersion, ruvia::String),
-    RUVIA_REQUIRED_FIELD_NAME("force_https", forceHttps, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("http2_enabled", http2Enabled, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("hsts_enabled", hstsEnabled, ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("response_compression_enabled", responseCompressionEnabled,
-                              ruvia::Bool),
-    RUVIA_REQUIRED_FIELD_NAME("response_compression_min_bytes", responseCompressionMinBytes,
-                              ruvia::Int64),
-    RUVIA_REQUIRED_FIELD_NAME("response_compression_max_bytes", responseCompressionMaxBytes,
-                              ruvia::Int64),
-    RUVIA_REQUIRED_FIELD_NAME("response_compression_algorithms", responseCompressionAlgorithms,
-                              ruvia::Array<ruvia::String>),
-    RUVIA_REQUIRED_FIELD_NAME("response_compression_mime_types", responseCompressionMimeTypes,
-                              ruvia::Array<ruvia::String>),
-    RUVIA_REQUIRED_FIELD_NAME("response_compression_extensions", responseCompressionExtensions,
-                              ruvia::Array<ruvia::String>),
-    RUVIA_REQUIRED_FIELD_NAME("response_compression_excluded_extensions",
-                              responseCompressionExcludedExtensions, ruvia::Array<ruvia::String>),
-    RUVIA_REQUIRED_FIELD_NAME("route_rules", routeRules, ruvia::Array<WebsiteRouteRuleOutput>));
 
 struct WebsiteDomainData final {
     std::string id;
@@ -275,11 +114,11 @@ struct WebsiteConfigData final {
     const auto& role = input.get<"role">();
     const auto& weight = input.get<"weight">();
     const auto& status = input.get<"status">();
-    if (!id || !protocol || !host || !port || !role || !weight || !status) {
+    if (!id || !group || !protocol || !host || !port || !role || !weight || !status) {
         return std::nullopt;
     }
     return WebsiteOriginData{.id = std::string(id->view()),
-                             .group = group ? std::string(group->view()) : "default",
+                             .group = std::string(group->view()),
                              .protocol = std::string(protocol->view()),
                              .host = std::string(host->view()),
                              .port = port->value,
@@ -406,10 +245,13 @@ template <typename Values>
     const auto& responseCompressionExcludedExtensions =
         input.get<"responseCompressionExcludedExtensions">();
     const auto& routeRules = input.get<"routeRules">();
-    if (!domains || !origins || !originHostHeader || !originConnectTimeoutSeconds ||
-        !originReadTimeoutSeconds || !passClientIp || !healthCheckEnabled || !accessLogEnabled ||
-        !accessLogRequestHeaders || !accessLogRequestBody || !accessLogResponseHeaders ||
-        !accessLogQueryParams || !accessLogCookies || !accessLogReferer || !accessLogUserAgent ||
+    if (!domains || !origins || !defaultOriginGroup || !originHostHeader ||
+        !originConnectTimeoutSeconds || !originReadTimeoutSeconds || !passClientIp ||
+        !healthCheckEnabled || !healthCheckPath || !healthCheckIntervalSeconds ||
+        !healthCheckTimeoutSeconds || !healthCheckExpectedStatus || !healthyThreshold ||
+        !unhealthyThreshold || !accessLogEnabled || !accessLogRequestHeaders ||
+        !accessLogRequestBody || !accessLogResponseHeaders || !accessLogQueryParams ||
+        !accessLogCookies || !accessLogReferer || !accessLogUserAgent ||
         !accessLogStatusCodeRanges || !accessLogClientAbort || !httpsEnabled || !certificateIds ||
         !minimumTlsVersion || !forceHttps || !http2Enabled || !hstsEnabled ||
         !responseCompressionEnabled || !responseCompressionMinBytes ||
@@ -424,21 +266,17 @@ template <typename Values>
         result.name = std::string(name->view());
     }
     result.originHostHeader = std::string(originHostHeader->view());
-    result.defaultOriginGroup =
-        defaultOriginGroup ? std::string(defaultOriginGroup->view()) : "default";
+    result.defaultOriginGroup = std::string(defaultOriginGroup->view());
     result.originConnectTimeoutSeconds = originConnectTimeoutSeconds->value;
     result.originReadTimeoutSeconds = originReadTimeoutSeconds->value;
     result.passClientIp = passClientIp->value;
     result.healthCheckEnabled = healthCheckEnabled->value;
-    result.healthCheckPath = healthCheckPath ? std::string(healthCheckPath->view()) : "/";
-    result.healthCheckIntervalSeconds =
-        healthCheckIntervalSeconds ? healthCheckIntervalSeconds->value : 10;
-    result.healthCheckTimeoutSeconds =
-        healthCheckTimeoutSeconds ? healthCheckTimeoutSeconds->value : 3;
-    result.healthCheckExpectedStatus =
-        healthCheckExpectedStatus ? healthCheckExpectedStatus->value : 200;
-    result.healthyThreshold = healthyThreshold ? healthyThreshold->value : 2;
-    result.unhealthyThreshold = unhealthyThreshold ? unhealthyThreshold->value : 3;
+    result.healthCheckPath = std::string(healthCheckPath->view());
+    result.healthCheckIntervalSeconds = healthCheckIntervalSeconds->value;
+    result.healthCheckTimeoutSeconds = healthCheckTimeoutSeconds->value;
+    result.healthCheckExpectedStatus = healthCheckExpectedStatus->value;
+    result.healthyThreshold = healthyThreshold->value;
+    result.unhealthyThreshold = unhealthyThreshold->value;
     result.accessLogEnabled = accessLogEnabled->value;
     result.accessLogRequestHeaders = accessLogRequestHeaders->value;
     result.accessLogRequestBody = accessLogRequestBody->value;
@@ -480,16 +318,13 @@ template <typename Values>
         }
         result.origins.push_back(std::move(*normalized));
     }
-    const bool legacyRouteRules = !defaultOriginGroup;
-    if (!legacyRouteRules) {
-        result.routeRules.reserve(routeRules->size());
-        for (const auto& rule : *routeRules) {
-            auto normalized = normalize(rule);
-            if (!normalized) {
-                return std::nullopt;
-            }
-            result.routeRules.push_back(std::move(*normalized));
+    result.routeRules.reserve(routeRules->size());
+    for (const auto& rule : *routeRules) {
+        auto normalized = normalize(rule);
+        if (!normalized) {
+            return std::nullopt;
         }
+        result.routeRules.push_back(std::move(*normalized));
     }
     std::unordered_set<std::string_view> enabledOriginGroups;
     for (const auto& origin : result.origins) {
