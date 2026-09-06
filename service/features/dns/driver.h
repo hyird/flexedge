@@ -7,13 +7,17 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
+
+#include <asio/ip/address.hpp>
 
 #include <ruvia/core/Task.h>
 #include <ruvia/web/Context.h>
 
 #include "service/features/dns/aliyun.h"
 #include "service/features/dns/cloudflare.h"
+#include "service/features/dns/record_reconciliation.h"
 #include "service/features/dns/registry.h"
 
 namespace service::dns {
@@ -144,32 +148,43 @@ class DnsProviderDriver final {
                     std::optional<std::int64_t> priority, bool proxied, std::string_view lineCode,
                     const std::vector<ProviderRecord>& remoteRecords) const {
         const auto name = remoteRecordName(localName, domain);
+        const auto plan = planRecordReconciliation(
+            remoteRecords, remoteRecordId,
+            [this, type, name, content, lineCode](const ProviderRecord& record) {
+                return recordHasSameIdentity(record, type, name, content, lineCode);
+            },
+            [this, type, name, content, ttl, priority, proxied,
+             lineCode](const ProviderRecord& record) {
+                return recordMatchesDesired(record, type, name, content, ttl, priority, proxied,
+                                            lineCode);
+            },
+            [this] {
+                if (kind_ == DnsProviderKind::cloudflare) {
+                    throw CloudflareError(CloudflareErrorCode::recordConflict,
+                                          "Cloudflare 中存在多条相同 DNS 记录，无法安全接管");
+                }
+                throw AliyunError(AliyunErrorCode::recordConflict,
+                                  "阿里云 DNS 中存在多条相同线路解析记录，无法安全接管");
+            });
+        if (plan.action == RecordReconciliationAction::reuse) {
+            co_return plan.record->id;
+        }
         if (kind_ == DnsProviderKind::cloudflare) {
-            std::vector<CloudflareRecord> records;
-            records.reserve(remoteRecords.size());
-            for (const auto& record : remoteRecords) {
-                records.push_back({record.id,
-                                   record.type,
-                                   record.name,
-                                   record.content,
-                                   record.ttl,
-                                   record.priority,
-                                   record.proxied,
-                                   {}});
+            if (plan.action == RecordReconciliationAction::update) {
+                co_return co_await cloudflareClient().updateRecord(c, secret, zoneId,
+                                                                   plan.record->id, type, name,
+                                                                   content, ttl, priority, proxied);
             }
-            co_return co_await cloudflareClient().reconcileRecord(c, secret, zoneId, remoteRecordId,
-                                                                  type, name, content, ttl,
-                                                                  priority, proxied, records);
+            co_return co_await cloudflareClient().createOrAdoptRecord(
+                c, secret, zoneId, type, name, content, ttl, priority, proxied);
         }
-        std::vector<AliyunRecord> records;
-        records.reserve(remoteRecords.size());
-        for (const auto& record : remoteRecords) {
-            records.push_back({record.id, record.name, record.type, record.content, record.ttl,
-                               record.priority, record.lineCode});
+        if (plan.action == RecordReconciliationAction::update) {
+            co_return co_await aliyunClient().updateRecord(c, accountId, secret, plan.record->id,
+                                                           domain, type, name, content, ttl,
+                                                           priority, lineCode);
         }
-        co_return co_await aliyunClient().reconcileRecord(c, accountId, secret, domain,
-                                                          remoteRecordId, type, name, content, ttl,
-                                                          priority, lineCode, records);
+        co_return co_await aliyunClient().createRecord(c, accountId, secret, domain, type, name,
+                                                       content, ttl, priority, lineCode);
     }
 
     template <typename Runtime>
@@ -246,6 +261,71 @@ class DnsProviderDriver final {
     static bool isSubdomain(std::string_view name, std::string_view domain) {
         return name.size() > domain.size() && name.ends_with(domain) &&
                name[name.size() - domain.size() - 1] == '.';
+    }
+
+    [[nodiscard]] bool recordHasSameIdentity(const ProviderRecord& record, std::string_view type,
+                                             std::string_view name, std::string_view content,
+                                             std::string_view lineCode) const {
+        if (record.type != type || !recordNameEquals(record.name, name) ||
+            !recordContentEquals(type, record.content, content)) {
+            return false;
+        }
+        return kind_ != DnsProviderKind::aliyun || record.lineCode == lineCode;
+    }
+
+    [[nodiscard]] bool recordMatchesDesired(const ProviderRecord& record, std::string_view type,
+                                            std::string_view name, std::string_view content,
+                                            std::int64_t ttl, std::optional<std::int64_t> priority,
+                                            bool proxied, std::string_view lineCode) const {
+        if (!recordHasSameIdentity(record, type, name, content, lineCode) || record.ttl != ttl) {
+            return false;
+        }
+        if (type == "MX" && record.priority != priority) {
+            return false;
+        }
+        if (kind_ == DnsProviderKind::cloudflare &&
+            (type == "A" || type == "AAAA" || type == "CNAME")) {
+            return record.proxied == proxied;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool recordContentEquals(std::string_view type, std::string_view left,
+                                           std::string_view right) const {
+        if (kind_ != DnsProviderKind::cloudflare) {
+            return left == right;
+        }
+        if (type == "A" || type == "AAAA") {
+            return ipAddressEquals(left, right);
+        }
+        if (type == "CNAME" || type == "MX") {
+            return recordNameEquals(left, right);
+        }
+        return left == right;
+    }
+
+    [[nodiscard]] static bool ipAddressEquals(std::string_view left, std::string_view right) {
+        std::error_code leftError;
+        std::error_code rightError;
+        const auto leftAddress = asio::ip::make_address(left, leftError);
+        const auto rightAddress = asio::ip::make_address(right, rightError);
+        return !leftError && !rightError && leftAddress == rightAddress;
+    }
+
+    [[nodiscard]] bool recordNameEquals(std::string_view left, std::string_view right) const {
+        return normalizeRecordName(left, kind_ == DnsProviderKind::cloudflare) ==
+               normalizeRecordName(right, kind_ == DnsProviderKind::cloudflare);
+    }
+
+    [[nodiscard]] static std::string normalizeRecordName(std::string_view input,
+                                                         bool trimTrailingDot) {
+        std::string result(input);
+        std::transform(result.begin(), result.end(), result.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (trimTrailingDot && result.ends_with('.')) {
+            result.pop_back();
+        }
+        return result;
     }
 
     DnsProviderKind kind_;

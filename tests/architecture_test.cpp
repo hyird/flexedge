@@ -19,6 +19,7 @@
 #include "service/config/schema.h"
 #include "service/domains/overview/overview.types.h"
 #include "service/features/certificate/worker.h"
+#include "service/features/dns/record_reconciliation.h"
 #include "service/features/dns/registry.h"
 #include "service/features/dns_sync/worker.h"
 #include "service/features/log_ingest/tail.h"
@@ -112,6 +113,48 @@ int main() {
     static_assert(service::dns::findDnsProvider("cloudflare")->supportsProxy);
     static_assert(service::dns::findDnsProvider("aliyun")->supportsRoutingLines);
     static_assert(service::dns::findDnsProvider("unknown") == nullptr);
+    struct ReconciliationTestRecord final {
+        std::string id;
+        bool desired;
+    };
+    const std::vector<ReconciliationTestRecord> reconciliationRecords{
+        {"known", false},
+        {"exact", true},
+    };
+    const auto knownRecordPlan = service::dns::planRecordReconciliation(
+        reconciliationRecords, "known", [](const ReconciliationTestRecord&) { return false; },
+        [](const ReconciliationTestRecord& record) { return record.desired; },
+        [] { throw std::runtime_error("unexpected duplicate"); });
+    REQUIRE(knownRecordPlan.action == service::dns::RecordReconciliationAction::update);
+    REQUIRE(knownRecordPlan.record->id == "known");
+    const auto exactRecordPlan = service::dns::planRecordReconciliation(
+        reconciliationRecords, "missing",
+        [](const ReconciliationTestRecord& record) { return record.id == "exact"; },
+        [](const ReconciliationTestRecord& record) { return record.desired; },
+        [] { throw std::runtime_error("unexpected duplicate"); });
+    REQUIRE(exactRecordPlan.action == service::dns::RecordReconciliationAction::reuse);
+    REQUIRE(exactRecordPlan.record->id == "exact");
+    const auto newRecordPlan = service::dns::planRecordReconciliation(
+        reconciliationRecords, "missing", [](const ReconciliationTestRecord&) { return false; },
+        [](const ReconciliationTestRecord&) { return false; },
+        [] { throw std::runtime_error("unexpected duplicate"); });
+    REQUIRE(newRecordPlan.action == service::dns::RecordReconciliationAction::create);
+    REQUIRE(newRecordPlan.record == nullptr);
+    REQUIRE(throwsRuntimeError([&] {
+        (void)service::dns::planRecordReconciliation(
+            reconciliationRecords, "missing",
+            [](const ReconciliationTestRecord& record) {
+                return record.id == "exact" || record.id == "known";
+            },
+            [](const ReconciliationTestRecord&) { return false; },
+            [] { throw std::runtime_error("duplicate record"); });
+    }));
+    const auto dnsDriver = source("service/features/dns/driver.h");
+    REQUIRE(dnsDriver.contains("planRecordReconciliation"));
+    REQUIRE(!dnsDriver.contains("std::vector<CloudflareRecord> records"));
+    REQUIRE(!dnsDriver.contains("std::vector<AliyunRecord> records"));
+    REQUIRE(!source("service/features/dns/cloudflare.h").contains("reconcileRecord"));
+    REQUIRE(!source("service/features/dns/aliyun.h").contains("reconcileRecord"));
     static_assert(service::node_dispatch::canReportAppliedNodeSpecRevision(2, 2, 3));
     static_assert(service::node_dispatch::canReportAppliedNodeSpecRevision(2, 3, 3));
     static_assert(!service::node_dispatch::canReportAppliedNodeSpecRevision(3, 2, 4));

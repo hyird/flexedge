@@ -340,50 +340,6 @@ class CloudflareClient final {
 
     template <typename Runtime>
     ruvia::Task<std::string>
-    reconcileRecord(Runtime& c, std::string_view token, std::string_view zoneId,
-                    std::string_view remoteRecordId, std::string_view type, std::string_view name,
-                    std::string_view content, std::int64_t ttl,
-                    std::optional<std::int64_t> priority, bool proxied,
-                    const std::vector<CloudflareRecord>& remoteRecords) const {
-        if (!remoteRecordId.empty()) {
-            const auto byId = std::find_if(
-                remoteRecords.begin(), remoteRecords.end(),
-                [remoteRecordId](const auto& record) { return record.id == remoteRecordId; });
-            if (byId != remoteRecords.end()) {
-                if (recordMatches(*byId, type, name, content, ttl, priority, proxied)) {
-                    co_return byId->id;
-                }
-                co_return co_await updateRecord(c, token, zoneId, byId->id, type, name, content,
-                                                ttl, priority, proxied);
-            }
-        }
-
-        const CloudflareRecord* exact = nullptr;
-        for (const auto& record : remoteRecords) {
-            if (record.type != type || !dnsNameEquals(record.name, name) ||
-                !recordContentEquals(type, record.content, content)) {
-                continue;
-            }
-            if (exact && exact->id != record.id) {
-                throw CloudflareError(CloudflareErrorCode::recordConflict,
-                                      "Cloudflare 中存在多条相同 DNS 记录，无法安全接管");
-            }
-            exact = &record;
-        }
-        if (exact) {
-            if (recordMatches(*exact, type, name, content, ttl, priority, proxied)) {
-                co_return exact->id;
-            }
-            co_return co_await updateRecord(c, token, zoneId, exact->id, type, name, content, ttl,
-                                            priority, proxied);
-        }
-
-        co_return co_await createOrAdoptRecord(c, token, zoneId, type, name, content, ttl, priority,
-                                               proxied);
-    }
-
-    template <typename Runtime>
-    ruvia::Task<std::string>
     createOrAdoptRecord(Runtime& c, std::string_view token, std::string_view zoneId,
                         std::string_view type, std::string_view name, std::string_view content,
                         std::int64_t ttl, std::optional<std::int64_t> priority,
@@ -664,23 +620,6 @@ class CloudflareClient final {
             return dnsNameEquals(left, right);
         }
         return left == right;
-    }
-
-    [[nodiscard]] static bool recordMatches(const CloudflareRecord& remote, std::string_view type,
-                                            std::string_view name, std::string_view content,
-                                            std::int64_t ttl, std::optional<std::int64_t> priority,
-                                            bool proxied) {
-        if (remote.type != type || !dnsNameEquals(remote.name, name) ||
-            !recordContentEquals(type, remote.content, content) || remote.ttl != ttl) {
-            return false;
-        }
-        if (type == "MX" && remote.priority != priority) {
-            return false;
-        }
-        if ((type == "A" || type == "AAAA" || type == "CNAME") && remote.proxied != proxied) {
-            return false;
-        }
-        return true;
     }
 
     [[nodiscard]] static std::string percentEncode(std::string_view input) {
