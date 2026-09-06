@@ -15,8 +15,10 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { getData, sendData, type ApiEnvelope } from '@/lib/api'
+import { dnsLinePath } from '@/lib/dns-lines'
 import { formatBytesPerSecond, formatDate } from '@/lib/format'
-import type { Cluster, Node, PageData } from '@/lib/types'
+import type { Cluster, DnsLine, DnsZone, Node, PageData } from '@/lib/types'
+import { useResourceFilters } from '@/hooks/use-resource-filters'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -50,6 +52,8 @@ import {
 } from '@/components/ui/sheet'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTableColumnHeader } from '@/components/data-table'
+import { DataTableCellContent } from '@/components/data-table/cell-content'
+import { DnsLineSelect } from '@/components/dns-line-tree'
 import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
 import { RowActions } from '@/components/row-actions'
@@ -80,16 +84,24 @@ type NodeLog = {
 
 export function NodesPanel({
   initialClusterId,
+  createOpen = false,
+  onCreateOpenChange,
+  showClusterFilter = true,
 }: {
   initialClusterId?: string
+  createOpen?: boolean
+  onCreateOpenChange?: (open: boolean) => void
+  showClusterFilter?: boolean
 }) {
   const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
-  const [draftKeyword, setDraftKeyword] = useState('')
-  const [keyword, setKeyword] = useState('')
-  const [clusterId, setClusterId] = useState(initialClusterId ?? 'all')
-  const [status, setStatus] = useState('all')
+  const filter = useResourceFilters({
+    keyword: '',
+    clusterId: initialClusterId ?? 'all',
+    status: 'all',
+  })
+  const { keyword, clusterId, status } = filter.filters
   const [dialog, setDialog] = useState<Node | 'new' | null>(null)
   const [removeTarget, setRemoveTarget] = useState<Node | null>(null)
   const [credentials, setCredentials] = useState<Credentials | null>(null)
@@ -102,6 +114,26 @@ export function NodesPanel({
         page: 1,
         page_size: 100,
       }).then((data) => data.list),
+  })
+  const clusters = useMemo(() => clustersQuery.data ?? [], [clustersQuery.data])
+  const clusterIds = useMemo(
+    () => clusters.map((cluster) => cluster.id),
+    [clusters]
+  )
+  const linesQuery = useQuery<Record<string, DnsLine[]>>({
+    queryKey: ['dns-zones', 'lines-by-cluster', clusterIds],
+    queryFn: async () => {
+      const entries = await Promise.all(
+        clusters.map(async (cluster) => {
+          const zone = await getData<DnsZone>(
+            `/dns-zones/${cluster.dns_zone_id}`
+          )
+          return [cluster.id, zone.runtime.lines] as const
+        })
+      )
+      return Object.fromEntries(entries)
+    },
+    enabled: clusterIds.length > 0,
   })
   const query = useQuery({
     queryKey: ['nodes', page, pageSize, keyword, clusterId, status],
@@ -134,44 +166,65 @@ export function NodesPanel({
       {
         accessorKey: 'name',
         header: ({ column }) => (
-          <DataTableColumnHeader column={column} title='节点' />
+          <DataTableColumnHeader column={column} title='节点 / 集群' />
         ),
         cell: ({ row }) => (
-          <div>
+          <DataTableCellContent>
             <div className='font-medium'>{row.original.name}</div>
             <div className='text-xs text-muted-foreground'>
               {row.original.cluster_name} ·{' '}
               {row.original.runtime.agent_version || '未注册'}
             </div>
-          </div>
+          </DataTableCellContent>
         ),
       },
       {
         id: 'connection',
-        header: '连接状态',
+        header: '连接 / 心跳',
         cell: ({ row }) => (
-          <div className='space-y-1'>
+          <DataTableCellContent>
             <StatusBadge status={row.original.runtime.connection_status} />
             <div className='text-xs text-muted-foreground'>
               {formatDate(row.original.runtime.last_heartbeat_at)}
             </div>
-          </div>
+          </DataTableCellContent>
         ),
       },
       {
-        id: 'endpoints',
-        header: 'Endpoint',
+        id: 'ip',
+        header: '节点 IP',
         cell: ({ row }) => (
-          <div className='space-y-1'>
+          <DataTableCellContent>
             {row.original.config.endpoints.slice(0, 2).map((endpoint) => (
-              <div key={endpoint.id} className='text-xs'>
-                <code>{endpoint.ip_address}</code>
-                <span className='ms-2 text-muted-foreground'>
-                  {endpoint.line_code}
-                </span>
-              </div>
+              <code key={endpoint.id}>{endpoint.ip_address}</code>
             ))}
-          </div>
+            {row.original.config.endpoints.length > 2 && (
+              <span className='text-xs text-muted-foreground'>
+                +{row.original.config.endpoints.length - 2}
+              </span>
+            )}
+          </DataTableCellContent>
+        ),
+      },
+      {
+        id: 'line',
+        header: 'DNS 线路',
+        cell: ({ row }) => (
+          <DataTableCellContent>
+            {row.original.config.endpoints.slice(0, 2).map((endpoint) => (
+              <span key={endpoint.id}>
+                {dnsLinePath(
+                  linesQuery.data?.[row.original.cluster_id] ?? [],
+                  endpoint.line_code
+                )}
+              </span>
+            ))}
+            {row.original.config.endpoints.length > 2 && (
+              <span className='text-xs text-muted-foreground'>
+                +{row.original.config.endpoints.length - 2}
+              </span>
+            )}
+          </DataTableCellContent>
         ),
       },
       {
@@ -188,7 +241,7 @@ export function NodesPanel({
       },
       {
         accessorKey: 'status',
-        header: '状态',
+        header: '启用状态',
         cell: ({ row }) => <StatusBadge status={row.original.status} />,
       },
       {
@@ -217,58 +270,49 @@ export function NodesPanel({
         ),
       },
     ],
-    [loadNodeCredentials]
+    [linesQuery.data, loadNodeCredentials]
   )
 
   return (
     <>
       <ResourceToolbar
-        value={draftKeyword}
-        onChange={setDraftKeyword}
+        value={filter.draft.keyword}
+        onChange={(value) => filter.setField('keyword', value)}
         onSearch={() => {
-          setKeyword(draftKeyword.trim())
+          const changed = filter.apply()
           setPage(1)
+          if (!changed && page === 1) void query.refetch()
         }}
         onReset={() => {
-          setDraftKeyword('')
-          setKeyword('')
+          const changed = filter.reset()
           setPage(1)
+          if (!changed && page === 1) void query.refetch()
         }}
-        onRefresh={() => query.refetch()}
         refreshing={query.isFetching}
         placeholder='搜索节点名称…'
-        actions={
-          <Button size='sm' onClick={() => setDialog('new')}>
-            <Plus /> 添加节点
-          </Button>
-        }
         filters={
           <>
+            {showClusterFilter && (
+              <Select
+                value={filter.draft.clusterId}
+                onValueChange={(value) => filter.setField('clusterId', value)}
+              >
+                <SelectTrigger className='w-44'>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value='all'>全部集群</SelectItem>
+                  {clustersQuery.data?.map((cluster) => (
+                    <SelectItem key={cluster.id} value={cluster.id}>
+                      {cluster.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
             <Select
-              value={clusterId}
-              onValueChange={(value) => {
-                setClusterId(value)
-                setPage(1)
-              }}
-            >
-              <SelectTrigger className='w-44'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value='all'>全部集群</SelectItem>
-                {clustersQuery.data?.map((cluster) => (
-                  <SelectItem key={cluster.id} value={cluster.id}>
-                    {cluster.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={status}
-              onValueChange={(value) => {
-                setStatus(value)
-                setPage(1)
-              }}
+              value={filter.draft.status}
+              onValueChange={(value) => filter.setField('status', value)}
             >
               <SelectTrigger className='w-36'>
                 <SelectValue />
@@ -298,15 +342,20 @@ export function NodesPanel({
         emptyTitle='暂无节点'
         emptyDescription='添加节点后会生成一次性接入凭据。'
       />
-      {dialog && (
+      {(dialog || createOpen) && (
         <NodeDialog
-          key={dialog === 'new' ? 'new' : dialog.id}
-          node={dialog === 'new' ? undefined : dialog}
+          key={!dialog || dialog === 'new' ? 'new' : dialog.id}
+          node={!dialog || dialog === 'new' ? undefined : dialog}
           clusters={clustersQuery.data ?? []}
           initialClusterId={clusterId === 'all' ? undefined : clusterId}
           open
           onCredentials={setCredentials}
-          onOpenChange={(open) => !open && setDialog(null)}
+          onOpenChange={(open) => {
+            if (!open) {
+              setDialog(null)
+              onCreateOpenChange?.(false)
+            }
+          }}
         />
       )}
       <CredentialsDialog
@@ -366,6 +415,16 @@ function NodeDialog({
       ],
     },
   })
+  const clusterId = form.watch('cluster_id')
+  const selectedCluster = clusters.find((cluster) => cluster.id === clusterId)
+  const linesQuery = useQuery({
+    queryKey: ['dns-zones', 'lines', selectedCluster?.dns_zone_id],
+    queryFn: () =>
+      getData<DnsZone>(`/dns-zones/${selectedCluster!.dns_zone_id}`).then(
+        (zone) => zone.runtime.lines
+      ),
+    enabled: !!selectedCluster?.dns_zone_id,
+  })
   const endpoints = useFieldArray({
     control: form.control,
     name: 'endpoints',
@@ -406,7 +465,7 @@ function NodeDialog({
             className='grid gap-4 px-4'
             onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
           >
-            <div className='grid gap-4 sm:grid-cols-2'>
+            <div className='grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto_auto]'>
               <FormField
                 control={form.control}
                 name='name'
@@ -444,27 +503,27 @@ function NodeDialog({
                   </FormItem>
                 )}
               />
+              <FormField
+                control={form.control}
+                name='status'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>状态</FormLabel>
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value='enabled'>启用</SelectItem>
+                        <SelectItem value='disabled'>停用</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </FormItem>
+                )}
+              />
             </div>
-            <FormField
-              control={form.control}
-              name='status'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>状态</FormLabel>
-                  <Select value={field.value} onValueChange={field.onChange}>
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      <SelectItem value='enabled'>启用</SelectItem>
-                      <SelectItem value='disabled'>停用</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </FormItem>
-              )}
-            />
             <div className='space-y-3'>
               <div className='flex items-center justify-between'>
                 <div>
@@ -512,9 +571,13 @@ function NodeDialog({
                     name={`endpoints.${index}.line_code`}
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel className='sr-only'>线路代码</FormLabel>
+                        <FormLabel className='sr-only'>DNS线路</FormLabel>
                         <FormControl>
-                          <Input placeholder='default' {...field} />
+                          <DnsLineSelect
+                            lines={linesQuery.data ?? []}
+                            value={field.value}
+                            onValueChange={field.onChange}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -535,7 +598,7 @@ function NodeDialog({
             </div>
           </form>
         </Form>
-        <SheetFooter>
+        <SheetFooter className='mt-0'>
           <Button variant='outline' onClick={() => onOpenChange(false)}>
             取消
           </Button>

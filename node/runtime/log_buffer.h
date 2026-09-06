@@ -36,6 +36,7 @@ class NodeLogBuffer final {
         std::string host;
         std::string target;
         std::uint32_t statusCode{};
+        std::uint64_t requestBytes{};
         std::uint64_t responseBytes{};
         std::uint64_t durationMs{};
         std::string userAgent;
@@ -486,6 +487,7 @@ class NodeLogBuffer final {
         record.host = bounded(record.host, log_contract::kMaxHostBytes);
         record.target = bounded(record.target, log_contract::kMaxTargetBytes);
         record.statusCode = std::clamp(record.statusCode, 100u, 999u);
+        record.requestBytes = (std::min)(record.requestBytes, log_contract::kMaxRequestBytes);
         record.responseBytes = (std::min)(record.responseBytes, log_contract::kMaxResponseBytes);
         record.durationMs = (std::min)(record.durationMs, log_contract::kMaxDurationMs);
         record.userAgent = bounded(record.userAgent, log_contract::kMaxUserAgentBytes);
@@ -515,6 +517,7 @@ class NodeLogBuffer final {
         value->set_host(record.host);
         value->set_target(record.target);
         value->set_status_code(record.statusCode);
+        value->set_request_bytes(record.requestBytes);
         value->set_response_bytes(record.responseBytes);
         value->set_duration_ms(record.durationMs);
         value->set_user_agent(record.userAgent);

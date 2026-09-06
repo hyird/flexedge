@@ -11,7 +11,17 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       <>
         <NavigationProgress />
         <Outlet />
-        <Toaster richColors closeButton duration={4500} />
+        <Toaster
+          position='top-center'
+          visibleToasts={Infinity}
+          gap={12}
+          expand
+          offset={{ top: 16 }}
+          mobileOffset={{ top: 12 }}
+          richColors
+          closeButton
+          duration={4500}
+        />
       </>
     ),
     notFoundComponent: NotFoundError,

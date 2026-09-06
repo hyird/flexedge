@@ -42,6 +42,7 @@ inline bool validAccess(const flexedge::node::v2::AccessLog& value) {
            !value.target().empty() &&
            bounded(value.target(), flexedge::node::log_contract::kMaxTargetBytes) &&
            value.status_code() >= 100 && value.status_code() <= 999 &&
+           value.request_bytes() <= flexedge::node::log_contract::kMaxRequestBytes &&
            value.response_bytes() <= flexedge::node::log_contract::kMaxResponseBytes &&
            value.duration_ms() <= flexedge::node::log_contract::kMaxDurationMs &&
            bounded(value.user_agent(), flexedge::node::log_contract::kMaxUserAgentBytes) &&

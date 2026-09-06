@@ -35,6 +35,10 @@ if(MSVC AND VCPKG_TARGET_TRIPLET MATCHES "static")
 endif()
 
 option(FLEXEDGE_BUILD_WEB "Build the frontend as part of the service build" ON)
+set(FLEXEDGE_XDB_V4_FILE "" CACHE FILEPATH
+    "Optional IPv4 ip2region XDB file to install as geo/ip2region_v4.xdb")
+set(FLEXEDGE_XDB_V6_FILE "" CACHE FILEPATH
+    "Optional IPv6 ip2region XDB file to install as geo/ip2region_v6.xdb")
 
 # Ruvia exposes three targets (core/http/web); we consume ruvia::web.
 set(RUVIA_BUILD_CORE ON CACHE BOOL "" FORCE)
@@ -54,6 +58,7 @@ FetchContent_Declare(
     GIT_TAG 8a4a02eb5559213fb012c3a2c4c34c9b6535dfe7 # main, 2026-08-31
 )
 FetchContent_MakeAvailable(ruvia)
+find_package(asio CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
 find_package(Protobuf CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
@@ -123,9 +128,19 @@ target_link_libraries(flexedge_service
         flexedge_node_protocol
         flexedge_log_ingest_protocol
         ruvia::web
+        asio::asio
         OpenSSL::Crypto
         ZLIB::ZLIB
 )
+
+add_executable(xdb_lookup tools/xdb_lookup.cpp)
+target_include_directories(xdb_lookup PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(xdb_lookup PRIVATE asio::asio)
+if(MSVC)
+    target_compile_options(xdb_lookup PRIVATE /W4 /permissive- /utf-8 /wd4819)
+else()
+    target_compile_options(xdb_lookup PRIVATE -Wall -Wextra -Wpedantic)
+endif()
 
 add_executable(flexedge_node
     node/main.cpp
@@ -275,7 +290,7 @@ if(CMAKE_CONFIGURATION_TYPES)
     endforeach()
 endif()
 
-install(TARGETS flexedge_service flexedge_node
+install(TARGETS flexedge_service flexedge_node xdb_lookup
     RUNTIME DESTINATION .
     COMPONENT Server
 )
@@ -293,6 +308,26 @@ install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/service/config/flexedge.service"
     DESTINATION systemd
     COMPONENT Server
 )
+if(FLEXEDGE_XDB_V4_FILE)
+    if(NOT EXISTS "${FLEXEDGE_XDB_V4_FILE}")
+        message(FATAL_ERROR "FLEXEDGE_XDB_V4_FILE does not exist: ${FLEXEDGE_XDB_V4_FILE}")
+    endif()
+    install(FILES "${FLEXEDGE_XDB_V4_FILE}"
+        DESTINATION geo
+        RENAME ip2region_v4.xdb
+        COMPONENT Server
+    )
+endif()
+if(FLEXEDGE_XDB_V6_FILE)
+    if(NOT EXISTS "${FLEXEDGE_XDB_V6_FILE}")
+        message(FATAL_ERROR "FLEXEDGE_XDB_V6_FILE does not exist: ${FLEXEDGE_XDB_V6_FILE}")
+    endif()
+    install(FILES "${FLEXEDGE_XDB_V6_FILE}"
+        DESTINATION geo
+        RENAME ip2region_v6.xdb
+        COMPONENT Server
+    )
+endif()
 install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/node/install_node.sh"
     DESTINATION .
     RENAME install-node.sh

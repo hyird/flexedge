@@ -1,15 +1,21 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { z } from 'zod'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useNavigate, useSearch } from '@tanstack/react-router'
-import type { ColumnDef } from '@tanstack/react-table'
-import { Pencil, Plus, Server, Trash2 } from 'lucide-react'
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
+import { useNavigate, useSearch } from '@tanstack/react-router'
+import { FolderTree, Pencil, Plus, Server, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { getData, sendData } from '@/lib/api'
 import type { Cluster, DnsZoneOption, PageData } from '@/lib/types'
+import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
 import {
   DropdownMenuItem,
   DropdownMenuSeparator,
@@ -38,12 +44,9 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Skeleton } from '@/components/ui/skeleton'
 import { ConfirmDialog } from '@/components/confirm-dialog'
-import { DataTableColumnHeader } from '@/components/data-table'
 import { FeatureShell } from '@/components/feature-shell'
-import { ResourceTable } from '@/components/resource-table'
-import { ResourceToolbar } from '@/components/resource-toolbar'
 import { RowActions } from '@/components/row-actions'
 import { StatusBadge } from '@/components/status-badge'
 import { NodesPanel } from '@/features/nodes'
@@ -68,207 +71,220 @@ type Values = z.infer<typeof schema>
 export function Clusters() {
   const navigate = useNavigate()
   const search = useSearch({ from: '/_authenticated/clusters' })
-
-  return (
-    <FeatureShell
-      title='集群管理'
-      description='在同一工作区管理资源分组、节点接入与运行状态。'
-    >
-      <Tabs
-        value={search.view}
-        onValueChange={(view) =>
-          void navigate({
-            to: '/clusters',
-            search:
-              view === 'nodes'
-                ? { view: 'nodes', cluster_id: search.cluster_id }
-                : { view: 'clusters', cluster_id: undefined },
-            replace: true,
-          })
-        }
-        className='gap-3'
-      >
-        <TabsList>
-          <TabsTrigger value='clusters'>集群</TabsTrigger>
-          <TabsTrigger value='nodes'>节点</TabsTrigger>
-        </TabsList>
-        <TabsContent value='clusters' className='space-y-3'>
-          <ClustersPanel />
-        </TabsContent>
-        <TabsContent value='nodes' className='space-y-3'>
-          <NodesPanel
-            key={search.cluster_id ?? 'all'}
-            initialClusterId={search.cluster_id}
-          />
-        </TabsContent>
-      </Tabs>
-    </FeatureShell>
-  )
-}
-
-function ClustersPanel() {
   const queryClient = useQueryClient()
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
-  const [draftKeyword, setDraftKeyword] = useState('')
-  const [keyword, setKeyword] = useState('')
-  const [status, setStatus] = useState('all')
   const [dialog, setDialog] = useState<Cluster | 'new' | null>(null)
   const [removeTarget, setRemoveTarget] = useState<Cluster | null>(null)
-
-  const query = useQuery({
-    queryKey: ['clusters', page, pageSize, keyword, status],
-    queryFn: () =>
+  const [createNodeOpen, setCreateNodeOpen] = useState(false)
+  const clustersQuery = useInfiniteQuery({
+    queryKey: ['clusters', 'tree'],
+    initialPageParam: 1,
+    queryFn: ({ pageParam }) =>
       getData<PageData<Cluster>>('/clusters/', {
-        page,
-        page_size: pageSize,
-        keyword: keyword || undefined,
-        status: status === 'all' ? undefined : status,
+        page: pageParam,
+        page_size: 100,
       }),
+    getNextPageParam: (last) =>
+      last.page < last.total_pages ? last.page + 1 : undefined,
   })
+  const clusters = clustersQuery.data?.pages.flatMap((page) => page.list) ?? []
+  const selected = clusters.find((cluster) => cluster.id === search.cluster_id)
+  const selectCluster = (id?: string) => {
+    setCreateNodeOpen(false)
+    void navigate({
+      to: '/clusters',
+      search: { view: 'nodes', cluster_id: id },
+    })
+  }
   const remove = useMutation({
-    mutationFn: (item: Cluster) =>
-      sendData('delete', `/clusters/${item.id}`, undefined, item.revision),
-    onSuccess: async (response) => {
+    mutationFn: (cluster: Cluster) =>
+      sendData(
+        'delete',
+        '/clusters/' + cluster.id,
+        undefined,
+        cluster.revision
+      ),
+    onSuccess: async (response, cluster) => {
       toast.success(response.message)
       setRemoveTarget(null)
+      if (search.cluster_id === cluster.id) selectCluster()
       await queryClient.invalidateQueries({ queryKey: ['clusters'] })
     },
   })
-
-  const columns = useMemo<ColumnDef<Cluster>[]>(
-    () => [
-      {
-        accessorKey: 'name',
-        header: ({ column }) => (
-          <DataTableColumnHeader column={column} title='集群' />
-        ),
-        cell: ({ row }) => (
-          <div>
-            <div className='font-medium'>{row.original.name}</div>
-            <div className='text-xs text-muted-foreground'>
-              {row.original.access_domain}
-            </div>
-          </div>
-        ),
-      },
-      {
-        accessorKey: 'dns_zone_domain',
-        header: '托管域名',
-        cell: ({ row }) => (
-          <div>
-            <div>{row.original.dns_zone_domain}</div>
-            <div className='text-xs text-muted-foreground'>
-              {row.original.dns_provider_name}
-            </div>
-          </div>
-        ),
-      },
-      {
-        accessorKey: 'hostname_prefix',
-        header: '主机前缀',
-        cell: ({ row }) => <code>{row.original.hostname_prefix}</code>,
-      },
-      {
-        accessorKey: 'node_count',
-        header: '节点',
-        cell: ({ row }) => (
-          <span className='tabular-nums'>
-            {row.original.online_node_count}/{row.original.node_count} 在线
-          </span>
-        ),
-      },
-      {
-        accessorKey: 'status',
-        header: '状态',
-        cell: ({ row }) => <StatusBadge status={row.original.status} />,
-      },
-      {
-        id: 'actions',
-        cell: ({ row }) => (
-          <RowActions>
-            <DropdownMenuItem asChild>
-              <Link
-                to='/clusters'
-                search={{ view: 'nodes', cluster_id: row.original.id }}
-              >
-                <Server /> 查看节点
-              </Link>
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setDialog(row.original)}>
-              <Pencil /> 编辑
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              variant='destructive'
-              onSelect={() => setRemoveTarget(row.original)}
-            >
-              <Trash2 /> 删除
-            </DropdownMenuItem>
-          </RowActions>
-        ),
-      },
-    ],
-    []
-  )
-
   return (
-    <>
-      <ResourceToolbar
-        value={draftKeyword}
-        onChange={setDraftKeyword}
-        onSearch={() => {
-          setKeyword(draftKeyword.trim())
-          setPage(1)
-        }}
-        onReset={() => {
-          setDraftKeyword('')
-          setKeyword('')
-          setPage(1)
-        }}
-        onRefresh={() => query.refetch()}
-        refreshing={query.isFetching}
-        placeholder='搜索集群名称…'
-        actions={
-          <Button size='sm' onClick={() => setDialog('new')}>
-            <Plus /> 创建集群
-          </Button>
-        }
-        filters={
-          <Select
-            value={status}
-            onValueChange={(value) => {
-              setStatus(value)
-              setPage(1)
-            }}
+    <FeatureShell
+      fixed
+      title='集群管理'
+      description='从左侧选择集群，管理该集群的节点与运行状态。'
+    >
+      <div className='grid min-h-0 flex-1 gap-4 overflow-y-auto md:grid-cols-[17rem_minmax(0,1fr)] md:overflow-hidden'>
+        <aside
+          aria-label='集群导航'
+          className='flex min-h-0 flex-col rounded-md border md:overflow-hidden'
+        >
+          <div className='flex shrink-0 items-center justify-between border-b p-3'>
+            <h2 className='flex items-center gap-2 text-sm font-semibold'>
+              <FolderTree className='size-4' />
+              集群
+            </h2>
+            <Button size='sm' onClick={() => setDialog('new')}>
+              <Plus />
+              创建集群
+            </Button>
+          </div>
+          <nav
+            aria-label='集群列表'
+            className='max-h-64 min-h-0 overflow-y-auto p-2 md:max-h-none md:flex-1'
           >
-            <SelectTrigger className='w-36'>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value='all'>全部状态</SelectItem>
-              <SelectItem value='enabled'>已启用</SelectItem>
-              <SelectItem value='disabled'>已停用</SelectItem>
-            </SelectContent>
-          </Select>
-        }
-      />
-      <ResourceTable
-        columns={columns}
-        data={query.data?.list ?? []}
-        loading={query.isLoading}
-        error={query.isError}
-        onRetry={() => void query.refetch()}
-        page={page}
-        pageSize={pageSize}
-        totalPages={query.data?.total_pages ?? 1}
-        onPaginationChange={(nextPage, nextSize) => {
-          setPage(nextPage)
-          setPageSize(nextSize)
-        }}
-        emptyTitle='暂无集群'
-        emptyDescription='创建集群后即可添加边缘节点。'
-      />
+            <div className='space-y-1'>
+              {clustersQuery.isLoading && (
+                <>
+                  <Skeleton className='h-9' />
+                  <Skeleton className='h-9' />
+                </>
+              )}
+              {clusters.map((cluster) => (
+                <div
+                  key={cluster.id}
+                  className={cn(
+                    'flex items-center rounded-md',
+                    search.cluster_id === cluster.id && 'bg-secondary'
+                  )}
+                >
+                  <Button
+                    variant='ghost'
+                    className='min-w-0 flex-1 justify-start px-2'
+                    aria-current={
+                      search.cluster_id === cluster.id ? 'page' : undefined
+                    }
+                    onClick={() => selectCluster(cluster.id)}
+                    title={cluster.name + ' · ' + cluster.access_domain}
+                  >
+                    <Server className='size-4 shrink-0' />
+                    <span className='truncate'>{cluster.name}</span>
+                    <span className='ms-auto text-xs text-muted-foreground'>
+                      {cluster.online_node_count}/{cluster.node_count}
+                    </span>
+                  </Button>
+                  <RowActions>
+                    <DropdownMenuItem onSelect={() => setDialog(cluster)}>
+                      <Pencil />
+                      编辑集群
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      variant='destructive'
+                      onSelect={() => setRemoveTarget(cluster)}
+                    >
+                      <Trash2 />
+                      删除集群
+                    </DropdownMenuItem>
+                  </RowActions>
+                </div>
+              ))}
+              {!clustersQuery.isLoading &&
+                !clustersQuery.isError &&
+                !clusters.length && (
+                  <p className='p-2 text-sm text-muted-foreground'>暂无集群</p>
+                )}
+              {clustersQuery.isError && (
+                <div role='alert' className='space-y-2 p-2 text-sm'>
+                  <p>集群加载失败</p>
+                  <Button
+                    size='sm'
+                    variant='outline'
+                    onClick={() => clustersQuery.refetch()}
+                  >
+                    重新加载
+                  </Button>
+                </div>
+              )}
+              {clustersQuery.hasNextPage && (
+                <Button
+                  variant='ghost'
+                  className='w-full'
+                  disabled={clustersQuery.isFetchingNextPage}
+                  onClick={() => clustersQuery.fetchNextPage()}
+                >
+                  {clustersQuery.isFetchingNextPage
+                    ? '正在加载…'
+                    : '加载更多集群'}
+                </Button>
+              )}
+            </div>
+          </nav>
+        </aside>
+        <section
+          aria-label='节点列表'
+          className='min-h-0 min-w-0 space-y-3 md:overflow-auto'
+        >
+          <div className='flex flex-wrap items-center justify-between gap-2'>
+            <div className='flex min-w-0 items-center gap-2'>
+              <h2 className='truncate font-semibold'>
+                {search.cluster_id
+                  ? (selected?.name ?? '所选集群')
+                  : '全部节点'}
+              </h2>
+              {selected && <StatusBadge status={selected.status} />}
+            </div>
+            <Button size='sm' onClick={() => setCreateNodeOpen(true)}>
+              <Plus />
+              添加节点
+            </Button>
+          </div>
+          {selected && (
+            <div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-4'>
+              <Card className='h-full py-2 shadow-none'>
+                <CardContent className='px-4 py-0 text-sm'>
+                  <div className='text-xs text-muted-foreground'>托管域名</div>
+                  <div
+                    className='truncate font-medium'
+                    title={`${selected.dns_zone_domain} · ${selected.dns_provider_name}`}
+                  >
+                    {selected.dns_zone_domain}{' '}
+                    <span className='font-normal text-muted-foreground'>
+                      · {selected.dns_provider_name}
+                    </span>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className='h-full py-2 shadow-none'>
+                <CardContent className='px-4 py-0 text-sm'>
+                  <div className='text-xs text-muted-foreground'>主机前缀</div>
+                  <code className='block truncate'>
+                    {selected.hostname_prefix}
+                  </code>
+                </CardContent>
+              </Card>
+              <Card className='h-full py-2 shadow-none'>
+                <CardContent className='px-4 py-0 text-sm'>
+                  <div className='text-xs text-muted-foreground'>接入域名</div>
+                  <code
+                    className='block truncate'
+                    title={selected.access_domain}
+                  >
+                    {selected.access_domain}
+                  </code>
+                </CardContent>
+              </Card>
+              <Card className='h-full py-2 shadow-none'>
+                <CardContent className='px-4 py-0 text-sm'>
+                  <div className='text-xs text-muted-foreground'>节点状态</div>
+                  <div className='font-medium'>
+                    {selected.online_node_count}/{selected.node_count} 在线
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          )}
+          <NodesPanel
+            key={search.cluster_id ?? 'all'}
+            initialClusterId={search.cluster_id}
+            showClusterFilter={false}
+            createOpen={createNodeOpen}
+            onCreateOpenChange={setCreateNodeOpen}
+          />
+        </section>
+      </div>
       {dialog && (
         <ClusterDialog
           key={dialog === 'new' ? 'new' : dialog.id}
@@ -281,17 +297,19 @@ function ClustersPanel() {
         open={!!removeTarget}
         onOpenChange={(open) => !open && setRemoveTarget(null)}
         title='删除集群'
-        desc={`确定删除“${removeTarget?.name ?? ''}”吗？有关联节点时服务端会拒绝删除。`}
-        confirmText={remove.isPending ? '正在删除…' : '确认删除'}
-        cancelBtnText='取消'
+        desc={
+          '确定删除“' +
+          (removeTarget?.name ?? '') +
+          '”吗？有关联节点时服务端会拒绝删除。'
+        }
+        confirmText='确认删除'
         destructive
         isLoading={remove.isPending}
         handleConfirm={() => removeTarget && remove.mutate(removeTarget)}
       />
-    </>
+    </FeatureShell>
   )
 }
-
 function ClusterDialog({
   cluster,
   open,

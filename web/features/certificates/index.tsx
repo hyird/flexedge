@@ -14,6 +14,7 @@ import type {
   DnsZoneOption,
   PageData,
 } from '@/lib/types'
+import { useResourceFilters } from '@/hooks/use-resource-filters'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -48,6 +49,7 @@ import {
 } from '@/components/ui/sheet'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTableColumnHeader } from '@/components/data-table'
+import { DataTableCellContent } from '@/components/data-table/cell-content'
 import { FeatureShell } from '@/components/feature-shell'
 import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
@@ -72,9 +74,8 @@ export function Certificates() {
   const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
-  const [draftKeyword, setDraftKeyword] = useState('')
-  const [keyword, setKeyword] = useState('')
-  const [status, setStatus] = useState('all')
+  const filter = useResourceFilters({ keyword: '', status: 'all' })
+  const { keyword, status } = filter.filters
   const [dialog, setDialog] = useState<Certificate | 'new' | null>(null)
   const [detailTarget, setDetailTarget] = useState<Certificate | null>(null)
   const [removeTarget, setRemoveTarget] = useState<Certificate | null>(null)
@@ -138,41 +139,44 @@ export function Certificates() {
           <DataTableColumnHeader column={column} title='证书域名' />
         ),
         cell: ({ row }) => (
-          <div>
+          <DataTableCellContent>
             <div className='font-medium'>{row.original.domains[0]}</div>
             {row.original.domains.length > 1 && (
               <div className='text-xs text-muted-foreground'>
                 另有 {row.original.domains.length - 1} 个域名
               </div>
             )}
-          </div>
+          </DataTableCellContent>
         ),
       },
       {
-        accessorKey: 'status',
-        header: '状态',
-        cell: ({ row }) => (
-          <div className='space-y-1'>
-            <StatusBadge status={row.original.status} />
-            <div className='text-xs text-muted-foreground'>
-              {row.original.usable ? '可用于网站' : '暂不可用'}
-            </div>
-          </div>
-        ),
-      },
-      {
-        accessorKey: 'certificate_provider',
+        accessorKey: 'issuer',
         header: '签发机构',
+        cell: ({ row }) => (
+          <DataTableCellContent>
+            <span>{row.original.issuer || '—'}</span>
+            <span className='text-xs text-muted-foreground'>
+              {row.original.certificate_provider}
+            </span>
+          </DataTableCellContent>
+        ),
       },
       {
         accessorKey: 'dns_zone_domain',
         header: 'DNS 验证域名',
       },
       {
+        accessorKey: 'website_count',
+        header: '使用网站',
+        cell: ({ row }) => (
+          <span className='tabular-nums'>{row.original.website_count} 个</span>
+        ),
+      },
+      {
         accessorKey: 'expires_at',
         header: '到期时间',
         cell: ({ row }) => (
-          <div>
+          <DataTableCellContent>
             <div className='whitespace-nowrap'>
               {formatDate(row.original.expires_at)}
             </div>
@@ -181,7 +185,19 @@ export function Certificates() {
                 ? '—'
                 : `剩余 ${row.original.remaining_days} 天`}
             </div>
-          </div>
+          </DataTableCellContent>
+        ),
+      },
+      {
+        accessorKey: 'status',
+        header: '状态',
+        cell: ({ row }) => (
+          <DataTableCellContent>
+            <StatusBadge status={row.original.status} />
+            <span className='text-xs text-muted-foreground'>
+              {row.original.usable ? '可用于网站' : '暂不可用'}
+            </span>
+          </DataTableCellContent>
         ),
       },
       {
@@ -228,27 +244,24 @@ export function Certificates() {
       }
     >
       <ResourceToolbar
-        value={draftKeyword}
-        onChange={setDraftKeyword}
+        value={filter.draft.keyword}
+        onChange={(value) => filter.setField('keyword', value)}
         onSearch={() => {
-          setKeyword(draftKeyword.trim())
+          const changed = filter.apply()
           setPage(1)
+          if (!changed && page === 1) void query.refetch()
         }}
         onReset={() => {
-          setDraftKeyword('')
-          setKeyword('')
+          const changed = filter.reset()
           setPage(1)
+          if (!changed && page === 1) void query.refetch()
         }}
-        onRefresh={() => query.refetch()}
         refreshing={query.isFetching}
         placeholder='搜索证书域名…'
         filters={
           <Select
-            value={status}
-            onValueChange={(value) => {
-              setStatus(value)
-              setPage(1)
-            }}
+            value={filter.draft.status}
+            onValueChange={(value) => filter.setField('status', value)}
           >
             <SelectTrigger className='w-36'>
               <SelectValue />

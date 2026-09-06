@@ -18,7 +18,23 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { StatusBadge } from '@/components/status-badge'
+
+function lineLabel(line: DnsLine) {
+  return (line.display_name || line.name || line.code)
+    .split('_')
+    .filter(Boolean)
+    .join(' / ')
+}
 
 export function DnsLineSelect({
   lines,
@@ -44,12 +60,12 @@ export function DnsLineSelect({
           type='button'
           variant='outline'
           role='combobox'
-          aria-label='DNS 线路'
+          aria-label='DNS线路选择器'
           aria-expanded={open}
           className='w-full justify-between font-normal'
         >
           <span className='truncate'>
-            {value ? dnsLinePath(lines, value) : '选择 DNS 线路'}
+            {value ? dnsLinePath(lines, value) : '选择DNS线路'}
           </span>
           <ChevronsUpDown className='shrink-0 text-muted-foreground' />
         </Button>
@@ -61,29 +77,39 @@ export function DnsLineSelect({
         <div className='mb-2 px-2 text-xs font-medium text-muted-foreground'>
           按线路分组逐级展开选择
         </div>
-        <div role='tree' className='max-h-80 overflow-y-auto'>
-          {!knownValue && value && (
-            <button
-              type='button'
-              role='treeitem'
-              aria-selected='true'
-              className='flex min-h-8 w-full items-center gap-2 rounded-md px-2 text-start text-sm hover:bg-muted'
-              onClick={() => selectLine(value)}
-            >
-              <Check className='size-4' />
-              <span>{value}（当前配置）</span>
-            </button>
-          )}
-          {tree.map((node) => (
-            <DnsLineSelectNode
-              key={node.key}
-              node={node}
-              depth={0}
-              selectedCode={value}
-              onSelect={selectLine}
-            />
-          ))}
-        </div>
+        <ScrollArea
+          type='auto'
+          className='h-[min(20rem,60svh)] w-full pe-1'
+        >
+          <div role='tree'>
+            {!knownValue && value && (
+              <button
+                type='button'
+                role='treeitem'
+                aria-selected='true'
+                className='flex min-h-8 w-full items-center gap-2 rounded-md px-2 text-start text-sm hover:bg-muted'
+                onClick={() => selectLine(value)}
+              >
+                <Check className='size-4' />
+                <span>{value}（当前配置）</span>
+              </button>
+            )}
+            {tree.map((node) => (
+              <DnsLineSelectNode
+                key={node.key}
+                node={node}
+                depth={0}
+                selectedCode={value}
+                onSelect={selectLine}
+              />
+            ))}
+            {!lines.length && !value && (
+              <p className='px-2 py-3 text-sm text-muted-foreground'>
+                暂无可用线路
+              </p>
+            )}
+          </div>
+        </ScrollArea>
       </PopoverContent>
     </Popover>
   )
@@ -192,80 +218,141 @@ function nodeHasLine(node: DnsLineTreeNode, code: string): boolean {
   )
 }
 
-export function DnsLineTree({ lines }: { lines: DnsLine[] }) {
-  if (!lines.length) {
-    return <p className='text-sm text-muted-foreground'>暂无可用线路。</p>
-  }
+export function DnsLineTree({
+  lines,
+  className,
+}: {
+  lines: DnsLine[]
+  className?: string
+}) {
+  const tree = buildDnsLineTree(lines)
 
   return (
-    <div className='space-y-1 rounded-md border p-2'>
-      {buildDnsLineTree(lines).map((node) => (
-        <DnsLineTreeItem key={node.key} node={node} depth={0} />
-      ))}
-    </div>
+    <ScrollArea
+      type='auto'
+      className={cn('h-full w-full rounded-md border', className)}
+    >
+      <div role='tree' className='space-y-1 p-2'>
+        {tree.map((node) => (
+          <DnsLineTreeViewNode key={node.key} node={node} depth={0} />
+        ))}
+        {!tree.length && (
+          <p className='px-2 py-3 text-sm text-muted-foreground'>
+            暂无线数据
+          </p>
+        )}
+      </div>
+    </ScrollArea>
   )
 }
 
-function DnsLineTreeItem({
+function DnsLineTreeViewNode({
   node,
   depth,
 }: {
   node: DnsLineTreeNode
   depth: number
 }) {
-  if (!node.children.length) {
-    return (
-      <div
-        className='flex min-h-8 items-center gap-2 rounded-md px-2 text-sm hover:bg-muted/50'
-        style={{ paddingInlineStart: `${8 + depth * 16}px` }}
-      >
-        <span className='min-w-0 flex-1 truncate'>{node.label}</span>
-        {node.line && (
-          <>
-            <code className='text-xs text-muted-foreground'>
-              {node.line.code}
-            </code>
-            <StatusBadge status={node.line.status} />
-          </>
-        )}
-      </div>
-    )
-  }
+  const hasChildren = node.children.length > 0
 
   return (
-    <Collapsible>
+    <Collapsible defaultOpen={false}>
       <div
-        className='flex min-h-8 items-center gap-1 rounded-md pe-2 hover:bg-muted/50'
+        role='treeitem'
+        className='flex min-h-9 items-center gap-1 rounded-md pe-2 hover:bg-muted'
         style={{ paddingInlineStart: `${depth * 16}px` }}
       >
-        <CollapsibleTrigger asChild>
-          <Button
-            type='button'
-            variant='ghost'
-            size='icon'
-            className='group size-8 shrink-0'
-            aria-label={`展开或收起 ${node.label}`}
-          >
-            <ChevronRight className='transition-transform group-data-[state=open]:rotate-90' />
-          </Button>
-        </CollapsibleTrigger>
-        <span className='min-w-0 flex-1 truncate text-sm font-medium'>
+        {hasChildren ? (
+          <CollapsibleTrigger asChild>
+            <Button
+              type='button'
+              variant='ghost'
+              size='icon'
+              className='group size-8 shrink-0'
+              aria-label={`展开或收起 ${node.label}`}
+            >
+              <ChevronRight className='transition-transform group-data-[state=open]:rotate-90' />
+            </Button>
+          </CollapsibleTrigger>
+        ) : (
+          <span className='size-8 shrink-0' aria-hidden='true' />
+        )}
+        <span className={cn('min-w-0 flex-1 truncate text-sm', hasChildren && 'font-medium')}>
           {node.label}
         </span>
         {node.line && (
-          <>
-            <code className='text-xs text-muted-foreground'>
-              {node.line.code}
-            </code>
-            <StatusBadge status={node.line.status} />
-          </>
+          <code className='shrink-0 text-xs text-muted-foreground'>
+            {node.line.code}
+          </code>
         )}
       </div>
-      <CollapsibleContent className='ms-4 border-s ps-1'>
-        {node.children.map((child) => (
-          <DnsLineTreeItem key={child.key} node={child} depth={depth + 1} />
-        ))}
-      </CollapsibleContent>
+      {hasChildren && (
+        <CollapsibleContent className='ms-4 border-s ps-1'>
+          {node.children.map((child) => (
+            <DnsLineTreeViewNode
+              key={child.key}
+              node={child}
+              depth={depth + 1}
+            />
+          ))}
+        </CollapsibleContent>
+      )}
     </Collapsible>
+  )
+}
+
+export function DnsLineTable({
+  lines,
+  fillHeight = false,
+}: {
+  lines: DnsLine[]
+  fillHeight?: boolean
+}) {
+  return (
+    <div
+      className={cn(
+        'min-h-0 min-w-0 overflow-hidden rounded-md border',
+        fillHeight && 'flex flex-1 flex-col'
+      )}
+    >
+      <Table
+        containerClassName={cn(
+          'overflow-auto overscroll-contain',
+          fillHeight ? 'min-h-0 flex-1' : 'max-h-[min(45svh,24rem)]'
+        )}
+        containerLabel='DNS线路表格'
+      >
+        <TableHeader className='sticky top-0 z-10 bg-background'>
+          <TableRow>
+            <TableHead>线路名称</TableHead>
+            <TableHead>线路代码</TableHead>
+            <TableHead>状态</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {lines.map((line) => (
+            <TableRow key={line.code}>
+              <TableCell>{lineLabel(line)}</TableCell>
+              <TableCell>
+                <code className='text-xs'>{line.code}</code>
+              </TableCell>
+              <TableCell>
+                <StatusBadge status={line.status} />
+              </TableCell>
+            </TableRow>
+          ))}
+          {!lines.length && (
+            <TableRow>
+              <TableCell
+                colSpan={3}
+                className='h-24 text-center text-muted-foreground'
+              >
+                暂无可用线路
+              </TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
+    </div>
   )
 }

@@ -633,6 +633,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
                 .host = found->second.request.authority,
                 .target = found->second.request.target,
                 .statusCode = overrideStatus == 0 ? found->second.statusCode : overrideStatus,
+                .requestBytes = static_cast<std::uint64_t>(found->second.request.body.size()),
                 .responseBytes = found->second.responseBytes,
                 .durationMs = durationMs,
                 .userAgent = found->second.website->access_log_user_agent()

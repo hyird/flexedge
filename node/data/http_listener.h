@@ -269,6 +269,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
     }
 
     void captureRequestLog(const ruvia::Http1ParsedRequest& parsed, const v2::Website& website) {
+        requestBodyBytes_ = requestBodyBytes(parsed);
         if (website.access_log_query_params()) {
             queryString_ = queryStringForLog(parsed.request().target());
         }
@@ -295,6 +296,16 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
             requestBody_ = std::move(body);
             requestBodyTruncated_ = truncated;
         }
+    }
+
+    static std::uint64_t requestBodyBytes(const ruvia::Http1ParsedRequest& parsed) {
+        if (parsed.bodyPlan().chunked()) {
+            const auto decoded = decodeChunkedBody(parsed.wireBody(), kMaxRequestBytes);
+            return decoded ? static_cast<std::uint64_t>(decoded->size()) : 0;
+        }
+        return parsed.bodyPlan().knownLength()
+                   ? static_cast<std::uint64_t>(parsed.wireBody().size())
+                   : 0;
     }
 
     void captureResponseHeaders(std::string_view bytes) {
@@ -356,6 +367,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
             .host = requestHost_,
             .target = requestTarget_,
             .statusCode = statusCode,
+            .requestBytes = requestBodyBytes_,
             .responseBytes = responseBytes,
             .durationMs = durationMs,
             .userAgent = requestUserAgent_,
@@ -1121,6 +1133,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
     std::string clientAddress_;
     std::string requestMethod_;
     std::string requestTarget_;
+    std::uint64_t requestBodyBytes_{};
     std::string requestUserAgent_;
     std::string requestReferer_;
     std::string requestHeaders_;

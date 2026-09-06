@@ -622,6 +622,7 @@ CREATE TABLE IF NOT EXISTS public.sys_website_access_log (
     host varchar(253) NOT NULL,
     target varchar(2048) NOT NULL,
     status_code integer NOT NULL,
+    request_bytes bigint DEFAULT 0 NOT NULL,
     response_bytes bigint DEFAULT 0 NOT NULL,
     duration_ms integer DEFAULT 0 NOT NULL,
     user_agent varchar(512),
@@ -633,7 +634,9 @@ CREATE TABLE IF NOT EXISTS public.sys_website_access_log (
     CONSTRAINT fk_website_access_log_website FOREIGN KEY (tenant_id, website_id)
         REFERENCES public.sys_website(tenant_id, id),
     CONSTRAINT ck_website_access_log_status CHECK (status_code BETWEEN 100 AND 999),
-    CONSTRAINT ck_website_access_log_size CHECK (response_bytes >= 0 AND duration_ms >= 0),
+    CONSTRAINT ck_website_access_log_size CHECK (
+        request_bytes >= 0 AND response_bytes >= 0 AND duration_ms >= 0
+    ),
     CONSTRAINT ck_website_access_log_protocol CHECK (protocol <> ''),
     CONSTRAINT ck_website_access_log_method CHECK (method <> ''),
     CONSTRAINT ck_website_access_log_host CHECK (host <> ''),
@@ -1007,6 +1010,28 @@ WHERE deleted_at IS NULL;
 
 END;
 $flexedge_website_route_rules$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0018_website_dashboard_index",
+        .sql = std::string{R"sql(DO $flexedge_website_dashboard_index$
+BEGIN
+
+CREATE INDEX IF NOT EXISTS idx_website_access_log_website_occurred
+    ON public.sys_website_access_log (tenant_id, website_id, occurred_at DESC);
+
+END;
+$flexedge_website_dashboard_index$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0019_access_log_request_bytes",
+        .sql = std::string{R"sql(DO $flexedge_access_log_request_bytes$
+BEGIN
+
+ALTER TABLE public.sys_website_access_log
+    ADD COLUMN IF NOT EXISTS request_bytes bigint DEFAULT 0 NOT NULL;
+
+END;
+$flexedge_access_log_request_bytes$)sql"},
     }},
 };
 

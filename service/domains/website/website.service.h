@@ -22,6 +22,7 @@
 #include "service/domains/website/website.error.h"
 #include "service/domains/website/website.types.h"
 #include "service/features/log_ingest/tail.h"
+#include "service/features/geoip/xdb_database.h"
 #include "service/features/node_runtime/model.h"
 #include "service/features/website_config/model.h"
 #include "service/features/website_dns/model.h"
@@ -137,9 +138,10 @@ class WebsiteService {
         const auto rows = co_await c.db().query(
             "SELECT log.id, TO_CHAR(log.occurred_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
             "log.node_id, log.node_name, log.client_ip::text, log.protocol, log.method, log.host, "
-            "log.target, log.status_code, log.response_bytes, log.duration_ms, log.user_agent, "
-            "log.referer, log.request_headers, log.request_body, log.request_body_truncated, "
-            "log.tls_fingerprint, log.response_headers, log.query_string, log.cookies, "
+            "log.target, log.status_code, log.request_bytes, log.response_bytes, log.duration_ms, "
+            "log.user_agent, log.referer, log.request_headers, log.request_body, "
+            "log.request_body_truncated, log.tls_fingerprint, log.response_headers, "
+            "log.query_string, log.cookies, "
             "log.ingested_unix_micros FROM sys_website website LEFT JOIN LATERAL (SELECT "
             "access.*, COALESCE(node.name, '') AS node_name, "
             "ROUND(EXTRACT(EPOCH FROM access.created_at) * 1000000)::bigint AS "
@@ -171,42 +173,265 @@ class WebsiteService {
             item.set<"host">(row[7].value().value_or(""));
             item.set<"target">(row[8].value().value_or(""));
             item.set<"statusCode">(row[9].as<std::int64_t>().value_or(0));
-            item.set<"responseBytes">(row[10].as<std::int64_t>().value_or(0));
-            item.set<"durationMs">(row[11].as<std::int64_t>().value_or(0));
-            item.set<"requestBodyTruncated">(row[16].as<bool>().value_or(false));
+            item.set<"requestBytes">(row[10].as<std::int64_t>().value_or(0));
+            item.set<"responseBytes">(row[11].as<std::int64_t>().value_or(0));
+            item.set<"durationMs">(row[12].as<std::int64_t>().value_or(0));
+            item.set<"requestBodyTruncated">(row[17].as<bool>().value_or(false));
             if (const auto value = row[4].value()) {
                 item.set<"clientIp">(*value);
-            }
-            if (const auto value = row[12].value()) {
-                item.set<"userAgent">(*value);
+                if (const auto location = service::geoip::xdbDatabase().lookup(*value)) {
+                    item.set<"clientIpLocation">(location->display);
+                }
             }
             if (const auto value = row[13].value()) {
-                item.set<"referer">(*value);
+                item.set<"userAgent">(*value);
             }
             if (const auto value = row[14].value()) {
-                item.set<"requestHeaders">(*value);
+                item.set<"referer">(*value);
             }
             if (const auto value = row[15].value()) {
+                item.set<"requestHeaders">(*value);
+            }
+            if (const auto value = row[16].value()) {
                 item.set<"requestBody">(*value);
             }
-            if (const auto value = row[17].value()) {
+            if (const auto value = row[18].value()) {
                 item.set<"tlsFingerprint">(*value);
             }
-            if (const auto value = row[18].value()) {
+            if (const auto value = row[19].value()) {
                 item.set<"responseHeaders">(*value);
             }
-            if (const auto value = row[19].value()) {
+            if (const auto value = row[20].value()) {
                 item.set<"queryString">(*value);
             }
-            if (const auto value = row[20].value()) {
+            if (const auto value = row[21].value()) {
                 item.set<"cookies">(*value);
             }
         }
         if (!items.empty()) {
             result.set<"cursor">(service::log_ingest::encodeTailCursor(
-                rows.front()[21].as<std::int64_t>().value_or(0),
+                rows.front()[22].as<std::int64_t>().value_or(0),
                 rows.front()[0].value().value_or("")));
         }
+        co_return result;
+    }
+
+    ruvia::Task<WebsiteDashboardDto> dashboard(ruvia::Context& c, const std::string& tenantId,
+                                                const std::string& id) {
+        const auto website = co_await c.db().query(
+            "SELECT 1 FROM sys_website WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL "
+            "LIMIT 1",
+            tenantId, id);
+        if (website.empty()) {
+            service::common::throwAppError(WebsiteError::NOT_FOUND);
+        }
+
+        const auto summaryRows = co_await c.db().query(
+            "WITH bounds AS (SELECT date_trunc('month', NOW() AT TIME ZONE 'Asia/Shanghai') "
+            "AT TIME ZONE 'Asia/Shanghai' AS current_month_start, date_trunc('day', NOW() AT "
+            "TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai' AS today_start), "
+            "minute_buckets AS (SELECT date_trunc('minute', access.occurred_at) AS bucket, "
+            "(SUM(access.response_bytes) * 8 / 60)::bigint AS bandwidth_bps FROM "
+            "sys_website_access_log access, bounds WHERE access.tenant_id = $1 AND "
+            "access.website_id = $2 AND access.occurred_at >= bounds.current_month_start - "
+            "INTERVAL '1 month' GROUP BY date_trunc('minute', access.occurred_at)) SELECT "
+            "COALESCE((SELECT MAX(bandwidth_bps) FROM minute_buckets, bounds WHERE bucket >= "
+            "bounds.current_month_start - INTERVAL '1 month' AND bucket < "
+            "bounds.current_month_start), 0)::bigint, COALESCE((SELECT MAX(bandwidth_bps) "
+            "FROM minute_buckets, bounds WHERE bucket >= bounds.current_month_start), "
+            "0)::bigint, COALESCE((SELECT MAX(bandwidth_bps) FROM minute_buckets, bounds "
+            "WHERE bucket >= bounds.today_start), 0)::bigint, COALESCE((SELECT "
+            "SUM(access.response_bytes) * 8 / 60 FROM sys_website_access_log access WHERE "
+            "access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= NOW() "
+            "- INTERVAL '1 minute'), 0)::bigint, COALESCE((SELECT COUNT(DISTINCT "
+            "access.client_ip) FROM sys_website_access_log access, bounds WHERE "
+            "access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= "
+            "bounds.today_start AND access.client_ip IS NOT NULL), 0)::bigint, "
+            "COALESCE((SELECT SUM(access.response_bytes) FROM sys_website_access_log access, "
+            "bounds WHERE access.tenant_id = $1 AND access.website_id = $2 AND "
+            "access.occurred_at >= bounds.today_start), 0)::bigint FROM bounds",
+            tenantId, id);
+
+        WebsiteDashboardDto result(c);
+        auto& summary = result.ensure<"summary">();
+        const auto& summaryRow = summaryRows.front();
+        summary.set<"previousMonthPeakBps">(summaryRow[0].as<std::int64_t>().value_or(0));
+        summary.set<"currentMonthPeakBps">(summaryRow[1].as<std::int64_t>().value_or(0));
+        summary.set<"todayPeakBps">(summaryRow[2].as<std::int64_t>().value_or(0));
+        summary.set<"currentBandwidthBps">(summaryRow[3].as<std::int64_t>().value_or(0));
+        summary.set<"todayUniqueIps">(summaryRow[4].as<std::int64_t>().value_or(0));
+        summary.set<"todayResponseBytes">(summaryRow[5].as<std::int64_t>().value_or(0));
+
+        const auto hourlyRows = co_await c.db().query(
+            "WITH buckets AS (SELECT generate_series(date_trunc('hour', NOW()) - INTERVAL "
+            "'23 hours', date_trunc('hour', NOW()), INTERVAL '1 hour') AS bucket) SELECT "
+            "TO_CHAR(buckets.bucket, 'YYYY-MM-DD\"T\"HH24:MI:SSOF'), COUNT(access.id)::bigint, "
+            "COALESCE(SUM(access.response_bytes), 0)::bigint, COALESCE(SUM(access.response_bytes) "
+            "* 8 / 3600, 0)::bigint FROM buckets LEFT JOIN sys_website_access_log access ON "
+            "access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= "
+            "buckets.bucket AND access.occurred_at < buckets.bucket + INTERVAL '1 hour' GROUP "
+            "BY buckets.bucket ORDER BY buckets.bucket",
+            tenantId, id);
+        auto& hourly = result.ensure<"hourly">();
+        for (const auto& row : hourlyRows) {
+            auto& item = hourly.emplace_back(c);
+            item.set<"timestamp">(row[0].value().value_or(""));
+            item.set<"requestCount">(row[1].as<std::int64_t>().value_or(0));
+            item.set<"responseBytes">(row[2].as<std::int64_t>().value_or(0));
+            item.set<"bandwidthBps">(row[3].as<std::int64_t>().value_or(0));
+        }
+
+        const auto dailyRows = co_await c.db().query(
+            "WITH buckets AS (SELECT generate_series(date_trunc('day', NOW()) - INTERVAL "
+            "'14 days', date_trunc('day', NOW()), INTERVAL '1 day') AS bucket) SELECT "
+            "TO_CHAR(buckets.bucket, 'YYYY-MM-DD\"T\"HH24:MI:SSOF'), COUNT(access.id)::bigint, "
+            "COALESCE(SUM(access.response_bytes), 0)::bigint, COALESCE(SUM(access.response_bytes) "
+            "* 8 / 86400, 0)::bigint FROM buckets LEFT JOIN sys_website_access_log access ON "
+            "access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= "
+            "buckets.bucket AND access.occurred_at < buckets.bucket + INTERVAL '1 day' GROUP "
+            "BY buckets.bucket ORDER BY buckets.bucket",
+            tenantId, id);
+        auto& daily = result.ensure<"daily">();
+        for (const auto& row : dailyRows) {
+            auto& item = daily.emplace_back(c);
+            item.set<"timestamp">(row[0].value().value_or(""));
+            item.set<"requestCount">(row[1].as<std::int64_t>().value_or(0));
+            item.set<"responseBytes">(row[2].as<std::int64_t>().value_or(0));
+            item.set<"bandwidthBps">(row[3].as<std::int64_t>().value_or(0));
+        }
+
+        const auto appendRankings = [&c](auto& output, const auto& rows) {
+            for (const auto& row : rows) {
+                auto& item = output.emplace_back(c);
+                item.template set<"label">(row[0].value().value_or(""));
+                item.template set<"requestCount">(row[1].template as<std::int64_t>().value_or(0));
+                item.template set<"responseBytes">(row[2].template as<std::int64_t>().value_or(0));
+            }
+        };
+        const auto& geoDatabase = service::geoip::xdbDatabase();
+        const auto appendClientIpRankings = [&c, &geoDatabase](auto& output, const auto& rows) {
+            for (const auto& row : rows) {
+                std::string label{row[0].value().value_or("")};
+                if (const auto location = geoDatabase.lookup(label)) {
+                    label += " · ";
+                    label += location->display;
+                } else if (label != "未知 IP") {
+                    label += " · 未知地区";
+                }
+                auto& item = output.emplace_back(c);
+                item.template set<"label">(label);
+                item.template set<"requestCount">(
+                    row[1].template as<std::int64_t>().value_or(0));
+                item.template set<"responseBytes">(
+                    row[2].template as<std::int64_t>().value_or(0));
+            }
+        };
+        if (geoDatabase.available()) {
+            const auto countryIpRows = co_await c.db().query(
+                "SELECT access.client_ip::text, COUNT(*)::bigint, "
+                "COALESCE(SUM(access.response_bytes), 0)::bigint FROM sys_website_access_log "
+                "access WHERE access.tenant_id = $1 AND access.website_id = $2 AND "
+                "access.occurred_at >= NOW() - INTERVAL '24 hours' AND access.client_ip IS NOT "
+                "NULL GROUP BY access.client_ip",
+                tenantId, id);
+            struct CountryTotal final {
+                std::int64_t requestCount{};
+                std::int64_t responseBytes{};
+            };
+            std::unordered_map<std::string, CountryTotal> countries;
+            for (const auto& row : countryIpRows) {
+                const auto ip = row[0].value();
+                if (!ip) {
+                    continue;
+                }
+                const auto country = geoDatabase.country(*ip);
+                if (!country) {
+                    continue;
+                }
+                auto& total = countries[*country];
+                total.requestCount += row[1].as<std::int64_t>().value_or(0);
+                total.responseBytes += row[2].as<std::int64_t>().value_or(0);
+            }
+            std::vector<std::pair<std::string, CountryTotal>> orderedCountries;
+            orderedCountries.reserve(countries.size());
+            for (const auto& country : countries) {
+                orderedCountries.emplace_back(country.first, country.second);
+            }
+            std::ranges::sort(orderedCountries, [](const auto& left, const auto& right) {
+                if (left.second.requestCount != right.second.requestCount) {
+                    return left.second.requestCount > right.second.requestCount;
+                }
+                if (left.second.responseBytes != right.second.responseBytes) {
+                    return left.second.responseBytes > right.second.responseBytes;
+                }
+                return left.first < right.first;
+            });
+            auto& countryOutput = result.ensure<"countries">();
+            const auto count = std::min<std::size_t>(orderedCountries.size(), 10);
+            for (std::size_t index = 0; index < count; ++index) {
+                const auto& country = orderedCountries[index];
+                auto& item = countryOutput.emplace_back(c);
+                item.set<"label">(country.first);
+                item.set<"requestCount">(country.second.requestCount);
+                item.set<"responseBytes">(country.second.responseBytes);
+            }
+        }
+        const auto statusCodeRows = co_await c.db().query(
+            "SELECT access.status_code::text, COUNT(*)::bigint, COALESCE(SUM(access.response_bytes), "
+            "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
+            "access.website_id = $2 AND access.occurred_at >= NOW() - INTERVAL '24 hours' GROUP "
+            "BY access.status_code ORDER BY COUNT(*) DESC, access.status_code ASC LIMIT 10",
+            tenantId, id);
+        appendRankings(result.ensure<"statusCodes">(), statusCodeRows);
+
+        const auto methodRows = co_await c.db().query(
+            "SELECT access.method, COUNT(*)::bigint, COALESCE(SUM(access.response_bytes), "
+            "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
+            "access.website_id = $2 AND access.occurred_at >= NOW() - INTERVAL '24 hours' GROUP "
+            "BY access.method ORDER BY COUNT(*) DESC, access.method ASC LIMIT 10",
+            tenantId, id);
+        appendRankings(result.ensure<"methods">(), methodRows);
+
+        const auto hostRows = co_await c.db().query(
+            "SELECT access.host, COUNT(*)::bigint, COALESCE(SUM(access.response_bytes), "
+            "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
+            "access.website_id = $2 AND access.occurred_at >= NOW() - INTERVAL '24 hours' GROUP "
+            "BY access.host ORDER BY COUNT(*) DESC, access.host ASC LIMIT 10",
+            tenantId, id);
+        appendRankings(result.ensure<"hosts">(), hostRows);
+
+        const auto refererRows = co_await c.db().query(
+            "SELECT COALESCE(NULLIF(access.referer, ''), '直接访问'), COUNT(*)::bigint, "
+            "COALESCE(SUM(access.response_bytes), 0)::bigint FROM sys_website_access_log access "
+            "WHERE access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= "
+            "NOW() - INTERVAL '24 hours' GROUP BY 1 ORDER BY COUNT(*) DESC, 1 ASC LIMIT 10",
+            tenantId, id);
+        appendRankings(result.ensure<"referers">(), refererRows);
+
+        const auto pathRows = co_await c.db().query(
+            "SELECT access.target, COUNT(*)::bigint, COALESCE(SUM(access.response_bytes), "
+            "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
+            "access.website_id = $2 AND access.occurred_at >= NOW() - INTERVAL '24 hours' GROUP "
+            "BY access.target ORDER BY COUNT(*) DESC, access.target ASC LIMIT 10",
+            tenantId, id);
+        appendRankings(result.ensure<"paths">(), pathRows);
+
+        const auto clientBytesRows = co_await c.db().query(
+            "SELECT COALESCE(access.client_ip::text, '未知 IP'), COUNT(*)::bigint, "
+            "COALESCE(SUM(access.response_bytes), 0)::bigint FROM sys_website_access_log access "
+            "WHERE access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= "
+            "NOW() - INTERVAL '24 hours' GROUP BY 1 ORDER BY 3 DESC, 2 DESC, 1 ASC LIMIT 10",
+            tenantId, id);
+        appendClientIpRankings(result.ensure<"clientIpsByBytes">(), clientBytesRows);
+
+        const auto clientRequestRows = co_await c.db().query(
+            "SELECT COALESCE(access.client_ip::text, '未知 IP'), COUNT(*)::bigint, "
+            "COALESCE(SUM(access.response_bytes), 0)::bigint FROM sys_website_access_log access "
+            "WHERE access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= "
+            "NOW() - INTERVAL '24 hours' GROUP BY 1 ORDER BY 2 DESC, 3 DESC, 1 ASC LIMIT 10",
+            tenantId, id);
+        appendClientIpRankings(result.ensure<"clientIpsByRequests">(), clientRequestRows);
+
         co_return result;
     }
 
