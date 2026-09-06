@@ -16,6 +16,7 @@
 #include "node/proto/edge_control.pb.h"
 #include "service/common/http.h"
 #include "service/domains/agent/agent.error.h"
+#include "service/domains/agent/agent.types.h"
 #include "service/features/cluster_dns/projection.h"
 #include "service/features/node_dispatch/protocol.h"
 #include "service/features/node_dispatch/queue.h"
@@ -25,45 +26,6 @@
 #include "service/utils/token.h"
 
 namespace service::agent {
-
-struct AgentPrincipal final {
-    std::string nodeId;
-    std::string clusterId;
-    std::string tenantId;
-    std::string agentId;
-};
-
-struct DesiredSummary final {
-    std::int64_t nodeSpecRevision{};
-    std::string releaseId;
-    std::string manifestDigest;
-};
-
-struct HeartbeatReport final {
-    struct OriginHealth final {
-        std::string websiteId;
-        std::string originId;
-        std::string status;
-        std::int64_t checkedAtUnixMillis{};
-        std::int64_t latencyMillis{};
-        std::string lastError;
-    };
-    std::string nodeId;
-    std::int64_t appliedNodeSpecRevision{};
-    std::string activeReleaseId;
-    std::string activeManifestDigest;
-    std::string agentVersion;
-    double cpuUsage{};
-    double memoryUsage{};
-    std::int64_t trafficOutBps{};
-    std::int64_t connectionCount{};
-    double load1m{};
-    std::int64_t queuedLogEvents{};
-    std::int64_t droppedLogEvents{};
-    std::string health;
-    std::string lastError;
-    std::vector<OriginHealth> originHealth;
-};
 
 class AgentService final {
   public:
