@@ -67,6 +67,7 @@ std::string source(std::string_view relativePath) {
     } while (false)
 
 int main() {
+    using service::sync_runtime::MarkerOperation;
     using service::sync_runtime::MarkerResourceType;
     REQUIRE(service::sync_runtime::resourceTypeName(MarkerResourceType::provider) == "provider");
     REQUIRE(service::sync_runtime::resourceTypeName(MarkerResourceType::dnsZone) == "dns_zone");
@@ -78,11 +79,26 @@ int main() {
     REQUIRE(service::sync_runtime::resourceColumn(MarkerResourceType::certificate) ==
             "certificate_id");
     REQUIRE(service::sync_runtime::resourceColumn(MarkerResourceType::website) == "website_id");
+    REQUIRE(service::sync_runtime::markerOperationName(MarkerOperation::verify) == "verify");
+    REQUIRE(service::sync_runtime::markerOperationName(MarkerOperation::sync) == "sync");
+    REQUIRE(service::sync_runtime::markerOperationName(MarkerOperation::syncLocal) == "sync_local");
+    REQUIRE(service::sync_runtime::markerOperationName(MarkerOperation::syncRemote) ==
+            "sync_remote");
+    REQUIRE(service::sync_runtime::markerOperationName(MarkerOperation::remove) == "delete");
+    REQUIRE(service::sync_runtime::markerOperationName(MarkerOperation::issue) == "issue");
+    REQUIRE(service::sync_runtime::markerOperationName(MarkerOperation::renew) == "renew");
+    REQUIRE(service::sync_runtime::markerOperationName(MarkerOperation::apply) == "apply");
+    REQUIRE(service::sync_runtime::supportsMarkerOperation(MarkerResourceType::dnsZone,
+                                                           MarkerOperation::syncRemote));
+    REQUIRE(!service::sync_runtime::supportsMarkerOperation(MarkerResourceType::website,
+                                                            MarkerOperation::remove));
     REQUIRE(throwsRuntimeError([] {
         (void)service::sync_runtime::resourceTypeName(static_cast<MarkerResourceType>(99));
     }));
     REQUIRE(throwsRuntimeError(
         [] { (void)service::sync_runtime::resourceColumn(static_cast<MarkerResourceType>(99)); }));
+    REQUIRE(
+        throwsRuntimeError([] { (void)service::sync_runtime::requireMarkerOperation("unknown"); }));
     const auto markerLease =
         service::sync_runtime::makeRunningLease("tenant", "marker", 7, "worker");
     REQUIRE(markerLease.marker.tenantId == "tenant");
@@ -340,6 +356,8 @@ int main() {
     const auto syncRuntime = source("service/features/sync_runtime/state.h");
     REQUIRE(syncRuntime.contains("namespace service::sync_runtime"));
     REQUIRE(syncRuntime.contains("enum class MarkerResourceType"));
+    REQUIRE(syncRuntime.contains("enum class MarkerOperation"));
+    REQUIRE(syncRuntime.contains("supportsMarkerOperation"));
     REQUIRE(syncRuntime.contains("resourceTypeName(MarkerResourceType resourceType)"));
     REQUIRE(syncRuntime.contains("resourceColumn(MarkerResourceType resourceType)"));
     REQUIRE(!syncRuntime.contains("resourceColumn(std::string_view"));
@@ -369,6 +387,7 @@ int main() {
          }) {
         const auto markerWriter = source(markerWriterPath);
         REQUIRE(markerWriter.contains("MarkerResourceType::"));
+        REQUIRE(markerWriter.contains("MarkerOperation"));
         REQUIRE(!markerWriter.contains("upsertMarker(transaction, tenantId, \""));
         REQUIRE(!markerWriter.contains("removeMarker(transaction, tenantId, \""));
     }

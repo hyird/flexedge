@@ -14,6 +14,8 @@
 #include <ruvia/core/Task.h>
 #include <ruvia/web/redis/Redis.h>
 
+#include "service/features/log_ingest/redis_protocol.h"
+
 namespace service::log_ingest::queue {
 
 inline constexpr std::string_view kStreamKey{"flexedge:log-deliveries:v3"};
@@ -85,12 +87,6 @@ struct AutoClaimResult final {
     std::vector<Entry> entries;
 };
 
-inline void requireNoError(const ruvia::RedisValue& value, std::string_view operation) {
-    if (value.kind() == ruvia::RedisValue::Kind::kError) {
-        throw std::runtime_error(std::string(operation) + ": " + std::string(value.error()));
-    }
-}
-
 inline Entry parseEntry(const ruvia::RedisValue& source) {
     if (source.kind() != ruvia::RedisValue::Kind::kArray) {
         throw std::runtime_error("unexpected Redis log stream entry");
@@ -115,7 +111,7 @@ inline ruvia::Task<void> initialize(ruvia::RedisHandle redis) {
     const std::array<std::string_view, 1> keys{kStreamKey};
     const std::array<std::string_view, 1> arguments{kConsumerGroup};
     const auto result = co_await redis.eval(kInitializeScript, keys, arguments);
-    requireNoError(result, "could not initialize Redis log stream");
+    requireRedisSuccess(result, "could not initialize Redis log stream");
     if (result.kind() != ruvia::RedisValue::Kind::kInteger ||
         (result.integer() != 0 && result.integer() != 1)) {
         throw std::runtime_error("unexpected Redis log stream initialization reply");
@@ -128,7 +124,7 @@ inline ruvia::Task<bool> push(ruvia::RedisHandle redis, std::string_view payload
     const std::array<std::string_view, 2> keys{kStreamKey, kRetainedBytesKey};
     const std::array<std::string_view, 3> arguments{payload, maximumEntries, maximumBytes};
     const auto result = co_await redis.eval(kPushScript, keys, arguments);
-    requireNoError(result, "could not append Redis log stream entry");
+    requireRedisSuccess(result, "could not append Redis log stream entry");
     if (result.kind() == ruvia::RedisValue::Kind::kInteger && result.integer() == 0) {
         co_return false;
     }
@@ -174,7 +170,7 @@ inline ruvia::Task<void> finish(ruvia::RedisHandle redis, std::string_view consu
     const std::array<std::string_view, 4> arguments{kConsumerGroup, entry.id, payloadBytes,
                                                     consumer};
     const auto result = co_await redis.eval(kFinishScript, keys, arguments);
-    requireNoError(result, "could not finish Redis log stream entry");
+    requireRedisSuccess(result, "could not finish Redis log stream entry");
     if (result.kind() != ruvia::RedisValue::Kind::kInteger || result.integer() != 1) {
         throw std::runtime_error("Redis log stream entry is no longer owned by this consumer");
     }
@@ -186,7 +182,7 @@ inline ruvia::Task<AutoClaimResult> autoClaim(ruvia::RedisHandle redis, std::str
     const auto count = std::to_string(kReclaimBatchSize);
     const auto value = co_await redis.command("XAUTOCLAIM", kStreamKey, kConsumerGroup, consumer,
                                               minimumIdle, cursor, "COUNT", count);
-    requireNoError(value, "could not reclaim Redis log stream entries");
+    requireRedisSuccess(value, "could not reclaim Redis log stream entries");
     if (value.kind() != ruvia::RedisValue::Kind::kArray) {
         throw std::runtime_error("unexpected Redis log stream reclaim reply");
     }
@@ -210,7 +206,7 @@ inline ruvia::Task<std::optional<std::int64_t>>
 deliveryCount(ruvia::RedisHandle redis, std::string_view consumer, std::string_view entryId) {
     const auto value = co_await redis.command("XPENDING", kStreamKey, kConsumerGroup, entryId,
                                               entryId, "1", consumer);
-    requireNoError(value, "could not inspect Redis log stream delivery count");
+    requireRedisSuccess(value, "could not inspect Redis log stream delivery count");
     if (value.kind() != ruvia::RedisValue::Kind::kArray) {
         throw std::runtime_error("unexpected Redis log stream delivery count reply");
     }

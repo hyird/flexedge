@@ -194,8 +194,7 @@ class CertificateService {
             throw;
         }
         (void)co_await service::certificate_issuance::enqueueCertificateRevision(
-            transaction, tenantId, certificateId, 1,
-            service::sync_runtime::MarkerOperation::issue);
+            transaction, tenantId, certificateId, 1, service::sync_runtime::MarkerOperation::issue);
         co_await transaction.commit();
         co_return;
     }
