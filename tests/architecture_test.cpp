@@ -226,29 +226,37 @@ int main() {
     REQUIRE(!std::filesystem::exists(sourceRoot / "service/features/website_dispatch/queue.h"));
     REQUIRE(!std::filesystem::exists(sourceRoot / "service/features/website_dispatch/model.h"));
 
-    REQUIRE(service::config::kSchemaMigrations.size() == 1);
-    REQUIRE(service::config::kSchemaMigrations.front().id() == "0001");
-    const auto& schemaBaseline = service::config::kSchemaMigrations.front().sql();
-    REQUIRE(!schemaBaseline.contains("sys_task"));
-    REQUIRE(!schemaBaseline.contains("node_key_"));
-    REQUIRE(!schemaBaseline.contains("device_key_"));
+    const auto& schemaMigrations = service::config::kSchemaMigrations;
+    REQUIRE(schemaMigrations.size() >= 20);
+    REQUIRE(schemaMigrations.front().id() == "0001");
+    REQUIRE(schemaMigrations.back().id() == "0020_sync_result_events");
+    const auto& schemaBaseline = schemaMigrations.front().sql();
+    // The production database records this checksum. Never fold later schema
+    // work into migration 0001 after it has been released.
+    REQUIRE(schemaBaseline.contains("CREATE TABLE public.sys_task"));
+    REQUIRE(schemaBaseline.contains("node_key_hash"));
+    REQUIRE(schemaBaseline.contains("device_key_fingerprint"));
+    REQUIRE(!schemaBaseline.contains("sys_sync_event"));
     REQUIRE(!schemaBaseline.contains("DROP TABLE"));
-    REQUIRE(!schemaBaseline.contains("UPDATE public."));
     REQUIRE(!schemaBaseline.contains("migrate_data"));
-    REQUIRE(schemaBaseline.contains("node_secret_envelope text"));
-    REQUIRE(schemaBaseline.contains("schema_version integer NOT NULL"));
-    REQUIRE(schemaBaseline.contains("CREATE TABLE public.sys_sync_task"));
-    REQUIRE(schemaBaseline.contains("CREATE TABLE public.sys_sync_event"));
-    REQUIRE(schemaBaseline.contains("uk_sync_task_resource"));
-    REQUIRE(schemaBaseline.contains("idx_sync_event_tenant_id"));
-    REQUIRE(schemaBaseline.contains("version bigint NOT NULL"));
-    REQUIRE(schemaBaseline.contains("processed_version bigint DEFAULT 0 NOT NULL"));
-    REQUIRE(schemaBaseline.contains("lease_until timestamptz"));
-    REQUIRE(schemaBaseline.contains(
+    std::string schemaSql;
+    for (const auto& migration : schemaMigrations) {
+        schemaSql += migration.sql();
+    }
+    REQUIRE(schemaSql.contains("node_secret_envelope text"));
+    REQUIRE(schemaSql.contains("schema_version integer NOT NULL"));
+    REQUIRE(schemaSql.contains("CREATE TABLE public.sys_sync_task"));
+    REQUIRE(schemaSql.contains("CREATE TABLE public.sys_sync_event"));
+    REQUIRE(schemaSql.contains("uk_sync_task_resource"));
+    REQUIRE(schemaSql.contains("idx_sync_event_tenant_id"));
+    REQUIRE(schemaSql.contains("version bigint NOT NULL"));
+    REQUIRE(schemaSql.contains("processed_version bigint DEFAULT 0 NOT NULL"));
+    REQUIRE(schemaSql.contains("lease_until timestamptz"));
+    REQUIRE(schemaSql.contains(
         "num_nonnulls(provider_id, dns_zone_id, certificate_id, website_id) = 1"));
-    REQUIRE(schemaBaseline.contains("request_bytes bigint DEFAULT 0 NOT NULL"));
-    REQUIRE(schemaBaseline.contains("idx_website_access_log_website_ingested"));
-    REQUIRE(schemaBaseline.contains("idx_node_log_node_ingested"));
+    REQUIRE(schemaSql.contains("request_bytes bigint DEFAULT 0 NOT NULL"));
+    REQUIRE(schemaSql.contains("idx_website_access_log_website_ingested"));
+    REQUIRE(schemaSql.contains("idx_node_log_node_ingested"));
 
     const auto websiteConfig = source("service/features/website_config/model.h");
     REQUIRE(websiteConfig.contains("!defaultOriginGroup"));
@@ -261,6 +269,12 @@ int main() {
     const auto websiteConfigTransport = source("service/features/website_config/transport.h");
     REQUIRE(websiteConfigTransport.contains("RUVIA_REQUEST_MODEL(WebsiteDomainInput"));
     REQUIRE(websiteConfigTransport.contains("WebsiteConfigOutput, RUVIA_OPTIONAL_FIELD(name"));
+    const auto acme = source("service/features/certificate/acme.h");
+    REQUIRE(acme.contains("certificate/acme_transport.h"));
+    REQUIRE(!acme.contains("RUVIA_REQUEST_MODEL(AcmeDirectoryInput"));
+    const auto acmeTransport = source("service/features/certificate/acme_transport.h");
+    REQUIRE(acmeTransport.contains("RUVIA_REQUEST_MODEL(AcmeDirectoryInput"));
+    REQUIRE(acmeTransport.contains("RUVIA_RESPONSE_MODEL(AcmeJwsOutput"));
 
     const auto websitePage = source("web/features/websites/index.tsx");
     REQUIRE(websitePage.contains("import { AccessLogSheet } from './access-log-sheet'"));
