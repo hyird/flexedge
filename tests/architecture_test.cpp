@@ -297,9 +297,11 @@ int main() {
     REQUIRE(acme.contains("certificate/acme_types.h"));
     REQUIRE(acme.contains("certificate/acme_jws.h"));
     REQUIRE(acme.contains("certificate/certificate_inspection.h"));
+    REQUIRE(acme.contains("certificate/certificate_request.h"));
     REQUIRE(!acme.contains("inline std::string hmacSha256"));
     REQUIRE(!acme.contains("inline std::string jwkThumbprint"));
     REQUIRE(!acme.contains("inline IssuedCertificate inspectCertificate"));
+    REQUIRE(!acme.contains("inline CertificateRequest createCertificateRequest"));
     const auto acmeJws = source("service/features/certificate/acme_jws.h");
     REQUIRE(acmeJws.contains("inline std::string hmacSha256"));
     REQUIRE(acmeJws.contains("inline std::string jwkThumbprint"));
@@ -308,6 +310,8 @@ int main() {
         source("service/features/certificate/certificate_inspection.h");
     REQUIRE(certificateInspection.contains("inline IssuedCertificate inspectCertificate"));
     REQUIRE(certificateInspection.contains("inline void validateCertificateDomains"));
+    const auto certificateRequest = source("service/features/certificate/certificate_request.h");
+    REQUIRE(certificateRequest.contains("inline CertificateRequest createCertificateRequest"));
     REQUIRE(!acme.contains("struct AcmeSettings final"));
     const auto acmeTypes = source("service/features/certificate/acme_types.h");
     REQUIRE(acmeTypes.contains("struct AcmeSettings final"));
