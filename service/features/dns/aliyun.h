@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -304,50 +303,6 @@ class AliyunClient final {
 
     template <typename Runtime>
     ruvia::Task<std::string>
-    reconcileRecord(Runtime& c, std::string_view accessKeyId, std::string_view accessKeySecret,
-                    std::string_view domainName, std::string_view remoteRecordId,
-                    std::string_view type, std::string_view rr, std::string_view value,
-                    std::int64_t ttl, std::optional<std::int64_t> priority, std::string_view line,
-                    const std::vector<AliyunRecord>& remoteRecords) const {
-        if (!remoteRecordId.empty()) {
-            const auto byId = std::find_if(
-                remoteRecords.begin(), remoteRecords.end(),
-                [remoteRecordId](const auto& record) { return record.id == remoteRecordId; });
-            if (byId != remoteRecords.end()) {
-                if (recordMatches(*byId, type, rr, value, ttl, priority, line)) {
-                    co_return byId->id;
-                }
-                co_return co_await updateRecord(c, accessKeyId, accessKeySecret, byId->id,
-                                                domainName, type, rr, value, ttl, priority, line);
-            }
-        }
-
-        const AliyunRecord* exact = nullptr;
-        for (const auto& record : remoteRecords) {
-            if (record.type != type || !recordNameEquals(record.rr, rr) || record.value != value ||
-                record.line != line) {
-                continue;
-            }
-            if (exact && exact->id != record.id) {
-                throw AliyunError(AliyunErrorCode::recordConflict,
-                                  "阿里云 DNS 中存在多条相同线路解析记录，无法安全接管");
-            }
-            exact = &record;
-        }
-        if (exact) {
-            if (recordMatches(*exact, type, rr, value, ttl, priority, line)) {
-                co_return exact->id;
-            }
-            co_return co_await updateRecord(c, accessKeyId, accessKeySecret, exact->id, domainName,
-                                            type, rr, value, ttl, priority, line);
-        }
-
-        co_return co_await createRecord(c, accessKeyId, accessKeySecret, domainName, type, rr,
-                                        value, ttl, priority, line);
-    }
-
-    template <typename Runtime>
-    ruvia::Task<std::string>
     createRecord(Runtime& c, std::string_view accessKeyId, std::string_view accessKeySecret,
                  std::string_view domainName, std::string_view type, std::string_view rr,
                  std::string_view value, std::int64_t ttl, std::optional<std::int64_t> priority,
@@ -477,31 +432,6 @@ class AliyunClient final {
             params.emplace("Priority", std::to_string(*priority));
         }
         return params;
-    }
-
-    [[nodiscard]] static bool recordMatches(const AliyunRecord& remote, std::string_view type,
-                                            std::string_view rr, std::string_view value,
-                                            std::int64_t ttl, std::optional<std::int64_t> priority,
-                                            std::string_view line) {
-        if (remote.type != type || !recordNameEquals(remote.rr, rr) || remote.value != value ||
-            remote.ttl != ttl || remote.line != line) {
-            return false;
-        }
-        if (type == "MX" && remote.priority != priority) {
-            return false;
-        }
-        return true;
-    }
-
-    [[nodiscard]] static bool recordNameEquals(std::string_view left, std::string_view right) {
-        return normalize(left) == normalize(right);
-    }
-
-    [[nodiscard]] static std::string normalize(std::string_view input) {
-        std::string result(input);
-        std::transform(result.begin(), result.end(), result.begin(),
-                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        return result;
     }
 
     [[nodiscard]] static std::string signedQuery(std::string_view action,
