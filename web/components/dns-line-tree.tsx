@@ -77,9 +77,9 @@ export function DnsLineSelect({
         <div className='mb-2 px-2 text-xs font-medium text-muted-foreground'>
           按线路分组逐级展开选择
         </div>
-        <ScrollArea
-          type='auto'
-          className='h-[min(20rem,60svh)] w-full pe-1'
+        <div
+          className='max-h-[min(20rem,60svh)] w-full overflow-y-auto overscroll-contain pe-1'
+          onWheel={(event) => event.stopPropagation()}
         >
           <div role='tree'>
             {!knownValue && value && (
@@ -109,7 +109,7 @@ export function DnsLineSelect({
               </p>
             )}
           </div>
-        </ScrollArea>
+        </div>
       </PopoverContent>
     </Popover>
   )

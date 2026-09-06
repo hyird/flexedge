@@ -19,7 +19,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
           offset={{ top: 16 }}
           mobileOffset={{ top: 12 }}
           richColors
-          closeButton
+          closeButton={false}
           duration={4500}
         />
       </>
