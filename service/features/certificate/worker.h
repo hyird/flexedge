@@ -319,26 +319,23 @@ inline ruvia::Task<void> execute(service::background::WorkerContext& context,
         "$4 AND tenant_id = $5 AND issuance_revision = $3 AND deleted_at IS NULL",
         std::string_view(materialJson), std::string_view(issued.expiresAt), task.version,
         task.certificateId, task.tenantId);
-    bool emittedResultEvent{};
+    service::sync_runtime::RunningResultTransition resultTransition;
     if (updated.affectedRows() != 0) {
         if (!co_await service::sync_runtime::renewRunningLease(transaction, lease)) {
             throw std::runtime_error("证书同步标记 lease 已失效");
         }
         co_await service::node_dispatch::enqueueCertificateConsumers(transaction, task.tenantId,
                                                                      task.certificateId);
-        const auto resultTransition =
+        resultTransition =
             co_await service::sync_runtime::completeRunningAndRecordEvent(transaction, lease);
         if (!resultTransition.markerTransitioned) {
             throw std::runtime_error("证书同步标记 lease 已失效");
         }
-        emittedResultEvent = resultTransition.eventRecorded;
     } else {
         (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
     }
-    co_await transaction.commit();
-    if (emittedResultEvent) {
-        service::sync_runtime::publishResultEvent(lease);
-    }
+    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
+                                                                resultTransition);
     co_return;
 }
 
@@ -366,12 +363,10 @@ inline ruvia::Task<void> fail(service::background::WorkerContext& context,
                                                                          task.certificateId);
         }
     }
-    co_await transaction.commit();
+    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
+                                                                resultTransition);
     if (!resultTransition.markerTransitioned) {
         co_return;
-    }
-    if (resultTransition.eventRecorded) {
-        service::sync_runtime::publishResultEvent(lease);
     }
     service::logging::error("Certificate sync marker " + task.id + " failed: " + message);
     co_return;

@@ -616,6 +616,9 @@ int main() {
     REQUIRE(syncRuntime.contains("recordRunningResultEvent"));
     REQUIRE(syncRuntime.contains("struct RunningResultTransition final"));
     REQUIRE(syncRuntime.contains("bool eventRecorded"));
+    REQUIRE(syncRuntime.contains("commitAndPublishResultEvent"));
+    REQUIRE(syncRuntime.contains("publishRecordedResultEvent"));
+    REQUIRE(!syncRuntime.contains("publishResultEvent"));
     REQUIRE(syncRuntime.contains("pruneResultEvents"));
     REQUIRE(syncRuntime.contains("removeRunning"));
     REQUIRE(syncRuntime.contains("recoverStaleRunning"));
@@ -814,8 +817,9 @@ int main() {
         const auto worker = source(path);
         REQUIRE(worker.contains("sys_sync_task"));
         REQUIRE(worker.contains("recoverStaleRunning"));
-        REQUIRE(worker.contains("publishResultEvent"));
-        REQUIRE(worker.contains("eventRecorded"));
+        REQUIRE(worker.contains("commitAndPublishResultEvent"));
+        REQUIRE(!worker.contains("publishResultEvent"));
+        REQUIRE(!worker.contains("eventRecorded"));
         REQUIRE(!worker.contains("sys_task"));
         REQUIRE(!worker.contains("task_runtime"));
         REQUIRE(!worker.contains("spec_snapshot"));
@@ -828,6 +832,9 @@ int main() {
     REQUIRE(!dnsChallenge.contains("RunningTaskLease"));
     const auto websiteRuntime = source("service/features/website_dns/runtime.h");
     REQUIRE(websiteRuntime.contains("sync_runtime::completeRunning"));
+    REQUIRE(websiteRuntime.contains("commitAndPublishResultEvent"));
+    REQUIRE(!websiteRuntime.contains("publishResultEvent"));
+    REQUIRE(!websiteRuntime.contains("eventRecorded"));
     REQUIRE(!websiteRuntime.contains("task_runtime"));
 
     flexedge::node::v2::Website routeWebsite;

@@ -212,24 +212,21 @@ storeConflicts(service::background::WorkerContext& context, const DnsTask& task,
         "NULL, updated_at = NOW() WHERE id = $2 AND tenant_id = $3 AND desired_revision = "
         "$4 AND deleted_at IS NULL",
         std::string_view(runtimeJson), task.resourceId, task.tenantId, desiredRevision);
-    bool emittedResultEvent{};
+    service::sync_runtime::RunningResultTransition resultTransition;
     if (updated.affectedRows() != 0) {
         if (!co_await service::sync_runtime::renewRunningLease(transaction, lease)) {
             throw std::runtime_error("DNS 同步标记 lease 已失效");
         }
-        const auto resultTransition =
+        resultTransition =
             co_await service::sync_runtime::completeRunningAndRecordEvent(transaction, lease);
         if (!resultTransition.markerTransitioned) {
             throw std::runtime_error("DNS 同步标记 lease 已失效");
         }
-        emittedResultEvent = resultTransition.eventRecorded;
     } else {
         (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
     }
-    co_await transaction.commit();
-    if (emittedResultEvent) {
-        service::sync_runtime::publishResultEvent(lease);
-    }
+    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
+                                                                resultTransition);
     co_return;
 }
 
@@ -596,7 +593,7 @@ inline ruvia::Task<void> persistSyncedZone(service::background::WorkerContext& c
         "'pending' END, last_synced_at = NOW(), last_error = NULL, updated_at = NOW() WHERE id = "
         "$1 AND tenant_id = $4 AND desired_revision = $3",
         task.resourceId, std::string_view(runtimeJson), revision, task.tenantId);
-    bool emittedResultEvent{};
+    service::sync_runtime::RunningResultTransition resultTransition;
     if (updated.affectedRows() == 0) {
         (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
     } else {
@@ -608,18 +605,15 @@ inline ruvia::Task<void> persistSyncedZone(service::background::WorkerContext& c
                 throw std::runtime_error("DNS 删除同步标记 lease 已失效");
             }
         } else {
-            const auto resultTransition =
+            resultTransition =
                 co_await service::sync_runtime::completeRunningAndRecordEvent(transaction, lease);
             if (!resultTransition.markerTransitioned) {
                 throw std::runtime_error("DNS 同步标记 lease 已失效");
             }
-            emittedResultEvent = resultTransition.eventRecorded;
         }
     }
-    co_await transaction.commit();
-    if (emittedResultEvent) {
-        service::sync_runtime::publishResultEvent(lease);
-    }
+    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
+                                                                resultTransition);
     co_return;
 }
 
@@ -795,10 +789,8 @@ inline ruvia::Task<void> fail(service::background::WorkerContext& context, const
             task.resourceId, permanent ? std::string_view{"failed"} : std::string_view{"pending"},
             std::string_view(message), task.version, task.tenantId);
     }
-    co_await transaction.commit();
-    if (resultTransition.eventRecorded) {
-        service::sync_runtime::publishResultEvent(lease);
-    }
+    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
+                                                                resultTransition);
     if (resultTransition.markerTransitioned) {
         service::logging::error("DNS sync task " + task.id + " failed: " + message);
     }

@@ -279,7 +279,7 @@ inline ruvia::Task<void> completeMarker(service::background::WorkerContext& cont
         "revision = $4 AND verification_generation = $5 AND deleted_at IS NULL",
         std::string_view(runtimeJson), task.providerId, task.tenantId, task.providerRevision,
         task.generation);
-    bool emittedResultEvent{};
+    service::sync_runtime::RunningResultTransition resultTransition;
     if (updated.affectedRows() == 0) {
         (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
     } else {
@@ -287,17 +287,14 @@ inline ruvia::Task<void> completeMarker(service::background::WorkerContext& cont
             co_await service::dns_sync::markProviderZonesDirty(transaction, task.tenantId,
                                                                task.providerId);
         }
-        const auto resultTransition =
+        resultTransition =
             co_await service::sync_runtime::completeRunningAndRecordEvent(transaction, lease);
         if (!resultTransition.markerTransitioned) {
             throw std::runtime_error("供应商检测标记 lease 已失效");
         }
-        emittedResultEvent = resultTransition.eventRecorded;
     }
-    co_await transaction.commit();
-    if (emittedResultEvent) {
-        service::sync_runtime::publishResultEvent(lease);
-    }
+    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
+                                                                resultTransition);
     co_return;
 }
 
@@ -334,10 +331,8 @@ inline ruvia::Task<void> fail(service::background::WorkerContext& context,
             "verification_generation = $5 AND deleted_at IS NULL",
             permanent, std::string_view(message), task.providerId, task.tenantId, task.generation);
     }
-    co_await transaction.commit();
-    if (resultTransition.eventRecorded) {
-        service::sync_runtime::publishResultEvent(lease);
-    }
+    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
+                                                                resultTransition);
     if (resultTransition.markerTransitioned) {
         service::logging::error("Provider verification marker " + task.id + " failed: " + message);
     }
