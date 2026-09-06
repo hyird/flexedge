@@ -146,8 +146,8 @@ int main() {
     REQUIRE(!std::filesystem::exists(sourceRoot / "service/features/website_dispatch/queue.h"));
     REQUIRE(!std::filesystem::exists(sourceRoot / "service/features/website_dispatch/model.h"));
 
-    REQUIRE(service::config::kSchemaMigrations.size() == 17);
-    REQUIRE(service::config::kSchemaMigrations.back().id() == "0017_website_route_rules");
+    REQUIRE(service::config::kSchemaMigrations.size() == 19);
+    REQUIRE(service::config::kSchemaMigrations.back().id() == "0019_access_log_request_bytes");
     const auto syncMigration =
         std::ranges::find_if(service::config::kSchemaMigrations, [](const auto& migration) {
             return migration.id() == "0015_edgeadmin_sync_markers";
@@ -167,7 +167,18 @@ int main() {
         });
     REQUIRE(infiniteRetryMigration != service::config::kSchemaMigrations.end());
     REQUIRE(infiniteRetryMigration->sql().contains("is_done = FALSE"));
-    REQUIRE(service::config::kSchemaMigrations.back().sql().contains("\"route_rules\": []"));
+    const auto routeRulesMigration =
+        std::ranges::find_if(service::config::kSchemaMigrations, [](const auto& migration) {
+            return migration.id() == "0017_website_route_rules";
+        });
+    REQUIRE(routeRulesMigration != service::config::kSchemaMigrations.end());
+    REQUIRE(routeRulesMigration->sql().contains("\"route_rules\": []"));
+    const auto requestBytesMigration =
+        std::ranges::find_if(service::config::kSchemaMigrations, [](const auto& migration) {
+            return migration.id() == "0019_access_log_request_bytes";
+        });
+    REQUIRE(requestBytesMigration != service::config::kSchemaMigrations.end());
+    REQUIRE(requestBytesMigration->sql().contains("request_bytes bigint DEFAULT 0 NOT NULL"));
 
     const auto syncRuntime = source("service/features/sync_runtime/state.h");
     REQUIRE(syncRuntime.contains("namespace service::sync_runtime"));
