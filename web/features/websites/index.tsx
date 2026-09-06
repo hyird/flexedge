@@ -2990,10 +2990,15 @@ function AccessLogSheet({
                     </span>
                     <span
                       className='text-[11px] text-muted-foreground'
-                      title={`请求体大小：${formatAccessLogBytes(log.request_bytes)}；响应大小：${formatAccessLogBytes(log.response_bytes)}`}
+                      title={`请求体大小：${formatAccessLogBytes(log.request_bytes)}`}
                     >
-                      请求体 {formatAccessLogBytes(log.request_bytes)} · 响应{' '}
-                      {formatAccessLogBytes(log.response_bytes)}
+                      请求体 {formatAccessLogBytes(log.request_bytes)}
+                    </span>
+                    <span
+                      className='text-[11px] text-muted-foreground'
+                      title={`响应大小：${formatAccessLogBytes(log.response_bytes)}`}
+                    >
+                      响应 {formatAccessLogBytes(log.response_bytes)}
                     </span>
                   </div>
                   <div className='col-span-2 overflow-x-auto text-muted-foreground'>
