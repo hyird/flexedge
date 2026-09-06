@@ -65,6 +65,24 @@ class WebsiteService {
         co_return co_await websiteDashboardService().dashboard(c, tenantId, id);
     }
 
+    ruvia::Task<void> requestDnsProbe(ruvia::Context& c, const std::string& tenantId,
+                                      const std::string& id) {
+        auto transaction = co_await c.db().beginTransaction();
+        const auto rows = co_await transaction.query(
+            "SELECT revision FROM sys_website WHERE id = $1 AND tenant_id = $2 AND "
+            "deleted_at IS NULL LIMIT 1 FOR UPDATE",
+            id, tenantId);
+        if (rows.empty()) {
+            service::common::throwAppError(WebsiteError::NOT_FOUND);
+        }
+        const auto revision = rows.front()[0].as<std::int64_t>().value_or(1);
+        (void)co_await service::sync_runtime::upsertMarker(
+            transaction, tenantId, service::sync_runtime::MarkerResourceType::website, id,
+            service::sync_runtime::MarkerOperation::apply, revision);
+        co_await transaction.commit();
+        co_return;
+    }
+
     ruvia::Task<void> create(ruvia::Context& c, const std::string& tenantId,
                              const std::string& clusterId,
                              const ruvia::ValidatedJson<WebsiteSaveInput>& body) {

@@ -30,6 +30,7 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
     RUVIA_GET_SSE("/:id/access-logs/stream", accessLogStream);
     RUVIA_GET("/:id/dashboard", dashboard);
     RUVIA_GET("/:id", detail);
+    RUVIA_POST("/:id/dns-probe", requestDnsProbe);
     RUVIA_POST("/", create, WebsiteConfigValidator);
     RUVIA_PUT("/:id", update, WebsiteConfigValidator);
     RUVIA_DELETE("/:id", remove);
@@ -102,6 +103,11 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
     ruvia::Task<ruvia::HttpResponse> dashboard(ruvia::Context& c) {
         auto data = co_await websiteService().dashboard(c, tenantId(c), requireId(c));
         co_return c.json(service::common::ok<WebsiteDashboardResponse>(c, std::move(data)));
+    }
+
+    ruvia::Task<ruvia::HttpResponse> requestDnsProbe(ruvia::Context& c) {
+        co_await websiteService().requestDnsProbe(c, tenantId(c), requireId(c));
+        co_return c.json(service::common::operation(c, "域名解析检测已提交"));
     }
 
     ruvia::Task<ruvia::HttpResponse> accessLogHistory(ruvia::Context& c) {

@@ -93,7 +93,7 @@ export function RecordsDialog({
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className='w-full overflow-hidden p-0 sm:max-w-4xl'>
+      <SheetContent className='flex h-full w-full flex-col overflow-hidden p-0 sm:max-w-4xl'>
         <SheetHeader className='px-6 pt-6'>
           <SheetTitle>{zone.domain} · DNS 记录</SheetTitle>
           <SheetDescription>
@@ -106,18 +106,46 @@ export function RecordsDialog({
         <Form {...form}>
           <form
             id='zone-records-form'
+            className='flex min-h-0 flex-1 flex-col'
             onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
           >
-            <ScrollArea className='max-h-[64svh] px-6'>
-              <div className='sticky top-0 z-10 hidden gap-2 border-b bg-background px-3 py-2 text-xs font-medium text-muted-foreground md:grid md:grid-cols-[100px_1fr_1.4fr_90px_100px_auto]'>
-                <span>类型</span>
-                <span>主机记录</span>
-                <span>记录值</span>
-                <span>TTL</span>
-                <span>线路</span>
-                <span>{supportsProxy ? '代理 / 操作' : '操作'}</span>
-              </div>
+            <ScrollArea className='min-h-0 flex-1 px-6'>
               <div className='space-y-3 pb-4'>
+                {!!systemRecords.length && (
+                  <section className='space-y-3 rounded-md border border-dashed bg-muted/30 p-3'>
+                    <div className='flex flex-wrap items-center gap-2'>
+                      <h3 className='text-sm font-medium'>系统自动记录</h3>
+                      <Badge variant='secondary'>只读</Badge>
+                      <p className='text-xs text-muted-foreground'>
+                        随节点、集群或网站托管解析自动更新，不能在此编辑或删除。
+                      </p>
+                    </div>
+                    <div className='space-y-2'>
+                      {systemRecords.map((record) => (
+                        <div
+                          key={record.id}
+                          className='grid gap-1 rounded-md border bg-background px-3 py-2 text-sm md:grid-cols-[100px_1fr_1.4fr_90px_100px] md:gap-2'
+                        >
+                          <span className='font-medium'>{record.type}</span>
+                          <span className='break-all'>{record.name}</span>
+                          <span className='break-all text-muted-foreground'>{record.content}</span>
+                          <span>TTL {record.ttl}</span>
+                          <span className='text-muted-foreground'>
+                            {record.line_code}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+                <div className='sticky top-0 z-10 hidden gap-2 border-b bg-background px-3 py-2 text-xs font-medium text-muted-foreground md:grid md:grid-cols-[100px_1fr_1.4fr_90px_100px_auto]'>
+                  <span>类型</span>
+                  <span>主机记录</span>
+                  <span>记录值</span>
+                  <span>TTL</span>
+                  <span>线路</span>
+                  <span>{supportsProxy ? '代理 / 操作' : '操作'}</span>
+                </div>
                 {records.fields.map((record, index) => (
                   <div
                     key={record.formKey}
@@ -251,33 +279,6 @@ export function RecordsDialog({
                   <div className='rounded-md border border-dashed py-12 text-center text-sm text-muted-foreground'>
                     暂无 DNS 记录
                   </div>
-                )}
-                {!!systemRecords.length && (
-                  <section className='space-y-3 rounded-md border border-dashed bg-muted/30 p-3'>
-                    <div className='flex flex-wrap items-center gap-2'>
-                      <h3 className='text-sm font-medium'>系统自动记录</h3>
-                      <Badge variant='secondary'>只读</Badge>
-                      <p className='text-xs text-muted-foreground'>
-                        随节点、集群或网站托管解析自动更新，不能在此编辑或删除。
-                      </p>
-                    </div>
-                    <div className='space-y-2'>
-                      {systemRecords.map((record) => (
-                        <div
-                          key={record.id}
-                          className='grid gap-1 rounded-md border bg-background px-3 py-2 text-sm md:grid-cols-[100px_1fr_1.4fr_90px_100px] md:gap-2'
-                        >
-                          <span className='font-medium'>{record.type}</span>
-                          <span className='break-all'>{record.name}</span>
-                          <span className='break-all text-muted-foreground'>{record.content}</span>
-                          <span>TTL {record.ttl}</span>
-                          <span className='text-muted-foreground'>
-                            {record.line_code}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
                 )}
               </div>
             </ScrollArea>

@@ -1,5 +1,10 @@
 import { useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
 import { Eye, FilePenLine, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -55,6 +60,7 @@ export function DnsZones() {
   })
   const query = useQuery({
     queryKey: [...queryKeys.dnsZones, page, pageSize, keyword, providerId],
+    placeholderData: keepPreviousData,
     queryFn: () =>
       getData<PageData<DnsZone>>('/dns-zones/', {
         page,

@@ -1,5 +1,10 @@
 import { useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
 import { Download, Eye, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -43,6 +48,7 @@ export function Certificates() {
 
   const query = useQuery({
     queryKey: [...queryKeys.certificates, page, pageSize, keyword, status],
+    placeholderData: keepPreviousData,
     queryFn: () =>
       getData<PageData<Certificate>>('/certificates/', {
         page,
