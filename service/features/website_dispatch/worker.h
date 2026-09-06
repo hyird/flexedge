@@ -107,10 +107,8 @@ inline ruvia::Task<void> fail(service::background::WorkerContext& context,
     auto transaction = co_await context.db().beginTransaction();
     const auto resultTransition = co_await service::sync_runtime::failRunningAndRecordEvent(
         transaction, lease, service::sync_runtime::boundedError(error));
-    co_await transaction.commit();
-    if (resultTransition.eventRecorded) {
-        service::sync_runtime::publishResultEvent(lease);
-    }
+    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
+                                                                resultTransition);
     if (resultTransition.markerTransitioned) {
         service::logging::error("Website sync marker " + marker.id +
                                 " failed: " + service::sync_runtime::boundedError(error));

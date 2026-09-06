@@ -157,8 +157,23 @@ inline constexpr std::string_view kEventOutcomeFailed{"failed"};
             .owner = owner};
 }
 
-inline void publishResultEvent(const RunningMarkerLease& lease) {
+namespace detail {
+
+inline void publishRecordedResultEvent(const RunningMarkerLease& lease) {
     service::sync_event::fanout::hub().publish(lease.marker.tenantId);
+}
+
+} // namespace detail
+
+template <typename Transaction>
+inline ruvia::Task<void> commitAndPublishResultEvent(Transaction& transaction,
+                                                     const RunningMarkerLease& lease,
+                                                     const RunningResultTransition& transition) {
+    co_await transaction.commit();
+    if (transition.eventRecorded) {
+        detail::publishRecordedResultEvent(lease);
+    }
+    co_return;
 }
 
 [[nodiscard]] inline std::string_view resourceColumn(MarkerResourceType resourceType) {
