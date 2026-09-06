@@ -317,6 +317,11 @@ int main() {
     REQUIRE(certificateInspection.contains("inline void validateCertificateDomains"));
     const auto certificateRequest = source("service/features/certificate/certificate_request.h");
     REQUIRE(certificateRequest.contains("inline CertificateRequest createCertificateRequest"));
+    const auto certificateService = source("service/domains/certificate/certificate.service.h");
+    REQUIRE(certificateService.contains("certificate.mapper.h"));
+    REQUIRE(!certificateService.contains("static void fillCertificate"));
+    const auto certificateMapper = source("service/domains/certificate/certificate.mapper.h");
+    REQUIRE(certificateMapper.contains("inline void fillCertificate"));
     REQUIRE(!acme.contains("struct AcmeSettings final"));
     const auto acmeTypes = source("service/features/certificate/acme_types.h");
     REQUIRE(acmeTypes.contains("struct AcmeSettings final"));
