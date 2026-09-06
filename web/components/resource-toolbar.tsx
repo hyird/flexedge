@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { Loader2, Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -13,6 +13,8 @@ type Props = {
   filters?: ReactNode
 }
 
+const minimumLoadingDurationMs = 350
+
 export function ResourceToolbar({
   value,
   onChange,
@@ -22,6 +24,31 @@ export function ResourceToolbar({
   placeholder = '搜索…',
   filters,
 }: Props) {
+  const isRefreshing = Boolean(refreshing)
+  const [showLoading, setShowLoading] = useState(false)
+  const loadingStartedAt = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (isRefreshing || !showLoading || loadingStartedAt.current === null) {
+      return
+    }
+    const remaining = Math.max(
+      0,
+      minimumLoadingDurationMs - (Date.now() - loadingStartedAt.current)
+    )
+    const timeoutId = window.setTimeout(() => {
+      loadingStartedAt.current = null
+      setShowLoading(false)
+    }, remaining)
+    return () => window.clearTimeout(timeoutId)
+  }, [isRefreshing, showLoading])
+
+  const handleSearch = () => {
+    loadingStartedAt.current = Date.now()
+    setShowLoading(true)
+    onSearch()
+  }
+
   return (
     <div className='flex w-full flex-wrap items-center gap-2 rounded-lg border bg-card/70 p-2 shadow-sm'>
       {value !== undefined && (
@@ -33,7 +60,7 @@ export function ResourceToolbar({
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault()
-                onSearch()
+                handleSearch()
               }
             }}
             aria-label={placeholder}
@@ -50,11 +77,11 @@ export function ResourceToolbar({
         <Button
           type='button'
           className='w-[4.5rem]'
-          onClick={onSearch}
-          disabled={refreshing}
-          aria-busy={refreshing}
+          onClick={handleSearch}
+          disabled={showLoading}
+          aria-busy={showLoading}
         >
-          {refreshing ? <Loader2 className='animate-spin' aria-hidden='true' /> : '查询'}
+          {showLoading ? <Loader2 className='animate-spin' aria-hidden='true' /> : '查询'}
         </Button>
       </div>
     </div>

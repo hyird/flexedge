@@ -19,6 +19,7 @@
 #include "service/features/cluster_dns/projection.h"
 #include "service/features/node_dispatch/protocol.h"
 #include "service/features/node_dispatch/queue.h"
+#include "service/features/node_runtime/fanout.h"
 #include "service/features/node_runtime/model.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
@@ -92,6 +93,7 @@ class AgentService final {
             .agentId = agentId,
         };
         co_await transaction.commit();
+        service::node_runtime::fanout::hub().publish(result.tenantId);
         co_return result;
     }
 
@@ -178,6 +180,7 @@ class AgentService final {
             "status IN ('pending', 'failed')",
             principal.tenantId, report.activeReleaseId, report.nodeId);
         co_await transaction.commit();
+        service::node_runtime::fanout::hub().publish(principal.tenantId);
         co_return;
     }
 
@@ -210,6 +213,7 @@ class AgentService final {
                 "AND status IN ('pending', 'failed')",
                 principal.tenantId, result.release_id(), nodeId);
             co_await transaction.commit();
+            service::node_runtime::fanout::hub().publish(principal.tenantId);
             co_return;
         }
         const auto phase = flexedge::node::v2::ApplyPhase_Name(result.failed_phase());
@@ -249,6 +253,7 @@ class AgentService final {
                 result.error().substr(0, 1000), result.retryable(), principal.clusterId);
         }
         co_await transaction.commit();
+        service::node_runtime::fanout::hub().publish(principal.tenantId);
         co_return;
     }
 };

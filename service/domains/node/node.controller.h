@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
+#include <exception>
 #include <initializer_list>
 #include <optional>
 #include <string>
@@ -19,6 +21,7 @@
 #include "service/features/log_ingest/fanout.h"
 #include "service/features/log_ingest/sse_tail.h"
 #include "service/features/log_ingest/tail.h"
+#include "service/features/node_runtime/fanout.h"
 #include "service/middleware/auth.h"
 
 namespace service::node {
@@ -28,6 +31,7 @@ class NodeController final : public ruvia::Controller<NodeController> {
     RUVIA_CONTROLLER_GROUP("/api/nodes", service::middleware::AuthMiddleware)
     RUVIA_ROUTES_BEGIN
     RUVIA_GET("/", list);
+    RUVIA_GET_SSE("/stream", runtimeStream);
     RUVIA_POST("/", create, NodeConfigValidator);
     RUVIA_PUT("/:id", update, NodeConfigValidator);
     RUVIA_GET_SSE("/:id/logs/stream", logStream);
@@ -47,6 +51,12 @@ class NodeController final : public ruvia::Controller<NodeController> {
 
     static std::int64_t expectedRevision(ruvia::Context& c) {
         return service::common::requireExpectedRevision(c);
+    }
+
+    static bool sseClientDisconnected(const std::exception& error) {
+        const std::string_view message{error.what()};
+        return message.contains("Broken pipe") || message.contains("Connection reset by peer") ||
+               message.contains("redis operation cancelled");
     }
 
     static ruvia::Task<void> writeLogEvent(ruvia::Context& c, ruvia::SseWriter& events,
@@ -133,6 +143,41 @@ class NodeController final : public ruvia::Controller<NodeController> {
         auto data = co_await nodeService().resetCredentials(c, tenantId(c), requireId(c), revision);
         service::common::setRevisionEtag(c, data.get<"revision">().value);
         co_return c.json(service::common::ok<NodeCredentialsResponse>(c, std::move(data)));
+    }
+
+    ruvia::Task<void> runtimeStream(ruvia::Context& c) {
+        try {
+            co_await runtimeStreamBody(c);
+        } catch (const std::exception& error) {
+            if (sseClientDisconnected(error)) {
+                co_return;
+            }
+            throw;
+        }
+    }
+
+    static ruvia::Task<void> runtimeStreamBody(ruvia::Context& c) {
+        const auto tenant = tenantId(c);
+        auto subscription = service::node_runtime::fanout::hub().subscribe(c.worker(), tenant);
+        auto events = c.streamSse();
+        co_await events.write(
+            {.data = "{}", .event = "ready", .retry = std::chrono::milliseconds{3000}});
+
+        while (!events.aborted()) {
+            const auto signal = co_await subscription.receiveFor(
+                service::node_runtime::fanout::kSseHeartbeatInterval, c.stopToken());
+            if (events.aborted()) {
+                co_return;
+            }
+            if (!signal.hasValue()) {
+                if (signal.status() != ruvia::WorkerWaitStatus::kTimedOut) {
+                    co_return;
+                }
+                co_await events.write({.event = "heartbeat"});
+                continue;
+            }
+            co_await events.write({.data = "{}", .event = "node-state"});
+        }
     }
 
     ruvia::Task<void> logStream(ruvia::Context& c) {

@@ -166,19 +166,14 @@ export function NodesPanel({
         header: '节点 IP',
         cell: ({ row }) => {
           const endpoints = row.original.config.endpoints
-          const addresses = endpoints
-            .slice(0, 2)
-            .map((endpoint) => endpoint.ip_address)
-            .join(' · ')
           return (
-            <DataTableCellContent>
-              <code title={addresses}>{addresses}</code>
-              {endpoints.length > 2 && (
-                <span className='text-xs text-muted-foreground'>
-                  +{endpoints.length - 2}
-                </span>
-              )}
-            </DataTableCellContent>
+            <div className='grid gap-1 font-mono text-sm'>
+              {endpoints.map((endpoint) => (
+                <code key={endpoint.id} title={endpoint.ip_address}>
+                  {endpoint.ip_address}
+                </code>
+              ))}
+            </div>
           )
         },
       },
@@ -188,24 +183,18 @@ export function NodesPanel({
         header: 'DNS 线路',
         cell: ({ row }) => {
           const endpoints = row.original.config.endpoints
-          const lines = endpoints
-            .slice(0, 2)
-            .map((endpoint) =>
-              dnsLinePath(
-                linesQuery.data?.[row.original.cluster_id] ?? [],
-                endpoint.line_code
-              )
-            )
-            .join(' · ')
+          const lines = linesQuery.data?.[row.original.cluster_id] ?? []
           return (
-            <DataTableCellContent>
-              <span title={lines}>{lines}</span>
-              {endpoints.length > 2 && (
-                <span className='text-xs text-muted-foreground'>
-                  +{endpoints.length - 2}
-                </span>
-              )}
-            </DataTableCellContent>
+            <div className='grid gap-1 text-sm'>
+              {endpoints.map((endpoint) => {
+                const line = dnsLinePath(lines, endpoint.line_code)
+                return (
+                  <span key={endpoint.id} title={line}>
+                    {line}
+                  </span>
+                )
+              })}
+            </div>
           )
         },
       },
