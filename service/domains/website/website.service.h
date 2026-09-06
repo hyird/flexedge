@@ -23,6 +23,7 @@
 #include "service/domains/website/website.error.h"
 #include "service/domains/website/website.types.h"
 #include "service/domains/website/website_dashboard.service.h"
+#include "service/domains/website/website_runtime.mapper.h"
 #include "service/features/log_ingest/tail.h"
 #include "service/features/node_runtime/model.h"
 #include "service/features/website_config/model.h"
@@ -289,11 +290,7 @@ class WebsiteService {
     }
 
   private:
-    struct BoundCertificate {
-        std::string id;
-        std::vector<std::string> domains;
-        bool usable;
-    };
+    using BoundCertificate = detail::BoundCertificate;
 
     struct DomainClaim {
         std::string id;
@@ -302,11 +299,7 @@ class WebsiteService {
         std::optional<std::string> dnsZoneId{};
     };
 
-    struct OriginRuntimeState {
-        std::string nodeId;
-        std::string nodeName;
-        service::node_runtime::NodeRuntimeData::OriginHealth health;
-    };
+    using OriginRuntimeState = detail::OriginRuntimeState;
 
     static std::string selectColumns() {
         return "SELECT website.id, website.cluster_id, cluster.name, "
@@ -447,78 +440,10 @@ class WebsiteService {
                 domains.emplace_back(domain, ruvia::ModelOptions{.resource = c.resource()});
             }
         }
-        item.set<"runtime">(
-            toRuntime(c, config, *runtime, certificates, targetCount, syncedCount, originStates));
+        item.set<"runtime">(detail::toRuntime(c, config, *runtime, certificates, targetCount,
+                                              syncedCount, originStates));
         item.set<"createdAt">(row[9].value().value_or(""));
         item.set<"updatedAt">(row[10].value().value_or(""));
-    }
-
-    static WebsiteRuntimeDto toRuntime(ruvia::Context& c,
-                                       const service::website_config::WebsiteConfigData& config,
-                                       const service::website_dns::WebsiteRuntimeData& input,
-                                       const std::vector<BoundCertificate>& certificates,
-                                       std::int64_t targetCount, std::int64_t syncedCount,
-                                       const std::vector<OriginRuntimeState>& originStates = {}) {
-        WebsiteRuntimeDto output(c);
-        const auto deployStatus = targetCount == 0             ? std::string_view{"no_nodes"}
-                                  : syncedCount == targetCount ? std::string_view{"applied"}
-                                  : syncedCount == 0           ? std::string_view{"pending"}
-                                                               : std::string_view{"partial"};
-        output.set<"deployStatus">(deployStatus);
-        output.set<"targetNodeCount">(targetCount);
-        output.set<"syncedNodeCount">(syncedCount);
-        auto& domains = output.ensure<"domainStates">();
-        for (const auto& domain : config.domains) {
-            const service::website_dns::WebsiteDomainRuntimeData* runtimeState = nullptr;
-            const auto state = std::ranges::find_if(input.domainStates, [&](const auto& candidate) {
-                return candidate.id && *candidate.id == domain.id;
-            });
-            if (state != input.domainStates.end()) {
-                runtimeState = &*state;
-            }
-            const bool https =
-                config.httpsEnabled &&
-                std::ranges::any_of(certificates, [&](const auto& certificate) {
-                    return certificate.usable &&
-                           std::ranges::any_of(
-                               certificate.domains, [&](const auto& certificateDomain) {
-                                   return service::common::certificateCoversHostname(
-                                       certificateDomain, domain.hostname);
-                               });
-                });
-            auto& item = domains.emplace_back(c);
-            std::string_view resolutionStatus{"unverified"};
-            if (runtimeState && runtimeState->resolutionStatus) {
-                resolutionStatus = *runtimeState->resolutionStatus;
-            }
-            item.set<"id">(domain.id);
-            item.set<"accessProtocol">(https ? std::string_view{"https"}
-                                             : std::string_view{"http"});
-            item.set<"resolutionStatus">(resolutionStatus);
-            if (runtimeState) {
-                if (runtimeState->lastVerifiedAt) {
-                    item.set<"lastVerifiedAt">(*runtimeState->lastVerifiedAt);
-                }
-                if (runtimeState->lastError) {
-                    item.set<"lastError">(*runtimeState->lastError);
-                }
-            }
-        }
-        auto& origins = output.ensure<"originStates">();
-        origins.reserve(originStates.size());
-        for (const auto& state : originStates) {
-            auto& item = origins.emplace_back(c);
-            item.set<"nodeId">(state.nodeId);
-            item.set<"nodeName">(state.nodeName);
-            item.set<"originId">(state.health.originId);
-            item.set<"status">(state.health.status);
-            item.set<"checkedAtUnixMillis">(state.health.checkedAtUnixMillis);
-            item.set<"latencyMillis">(state.health.latencyMillis);
-            if (state.health.lastError) {
-                item.set<"lastError">(*state.health.lastError);
-            }
-        }
-        return output;
     }
 
     template <typename Db>

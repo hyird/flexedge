@@ -287,8 +287,13 @@ int main() {
     REQUIRE(websiteAccessLogMapper.contains("fillWebsiteAccessLog"));
     REQUIRE(websiteAccessLogMapper.contains("clientIpLocation"));
     REQUIRE(websiteService.contains("website_access_log.service.h"));
+    REQUIRE(websiteService.contains("website_runtime.mapper.h"));
     REQUIRE(websiteService.contains("websiteAccessLogService().tail"));
     REQUIRE(!websiteService.contains("sys_website_access_log"));
+    REQUIRE(!websiteService.contains("static WebsiteRuntimeDto toRuntime"));
+    const auto websiteRuntimeMapper = source("service/domains/website/website_runtime.mapper.h");
+    REQUIRE(websiteRuntimeMapper.contains("inline WebsiteRuntimeDto toRuntime"));
+    REQUIRE(websiteRuntimeMapper.contains("struct BoundCertificate final"));
     const auto websiteAccessLogs = source("service/domains/website/website_access_log.service.h");
     REQUIRE(websiteAccessLogs.contains("class WebsiteAccessLogService final"));
     REQUIRE(websiteAccessLogs.contains("sys_website_access_log access LEFT JOIN"));
