@@ -388,6 +388,15 @@ int main() {
     REQUIRE(dnsProviderReadService.contains("class DnsProviderReadService final"));
     REQUIRE(dnsProviderReadService.contains("struct StoredProvider final"));
     REQUIRE(dnsProviderReadService.contains("static StoredProvider parseRow"));
+    const auto certificateProviderServiceSource =
+        source("service/domains/provider/certificate_provider.service.h");
+    REQUIRE(certificateProviderServiceSource.contains("certificate_provider_read.service.h"));
+    REQUIRE(certificateProviderServiceSource.contains("certificateProviderReadService().list"));
+    REQUIRE(!certificateProviderServiceSource.contains("static void fill"));
+    const auto certificateProviderReadService =
+        source("service/domains/provider/certificate_provider_read.service.h");
+    REQUIRE(certificateProviderReadService.contains("class CertificateProviderReadService final"));
+    REQUIRE(certificateProviderReadService.contains("static void fill"));
     REQUIRE(!acme.contains("struct AcmeSettings final"));
     const auto acmeTypes = source("service/features/certificate/acme_types.h");
     REQUIRE(acmeTypes.contains("struct AcmeSettings final"));
