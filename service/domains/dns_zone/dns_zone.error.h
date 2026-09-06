@@ -17,8 +17,8 @@ struct DnsZoneError {
         16206, "DNS 记录使用了不可用的解析线路", 422};
     static inline constexpr service::common::AppErrorDef PROVIDER_UNAVAILABLE{
         16207, "DNS 服务商账号不可用", 422};
-    static inline constexpr service::common::AppErrorDef CLUSTER_MANAGED_RECORD{
-        16208, "集群托管域名的 A、AAAA 或 CNAME 记录由节点自动维护", 422};
+    static inline constexpr service::common::AppErrorDef SYSTEM_MANAGED_RECORD{
+        16208, "系统自动生成的 DNS 记录不能修改或覆盖", 422};
 };
 
 } // namespace service::dns_zone

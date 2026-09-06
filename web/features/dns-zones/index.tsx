@@ -113,7 +113,9 @@ export function DnsZones() {
         header: '记录数',
         cell: ({ row }) => (
           <span className='tabular-nums'>
-            {row.original.config.records.length} 条
+            {row.original.config.records.length +
+              row.original.runtime.projected_records.length}{' '}
+            条
           </span>
         ),
       },
