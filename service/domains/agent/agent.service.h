@@ -88,7 +88,6 @@ class AgentService final {
         const auto nodeId = candidates.front()[0].value().value_or("");
         const auto clusterId = candidates.front()[1].value().value_or("");
         const auto tenantId = candidates.front()[2].value().value_or("");
-        co_await service::node_dispatch::ensureClusterRelease(transaction, tenantId, clusterId);
         const auto rows = co_await transaction.query(
             "SELECT id, cluster_id, tenant_id, registration_status, node_secret_hash FROM "
             "sys_node WHERE id = $1 AND cluster_id = $2 AND tenant_id = $3 AND agent_id = $4 "
@@ -112,11 +111,17 @@ class AgentService final {
             if (updated.affectedRows() != 1) {
                 service::common::throwAppError(AGENT_UNAUTHORIZED);
             }
+            // The target set is created from registered nodes. Publish only after this node has
+            // transitioned out of pending so the initial release includes it as a target.
+            co_await service::node_dispatch::publishClusterRelease(transaction, tenantId,
+                                                                   clusterId);
             const std::string tenantIdValue(tenantId);
             const std::string clusterIdValue(clusterId);
             co_await service::cluster_dns::reconcileCluster(transaction, tenantIdValue,
                                                             clusterIdValue);
-        } else if (rows.front()[3].value().value_or("") != "registered") {
+        } else if (rows.front()[3].value().value_or("") == "registered") {
+            co_await service::node_dispatch::ensureClusterRelease(transaction, tenantId, clusterId);
+        } else {
             service::common::throwAppError(AGENT_UNAUTHORIZED);
         }
         AgentPrincipal result{

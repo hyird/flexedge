@@ -436,10 +436,11 @@ class WebsiteService {
         appendRankings(result.ensure<"referers">(), refererRows);
 
         const auto pathRows = co_await c.db().query(
-            "SELECT access.target, COUNT(*)::bigint, COALESCE(SUM(access.response_bytes), "
+            "SELECT split_part(access.target, '?', 1), COUNT(*)::bigint, "
+            "COALESCE(SUM(access.response_bytes), "
             "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
             "access.website_id = $2 AND access.occurred_at >= NOW() - INTERVAL '24 hours' GROUP "
-            "BY access.target ORDER BY COUNT(*) DESC, access.target ASC LIMIT 10",
+            "BY 1 ORDER BY COUNT(*) DESC, 1 ASC LIMIT 10",
             tenantId, id);
         appendRankings(result.ensure<"paths">(), pathRows);
 

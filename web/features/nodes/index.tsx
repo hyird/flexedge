@@ -52,6 +52,7 @@ import {
 } from '@/components/ui/sheet'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTableColumnHeader } from '@/components/data-table'
+import { DataTableCellContent } from '@/components/data-table/cell-content'
 import { DnsLineSelect } from '@/components/dns-line-tree'
 import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
@@ -169,89 +170,93 @@ export function NodesPanel({
           <DataTableColumnHeader column={column} title='节点 / 集群' />
         ),
         cell: ({ row }) => (
-          <div className='flex min-w-0 flex-col justify-center gap-0.5'>
-            <div className='truncate font-medium' title={row.original.name}>
+          <DataTableCellContent>
+            <span className='font-medium' title={row.original.name}>
               {row.original.name}
-            </div>
-            <div className='truncate text-xs text-muted-foreground'>
+            </span>
+            <span className='text-xs text-muted-foreground'>
               {row.original.cluster_name} ·{' '}
               {row.original.runtime.agent_version || '未注册'}
-            </div>
-          </div>
+            </span>
+          </DataTableCellContent>
         ),
       },
       {
         id: 'connection',
-        size: 210,
+        size: 275,
         header: '连接 / 心跳',
         cell: ({ row }) => (
-          <div className='flex min-w-0 flex-col justify-center gap-1'>
+          <DataTableCellContent>
             <StatusBadge status={row.original.runtime.connection_status} />
             <time
-              className='truncate text-xs text-muted-foreground tabular-nums'
+              className='text-xs text-muted-foreground tabular-nums'
               dateTime={row.original.runtime.last_heartbeat_at}
               title={row.original.runtime.last_heartbeat_at}
             >
               {formatDate(row.original.runtime.last_heartbeat_at)}
             </time>
-          </div>
+          </DataTableCellContent>
         ),
       },
       {
         id: 'ip',
         size: 175,
         header: '节点 IP',
-        cell: ({ row }) => (
-          <div className='flex min-w-0 flex-col justify-center gap-1'>
-            {row.original.config.endpoints.slice(0, 2).map((endpoint) => (
-              <code key={endpoint.id} className='truncate' title={endpoint.ip_address}>
-                {endpoint.ip_address}
-              </code>
-            ))}
-            {row.original.config.endpoints.length > 2 && (
-              <span className='text-xs text-muted-foreground'>
-                +{row.original.config.endpoints.length - 2}
-              </span>
-            )}
-          </div>
-        ),
+        cell: ({ row }) => {
+          const endpoints = row.original.config.endpoints
+          const addresses = endpoints
+            .slice(0, 2)
+            .map((endpoint) => endpoint.ip_address)
+            .join(' · ')
+          return (
+            <DataTableCellContent>
+              <code title={addresses}>{addresses}</code>
+              {endpoints.length > 2 && (
+                <span className='text-xs text-muted-foreground'>
+                  +{endpoints.length - 2}
+                </span>
+              )}
+            </DataTableCellContent>
+          )
+        },
       },
       {
         id: 'line',
         size: 130,
         header: 'DNS 线路',
-        cell: ({ row }) => (
-          <div className='flex min-w-0 flex-col justify-center gap-1'>
-            {row.original.config.endpoints.slice(0, 2).map((endpoint) => (
-              <span key={endpoint.id} className='truncate'>
-                {dnsLinePath(
-                  linesQuery.data?.[row.original.cluster_id] ?? [],
-                  endpoint.line_code
-                )}
-              </span>
-            ))}
-            {row.original.config.endpoints.length > 2 && (
-              <span className='text-xs text-muted-foreground'>
-                +{row.original.config.endpoints.length - 2}
-              </span>
-            )}
-          </div>
-        ),
+        cell: ({ row }) => {
+          const endpoints = row.original.config.endpoints
+          const lines = endpoints
+            .slice(0, 2)
+            .map((endpoint) =>
+              dnsLinePath(
+                linesQuery.data?.[row.original.cluster_id] ?? [],
+                endpoint.line_code
+              )
+            )
+            .join(' · ')
+          return (
+            <DataTableCellContent>
+              <span title={lines}>{lines}</span>
+              {endpoints.length > 2 && (
+                <span className='text-xs text-muted-foreground'>
+                  +{endpoints.length - 2}
+                </span>
+              )}
+            </DataTableCellContent>
+          )
+        },
       },
       {
         id: 'metrics',
         size: 300,
         header: '实时负载',
         cell: ({ row }) => (
-          <div className='grid min-w-0 gap-0.5 text-xs text-muted-foreground'>
-            <span className='truncate'>
-              CPU {row.original.runtime.cpu_usage?.toFixed(1) ?? '—'}% · 内存{' '}
-              {row.original.runtime.memory_usage?.toFixed(1) ?? '—'}%
-            </span>
-            <span className='truncate'>
-              {formatBytesPerSecond(row.original.runtime.traffic_out_bps)} ·{' '}
-              {row.original.runtime.connection_count ?? '—'} 连接
-            </span>
+          <div className='text-xs whitespace-nowrap text-muted-foreground'>
+            CPU {row.original.runtime.cpu_usage?.toFixed(1) ?? '—'}% · 内存{' '}
+            {row.original.runtime.memory_usage?.toFixed(1) ?? '—'}% ·{' '}
+            {formatBytesPerSecond(row.original.runtime.traffic_out_bps)} ·{' '}
+            {row.original.runtime.connection_count ?? '—'} 连接
           </div>
         ),
       },
@@ -259,11 +264,7 @@ export function NodesPanel({
         accessorKey: 'status',
         size: 120,
         header: '启用状态',
-        cell: ({ row }) => (
-          <div className='flex h-full items-center'>
-            <StatusBadge status={row.original.status} />
-          </div>
-        ),
+        cell: ({ row }) => <StatusBadge status={row.original.status} />,
       },
       {
         id: 'actions',
