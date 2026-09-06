@@ -622,7 +622,6 @@ CREATE TABLE IF NOT EXISTS public.sys_website_access_log (
     host varchar(253) NOT NULL,
     target varchar(2048) NOT NULL,
     status_code integer NOT NULL,
-    request_bytes bigint DEFAULT 0 NOT NULL,
     response_bytes bigint DEFAULT 0 NOT NULL,
     duration_ms integer DEFAULT 0 NOT NULL,
     user_agent varchar(512),
@@ -634,9 +633,7 @@ CREATE TABLE IF NOT EXISTS public.sys_website_access_log (
     CONSTRAINT fk_website_access_log_website FOREIGN KEY (tenant_id, website_id)
         REFERENCES public.sys_website(tenant_id, id),
     CONSTRAINT ck_website_access_log_status CHECK (status_code BETWEEN 100 AND 999),
-    CONSTRAINT ck_website_access_log_size CHECK (
-        request_bytes >= 0 AND response_bytes >= 0 AND duration_ms >= 0
-    ),
+    CONSTRAINT ck_website_access_log_size CHECK (response_bytes >= 0 AND duration_ms >= 0),
     CONSTRAINT ck_website_access_log_protocol CHECK (protocol <> ''),
     CONSTRAINT ck_website_access_log_method CHECK (method <> ''),
     CONSTRAINT ck_website_access_log_host CHECK (host <> ''),
