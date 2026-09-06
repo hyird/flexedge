@@ -30,6 +30,7 @@ set(EXPECTED_FILES
     "node-release.manifest"
     "server${EXECUTABLE_SUFFIX}"
     "systemd/flexedge.service"
+    "xdb_lookup${EXECUTABLE_SUFFIX}"
 )
 if(EXPECT_WEB)
     list(APPEND EXPECTED_FILES "web/index.html")
