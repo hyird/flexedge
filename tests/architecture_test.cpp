@@ -279,12 +279,18 @@ int main() {
     const auto websiteDashboard = source("service/domains/website/website_dashboard.service.h");
     REQUIRE(websiteDashboard.contains("class WebsiteDashboardService final"));
     REQUIRE(websiteDashboard.contains("minute_buckets AS"));
-    REQUIRE(websiteService.contains("website_access_log.mapper.h"));
     REQUIRE(!websiteService.contains("static void fillAccessLog"));
     const auto websiteAccessLogMapper =
         source("service/domains/website/website_access_log.mapper.h");
     REQUIRE(websiteAccessLogMapper.contains("fillWebsiteAccessLog"));
     REQUIRE(websiteAccessLogMapper.contains("clientIpLocation"));
+    REQUIRE(websiteService.contains("website_access_log.service.h"));
+    REQUIRE(websiteService.contains("websiteAccessLogService().tail"));
+    REQUIRE(!websiteService.contains("sys_website_access_log access LEFT JOIN"));
+    const auto websiteAccessLogs = source("service/domains/website/website_access_log.service.h");
+    REQUIRE(websiteAccessLogs.contains("class WebsiteAccessLogService final"));
+    REQUIRE(websiteAccessLogs.contains("sys_website_access_log access LEFT JOIN"));
+    REQUIRE(websiteAccessLogs.contains("website_access_log.mapper.h"));
     const auto acme = source("service/features/certificate/acme.h");
     REQUIRE(acme.contains("certificate/acme_types.h"));
     REQUIRE(!acme.contains("struct AcmeSettings final"));
