@@ -36,6 +36,7 @@
 #include "node/data/https_listener.h"
 #include "node/data/origin_selection.h"
 #include "node/data/origin_health.h"
+#include "node/data/streaming_origin_exchange.h"
 #include "node/runtime/http_redirect.h"
 #include "node/runtime/node_credentials.h"
 #include "node/proto/schema_version.h"
@@ -799,6 +800,20 @@ int main(int argc, char* argv[]) {
                 flexedge::node::ChunkedWireStatus::kIncomplete);
         REQUIRE(chunkedTracker.consume("\r\n") == flexedge::node::ChunkedWireStatus::kComplete);
         REQUIRE(chunkedTracker.consume("extra") == flexedge::node::ChunkedWireStatus::kInvalid);
+
+        flexedge::node::StreamingChunkedDecoder streamingChunked;
+        std::string streamingPayload;
+        REQUIRE(streamingChunked.consume("4\r\nWi", streamingPayload) ==
+                flexedge::node::StreamingChunkedDecoder::Status::kIncomplete);
+        REQUIRE(streamingPayload == "Wi");
+        REQUIRE(streamingChunked.consume("ki\r\n5;extension=value\r\npe", streamingPayload) ==
+                flexedge::node::StreamingChunkedDecoder::Status::kIncomplete);
+        REQUIRE(streamingPayload == "Wikipe");
+        REQUIRE(streamingChunked.consume("dia\r\n0\r\nX-Stream: ok\r\n\r\n", streamingPayload) ==
+                flexedge::node::StreamingChunkedDecoder::Status::kComplete);
+        REQUIRE(streamingPayload == "Wikipedia");
+        REQUIRE(streamingChunked.consume("extra", streamingPayload) ==
+                flexedge::node::StreamingChunkedDecoder::Status::kInvalid);
 
         const std::string bufferedResponse = "HTTP/1.1 100 Continue\r\nX-Ignored: yes\r\n\r\n"
                                              "HTTP/1.1 200 OK\r\n"

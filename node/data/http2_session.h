@@ -28,6 +28,7 @@
 #include "node/data/origin_health.h"
 #include "node/data/origin_selection.h"
 #include "node/data/response_compression.h"
+#include "node/data/streaming_origin_exchange.h"
 #include "node/runtime/log_buffer.h"
 #include "node/runtime/runtime_metrics.h"
 #include "node/runtime/runtime_state.h"
@@ -69,6 +70,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
         std::vector<const v2::Origin*> origins;
         std::size_t originIndex{};
         std::shared_ptr<BufferedOriginExchange> exchange;
+        std::shared_ptr<StreamingOriginExchange> streamingExchange;
         BufferedBytesLease requestReservation;
         BufferedBytesLease responseReservation;
         std::optional<ruvia::Http2Event> lease;
@@ -80,6 +82,8 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
         std::uint64_t responseBytes{};
         std::chrono::steady_clock::time_point startedAt{std::chrono::steady_clock::now()};
         bool responseSubmitted{};
+        bool streamingHead{};
+        bool streamingPaused{};
     };
 
     static bool normalIoClose(const std::error_code& error) noexcept {
@@ -176,6 +180,12 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
                                    [&](const auto& value) { return value == wanted; });
     }
 
+    static bool acceptsStreamingResponse(const BufferedProxyRequest& request) noexcept {
+        return std::ranges::any_of(request.headers, [](const auto& header) {
+            return httpHeaderName(header.first, "Accept") && acceptsEventStream(header.second);
+        });
+    }
+
     void log(std::string_view message) const noexcept {
         try {
             std::cerr << "flexedge node http2: " << message << '\n';
@@ -225,6 +235,9 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
             if (state.exchange) {
                 state.exchange->close();
             }
+            if (state.streamingExchange) {
+                state.streamingExchange->close();
+            }
         }
         std::error_code ignored;
         ignored = stream_.lowest_layer().close(ignored);
@@ -257,6 +270,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
                 return;
             }
             drainEvents();
+            resumeStreamingOrigins();
             flush();
             read();
         } catch (const std::exception& error) {
@@ -384,6 +398,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
         for (const auto& [name, value] : state.request.headers) {
             views.emplace_back(name, value);
         }
+        const auto streamingResponseRequested = acceptsStreamingResponse(state.request);
         std::error_code endpointError;
         const auto clientAddress = stream_.lowest_layer()
                                        .remote_endpoint(endpointError)
@@ -396,9 +411,13 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
                                               .hasBody = state.request.hasBody},
                                              *state.website, state.request.authority,
                                              endpointError ? "unknown" : clientAddress, true, false,
-                                             false, state.route);
+                                             false, streamingResponseRequested, state.route);
         if (!prepared) {
             respond(streamId, 502);
+            return;
+        }
+        if (streamingResponseRequested) {
+            startStreamingOrigin(streamId, origin, std::move(*prepared));
             return;
         }
         const auto self = shared_from_this();
@@ -435,6 +454,121 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
                 self->respond(streamId, std::move(response));
             });
         state.exchange->start();
+    }
+
+    void startStreamingOrigin(std::uint32_t streamId, const v2::Origin* origin,
+                              PreparedOriginRequest prepared) {
+        const auto found = requests_.find(streamId);
+        if (found == requests_.end() || found->second.website == nullptr) {
+            return;
+        }
+        auto& state = found->second;
+        const auto originId = origin->id();
+        const auto originHost = origin->host();
+        const auto originPort = origin->port();
+        const auto self = shared_from_this();
+        state.streamingExchange = std::make_shared<StreamingOriginExchange>(
+            stream_.get_executor(), originConnections_, std::move(prepared.bytes),
+            std::move(prepared.responseExchange), originHost,
+            static_cast<std::uint16_t>(originPort), origin->protocol() == "https",
+            std::chrono::seconds(state.website->origin_connect_timeout_seconds()),
+            std::chrono::seconds(state.website->origin_read_timeout_seconds()), state.route,
+            [self, streamId, originId](BufferedProxyResponse source) mutable {
+                const auto current = self->requests_.find(streamId);
+                if (current == self->requests_.end()) {
+                    return false;
+                }
+                auto& request = current->second;
+                self->captureResponseMetadata(streamId, source);
+                ruvia::HttpResponse response;
+                response.status(ruvia::HttpStatusCode::fromValue(source.status));
+                self->appendOriginResponseHeaders(streamId, response, source);
+                const auto submitted =
+                    self->connection_.submitStreamingResponseHead(streamId, std::move(response));
+                if (submitted != ruvia::Http2SubmitStatus::kAccepted) {
+                    self->log(std::string("streaming response head submit failed with status ") +
+                              std::to_string(static_cast<int>(submitted)));
+                    self->close();
+                    return false;
+                }
+                request.streamingHead = true;
+                self->health_.success(request.website->id(), originId,
+                                      request.website->healthy_threshold());
+                self->flush();
+                return true;
+            },
+            [self, streamId](std::string_view bytes) {
+                const auto current = self->requests_.find(streamId);
+                if (current == self->requests_.end() || !current->second.streamingHead) {
+                    return StreamingOriginWriteStatus::kRejected;
+                }
+                const auto submitted = self->connection_.submitData(
+                    streamId, bytes, ruvia::Http2EndStream::kKeepOpen);
+                if (submitted == ruvia::Http2DataSubmitStatus::kAccepted) {
+                    current->second.responseBytes += bytes.size();
+                    self->flush();
+                    return StreamingOriginWriteStatus::kAccepted;
+                }
+                if (submitted == ruvia::Http2DataSubmitStatus::kQueued) {
+                    current->second.responseBytes += bytes.size();
+                    current->second.streamingPaused = true;
+                    self->flush();
+                    return StreamingOriginWriteStatus::kPaused;
+                }
+                self->log(std::string("streaming response data submit failed with status ") +
+                          std::to_string(static_cast<int>(submitted)));
+                self->close();
+                return StreamingOriginWriteStatus::kRejected;
+            },
+            [self, streamId, originId, originHost, originPort](std::error_code error) mutable {
+                const auto current = self->requests_.find(streamId);
+                if (current == self->requests_.end()) {
+                    return;
+                }
+                auto& request = current->second;
+                request.streamingExchange.reset();
+                request.streamingPaused = false;
+                if (error) {
+                    self->health_.failure(request.website->id(), originId,
+                                          request.website->unhealthy_threshold());
+                    if (!request.streamingHead) {
+                        self->log(std::string("streaming origin exchange failed for ") + originHost +
+                                  ":" + std::to_string(originPort) + ": " + error.message());
+                        self->tryOrigin(streamId);
+                        return;
+                    }
+                    self->log(std::string("streaming origin closed for ") + originHost + ":" +
+                              std::to_string(originPort) + ": " + error.message());
+                }
+                if (!request.streamingHead) {
+                    self->respond(streamId, 502);
+                    return;
+                }
+                self->finishStreamingResponse(streamId);
+            });
+        state.streamingExchange->start();
+    }
+
+    void finishStreamingResponse(std::uint32_t streamId) {
+        const auto found = requests_.find(streamId);
+        if (found == requests_.end()) {
+            return;
+        }
+        const auto submitted =
+            connection_.submitData(streamId, {}, ruvia::Http2EndStream::kEndStream);
+        if (submitted != ruvia::Http2DataSubmitStatus::kAccepted &&
+            submitted != ruvia::Http2DataSubmitStatus::kQueued) {
+            log(std::string("streaming response finish failed with status ") +
+                std::to_string(static_cast<int>(submitted)));
+            close();
+            return;
+        }
+        if (connection_.hasQueuedData(streamId)) {
+            found->second.responseSubmitted = true;
+        } else {
+            completeResponse(streamId);
+        }
+        flush();
     }
 
     void respond(std::uint32_t streamId, std::uint16_t status) {
@@ -592,6 +726,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
                     completeResponse(streamId);
                 }
             }
+            resumeStreamingOrigins();
             metrics_.trafficOut(size);
             flush();
         } catch (const std::exception& error) {
@@ -607,6 +742,12 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
         const auto found = requests_.find(streamId);
         if (found == requests_.end()) {
             return;
+        }
+        if (found->second.exchange) {
+            found->second.exchange->close();
+        }
+        if (found->second.streamingExchange) {
+            found->second.streamingExchange->close();
         }
         auto& lease = found->second.lease;
         if (lease) {
@@ -661,6 +802,20 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
             });
         }
         requests_.erase(found);
+    }
+
+    void resumeStreamingOrigins() {
+        std::vector<std::shared_ptr<StreamingOriginExchange>> resumable;
+        for (auto& [streamId, state] : requests_) {
+            if (state.streamingPaused && state.streamingExchange &&
+                !connection_.hasQueuedData(streamId)) {
+                state.streamingPaused = false;
+                resumable.push_back(state.streamingExchange);
+            }
+        }
+        for (const auto& exchange : resumable) {
+            exchange->resume();
+        }
     }
 
     Stream stream_;
