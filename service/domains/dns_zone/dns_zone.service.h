@@ -243,7 +243,7 @@ class DnsZoneService {
                  const ruvia::ValidatedJson<service::dns_sync::ZoneConfigInput>& config) {
         auto transaction = co_await c.db().beginTransaction();
         const auto current = co_await transaction.query(
-            "SELECT zone.revision, zone.runtime::text, provider.provider FROM sys_dns_zone zone "
+            "SELECT zone.revision, zone.runtime::text, provider.provider, zone.domain FROM sys_dns_zone zone "
             "INNER JOIN sys_provider provider ON provider.tenant_id = zone.tenant_id AND "
             "provider.id = zone.provider_id WHERE zone.id = $1 AND zone.tenant_id = $2 AND "
             "zone.deleted_at IS NULL AND provider.deleted_at IS NULL LIMIT 1 FOR UPDATE OF zone",
@@ -261,7 +261,10 @@ class DnsZoneService {
         }
         validateRecordLines(c, *normalizedConfig, current.front()[1].value().value_or("{}"));
         validateRecordTtls(*normalizedConfig, current.front()[2].value().value_or(""));
-        co_await validateClusterManagedRecords(transaction, tenantId, id, *normalizedConfig);
+        co_await validateSystemManagedRecords(transaction, tenantId, id,
+                                               current.front()[3].value().value_or(""),
+                                               current.front()[1].value().value_or("{}"),
+                                               *normalizedConfig);
         const auto configJson = serializeConfig(c, *normalizedConfig);
         const auto rows = co_await transaction.query(
             "UPDATE sys_dns_zone SET config = $1::jsonb, revision = revision + 1, "
@@ -376,21 +379,41 @@ class DnsZoneService {
     }
 
     static ruvia::Task<void>
-    validateClusterManagedRecords(ruvia::DbTransaction& transaction, const std::string& tenantId,
-                                  const std::string& zoneId,
-                                  const service::dns_sync::ZoneConfigData& config) {
-        const auto rows = co_await transaction.query(
-            "SELECT hostname_prefix FROM sys_cluster WHERE tenant_id = $1 AND dns_zone_id = $2 "
-            "AND status = 'enabled' AND deleted_at IS NULL",
-            tenantId, zoneId);
-        std::unordered_set<std::string> hostnames;
-        hostnames.reserve(rows.size());
-        for (const auto& row : rows) {
-            hostnames.emplace(row[0].value().value_or(""));
+    validateSystemManagedRecords(ruvia::DbTransaction& transaction, const std::string& tenantId,
+                                 const std::string& zoneId, std::string_view zoneDomain,
+                                 std::string_view runtimeJson,
+                                 const service::dns_sync::ZoneConfigData& config) {
+        const auto projected =
+            co_await service::dns_sync::loadProjectedRecords(transaction, tenantId, zoneId);
+        std::unordered_set<std::string> systemIds;
+        std::unordered_set<std::string> trafficHostnames;
+        systemIds.reserve(projected.size());
+        trafficHostnames.reserve(projected.size());
+        for (const auto& record : projected) {
+            systemIds.emplace(record.id);
+            if (service::dns_sync::isTrafficRecord(record.type)) {
+                trafficHostnames.emplace(
+                    service::dns_sync::recordHostname(record.name, zoneDomain));
+            }
+        }
+
+        const auto runtime = service::dns_sync::parseStoredRuntime(runtimeJson);
+        if (!runtime) {
+            throwCorruptConfig();
+        }
+        std::unordered_set<std::string> challengeHostnames;
+        challengeHostnames.reserve(runtime->challengeRecords.size());
+        for (const auto& record : runtime->challengeRecords) {
+            systemIds.emplace(record.id);
+            challengeHostnames.emplace(service::dns_sync::recordHostname(record.name, zoneDomain));
         }
         for (const auto& record : config.records) {
-            if (service::dns_sync::isClusterManagedRecord(record, hostnames)) {
-                service::common::throwAppError(DnsZoneError::CLUSTER_MANAGED_RECORD);
+            const auto hostname = service::dns_sync::recordHostname(record.name, zoneDomain);
+            if (systemIds.contains(record.id) ||
+                (service::dns_sync::isTrafficRecord(record.type) &&
+                 trafficHostnames.contains(hostname)) ||
+                (record.type == "TXT" && challengeHostnames.contains(hostname))) {
+                service::common::throwAppError(DnsZoneError::SYSTEM_MANAGED_RECORD);
             }
         }
         co_return;

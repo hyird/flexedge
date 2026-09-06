@@ -1,9 +1,7 @@
 import type { DnsZone } from '@/lib/types'
 
 export function hasMeaningfulConflicts(zone: DnsZone) {
-  return zone.runtime.conflicts.some(
-    (conflict) => conflict.local_content !== conflict.remote_content
-  )
+  return zone.runtime.conflicts.length > 0
 }
 
 export function displaySyncStatus(zone: DnsZone) {

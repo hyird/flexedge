@@ -199,6 +199,17 @@ inline RecordConflict makeRecordConflict(const ManagedRecord& local,
     };
 }
 
+inline bool requiresManualResolution(const ManagedRecord& local,
+                                     const service::dns::ProviderRecord& remote,
+                                     const service::dns::DnsProviderDriver& driver,
+                                     std::string_view domain) {
+    const auto expected = toRemoteRecord(local, driver, domain);
+    return expected.type != remote.type ||
+           service::common::normalizeDomainName(expected.name) !=
+               service::common::normalizeDomainName(remote.name) ||
+           expected.content != remote.content;
+}
+
 inline const service::dns::ProviderRecord*
 findUnclaimedRemoteRecord(const ManagedRecord& local,
                           const std::unordered_set<std::string>& claimedRemoteIds,
@@ -240,7 +251,7 @@ inline std::vector<RecordConflict> collectSyncConflicts(
             const auto remote = remoteById.find(known->second);
             if (remote == remoteById.end()) {
                 conflicts.push_back(makeRecordConflict(local, "（远端已删除）"));
-            } else if (!recordMatches(local, *remote->second, driver, domain)) {
+            } else if (requiresManualResolution(local, *remote->second, driver, domain)) {
                 conflicts.push_back(makeRecordConflict(local, remote->second->content));
             }
             continue;
@@ -248,7 +259,7 @@ inline std::vector<RecordConflict> collectSyncConflicts(
 
         const auto* candidate =
             findUnclaimedRemoteRecord(local, claimedRemoteIds, remoteRecords, driver, domain);
-        if (candidate && !recordMatches(local, *candidate, driver, domain)) {
+        if (candidate && requiresManualResolution(local, *candidate, driver, domain)) {
             conflicts.push_back(makeRecordConflict(local, candidate->content));
         }
     }

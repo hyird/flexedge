@@ -13,6 +13,7 @@
 #include <ruvia/web/db/DbTransaction.h>
 
 #include "service/common/database.h"
+#include "service/common/domain_name.h"
 #include "service/features/dns_sync/snapshot.h"
 #include "service/features/node_config/model.h"
 #include "service/features/sync_runtime/state.h"
@@ -34,6 +35,22 @@ inline bool isClusterManagedRecord(const ZoneRecordData& record,
                                    const std::unordered_set<std::string>& hostnames) {
     return hostnames.contains(record.name) &&
            (record.type == "A" || record.type == "AAAA" || record.type == "CNAME");
+}
+
+inline std::string recordHostname(std::string_view name, std::string_view zoneDomain) {
+    const auto normalizedName = service::common::normalizeDomainName(name);
+    const auto normalizedZone = service::common::normalizeDomainName(zoneDomain);
+    if (normalizedName == "@" || normalizedName == normalizedZone) {
+        return normalizedZone;
+    }
+    if (normalizedName.ends_with("." + normalizedZone)) {
+        return normalizedName;
+    }
+    return normalizedName + "." + normalizedZone;
+}
+
+inline bool isTrafficRecord(std::string_view type) {
+    return type == "A" || type == "AAAA" || type == "CNAME";
 }
 
 using ProjectedRecordsByZone = std::unordered_map<std::string, std::vector<SnapshotRecord>>;

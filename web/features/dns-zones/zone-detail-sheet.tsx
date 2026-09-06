@@ -35,8 +35,14 @@ export function ZoneDetailSheet({
   onOpenChange: (open: boolean) => void
 }) {
   const supportsProxy = zone?.dns_provider === 'cloudflare'
+  const records = zone
+    ? [
+        ...zone.config.records.map((record) => ({ record, system: false })),
+        ...zone.runtime.projected_records.map((record) => ({ record, system: true })),
+      ]
+    : []
   const hasMxRecords =
-    zone?.config.records.some((record) => record.type === 'MX') ?? false
+    records.some(({ record }) => record.type === 'MX')
   const conflicts = zone
     ? zone.runtime.conflicts.filter(
         (conflict) => conflict.local_content !== conflict.remote_content
@@ -76,7 +82,7 @@ export function ZoneDetailSheet({
                 <div className='rounded-md border p-3'>
                   <div className='text-xs text-muted-foreground'>DNS 记录</div>
                   <div className='mt-1 text-2xl font-semibold'>
-                    {zone.config.records.length}
+                    {records.length}
                   </div>
                 </div>
                 <div className='rounded-md border p-3'>
@@ -148,6 +154,7 @@ export function ZoneDetailSheet({
                 <TableHeader className='sticky top-0 z-10 bg-background'>
                   <TableRow>
                     <TableHead>类型</TableHead>
+                    <TableHead>来源</TableHead>
                     <TableHead>主机记录</TableHead>
                     <TableHead>记录值</TableHead>
                     {hasMxRecords && <TableHead>优先级</TableHead>}
@@ -157,9 +164,14 @@ export function ZoneDetailSheet({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {zone.config.records.map((record) => (
-                    <TableRow key={record.id}>
+                  {records.map(({ record, system }) => (
+                    <TableRow key={`${system ? 'system' : 'custom'}-${record.id}`}>
                       <TableCell>{record.type}</TableCell>
+                      <TableCell>
+                        <Badge variant={system ? 'secondary' : 'outline'}>
+                          {system ? '系统自动' : '自定义'}
+                        </Badge>
+                      </TableCell>
                       <TableCell>{record.name}</TableCell>
                       <TableCell>{record.content}</TableCell>
                       {hasMxRecords && (
@@ -180,10 +192,10 @@ export function ZoneDetailSheet({
                       )}
                     </TableRow>
                   ))}
-                  {!zone.config.records.length && (
+                  {!records.length && (
                     <TableRow>
                       <TableCell
-                        colSpan={(supportsProxy ? 6 : 5) + (hasMxRecords ? 1 : 0)}
+                        colSpan={(supportsProxy ? 7 : 6) + (hasMxRecords ? 1 : 0)}
                         className='h-24 text-center text-muted-foreground'
                       >
                         暂无 DNS 记录
@@ -205,4 +217,3 @@ export function ZoneDetailSheet({
     </Sheet>
   )
 }
-

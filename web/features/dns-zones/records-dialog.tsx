@@ -7,6 +7,7 @@ import { toast } from 'sonner'
 import { sendData } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import type { DnsZone } from '@/lib/types'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -61,6 +62,7 @@ export function RecordsDialog({
 }) {
   const queryClient = useQueryClient()
   const supportsProxy = zone.dns_provider === 'cloudflare'
+  const systemRecords = zone.runtime.projected_records
   const form = useForm<RecordsValues>({
     resolver: zodResolver(recordsSchema),
     defaultValues: { records: zone.config.records },
@@ -95,7 +97,7 @@ export function RecordsDialog({
         <SheetHeader className='px-6 pt-6'>
           <SheetTitle>{zone.domain} · DNS 记录</SheetTitle>
           <SheetDescription>
-            保存后会自动提交同步任务。记录 ID 由控制台生成并保持稳定。
+            保存后会自动提交同步任务。系统自动记录由节点和托管网站生成，只读且不可删除。
             {supportsProxy
               ? ' Cloudflare 支持代理开关。'
               : ' 当前服务商仅支持 DNS 解析。'}
@@ -249,6 +251,33 @@ export function RecordsDialog({
                   <div className='rounded-md border border-dashed py-12 text-center text-sm text-muted-foreground'>
                     暂无 DNS 记录
                   </div>
+                )}
+                {!!systemRecords.length && (
+                  <section className='space-y-3 rounded-md border border-dashed bg-muted/30 p-3'>
+                    <div className='flex flex-wrap items-center gap-2'>
+                      <h3 className='text-sm font-medium'>系统自动记录</h3>
+                      <Badge variant='secondary'>只读</Badge>
+                      <p className='text-xs text-muted-foreground'>
+                        随节点、集群或网站托管解析自动更新，不能在此编辑或删除。
+                      </p>
+                    </div>
+                    <div className='space-y-2'>
+                      {systemRecords.map((record) => (
+                        <div
+                          key={record.id}
+                          className='grid gap-1 rounded-md border bg-background px-3 py-2 text-sm md:grid-cols-[100px_1fr_1.4fr_90px_100px] md:gap-2'
+                        >
+                          <span className='font-medium'>{record.type}</span>
+                          <span className='break-all'>{record.name}</span>
+                          <span className='break-all text-muted-foreground'>{record.content}</span>
+                          <span>TTL {record.ttl}</span>
+                          <span className='text-muted-foreground'>
+                            {record.line_code}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
                 )}
               </div>
             </ScrollArea>
