@@ -148,5 +148,14 @@ RUVIA_RESPONSE_MODEL(WebsiteAccessLogTailDataDto,
 RUVIA_RESPONSE_MODEL(WebsiteAccessLogTailResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, WebsiteAccessLogTailDataDto));
+RUVIA_RESPONSE_MODEL(WebsiteAccessLogPageDataDto,
+                     RUVIA_REQUIRED_FIELD(list, ruvia::Array<WebsiteAccessLogDto>),
+                     RUVIA_REQUIRED_FIELD(total, ruvia::Int64),
+                     RUVIA_REQUIRED_FIELD(page, ruvia::Int64),
+                     RUVIA_REQUIRED_FIELD_NAME("page_size", pageSize, ruvia::Int64),
+                     RUVIA_REQUIRED_FIELD_NAME("total_pages", totalPages, ruvia::Int64));
+RUVIA_RESPONSE_MODEL(WebsiteAccessLogPageResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+                     RUVIA_REQUIRED_FIELD(message, ruvia::String),
+                     RUVIA_REQUIRED_FIELD(data, WebsiteAccessLogPageDataDto));
 
 } // namespace service::website

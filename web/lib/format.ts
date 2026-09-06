@@ -23,6 +23,18 @@ export function formatDate(value?: string) {
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`
 }
 
+export function formatBytes(value?: number) {
+  if (value === undefined || !Number.isFinite(value)) return '—'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let amount = Math.max(0, value)
+  let index = 0
+  while (amount >= 1024 && index < units.length - 1) {
+    amount /= 1024
+    index += 1
+  }
+  return `${amount.toFixed(index === 0 ? 0 : 1)} ${units[index]}`
+}
+
 export function formatBytesPerSecond(value?: number) {
   if (value === undefined) return '—'
   const units = ['B/s', 'KB/s', 'MB/s', 'GB/s']

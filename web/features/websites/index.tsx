@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useState } from 'react'
+import { type ReactNode, useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { z } from 'zod'
 import { type Resolver, useFieldArray, useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -20,7 +20,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { getData, sendData, type ApiEnvelope } from '@/lib/api'
-import { formatBytesPerSecond, formatDate } from '@/lib/format'
+import { formatBytes, formatBytesPerSecond, formatDate } from '@/lib/format'
 import type {
   Certificate,
   Cluster,
@@ -62,6 +62,7 @@ import {
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Skeleton } from '@/components/ui/skeleton'
 import {
   Select,
   SelectContent,
@@ -341,9 +342,11 @@ function accessLogStatusClass(status: number) {
   return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
 }
 
-function formatAccessLogBytes(value?: number) {
+function formatAccessLogDuration(value?: number) {
   if (value === undefined || !Number.isFinite(value)) return '—'
-  return `${new Intl.NumberFormat('en-US').format(Math.max(0, value))} B`
+  const milliseconds = Math.max(0, value)
+  if (milliseconds < 1000) return `${milliseconds.toFixed(0)} ms`
+  return `${(milliseconds / 1000).toFixed(1)} s`
 }
 
 function accessLogUrlScheme(protocol: string) {
@@ -2483,18 +2486,6 @@ function WebsiteDashboardMetric({
   )
 }
 
-function formatDashboardBytes(value?: number) {
-  if (value === undefined || !Number.isFinite(value)) return '—'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let amount = Math.max(0, value)
-  let index = 0
-  while (amount >= 1024 && index < units.length - 1) {
-    amount /= 1024
-    index += 1
-  }
-  return `${amount.toFixed(index === 0 ? 0 : 1)} ${units[index]}`
-}
-
 function WebsiteDashboardTrend({
   title,
   description,
@@ -2697,7 +2688,7 @@ function WebsiteDetailSheet({
               />
               <WebsiteDashboardMetric
                 title='当天流量'
-                value={formatDashboardBytes(summary?.today_response_bytes)}
+                value={formatBytes(summary?.today_response_bytes)}
                 description='当天响应流量累计'
                 icon={ShieldCheck}
               />
@@ -2726,14 +2717,14 @@ function WebsiteDetailSheet({
                 description='按小时汇总响应流量。'
                 data={dashboard?.hourly ?? []}
                 value={(item) => item.response_bytes}
-                format={formatDashboardBytes}
+                format={formatBytes}
               />
               <WebsiteDashboardTrend
                 title='15 天流量趋势'
                 description='按天汇总响应流量。'
                 data={dashboard?.daily ?? []}
                 value={(item) => item.response_bytes}
-                format={formatDashboardBytes}
+                format={formatBytes}
               />
               <WebsiteDashboardTrend
                 title='24 小时访问量趋势'
@@ -2799,7 +2790,7 @@ function WebsiteDetailSheet({
                 description='最近 24 小时按响应流量。'
                 data={dashboard?.client_ips_by_bytes ?? []}
                 value={(item) => item.response_bytes}
-                format={formatDashboardBytes}
+                format={formatBytes}
               />
               <WebsiteDashboardRankingList
                 title='独立 IP 排行（请求数）'
@@ -2898,6 +2889,163 @@ function WebsiteDetailSheet({
   )
 }
 
+const accessLogMethods = ['all', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] as const
+const accessLogStatusClasses = ['all', '1xx', '2xx', '3xx', '4xx', '5xx'] as const
+
+type AccessLogMethod = (typeof accessLogMethods)[number]
+type AccessLogStatusClass = (typeof accessLogStatusClasses)[number]
+type AccessLogView = 'live' | 'history'
+
+function accessLogMatches(
+  log: AccessLog,
+  keyword: string,
+  method: AccessLogMethod,
+  statusClass: AccessLogStatusClass
+) {
+  if (method !== 'all' && log.method !== method) return false
+  if (statusClass !== 'all' && !String(log.status_code).startsWith(statusClass[0])) {
+    return false
+  }
+  const normalizedKeyword = keyword.trim().toLocaleLowerCase()
+  if (!normalizedKeyword) return true
+  return [
+    log.method,
+    log.host,
+    log.target,
+    log.node_name,
+    log.client_ip,
+    log.client_ip_location,
+    log.protocol,
+    String(log.status_code),
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLocaleLowerCase()
+    .includes(normalizedKeyword)
+}
+
+function AccessLogFilters({
+  keyword,
+  method,
+  statusClass,
+  onKeywordChange,
+  onMethodChange,
+  onStatusClassChange,
+}: {
+  keyword: string
+  method: AccessLogMethod
+  statusClass: AccessLogStatusClass
+  onKeywordChange: (value: string) => void
+  onMethodChange: (value: AccessLogMethod) => void
+  onStatusClassChange: (value: AccessLogStatusClass) => void
+}) {
+  return (
+    <div className='flex flex-col gap-2 px-4 sm:flex-row'>
+      <Input
+        value={keyword}
+        onChange={(event) => onKeywordChange(event.target.value)}
+        placeholder='搜索域名、路径、IP、节点或状态码'
+        aria-label='搜索访问日志'
+        className='h-9 sm:max-w-sm'
+      />
+      <div className='grid grid-cols-2 gap-2 sm:flex'>
+        <Select value={method} onValueChange={(value) => onMethodChange(value as AccessLogMethod)}>
+          <SelectTrigger className='h-9 w-full sm:w-28' aria-label='按请求方法筛选'>
+            <SelectValue placeholder='请求方法' />
+          </SelectTrigger>
+          <SelectContent>
+            {accessLogMethods.map((item) => (
+              <SelectItem key={item} value={item}>
+                {item === 'all' ? '全部方法' : item}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={statusClass}
+          onValueChange={(value) => onStatusClassChange(value as AccessLogStatusClass)}
+        >
+          <SelectTrigger className='h-9 w-full sm:w-28' aria-label='按状态码筛选'>
+            <SelectValue placeholder='状态码' />
+          </SelectTrigger>
+          <SelectContent>
+            {accessLogStatusClasses.map((item) => (
+              <SelectItem key={item} value={item}>
+                {item === 'all' ? '全部状态' : item}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+  )
+}
+
+function AccessLogList({
+  logs,
+  emptyMessage,
+  label,
+}: {
+  logs: AccessLog[]
+  emptyMessage: string
+  label: string
+}) {
+  return (
+    <div className='bg-card font-mono text-xs' role='region' aria-label={label}>
+      {logs.map((log) => {
+        const request = `${accessLogUrlScheme(log.protocol)}://${log.host}${log.target}`
+        const statusLabel = accessLogStatusLabel(log.status_code)
+        return (
+          <div
+            key={log.id}
+            className='grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-0 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50'
+          >
+            <div className='flex min-w-0 items-center gap-2'>
+              <Badge
+                variant='outline'
+                className={accessLogStatusClass(log.status_code)}
+                aria-label={`响应状态 ${log.status_code}，${statusLabel}`}
+                title={statusLabel}
+              >
+                {log.status_code}
+              </Badge>
+              <span className='font-semibold text-foreground'>{log.method}</span>
+              <code title={request} className='min-w-0 truncate text-foreground'>
+                {request}
+              </code>
+            </div>
+            <div className='row-span-2 flex self-center flex-col items-end gap-0 text-end text-[11px] leading-4 text-muted-foreground tabular-nums'>
+              <span title={`${log.duration_ms} 毫秒`} className='font-medium'>
+                {formatAccessLogDuration(log.duration_ms)}
+              </span>
+              <span title={`请求体大小：${formatBytes(log.request_bytes)}`}>
+                请求体 {formatBytes(log.request_bytes)}
+              </span>
+              <span title={`响应大小：${formatBytes(log.response_bytes)}`}>
+                响应 {formatBytes(log.response_bytes)}
+              </span>
+            </div>
+            <div className='col-start-1 min-w-0 overflow-x-auto text-muted-foreground'>
+              <div className='flex min-w-max items-center gap-x-3 whitespace-nowrap'>
+                <time dateTime={log.occurred_at}>{formatDate(log.occurred_at)}</time>
+                <span>[{log.node_name || '未知节点'}]</span>
+                <span title='用户 IP'>{log.client_ip || '未知 IP'}</span>
+                {log.client_ip_location && (
+                  <span title={`IP 归属地：${log.client_ip_location}`}>
+                    {log.client_ip_location.replaceAll(' · ', '')}
+                  </span>
+                )}
+                <span>{accessLogHttpVersion(log.protocol)}</span>
+              </div>
+            </div>
+          </div>
+        )
+      })}
+      {!logs.length && <p className='py-16 text-center text-muted-foreground'>{emptyMessage}</p>}
+    </div>
+  )
+}
+
 function AccessLogSheet({
   website,
   onOpenChange,
@@ -2907,10 +3055,16 @@ function AccessLogSheet({
 }) {
   const [logs, setLogs] = useState<AccessLog[]>([])
   const [connected, setConnected] = useState(false)
+  const [view, setView] = useState<AccessLogView>('live')
+  const [keyword, setKeyword] = useState('')
+  const [method, setMethod] = useState<AccessLogMethod>('all')
+  const [statusClass, setStatusClass] = useState<AccessLogStatusClass>('all')
+  const [historyPage, setHistoryPage] = useState(1)
+  const deferredKeyword = useDeferredValue(keyword.trim())
 
   useEffect(() => {
     const source = new EventSource(
-      `/api/websites/${website.id}/access-logs/stream?limit=100`,
+      `/api/websites/${website.id}/access-logs/stream?limit=1000`,
       { withCredentials: true }
     )
     source.addEventListener('ready', () => setConnected(true))
@@ -2931,95 +3085,146 @@ function AccessLogSheet({
     })
     source.onerror = () => setConnected(false)
     return () => source.close()
-  }, [website])
+  }, [website.id])
+
+  const liveLogs = useMemo(
+    () => logs.filter((log) => accessLogMatches(log, keyword, method, statusClass)),
+    [keyword, logs, method, statusClass]
+  )
+  const historyQuery = useQuery({
+    queryKey: [
+      'websites',
+      website.id,
+      'access-logs',
+      historyPage,
+      deferredKeyword,
+      method,
+      statusClass,
+    ],
+    queryFn: () =>
+      getData<PageData<AccessLog>>(`/websites/${website.id}/access-logs`, {
+        page: historyPage,
+        page_size: 50,
+        keyword: deferredKeyword || undefined,
+        method: method === 'all' ? undefined : method,
+        status_class: statusClass === 'all' ? undefined : statusClass,
+      }),
+    enabled: view === 'history',
+  })
+  const history = historyQuery.data
+  const changeFilters = (next: {
+    keyword?: string
+    method?: AccessLogMethod
+    statusClass?: AccessLogStatusClass
+  }) => {
+    if (next.keyword !== undefined) setKeyword(next.keyword)
+    if (next.method !== undefined) setMethod(next.method)
+    if (next.statusClass !== undefined) setStatusClass(next.statusClass)
+    setHistoryPage(1)
+  }
 
   return (
     <Sheet open onOpenChange={onOpenChange}>
       <SheetContent className='flex w-full flex-col sm:max-w-5xl'>
         <SheetHeader className='text-start'>
           <div className='flex items-center gap-2'>
-            <SheetTitle>{website?.config.name} · 访问日志</SheetTitle>
+            <SheetTitle>{website.config.name} · 访问日志</SheetTitle>
             <Badge variant='outline' role='status'>
               {connected ? '已连接' : '正在重连'}
             </Badge>
           </div>
           <SheetDescription>
-            实时显示最近 200 条请求，按接收时间倒序；断线后会自动重连。
+            实时日志保留最近 200 条请求；历史日志可按关键字、请求方法和状态码检索。
           </SheetDescription>
         </SheetHeader>
-        <ScrollArea className='min-h-0 flex-1 px-4'>
-          <div
-            className='overflow-hidden rounded-lg border bg-card font-mono text-xs'
-            role='region'
-            aria-label='访问日志列表'
-            tabIndex={0}
-          >
-            {logs.map((log) => {
-              const request = `${accessLogUrlScheme(log.protocol)}://${log.host}${log.target}`
-              const statusLabel = accessLogStatusLabel(log.status_code)
-              return (
-                <div
-                  key={log.id}
-                  className='grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-0 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50'
-                >
-                  <div className='flex min-w-0 items-center gap-2'>
-                    <Badge
-                      variant='outline'
-                      className={accessLogStatusClass(log.status_code)}
-                      aria-label={`响应状态 ${log.status_code}，${statusLabel}`}
-                      title={statusLabel}
-                    >
-                      {log.status_code}
-                    </Badge>
-                    <span className='font-semibold text-foreground'>
-                      {log.method}
-                    </span>
-                    <code
-                      title={request}
-                      className='min-w-0 truncate text-foreground'
-                    >
-                      {request}
-                    </code>
-                  </div>
-                  <div className='row-span-2 flex self-center flex-col items-end gap-0 text-end text-[11px] leading-4 text-muted-foreground tabular-nums'>
-                    <span
-                      className='font-medium text-muted-foreground'
-                      title={`${log.duration_ms} 毫秒`}
-                    >
-                      {log.duration_ms} ms
-                    </span>
-                    <span title={`请求体大小：${formatAccessLogBytes(log.request_bytes)}`}>
-                      请求体 {formatAccessLogBytes(log.request_bytes)}
-                    </span>
-                    <span title={`响应大小：${formatAccessLogBytes(log.response_bytes)}`}>
-                      响应 {formatAccessLogBytes(log.response_bytes)}
-                    </span>
-                  </div>
-                  <div className='col-start-1 min-w-0 overflow-x-auto text-muted-foreground'>
-                    <div className='flex min-w-max items-center gap-x-3 whitespace-nowrap'>
-                      <time dateTime={log.occurred_at}>
-                        {formatDate(log.occurred_at)}
-                      </time>
-                      <span>[{log.node_name || '未知节点'}]</span>
-                      <span title='用户 IP'>{log.client_ip || '未知 IP'}</span>
-                      {log.client_ip_location && (
-                        <span title={`IP 归属地：${log.client_ip_location}`}>
-                          {log.client_ip_location.replaceAll(' · ', '')}
-                        </span>
-                      )}
-                      <span>{accessLogHttpVersion(log.protocol)}</span>
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
-            {!logs.length && (
-              <p className='py-16 text-center text-muted-foreground'>
-                等待访问日志…
-              </p>
+        <Tabs
+          value={view}
+          onValueChange={(value) => setView(value as AccessLogView)}
+          className='min-h-0 flex-1 gap-3'
+        >
+          <div className='flex flex-wrap items-center justify-between gap-2 px-4'>
+            <TabsList>
+              <TabsTrigger value='live'>实时日志</TabsTrigger>
+              <TabsTrigger value='history'>历史日志</TabsTrigger>
+            </TabsList>
+            {view === 'live' && (
+              <span className='text-xs text-muted-foreground'>
+                显示 {liveLogs.length} / {logs.length} 条
+              </span>
+            )}
+            {view === 'history' && history && (
+              <span className='text-xs text-muted-foreground'>共 {history.total} 条</span>
             )}
           </div>
-        </ScrollArea>
+          <AccessLogFilters
+            keyword={keyword}
+            method={method}
+            statusClass={statusClass}
+            onKeywordChange={(value) => changeFilters({ keyword: value })}
+            onMethodChange={(value) => changeFilters({ method: value })}
+            onStatusClassChange={(value) => changeFilters({ statusClass: value })}
+          />
+          <TabsContent value='live' className='mt-0 flex min-h-0 flex-1 flex-col'>
+            <ScrollArea className='min-h-0 flex-1 px-4'>
+              <AccessLogList
+                logs={liveLogs}
+                emptyMessage={logs.length ? '没有符合筛选条件的实时日志' : '等待访问日志…'}
+                label='实时访问日志列表'
+              />
+            </ScrollArea>
+          </TabsContent>
+          <TabsContent value='history' className='mt-0 flex min-h-0 flex-1 flex-col'>
+            {historyQuery.isLoading ? (
+              <div className='space-y-1 px-4' aria-label='正在加载历史访问日志'>
+                <Skeleton className='h-16 w-full' />
+                <Skeleton className='h-16 w-full' />
+                <Skeleton className='h-16 w-full' />
+              </div>
+            ) : historyQuery.isError ? (
+              <div className='flex flex-1 flex-col items-center justify-center gap-3 px-4 text-sm text-muted-foreground'>
+                <p>历史访问日志加载失败。</p>
+                <Button variant='outline' size='sm' onClick={() => void historyQuery.refetch()}>
+                  重试
+                </Button>
+              </div>
+            ) : (
+              <>
+                <ScrollArea className='min-h-0 flex-1 px-4'>
+                  <AccessLogList
+                    logs={history?.list ?? []}
+                    emptyMessage='没有符合筛选条件的历史日志'
+                    label='历史访问日志列表'
+                  />
+                </ScrollArea>
+                <div className='flex items-center justify-end gap-2 border-t px-4 py-2 text-xs text-muted-foreground'>
+                  <Button
+                    variant='outline'
+                    size='sm'
+                    disabled={(history?.page ?? 1) <= 1 || historyQuery.isFetching}
+                    onClick={() => setHistoryPage((page) => Math.max(1, page - 1))}
+                  >
+                    上一页
+                  </Button>
+                  <span>
+                    {history?.page ?? 1} / {Math.max(1, history?.total_pages ?? 1)}
+                  </span>
+                  <Button
+                    variant='outline'
+                    size='sm'
+                    disabled={
+                      !history ||
+                      history.page >= history.total_pages ||
+                      historyQuery.isFetching
+                    }
+                    onClick={() => setHistoryPage((page) => page + 1)}
+                  >
+                    下一页
+                  </Button>
+                </div>
+              </>
+            )}
+          </TabsContent>
+        </Tabs>
       </SheetContent>
     </Sheet>
   )
