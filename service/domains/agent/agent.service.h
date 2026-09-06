@@ -16,6 +16,7 @@
 #include "node/proto/edge_control.pb.h"
 #include "service/common/http.h"
 #include "service/domains/agent/agent.error.h"
+#include "service/domains/agent/agent_runtime.mapper.h"
 #include "service/domains/agent/agent.types.h"
 #include "service/features/cluster_dns/projection.h"
 #include "service/features/node_dispatch/protocol.h"
@@ -218,31 +219,7 @@ class AgentService final {
         if (report.nodeId != principal.nodeId) {
             service::common::throwAppError(AGENT_UNAUTHORIZED);
         }
-        service::node_runtime::NodeRuntimeOutput runtime(c);
-        runtime.set<"agentVersion">(report.agentVersion);
-        runtime.set<"cpuUsage">(report.cpuUsage);
-        runtime.set<"memoryUsage">(report.memoryUsage);
-        runtime.set<"trafficOutBps">(report.trafficOutBps);
-        runtime.set<"connectionCount">(report.connectionCount);
-        runtime.set<"load1m">(report.load1m);
-        runtime.set<"queuedLogEvents">(report.queuedLogEvents);
-        runtime.set<"droppedLogEvents">(report.droppedLogEvents);
-        runtime.set<"health">(report.health);
-        runtime.set<"lastError">(report.lastError);
-        auto& originHealth = runtime.ensure<"originHealth">();
-        originHealth.reserve(report.originHealth.size());
-        for (const auto& reportItem : report.originHealth) {
-            auto& item = originHealth.emplace_back(c);
-            item.set<"websiteId">(reportItem.websiteId);
-            item.set<"originId">(reportItem.originId);
-            item.set<"status">(reportItem.status);
-            item.set<"checkedAtUnixMillis">(reportItem.checkedAtUnixMillis);
-            item.set<"latencyMillis">(reportItem.latencyMillis);
-            if (!reportItem.lastError.empty()) {
-                item.set<"lastError">(reportItem.lastError);
-            }
-        }
-        const auto runtimeJson = ruvia::toJson(runtime, {.resource = c.resource()});
+        const auto runtimeJson = heartbeatRuntimeJson(c, report);
         auto transaction = co_await c.db().beginTransaction();
         const auto updated = co_await transaction.query(
             "UPDATE sys_node node SET last_heartbeat_at = NOW(), applied_node_spec_revision = $2, "
@@ -255,8 +232,7 @@ class AgentService final {
             "node.tenant_id AND release.id = $3 AND release.cluster_id = node.cluster_id AND "
             "release.manifest_digest = $4) RETURNING node.id",
             report.nodeId, report.appliedNodeSpecRevision, report.activeReleaseId,
-            report.activeManifestDigest, std::string_view(runtimeJson), principal.tenantId,
-            principal.agentId);
+            report.activeManifestDigest, runtimeJson, principal.tenantId, principal.agentId);
         if (updated.empty()) {
             service::common::throwAppError(REVISION_INVALID);
         }
