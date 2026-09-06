@@ -463,6 +463,16 @@ int main() {
     REQUIRE(acmeAccount.contains("SELECT revision, runtime::text FROM sys_provider"));
     const auto certificateWorker = source("service/features/certificate/worker.h");
     REQUIRE(certificateWorker.contains("certificate/acme_account.h"));
+    REQUIRE(certificateWorker.contains("certificate/task.h"));
+    REQUIRE(certificateWorker.contains("certificate/work_loader.h"));
+    REQUIRE(!certificateWorker.contains("struct CertificateTask final"));
+    REQUIRE(!certificateWorker.contains("struct CertificateWork final"));
+    REQUIRE(!certificateWorker.contains("inline ruvia::Task<CertificateWork>\nloadWork"));
+    const auto certificateTask = source("service/features/certificate/task.h");
+    REQUIRE(certificateTask.contains("struct CertificateTask final"));
+    const auto certificateWorkLoader = source("service/features/certificate/work_loader.h");
+    REQUIRE(certificateWorkLoader.contains("struct CertificateWork final"));
+    REQUIRE(certificateWorkLoader.contains("loadWork"));
     const auto websitePage = source("web/features/websites/index.tsx");
     REQUIRE(websitePage.contains("import { AccessLogSheet } from './access-log-sheet'"));
     REQUIRE(websitePage.contains("import { WebsiteDialog } from './website-dialog'"));
