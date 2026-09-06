@@ -274,9 +274,10 @@ inline ruvia::Task<bool> recordRunningResultEvent(Database& database,
     const auto result = co_await database.execute(
         "INSERT INTO sys_sync_event (tenant_id, task_id, resource_type, resource_id, operation, "
         "version, outcome) SELECT tenant_id, id, resource_type, resource_id, operation, version, "
-        "$4 FROM sys_sync_task WHERE tenant_id = $1 AND id = $2 AND version = $3 AND "
-        "(($4 = 'completed' AND is_done AND is_ok) OR ($4 = 'failed' AND NOT is_done AND NOT "
-        "is_ok AND count_fails > 0))",
+        "$4::varchar(16) FROM sys_sync_task WHERE tenant_id = $1 AND id = $2 AND version = $3 AND "
+        "(($4::varchar(16) = 'completed'::varchar(16) AND is_done AND is_ok) OR "
+        "($4::varchar(16) = 'failed'::varchar(16) AND NOT is_done AND NOT is_ok AND "
+        "count_fails > 0))",
         lease.marker.tenantId, lease.marker.markerId, lease.marker.version, outcome);
     co_return result.affectedRows() != 0;
 }

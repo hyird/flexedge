@@ -561,6 +561,8 @@ int main() {
     REQUIRE(syncEventService.contains("SyncEventPageDataDto"));
     REQUIRE(syncEventService.contains("FROM sys_sync_event"));
     REQUIRE(syncEventService.contains("ORDER BY id ASC"));
+    const auto syncRuntimeState = source("service/features/sync_runtime/state.h");
+    REQUIRE(syncRuntimeState.contains("$4::varchar(16)"));
     const auto syncEventTypes = source("service/domains/sync_event/sync_event.types.h");
     REQUIRE(syncEventTypes.contains("SyncEventDto"));
     REQUIRE(syncEventTypes.contains("has_more"));
