@@ -1,19 +1,11 @@
 #pragma once
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cstdint>
-#include <limits>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <string_view>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
-#include <zlib.h>
 
 #include <ruvia/core/Task.h>
 #include <ruvia/web/Context.h>
@@ -23,101 +15,30 @@
 #include "service/common/database.h"
 #include "service/common/http.h"
 #include "service/domains/certificate/certificate.error.h"
-#include "service/domains/certificate/certificate.mapper.h"
+#include "service/domains/certificate/certificate_read.service.h"
 #include "service/domains/certificate/certificate.types.h"
 #include "service/features/certificate/model.h"
 #include "service/features/certificate/dns_challenge.h"
-#include "service/features/certificate_material/model.h"
 #include "service/features/certificate_material/download.h"
 #include "service/features/certificate/queue.h"
 #include "service/features/dns/registry.h"
 #include "service/features/sync_runtime/state.h"
-#include "service/utils/secret.h"
-#include "service/utils/sensitive_string.h"
 
 namespace service::certificate {
 
-class CertificateService {
+class CertificateService final {
   public:
     ruvia::Task<CertificatePageDataDto>
     list(ruvia::Context& c, const std::string& tenantId, std::int64_t page, std::int64_t pageSize,
          std::int64_t skip, const std::optional<std::string>& keyword,
          std::optional<std::string_view> status, std::optional<bool> usable) {
-        std::string where =
-            " FROM sys_certificate cert INNER JOIN sys_dns_zone zone ON zone.tenant_id = "
-            "cert.tenant_id AND zone.id = cert.dns_zone_id INNER JOIN sys_provider provider ON "
-            "provider.tenant_id = cert.tenant_id AND provider.id = cert.provider_id AND "
-            "provider.kind = 'certificate' LEFT JOIN LATERAL (SELECT task.operation, "
-            "CASE WHEN task.lease_until IS NOT NULL THEN 'running' WHEN task.is_done AND "
-            "task.is_ok THEN 'completed' WHEN task.count_fails > 0 THEN 'retry' ELSE 'pending' END "
-            "AS sync_status, task.count_fails AS sync_count_fails FROM sys_sync_task task WHERE "
-            "task.resource_type = 'certificate' AND "
-            "task.tenant_id = cert.tenant_id AND task.resource_id = cert.id AND task.version = "
-            "cert.issuance_revision ORDER BY task.updated_at DESC LIMIT 1) latest_task ON TRUE "
-            "WHERE cert.deleted_at IS NULL AND "
-            "cert.tenant_id = $1";
-        std::vector<ruvia::DbValue> params{ruvia::DbValue{tenantId}};
-        std::optional<std::string> pattern;
-        if (keyword) {
-            pattern = "%" + service::common::escapeLikePattern(*keyword) + "%";
-            where += " AND cert.domain ILIKE $" + std::to_string(params.size() + 1);
-            params.emplace_back(std::string_view(*pattern));
-        }
-        if (status && !status->empty()) {
-            where += " AND cert.status = $" + std::to_string(params.size() + 1);
-            params.emplace_back(*status);
-        }
-        if (usable) {
-            where += " AND COALESCE(cert.issued_revision > 0 AND cert.expires_at > NOW(), FALSE) "
-                     "= $" +
-                     std::to_string(params.size() + 1);
-            params.emplace_back(*usable);
-        }
-        const auto countRows = co_await c.db().query("SELECT COUNT(*)" + where, params);
-        const auto total = countRows.empty() ? std::int64_t{0}
-                                             : countRows.front()[0].as<std::int64_t>().value_or(0);
-        const auto rows =
-            co_await c.db().query(certificateColumns() + where + " ORDER BY cert.sort DESC LIMIT " +
-                                      std::to_string(pageSize) + " OFFSET " + std::to_string(skip),
-                                  params);
-        CertificatePageDataDto result(c);
-        result.set<"total">(total);
-        result.set<"page">(page);
-        result.set<"pageSize">(pageSize);
-        result.set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
-        auto& items = result.ensure<"list">();
-        for (const auto& row : rows) {
-            fillCertificate(c, items.emplace_back(c), row);
-        }
-        co_return result;
+        co_return co_await certificateReadService().list(c, tenantId, page, pageSize, skip, keyword,
+                                                         status, usable);
     }
 
     ruvia::Task<CertificateDto> get(ruvia::Context& c, const std::string& tenantId,
                                     const std::string& id) {
-        const auto rows = co_await c.db().query(
-            certificateColumns() +
-                " FROM sys_certificate cert INNER JOIN sys_dns_zone zone ON zone.tenant_id = "
-                "cert.tenant_id AND zone.id = cert.dns_zone_id INNER JOIN sys_provider "
-                "provider ON provider.tenant_id = cert.tenant_id AND provider.id = "
-                "cert.provider_id AND provider.kind = 'certificate' LEFT JOIN LATERAL (SELECT "
-                "task.operation, CASE WHEN task.lease_until IS NOT NULL THEN 'running' WHEN "
-                "task.is_done AND task.is_ok THEN 'completed' WHEN task.count_fails > 0 THEN "
-                "'retry' "
-                "ELSE 'pending' END AS sync_status, task.count_fails AS sync_count_fails FROM "
-                "sys_sync_task task "
-                "WHERE "
-                "task.resource_type = 'certificate' AND task.tenant_id = cert.tenant_id AND "
-                "task.resource_id = cert.id AND task.version = cert.issuance_revision ORDER BY "
-                "task.updated_at DESC LIMIT 1) latest_task ON TRUE WHERE cert.id = $1 AND "
-                "cert.tenant_id = $2 AND "
-                "cert.deleted_at IS NULL LIMIT 1",
-            id, tenantId);
-        if (rows.empty()) {
-            service::common::throwAppError(CertificateError::NOT_FOUND);
-        }
-        CertificateDto result(c);
-        fillCertificate(c, result, rows.front());
-        co_return result;
+        co_return co_await certificateReadService().get(c, tenantId, id);
     }
 
     ruvia::Task<void> create(ruvia::Context& c, const std::string& tenantId,
@@ -300,59 +221,10 @@ class CertificateService {
 
     ruvia::Task<service::certificate_material::CertificateDownload>
     download(ruvia::Context& c, const std::string& tenantId, const std::string& id) {
-        const auto rows = co_await c.db().query(
-            "SELECT domain, material::text, COALESCE(issued_revision > 0 AND expires_at > NOW(), "
-            "FALSE) FROM sys_certificate WHERE id = $1 AND tenant_id = $2 AND deleted_at IS "
-            "NULL LIMIT 1",
-            id, tenantId);
-        if (rows.empty()) {
-            service::common::throwAppError(CertificateError::NOT_FOUND);
-        }
-        if (!rows.front()[2].as<bool>().value_or(false)) {
-            service::common::throwAppError(CertificateError::CERTIFICATE_UNAVAILABLE);
-        }
-        const auto material = service::certificate_material::parseStored(
-            rows.front()[1].value().value_or("{}"), {.resource = c.resource()});
-        if (!material) {
-            throw std::runtime_error("stored certificate material is invalid");
-        }
-        if (!material->certificateChainPem || !material->privateKeyEnvelope) {
-            service::common::throwAppError(CertificateError::CERTIFICATE_UNAVAILABLE);
-        }
-        const auto filename = service::certificate_material::archiveFilename(
-            rows.front()[0].value().value_or("certificate"));
-        auto archive = co_await c.runBlocking(
-            [archiveFilename = filename, chain = std::move(*material->certificateChainPem),
-             privateKey = service::utils::SensitiveString(
-                 service::utils::openSecret(*material->privateKeyEnvelope))]() {
-                return CertificateService::buildCertificateArchive(archiveFilename, chain,
-                                                                   privateKey.view());
-            });
-        co_return service::certificate_material::CertificateDownload{
-            filename + ".zip",
-            std::move(archive),
-        };
+        co_return co_await certificateReadService().download(c, tenantId, id);
     }
 
   private:
-    static std::string certificateColumns() {
-        return "SELECT cert.id, cert.revision, cert.config::text, cert.status, "
-               "cert.material::text, TO_CHAR(cert.expires_at, "
-               "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), cert.last_error, "
-               "TO_CHAR(cert.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-               "TO_CHAR(cert.updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-               "cert.dns_zone_id, zone.domain, CASE WHEN cert.expires_at IS NULL THEN NULL ELSE "
-               "GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (cert.expires_at - NOW())) / 86400))::BIGINT "
-               "END, cert.subject_alt_names[1], cert.subject_alt_names[2], provider.id, "
-               "provider.provider, latest_task.sync_status, latest_task.sync_count_fails, "
-               "(SELECT COUNT(DISTINCT website.id) FROM "
-               "sys_website_certificate_binding binding INNER JOIN sys_website website ON "
-               "website.id = binding.website_id AND website.tenant_id = cert.tenant_id "
-               "AND website.deleted_at IS NULL WHERE binding.tenant_id = cert.tenant_id "
-               "AND binding.certificate_id = cert.id), COALESCE(cert.issued_revision > 0 AND "
-               "cert.expires_at > NOW(), FALSE)";
-    }
-
     static std::string
     serializeCertificateConfig(ruvia::Context& c,
                                const service::certificate_issuance::CertificateConfigData& config) {
@@ -360,151 +232,6 @@ class CertificateService {
             service::certificate_issuance::toOutput(config, {.resource = c.resource()});
         const auto json = ruvia::toJson(output, {.resource = c.resource()});
         return std::string(json.data(), json.size());
-    }
-
-    struct ZipEntry final {
-        std::string filename;
-        std::string compressed;
-        std::uint32_t checksum;
-        std::uint32_t uncompressedSize;
-        std::uint32_t localHeaderOffset;
-    };
-
-    template <typename Value>
-        requires std::is_unsigned_v<Value>
-    static void appendLittleEndian(std::string& output, Value value) {
-        for (std::size_t index = 0; index < sizeof(Value); ++index) {
-            output.push_back(static_cast<char>(value & static_cast<Value>(0xff)));
-            value >>= 8;
-        }
-    }
-
-    static std::uint32_t zipSize(std::size_t value, std::string_view field) {
-        if (value > std::numeric_limits<std::uint32_t>::max()) {
-            throw std::runtime_error("certificate archive " + std::string(field) +
-                                     " exceeds ZIP32 limits");
-        }
-        return static_cast<std::uint32_t>(value);
-    }
-
-    static std::uint16_t zipFilenameSize(std::size_t value) {
-        if (value > std::numeric_limits<std::uint16_t>::max()) {
-            throw std::runtime_error("certificate archive filename exceeds ZIP limits");
-        }
-        return static_cast<std::uint16_t>(value);
-    }
-
-    static std::string deflateForZip(std::string_view input) {
-        if (input.size() > std::numeric_limits<uInt>::max()) {
-            throw std::runtime_error("certificate file exceeds deflate limits");
-        }
-
-        z_stream stream{};
-        if (deflateInit2(&stream, Z_BEST_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8,
-                         Z_DEFAULT_STRATEGY) != Z_OK) {
-            throw std::runtime_error("failed to initialize certificate archive compression");
-        }
-        struct StreamGuard final {
-            z_stream* stream;
-            ~StreamGuard() { deflateEnd(stream); }
-        } guard{&stream};
-
-        const auto bound = deflateBound(&stream, static_cast<uLong>(input.size()));
-        if (bound > std::numeric_limits<uInt>::max()) {
-            throw std::runtime_error("compressed certificate file exceeds deflate limits");
-        }
-        std::string output(static_cast<std::size_t>(bound), '\0');
-        stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
-        stream.avail_in = static_cast<uInt>(input.size());
-        stream.next_out = reinterpret_cast<Bytef*>(output.data());
-        stream.avail_out = static_cast<uInt>(output.size());
-        if (deflate(&stream, Z_FINISH) != Z_STREAM_END) {
-            throw std::runtime_error("failed to compress certificate archive entry");
-        }
-        output.resize(static_cast<std::size_t>(stream.total_out));
-        return output;
-    }
-
-    static ZipEntry makeZipEntry(std::string filename, std::string_view content) {
-        if (content.empty()) {
-            throw std::runtime_error("certificate archive entry is empty");
-        }
-        const auto checksum = crc32_z(
-            crc32(0L, Z_NULL, 0), reinterpret_cast<const Bytef*>(content.data()), content.size());
-        return {
-            .filename = std::move(filename),
-            .compressed = deflateForZip(content),
-            .checksum = static_cast<std::uint32_t>(checksum),
-            .uncompressedSize = zipSize(content.size(), "entry"),
-            .localHeaderOffset = 0,
-        };
-    }
-
-    static void appendLocalHeader(std::string& archive, ZipEntry& entry) {
-        entry.localHeaderOffset = zipSize(archive.size(), "offset");
-        appendLittleEndian<std::uint32_t>(archive, 0x04034b50);
-        appendLittleEndian<std::uint16_t>(archive, 20);
-        appendLittleEndian<std::uint16_t>(archive, 0x0800);
-        appendLittleEndian<std::uint16_t>(archive, 8);
-        appendLittleEndian<std::uint16_t>(archive, 0);
-        appendLittleEndian<std::uint16_t>(archive, 0x0021);
-        appendLittleEndian<std::uint32_t>(archive, entry.checksum);
-        appendLittleEndian<std::uint32_t>(archive, zipSize(entry.compressed.size(), "entry"));
-        appendLittleEndian<std::uint32_t>(archive, entry.uncompressedSize);
-        appendLittleEndian<std::uint16_t>(archive, zipFilenameSize(entry.filename.size()));
-        appendLittleEndian<std::uint16_t>(archive, 0);
-        archive.append(entry.filename);
-        archive.append(entry.compressed);
-    }
-
-    static void appendCentralHeader(std::string& archive, const ZipEntry& entry) {
-        appendLittleEndian<std::uint32_t>(archive, 0x02014b50);
-        appendLittleEndian<std::uint16_t>(archive, 20);
-        appendLittleEndian<std::uint16_t>(archive, 20);
-        appendLittleEndian<std::uint16_t>(archive, 0x0800);
-        appendLittleEndian<std::uint16_t>(archive, 8);
-        appendLittleEndian<std::uint16_t>(archive, 0);
-        appendLittleEndian<std::uint16_t>(archive, 0x0021);
-        appendLittleEndian<std::uint32_t>(archive, entry.checksum);
-        appendLittleEndian<std::uint32_t>(archive, zipSize(entry.compressed.size(), "entry"));
-        appendLittleEndian<std::uint32_t>(archive, entry.uncompressedSize);
-        appendLittleEndian<std::uint16_t>(archive, zipFilenameSize(entry.filename.size()));
-        appendLittleEndian<std::uint16_t>(archive, 0);
-        appendLittleEndian<std::uint16_t>(archive, 0);
-        appendLittleEndian<std::uint16_t>(archive, 0);
-        appendLittleEndian<std::uint16_t>(archive, 0);
-        appendLittleEndian<std::uint32_t>(archive, 0);
-        appendLittleEndian<std::uint32_t>(archive, entry.localHeaderOffset);
-        archive.append(entry.filename);
-    }
-
-    static std::string buildCertificateArchive(std::string_view filename,
-                                               std::string_view certificateChain,
-                                               std::string_view privateKey) {
-        std::array entries{
-            makeZipEntry(std::string(filename) + ".crt", certificateChain),
-            makeZipEntry(std::string(filename) + ".key", privateKey),
-        };
-        std::string archive;
-        archive.reserve(certificateChain.size() + privateKey.size() + 256);
-        for (auto& entry : entries) {
-            appendLocalHeader(archive, entry);
-        }
-
-        const auto centralOffset = zipSize(archive.size(), "central directory offset");
-        for (const auto& entry : entries) {
-            appendCentralHeader(archive, entry);
-        }
-        const auto centralSize = zipSize(archive.size() - centralOffset, "central directory");
-        appendLittleEndian<std::uint32_t>(archive, 0x06054b50);
-        appendLittleEndian<std::uint16_t>(archive, 0);
-        appendLittleEndian<std::uint16_t>(archive, 0);
-        appendLittleEndian<std::uint16_t>(archive, static_cast<std::uint16_t>(entries.size()));
-        appendLittleEndian<std::uint16_t>(archive, static_cast<std::uint16_t>(entries.size()));
-        appendLittleEndian<std::uint32_t>(archive, centralSize);
-        appendLittleEndian<std::uint32_t>(archive, centralOffset);
-        appendLittleEndian<std::uint16_t>(archive, 0);
-        return archive;
     }
 
     static std::string normalizeDomain(std::string_view input) {
