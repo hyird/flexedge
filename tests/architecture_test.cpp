@@ -243,8 +243,8 @@ int main() {
     for (const auto& migration : schemaMigrations) {
         schemaSql += migration.sql();
     }
-    REQUIRE(schemaSql.contains("node_secret_envelope text"));
-    REQUIRE(schemaSql.contains("schema_version integer NOT NULL"));
+    REQUIRE(schemaSql.contains("RENAME COLUMN node_key_envelope TO node_secret_envelope"));
+    REQUIRE(schemaSql.contains("RENAME COLUMN protocol_version TO schema_version"));
     REQUIRE(schemaSql.contains("CREATE TABLE public.sys_sync_task"));
     REQUIRE(schemaSql.contains("CREATE TABLE public.sys_sync_event"));
     REQUIRE(schemaSql.contains("uk_sync_task_resource"));
