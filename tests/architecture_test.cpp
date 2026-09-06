@@ -230,6 +230,9 @@ int main() {
     REQUIRE(schemaMigrations.size() >= 20);
     REQUIRE(schemaMigrations.front().id() == "0001");
     REQUIRE(schemaMigrations.back().id() == "0020_sync_result_events");
+    const auto& syncEventMigration = schemaMigrations.back().sql();
+    REQUIRE(syncEventMigration.starts_with("DO $flexedge_sync_result_events$"));
+    REQUIRE(syncEventMigration.contains("CREATE TABLE public.sys_sync_event"));
     const auto& schemaBaseline = schemaMigrations.front().sql();
     // The production database records this checksum. Never fold later schema
     // work into migration 0001 after it has been released.

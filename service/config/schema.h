@@ -1032,7 +1032,9 @@ $flexedge_access_log_request_bytes$)sql"},
     }},
     ruvia::DbMigration{{
         .id = "0020_sync_result_events",
-        .sql = std::string{R"sql(
+        .sql = std::string{R"sql(DO $flexedge_sync_result_events$
+BEGIN
+
 CREATE TABLE public.sys_sync_event (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tenant_id uuid NOT NULL REFERENCES public.sys_tenant(id),
@@ -1054,6 +1056,9 @@ CREATE INDEX idx_sync_event_tenant_id
     ON public.sys_sync_event (tenant_id, id);
 CREATE INDEX idx_sync_event_emitted_at
     ON public.sys_sync_event (emitted_at);
+
+END;
+$flexedge_sync_result_events$
 )sql"},
     }},
 
