@@ -184,13 +184,16 @@ else()
 endif()
 
 if(BUILD_TESTING)
-    add_executable(flexedge_architecture_test tests/architecture_test.cpp)
+    add_executable(flexedge_architecture_test
+        tests/architecture_test.cpp
+        service/features/background/worker_pool.cpp
+    )
     target_include_directories(flexedge_architecture_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_definitions(flexedge_architecture_test
         PRIVATE FLEXEDGE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(flexedge_architecture_test
-        PRIVATE flexedge_node_protocol ruvia::web OpenSSL::Crypto
+        PRIVATE flexedge_node_protocol ruvia::web asio::asio OpenSSL::Crypto
     )
     if(MSVC)
         target_compile_options(flexedge_architecture_test PRIVATE /W4 /permissive- /utf-8 /wd4819)
