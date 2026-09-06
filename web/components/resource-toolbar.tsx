@@ -49,15 +49,12 @@ export function ResourceToolbar({
         </Button>
         <Button
           type='button'
+          className='w-[4.5rem]'
           onClick={onSearch}
           disabled={refreshing}
           aria-busy={refreshing}
         >
-          <Loader2
-            className={refreshing ? 'animate-spin' : 'invisible'}
-            aria-hidden='true'
-          />
-          查询
+          {refreshing ? <Loader2 className='animate-spin' aria-hidden='true' /> : '查询'}
         </Button>
       </div>
     </div>
