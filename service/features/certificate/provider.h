@@ -16,7 +16,8 @@
 #include <ruvia/web/Model.h>
 
 #include "service/config/outbound.h"
-#include "service/features/certificate/acme.h"
+#include "service/features/certificate/acme_transport.h"
+#include "service/features/certificate/acme_types.h"
 #include "service/features/outbound_http/client.h"
 
 namespace service::certificate_issuance {
