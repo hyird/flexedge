@@ -463,6 +463,7 @@ int main() {
     REQUIRE(acmeAccount.contains("SELECT revision, runtime::text FROM sys_provider"));
     const auto certificateWorker = source("service/features/certificate/worker.h");
     REQUIRE(certificateWorker.contains("certificate/acme_account.h"));
+    REQUIRE(certificateWorker.contains("certificate/maintenance.h"));
     REQUIRE(certificateWorker.contains("certificate/task.h"));
     REQUIRE(certificateWorker.contains("certificate/task_loader.h"));
     REQUIRE(certificateWorker.contains("certificate/work_loader.h"));
@@ -470,6 +471,7 @@ int main() {
     REQUIRE(!certificateWorker.contains("struct CertificateTask final"));
     REQUIRE(!certificateWorker.contains("struct CertificateWork final"));
     REQUIRE(!certificateWorker.contains("inline ruvia::Task<std::optional<CertificateTask>>"));
+    REQUIRE(!certificateWorker.contains("inline ruvia::Task<void> reconcile"));
     REQUIRE(!certificateWorker.contains("inline ruvia::Task<CertificateWork>\nloadWork"));
     REQUIRE(!certificateWorker.contains("CertificateMaterialOutput material"));
     REQUIRE(!certificateWorker.contains("inline ruvia::Task<void>\nfail("));
@@ -479,6 +481,13 @@ int main() {
     REQUIRE(certificateTaskLoader.contains("inline ruvia::Task<std::optional<CertificateTask>>"));
     REQUIRE(certificateTaskLoader.contains("FOR UPDATE OF marker SKIP"));
     REQUIRE(certificateTaskLoader.contains("LOCKED LIMIT"));
+    const auto certificateMaintenance = source("service/features/certificate/maintenance.h");
+    REQUIRE(certificateMaintenance.contains("expireCertificates"));
+    REQUIRE(certificateMaintenance.contains("reconcileMissingIssuanceMarkers"));
+    REQUIRE(certificateMaintenance.contains("scheduleAutoRenewals"));
+    REQUIRE(certificateMaintenance.contains("reconcileCertificateMaintenance"));
+    REQUIRE(certificateMaintenance.contains("enqueueCertificateRevision"));
+    REQUIRE(certificateMaintenance.contains("enqueueCertificateConsumers"));
     const auto certificateWorkLoader = source("service/features/certificate/work_loader.h");
     REQUIRE(certificateWorkLoader.contains("struct CertificateWork final"));
     REQUIRE(certificateWorkLoader.contains("loadWork"));
