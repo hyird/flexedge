@@ -16,17 +16,9 @@
 #include "service/features/dns_sync/queue.h"
 #include "service/features/dns_sync/snapshot.h"
 #include "service/features/sync_runtime/state.h"
+#include "service/features/dns_sync/task.h"
 
 namespace service::dns_sync::detail {
-
-struct DnsTask final {
-    std::string id;
-    std::string tenantId;
-    std::string resourceId;
-    service::sync_runtime::MarkerOperation operation;
-    std::int64_t version;
-    std::int64_t failures;
-};
 
 struct ZoneSyncState final {
     ZoneRuntimeData runtime;
