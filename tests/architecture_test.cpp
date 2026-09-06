@@ -366,6 +366,17 @@ int main() {
     REQUIRE(agentProtocol.contains("inline bool parseClientEnvelope"));
     REQUIRE(agentProtocol.contains("inline bool validHeartbeat"));
     REQUIRE(agentProtocol.contains("inline HeartbeatReport toHeartbeatReport"));
+    const auto authServiceSource = source("service/domains/auth/auth.service.h");
+    REQUIRE(authServiceSource.contains("auth_session.service.h"));
+    REQUIRE(!authServiceSource.contains("sys_auth_session"));
+    REQUIRE(!authServiceSource.contains("createSession"));
+    const auto authSessionService = source("service/domains/auth/auth_session.service.h");
+    REQUIRE(authSessionService.contains("class AuthSessionService final"));
+    REQUIRE(authSessionService.contains("sys_auth_session"));
+    REQUIRE(authSessionService.contains("readSessionCookie"));
+    const auto authController = source("service/domains/auth/auth.controller.h");
+    REQUIRE(authController.contains("authSessionService().refresh"));
+    REQUIRE(authController.contains("authSessionService().logout"));
     REQUIRE(!acme.contains("struct AcmeSettings final"));
     const auto acmeTypes = source("service/features/certificate/acme_types.h");
     REQUIRE(acmeTypes.contains("struct AcmeSettings final"));
