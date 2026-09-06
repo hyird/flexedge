@@ -388,9 +388,18 @@ int main() {
     REQUIRE(certificateArchive.contains("deflateForZip"));
     const auto agentDomainService = source("service/domains/agent/agent.service.h");
     REQUIRE(agentDomainService.contains("agent.types.h"));
+    REQUIRE(agentDomainService.contains("agent_read.service.h"));
+    REQUIRE(agentDomainService.contains("agentReadService().isCurrent"));
+    REQUIRE(agentDomainService.contains("agentReadService().desiredSummary"));
+    REQUIRE(agentDomainService.contains("agentReadService().objects"));
     REQUIRE(!agentDomainService.contains("struct HeartbeatReport final"));
+    REQUIRE(!agentDomainService.contains("sys_cluster_release_object mapping"));
     const auto agentTypes = source("service/domains/agent/agent.types.h");
     REQUIRE(agentTypes.contains("struct HeartbeatReport final"));
+    const auto agentReadService = source("service/domains/agent/agent_read.service.h");
+    REQUIRE(agentReadService.contains("class AgentReadService final"));
+    REQUIRE(agentReadService.contains("sys_cluster_release_object mapping"));
+    REQUIRE(agentReadService.contains("artifactDigest"));
     REQUIRE(agentDomainService.contains("agent_runtime.mapper.h"));
     REQUIRE(!agentDomainService.contains("NodeRuntimeOutput runtime"));
     const auto agentRuntimeMapper = source("service/domains/agent/agent_runtime.mapper.h");
