@@ -44,6 +44,11 @@ class AcmeError final : public std::runtime_error {
     bool permanent_;
 };
 
+struct EabCredentials final {
+    std::string keyId;
+    service::utils::SensitiveString hmacKey;
+};
+
 struct AcmeAccount final {
     service::utils::SensitiveString privateKeyPem;
     std::string accountUrl;
