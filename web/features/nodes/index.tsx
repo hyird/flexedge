@@ -111,37 +111,47 @@ export function NodesPanel({
     () => [
       {
         accessorKey: 'name',
-        size: 250,
-        header: ({ column }) => (
-          <DataTableColumnHeader column={column} title='节点 / 集群' />
-        ),
+        size: 155,
+        header: ({ column }) => <DataTableColumnHeader column={column} title='节点' />,
         cell: ({ row }) => (
           <DataTableCellContent>
             <span className='font-medium' title={row.original.name}>
               {row.original.name}
             </span>
             <span className='text-xs text-muted-foreground'>
-              {row.original.cluster_name} ·{' '}
               {row.original.runtime.agent_version || '未注册'}
             </span>
           </DataTableCellContent>
         ),
       },
       {
-        id: 'connection',
-        size: 275,
-        header: '连接 / 心跳',
+        id: 'cluster',
+        size: 125,
+        header: '集群',
         cell: ({ row }) => (
-          <DataTableCellContent>
-            <StatusBadge status={row.original.runtime.connection_status} />
-            <time
-              className='text-xs text-muted-foreground tabular-nums'
-              dateTime={row.original.runtime.last_heartbeat_at}
-              title={row.original.runtime.last_heartbeat_at}
-            >
-              {formatDate(row.original.runtime.last_heartbeat_at)}
-            </time>
-          </DataTableCellContent>
+          <span className='font-medium' title={row.original.cluster_name}>
+            {row.original.cluster_name}
+          </span>
+        ),
+      },
+      {
+        id: 'connection',
+        size: 100,
+        header: '连接',
+        cell: ({ row }) => <StatusBadge status={row.original.runtime.connection_status} />,
+      },
+      {
+        id: 'heartbeat',
+        size: 185,
+        header: '心跳',
+        cell: ({ row }) => (
+          <time
+            className='text-xs text-muted-foreground tabular-nums'
+            dateTime={row.original.runtime.last_heartbeat_at}
+            title={row.original.runtime.last_heartbeat_at}
+          >
+            {formatDate(row.original.runtime.last_heartbeat_at)}
+          </time>
         ),
       },
       {
