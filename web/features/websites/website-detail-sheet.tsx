@@ -1,14 +1,15 @@
 import { type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   Globe2,
   Network,
+  RefreshCw,
   Server,
   ShieldCheck,
   type LucideIcon,
 } from 'lucide-react'
-import { getData } from '@/lib/api'
+import { apiErrorMessage, getData, sendData } from '@/lib/api'
 import { formatBytes, formatBytesPerSecond } from '@/lib/format'
 import { queryKeys } from '@/lib/query-keys'
 import type {
@@ -35,6 +36,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import { StatusBadge } from '@/components/status-badge'
+import { toast } from 'sonner'
 import { originGroupLabel } from './website-display'
 
 function WebsiteDashboardMetric({
@@ -188,6 +190,7 @@ export function WebsiteDetailSheet({
   onOpenChange: (open: boolean) => void
 }) {
   const websiteId = website?.id
+  const queryClient = useQueryClient()
   const detailQuery = useQuery({
     queryKey: [...queryKeys.websites, websiteId, 'detail'],
     enabled: !!websiteId,
@@ -205,6 +208,19 @@ export function WebsiteDetailSheet({
       return getData<WebsiteDashboard>(`/websites/${websiteId}/dashboard`)
     },
     refetchInterval: 30_000,
+  })
+  const dnsProbeMutation = useMutation({
+    mutationFn: async () => {
+      if (!websiteId) throw new Error('网站不存在')
+      return sendData('post', `/websites/${websiteId}/dns-probe`)
+    },
+    onSuccess: async (response) => {
+      toast.success(response.message)
+      await queryClient.invalidateQueries({
+        queryKey: [...queryKeys.websites, websiteId, 'detail'],
+      })
+    },
+    onError: (error) => toast.error(apiErrorMessage(error)),
   })
 
   if (!website) return null
@@ -381,9 +397,25 @@ export function WebsiteDetailSheet({
 
             <div className='grid gap-6 xl:grid-cols-2'>
               <Card>
-                <CardHeader className='border-b'>
-                  <CardTitle>域名解析状态</CardTitle>
-                  <CardDescription>节点回传的域名解析运行状态。</CardDescription>
+                <CardHeader className='flex flex-row items-start justify-between gap-3 border-b'>
+                  <div className='space-y-1.5'>
+                    <CardTitle>域名解析状态</CardTitle>
+                    <CardDescription>由公共 DNS 探测服务校验 CNAME 指向。</CardDescription>
+                  </div>
+                  <Button
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    className='shrink-0'
+                    onClick={() => dnsProbeMutation.mutate()}
+                    disabled={dnsProbeMutation.isPending}
+                  >
+                    <RefreshCw
+                      className={dnsProbeMutation.isPending ? 'animate-spin' : undefined}
+                      aria-hidden='true'
+                    />
+                    立即检测
+                  </Button>
                 </CardHeader>
                 <CardContent className='divide-y px-4'>
                   {detail.config.domains.map((domain) => {
@@ -405,7 +437,17 @@ export function WebsiteDetailSheet({
                               : '外部解析'}
                           </p>
                         </div>
-                        <StatusBadge status={runtime?.resolution_status ?? 'pending'} />
+                        <div className='max-w-full space-y-1 text-end'>
+                          <StatusBadge status={runtime?.resolution_status ?? 'pending'} />
+                          {runtime?.last_error && (
+                            <p
+                              className='max-w-56 truncate text-xs text-destructive'
+                              title={runtime.last_error}
+                            >
+                              {runtime.last_error}
+                            </p>
+                          )}
+                        </div>
                       </div>
                     )
                   })}

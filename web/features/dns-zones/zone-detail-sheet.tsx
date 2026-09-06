@@ -37,8 +37,8 @@ export function ZoneDetailSheet({
   const supportsProxy = zone?.dns_provider === 'cloudflare'
   const records = zone
     ? [
-        ...zone.config.records.map((record) => ({ record, system: false })),
         ...zone.runtime.projected_records.map((record) => ({ record, system: true })),
+        ...zone.config.records.map((record) => ({ record, system: false })),
       ]
     : []
   const hasMxRecords =
@@ -61,7 +61,7 @@ export function ZoneDetailSheet({
         {zone && (
           <Tabs
             defaultValue='overview'
-            className='min-h-0 flex-1 gap-4 px-6 pb-4'
+            className='flex min-h-0 flex-1 flex-col gap-4 px-6 pb-4'
           >
             <TabsList className='grid w-full shrink-0 grid-cols-3'>
               <TabsTrigger value='overview'>基础信息</TabsTrigger>

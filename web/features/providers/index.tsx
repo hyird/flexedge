@@ -1,5 +1,10 @@
 import { useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
 import { CheckCircle2, Pencil, Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -48,6 +53,7 @@ export function Providers() {
 
   const dnsQuery = useQuery({
     queryKey: [...queryKeys.providers, 'dns', dnsPage, dnsPageSize, keyword],
+    placeholderData: keepPreviousData,
     queryFn: () =>
       getData<PageData<DnsProvider>>('/providers/dns', {
         page: dnsPage,

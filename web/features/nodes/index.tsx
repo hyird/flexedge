@@ -1,5 +1,10 @@
 import { useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
 import { FileTerminal, KeyRound, Pencil, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -83,6 +88,7 @@ export function NodesPanel({
   })
   const query = useQuery({
     queryKey: [...queryKeys.nodes, page, pageSize, keyword, clusterId, status],
+    placeholderData: keepPreviousData,
     queryFn: () =>
       getData<PageData<Node>>('/nodes/', {
         page,
