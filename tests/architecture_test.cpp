@@ -339,6 +339,11 @@ int main() {
     REQUIRE(certificateService.contains("certificate_material/download.h"));
     REQUIRE(!certificateService.contains("struct CertificateDownload final"));
     REQUIRE(!certificateService.contains("static std::string certificateFilename"));
+    const auto agentDomainService = source("service/domains/agent/agent.service.h");
+    REQUIRE(agentDomainService.contains("agent.types.h"));
+    REQUIRE(!agentDomainService.contains("struct HeartbeatReport final"));
+    const auto agentTypes = source("service/domains/agent/agent.types.h");
+    REQUIRE(agentTypes.contains("struct HeartbeatReport final"));
     REQUIRE(!acme.contains("struct AcmeSettings final"));
     const auto acmeTypes = source("service/features/certificate/acme_types.h");
     REQUIRE(acmeTypes.contains("struct AcmeSettings final"));
