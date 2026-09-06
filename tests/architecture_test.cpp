@@ -157,6 +157,9 @@ int main() {
     REQUIRE(!dnsDriver.contains("std::vector<AliyunRecord> records"));
     REQUIRE(!source("service/features/dns/cloudflare.h").contains("reconcileRecord"));
     REQUIRE(!source("service/features/dns/aliyun.h").contains("reconcileRecord"));
+    const auto dnsSyncReconciliation = source("service/features/dns_sync/reconciliation.h");
+    REQUIRE(dnsSyncReconciliation.contains("requiresManualResolution"));
+    REQUIRE(dnsSyncReconciliation.contains("expected.content != remote.content"));
     REQUIRE(service::dns_sync::recordHostname("test", "a-z.xin") == "test.a-z.xin");
     REQUIRE(service::dns_sync::recordHostname("test.a-z.xin", "a-z.xin") == "test.a-z.xin");
     REQUIRE(service::dns_sync::recordHostname("@", "a-z.xin") == "a-z.xin");
@@ -332,7 +335,9 @@ int main() {
     REQUIRE(certificateMapper.contains("inline void fillCertificate"));
     const auto certificateDownload = source("service/features/certificate_material/download.h");
     REQUIRE(certificateDownload.contains("inline std::string archiveFilename"));
+    REQUIRE(certificateDownload.contains("struct CertificateDownload final"));
     REQUIRE(certificateService.contains("certificate_material/download.h"));
+    REQUIRE(!certificateService.contains("struct CertificateDownload final"));
     REQUIRE(!certificateService.contains("static std::string certificateFilename"));
     REQUIRE(!acme.contains("struct AcmeSettings final"));
     const auto acmeTypes = source("service/features/certificate/acme_types.h");
