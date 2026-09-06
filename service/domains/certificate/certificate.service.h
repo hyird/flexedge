@@ -194,7 +194,8 @@ class CertificateService {
             throw;
         }
         (void)co_await service::certificate_issuance::enqueueCertificateRevision(
-            transaction, tenantId, certificateId, 1, "issue");
+            transaction, tenantId, certificateId, 1,
+            service::sync_runtime::MarkerOperation::issue);
         co_await transaction.commit();
         co_return;
     }
@@ -257,7 +258,8 @@ class CertificateService {
             service::common::throwAppError(CertificateError::REVISION_CONFLICT);
         }
         (void)co_await service::certificate_issuance::enqueueCertificateRevision(
-            transaction, tenantId, id, issuanceRevision, "renew");
+            transaction, tenantId, id, issuanceRevision,
+            service::sync_runtime::MarkerOperation::renew);
         co_await transaction.commit();
         co_return;
     }
@@ -294,7 +296,8 @@ class CertificateService {
         }
         co_await service::certificate_issuance::retireDnsChallengesForDeletedCertificate(
             transaction, tenantId, dnsZoneId, id);
-        co_await service::sync_runtime::removeMarker(transaction, tenantId, "certificate", id);
+        co_await service::sync_runtime::removeMarker(
+            transaction, tenantId, service::sync_runtime::MarkerResourceType::certificate, id);
         co_await transaction.commit();
         co_return;
     }

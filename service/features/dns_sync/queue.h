@@ -135,28 +135,35 @@ inline ruvia::Task<std::string> enqueueZoneRevision(ruvia::DbTransaction& transa
                                                     const std::string& tenantId,
                                                     const std::string& zoneId,
                                                     std::int64_t revision,
-                                                    std::string_view operation = "sync") {
+                                                    service::sync_runtime::MarkerOperation operation =
+                                                        service::sync_runtime::MarkerOperation::sync) {
+    const auto operationValue = service::sync_runtime::markerOperationName(operation);
     const auto rows = co_await transaction.query(
         "SELECT id FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 AND "
         "(deleted_at IS NULL OR $3::text = 'delete') LIMIT 1",
-        tenantId, zoneId, operation);
+        tenantId, zoneId, operationValue);
     if (rows.empty()) {
         throw std::runtime_error("DNS 聚合根不存在");
     }
-    co_return co_await service::sync_runtime::upsertMarker(transaction, tenantId, "dns_zone",
-                                                           zoneId, operation, revision);
+    co_return co_await service::sync_runtime::upsertMarker(
+        transaction, tenantId, service::sync_runtime::MarkerResourceType::dnsZone, zoneId,
+        operation, revision);
 }
 
 inline ruvia::Task<std::string> enqueueZoneDeletion(ruvia::DbTransaction& transaction,
                                                     const std::string& tenantId,
                                                     const std::string& zoneId,
                                                     std::int64_t revision) {
-    co_return co_await enqueueZoneRevision(transaction, tenantId, zoneId, revision, "delete");
+    co_return co_await enqueueZoneRevision(
+        transaction, tenantId, zoneId, revision,
+        service::sync_runtime::MarkerOperation::remove);
 }
 
 inline ruvia::Task<std::optional<std::string>>
 pruneClusterManagedRecords(ruvia::DbTransaction& transaction, const std::string& tenantId,
-                           const std::string& zoneId, std::string_view operation = "sync") {
+                           const std::string& zoneId,
+                           service::sync_runtime::MarkerOperation operation =
+                               service::sync_runtime::MarkerOperation::sync) {
     const auto zoneRows = co_await transaction.query(
         "SELECT revision FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 AND "
         "deleted_at IS NULL LIMIT 1 FOR UPDATE",
@@ -230,7 +237,8 @@ pruneClusterManagedRecords(ruvia::DbTransaction& transaction, const std::string&
 inline ruvia::Task<std::string> markZoneDirty(ruvia::DbTransaction& transaction,
                                               const std::string& tenantId,
                                               const std::string& zoneId,
-                                              std::string_view operation = "sync") {
+                                              service::sync_runtime::MarkerOperation operation =
+                                                  service::sync_runtime::MarkerOperation::sync) {
     if (const auto pruned =
             co_await pruneClusterManagedRecords(transaction, tenantId, zoneId, operation)) {
         co_return *pruned;

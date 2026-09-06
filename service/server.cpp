@@ -55,7 +55,7 @@
 #include "service/domains/node/node.controller.h"
 #include "service/domains/overview/overview.controller.h"
 #include "service/domains/provider/provider.controller.h"
-#include "service/domains/task/task.controller.h"
+#include "service/domains/sync_event/sync_event.controller.h"
 #include "service/features/background/worker_pool.h"
 #include "service/features/certificate/worker.h"
 #include "service/features/dns_sync/worker.h"
@@ -106,7 +106,7 @@ void configureDocumentRoot(ruvia::App& app, const std::filesystem::path& runtime
         .root = std::move(webRoot),
         .staticOptions =
             {
-                .cacheControl = "no-store",
+                .cacheControl = "no-cache",
                 .indexFile = "index.html",
             },
         .precompressGzip = true,
@@ -221,7 +221,7 @@ bool isSpaFallbackRequest(ruvia::Context& c, ruvia::HttpErrorInfo info) {
 
 ruvia::Task<ruvia::HttpResponse> handleNotFound(ruvia::Context& c) {
     if (isSpaRequest(c)) {
-        c.header("cache-control", "no-store");
+        c.header("cache-control", "no-cache");
         co_return c.file(
             {.path = webRootPath() / "index.html", .contentType = "text/html; charset=UTF-8"});
     }
@@ -234,7 +234,7 @@ ruvia::Task<ruvia::HttpResponse> handleNotFound(ruvia::Context& c) {
 // 与 ruvia::HttpErrorHandler 签名匹配；运行时把业务 HttpError 转成统一响应 DTO。
 ruvia::Task<ruvia::HttpResponse> handleError(ruvia::Context& c, ruvia::HttpErrorInfo info) {
     if (isSpaFallbackRequest(c, info)) {
-        c.header("cache-control", "no-store");
+        c.header("cache-control", "no-cache");
         co_return c.file(
             {.path = webRootPath() / "index.html", .contentType = "text/html; charset=UTF-8"});
     }

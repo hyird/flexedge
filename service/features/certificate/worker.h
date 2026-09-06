@@ -13,6 +13,7 @@
 #include <ruvia/core/Task.h>
 #include <ruvia/core/Timer.h>
 
+#include "service/features/background/marker_worker_loop.h"
 #include "service/features/background/worker_pool.h"
 #include "service/features/certificate/acme.h"
 #include "service/features/certificate_material/model.h"
@@ -39,7 +40,6 @@ struct CertificateTask final {
     std::string id;
     std::string tenantId;
     std::string certificateId;
-    std::string operation;
     std::int64_t version;
     std::int64_t failures;
 };
@@ -63,7 +63,8 @@ inline std::string boundedError(std::string_view value) {
 }
 
 inline ruvia::Task<void> recoverStaleMarkers(service::background::WorkerContext& context) {
-    co_await service::sync_runtime::recoverStaleRunning(context.db(), "certificate");
+    co_await service::sync_runtime::recoverStaleRunning(
+        context.db(), service::sync_runtime::MarkerResourceType::certificate);
     co_return;
 }
 
@@ -102,8 +103,9 @@ inline ruvia::Task<void> reconcile(service::background::WorkerContext& context) 
         if (!locked.empty()) {
             co_await enqueueCertificateRevision(
                 transaction, row[0].value().value_or(""), row[1].value().value_or(""), revision,
-                locked.front()[0].as<std::int64_t>().value_or(0) == 0 ? std::string_view{"issue"}
-                                                                      : std::string_view{"renew"});
+                locked.front()[0].as<std::int64_t>().value_or(0) == 0
+                    ? service::sync_runtime::MarkerOperation::issue
+                    : service::sync_runtime::MarkerOperation::renew);
         }
         co_await transaction.commit();
     }
@@ -142,7 +144,8 @@ inline ruvia::Task<void> reconcile(service::background::WorkerContext& context) 
             "NULL, updated_at = NOW() WHERE tenant_id = $2 AND id = $3",
             issuanceRevision, row[0].value().value_or(""), row[1].value().value_or(""));
         co_await enqueueCertificateRevision(transaction, row[0].value().value_or(""),
-                                            row[1].value().value_or(""), issuanceRevision, "renew");
+                                            row[1].value().value_or(""), issuanceRevision,
+                                            service::sync_runtime::MarkerOperation::renew);
         co_await transaction.commit();
     }
     co_return;
@@ -162,8 +165,7 @@ claim(service::background::WorkerContext& context) {
         "UPDATE sys_sync_task marker SET lease_owner = $1, lease_until = NOW() + INTERVAL '60 "
         "seconds', "
         "updated_at = NOW() FROM candidate WHERE marker.id = candidate.id RETURNING marker.id, "
-        "marker.tenant_id, marker.resource_id, marker.operation, marker.version, "
-        "marker.count_fails",
+        "marker.tenant_id, marker.resource_id, marker.version, marker.count_fails",
         context.leaseOwner());
     if (rows.empty()) {
         co_return std::nullopt;
@@ -173,9 +175,8 @@ claim(service::background::WorkerContext& context) {
         .id = std::string(row[0].value().value_or("")),
         .tenantId = std::string(row[1].value().value_or("")),
         .certificateId = std::string(row[2].value().value_or("")),
-        .operation = std::string(row[3].value().value_or("")),
-        .version = row[4].as<std::int64_t>().value_or(1),
-        .failures = row[5].as<std::int64_t>().value_or(0),
+        .version = row[3].as<std::int64_t>().value_or(1),
+        .failures = row[4].as<std::int64_t>().value_or(0),
     };
 }
 
@@ -269,10 +270,8 @@ inline ruvia::Task<CertificateWork> loadWork(service::background::WorkerContext&
 
 inline ruvia::Task<void> execute(service::background::WorkerContext& context,
                                  const CertificateTask& task) {
-    const service::sync_runtime::RunningMarkerLease lease{
-        .marker = {.tenantId = task.tenantId, .markerId = task.id, .version = task.version},
-        .owner = context.leaseOwner(),
-    };
+    const auto lease = service::sync_runtime::makeRunningLease(task.tenantId, task.id, task.version,
+                                                               context.leaseOwner());
     auto work = co_await loadWork(context, task);
     const auto settings = settingsForProvider(work.provider);
     if (!settings) {
@@ -325,36 +324,41 @@ inline ruvia::Task<void> execute(service::background::WorkerContext& context,
         "$4 AND tenant_id = $5 AND issuance_revision = $3 AND deleted_at IS NULL",
         std::string_view(materialJson), std::string_view(issued.expiresAt), task.version,
         task.certificateId, task.tenantId);
+    bool emittedResultEvent{};
     if (updated.affectedRows() != 0) {
         if (!co_await service::sync_runtime::renewRunningLease(transaction, lease)) {
             throw std::runtime_error("证书同步标记 lease 已失效");
         }
         co_await service::node_dispatch::enqueueCertificateConsumers(transaction, task.tenantId,
                                                                      task.certificateId);
-        if (!co_await service::sync_runtime::completeRunning(transaction, lease)) {
+        const auto resultTransition =
+            co_await service::sync_runtime::completeRunningAndRecordEvent(transaction, lease);
+        if (!resultTransition.markerTransitioned) {
             throw std::runtime_error("证书同步标记 lease 已失效");
         }
+        emittedResultEvent = resultTransition.eventRecorded;
     } else {
         (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
     }
     co_await transaction.commit();
+    if (emittedResultEvent) {
+        service::sync_runtime::publishResultEvent(lease);
+    }
     co_return;
 }
 
 inline ruvia::Task<void> fail(service::background::WorkerContext& context,
                               const CertificateTask& task, std::string_view error, bool permanent) {
     const auto message = boundedError(error);
-    const service::sync_runtime::RunningMarkerLease lease{
-        .marker = {.tenantId = task.tenantId, .markerId = task.id, .version = task.version},
-        .owner = context.leaseOwner(),
-    };
+    const auto lease = service::sync_runtime::makeRunningLease(task.tenantId, task.id, task.version,
+                                                               context.leaseOwner());
     auto transaction = co_await context.db().beginTransaction();
     (void)co_await transaction.query(
         "SELECT id FROM sys_certificate WHERE tenant_id = $1 AND id = $2 LIMIT 1 FOR UPDATE",
         task.tenantId, task.certificateId);
-    const bool transitioned =
-        co_await service::sync_runtime::failRunning(transaction, lease, message);
-    if (transitioned) {
+    const auto resultTransition =
+        co_await service::sync_runtime::failRunningAndRecordEvent(transaction, lease, message);
+    if (resultTransition.markerTransitioned) {
         const auto updated = co_await transaction.query(
             "UPDATE sys_certificate SET status = CASE WHEN expires_at > NOW() THEN CASE WHEN $3 "
             "THEN 'valid' ELSE 'renewing' END WHEN $3 THEN 'failed' ELSE 'pending' END, "
@@ -368,8 +372,11 @@ inline ruvia::Task<void> fail(service::background::WorkerContext& context,
         }
     }
     co_await transaction.commit();
-    if (!transitioned) {
+    if (!resultTransition.markerTransitioned) {
         co_return;
+    }
+    if (resultTransition.eventRecorded) {
+        service::sync_runtime::publishResultEvent(lease);
     }
     service::logging::error("Certificate sync marker " + task.id + " failed: " + message);
     co_return;
@@ -422,30 +429,9 @@ inline ruvia::Task<void> runMaintenance(service::background::WorkerContext& cont
 }
 
 inline ruvia::Task<void> run(service::background::WorkerContext& context) {
-    auto nextLeaseRecovery = std::chrono::steady_clock::now();
-    auto nextReconciliation = std::chrono::steady_clock::now();
-    while (!context.stopToken().stopRequested()) {
-        std::string workerError;
-        std::size_t processed = 0;
-        try {
-            co_await runMaintenance(context, nextLeaseRecovery, nextReconciliation);
-            co_await processAvailableTasks(context, processed);
-        } catch (const std::exception& error) {
-            workerError = boundedError(error.what());
-        } catch (...) {
-            workerError = "未知证书同步错误";
-        }
-        if (!workerError.empty()) {
-            service::logging::error("Certificate worker failure: " + workerError);
-        }
-        const auto delay =
-            processed == 0 || !workerError.empty() ? kIdlePollInterval : std::chrono::seconds{0};
-        if (delay.count() > 0 &&
-            co_await ruvia::sleepFor(context.worker(), delay, context.stopToken()) ==
-                ruvia::TimerSleepResult::kStopRequested) {
-            break;
-        }
-    }
+    co_await service::background::runMarkerWorkerLoop(
+        context, kIdlePollInterval, "Certificate worker failure: ", "未知证书同步错误",
+        runMaintenance, processAvailableTasks, boundedError);
     co_return;
 }
 

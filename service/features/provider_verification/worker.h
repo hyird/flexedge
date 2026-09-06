@@ -15,6 +15,7 @@
 #include <ruvia/core/Task.h>
 #include <ruvia/core/Timer.h>
 
+#include "service/features/background/marker_worker_loop.h"
 #include "service/features/background/worker_pool.h"
 #include "service/features/certificate/provider.h"
 #include "service/features/certificate/provider_config.h"
@@ -92,7 +93,8 @@ inline ruvia::Task<void> reconcile(service::background::WorkerContext& context) 
 }
 
 inline ruvia::Task<void> recoverStaleMarkers(service::background::WorkerContext& context) {
-    co_await service::sync_runtime::recoverStaleRunning(context.db(), "provider");
+    co_await service::sync_runtime::recoverStaleRunning(
+        context.db(), service::sync_runtime::MarkerResourceType::provider);
     co_return;
 }
 
@@ -136,10 +138,8 @@ claim(service::background::WorkerContext& context) {
 
 inline ruvia::Task<std::optional<std::string>>
 loadCurrentRuntime(service::background::WorkerContext& context, const VerificationTask& task) {
-    const service::sync_runtime::RunningMarkerLease lease{
-        .marker = {.tenantId = task.tenantId, .markerId = task.id, .version = task.generation},
-        .owner = context.leaseOwner(),
-    };
+    const auto lease = service::sync_runtime::makeRunningLease(
+        task.tenantId, task.id, task.generation, context.leaseOwner());
     if (!co_await service::sync_runtime::renewRunningLease(context.db(), lease)) {
         throw std::runtime_error("供应商检测标记 lease 已失效");
     }
@@ -256,10 +256,8 @@ verifyCertificate(service::background::WorkerContext& context, const Verificatio
 inline ruvia::Task<void> completeMarker(service::background::WorkerContext& context,
                                         const VerificationTask& task, VerificationResult result) {
     const bool dns = task.kind == "dns";
-    const service::sync_runtime::RunningMarkerLease lease{
-        .marker = {.tenantId = task.tenantId, .markerId = task.id, .version = task.generation},
-        .owner = context.leaseOwner(),
-    };
+    const auto lease = service::sync_runtime::makeRunningLease(
+        task.tenantId, task.id, task.generation, context.leaseOwner());
     auto transaction = co_await context.db().beginTransaction();
     const auto rows = co_await transaction.query(
         "SELECT runtime::text FROM sys_provider WHERE id = $1 AND tenant_id = $2 AND kind = $3 "
@@ -296,6 +294,7 @@ inline ruvia::Task<void> completeMarker(service::background::WorkerContext& cont
         "revision = $4 AND verification_generation = $5 AND deleted_at IS NULL",
         std::string_view(runtimeJson), task.providerId, task.tenantId, task.providerRevision,
         task.generation);
+    bool emittedResultEvent{};
     if (updated.affectedRows() == 0) {
         (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
     } else {
@@ -303,11 +302,17 @@ inline ruvia::Task<void> completeMarker(service::background::WorkerContext& cont
             co_await service::dns_sync::markProviderZonesDirty(transaction, task.tenantId,
                                                                task.providerId);
         }
-        if (!co_await service::sync_runtime::completeRunning(transaction, lease)) {
+        const auto resultTransition =
+            co_await service::sync_runtime::completeRunningAndRecordEvent(transaction, lease);
+        if (!resultTransition.markerTransitioned) {
             throw std::runtime_error("供应商检测标记 lease 已失效");
         }
+        emittedResultEvent = resultTransition.eventRecorded;
     }
     co_await transaction.commit();
+    if (emittedResultEvent) {
+        service::sync_runtime::publishResultEvent(lease);
+    }
     co_return;
 }
 
@@ -332,14 +337,12 @@ inline ruvia::Task<void> fail(service::background::WorkerContext& context,
                               const VerificationTask& task, std::string_view error,
                               bool permanent) {
     const auto message = boundedError(error);
-    const service::sync_runtime::RunningMarkerLease lease{
-        .marker = {.tenantId = task.tenantId, .markerId = task.id, .version = task.generation},
-        .owner = context.leaseOwner(),
-    };
+    const auto lease = service::sync_runtime::makeRunningLease(
+        task.tenantId, task.id, task.generation, context.leaseOwner());
     auto transaction = co_await context.db().beginTransaction();
-    const bool transitioned =
-        co_await service::sync_runtime::failRunning(transaction, lease, message);
-    if (transitioned) {
+    const auto resultTransition =
+        co_await service::sync_runtime::failRunningAndRecordEvent(transaction, lease, message);
+    if (resultTransition.markerTransitioned) {
         (void)co_await transaction.execute(
             "UPDATE sys_provider SET status = CASE WHEN $1::BOOLEAN THEN 'invalid' ELSE status "
             "END, last_error = $2, updated_at = NOW() WHERE id = $3 AND tenant_id = $4 AND "
@@ -347,7 +350,10 @@ inline ruvia::Task<void> fail(service::background::WorkerContext& context,
             permanent, std::string_view(message), task.providerId, task.tenantId, task.generation);
     }
     co_await transaction.commit();
-    if (transitioned) {
+    if (resultTransition.eventRecorded) {
+        service::sync_runtime::publishResultEvent(lease);
+    }
+    if (resultTransition.markerTransitioned) {
         service::logging::error("Provider verification marker " + task.id + " failed: " + message);
     }
     co_return;
@@ -427,37 +433,24 @@ inline ruvia::Task<void> processMarkers(service::background::WorkerContext& cont
     co_return;
 }
 
-inline ruvia::Task<void> run(service::background::WorkerContext& context) {
-    auto nextLeaseRecovery = std::chrono::steady_clock::now();
-    auto nextReconciliation = std::chrono::steady_clock::now();
-    while (!context.stopToken().stopRequested()) {
-        std::string workerError;
-        std::size_t processed = 0;
-        try {
-            if (std::chrono::steady_clock::now() >= nextLeaseRecovery) {
-                co_await recoverStaleMarkers(context);
-                nextLeaseRecovery = std::chrono::steady_clock::now() + kLeaseRecoveryInterval;
-            }
-            if (std::chrono::steady_clock::now() >= nextReconciliation) {
-                co_await reconcile(context);
-                nextReconciliation = std::chrono::steady_clock::now() + kReconciliationInterval;
-            }
-            co_await processMarkers(context, processed);
-        } catch (const std::exception& error) {
-            workerError = boundedError(error.what());
-        } catch (...) {
-            workerError = "未知供应商检测错误";
-        }
-        if (!workerError.empty()) {
-            service::logging::error("Provider verification worker failure: " + workerError);
-        }
-        const bool shouldIdle = processed == 0 || !workerError.empty();
-        if (shouldIdle &&
-            co_await ruvia::sleepFor(context.worker(), kIdlePollInterval, context.stopToken()) ==
-                ruvia::TimerSleepResult::kStopRequested) {
-            break;
-        }
+inline ruvia::Task<void> runMaintenance(service::background::WorkerContext& context,
+                                        std::chrono::steady_clock::time_point& nextLeaseRecovery,
+                                        std::chrono::steady_clock::time_point& nextReconciliation) {
+    if (std::chrono::steady_clock::now() >= nextLeaseRecovery) {
+        co_await recoverStaleMarkers(context);
+        nextLeaseRecovery = std::chrono::steady_clock::now() + kLeaseRecoveryInterval;
     }
+    if (std::chrono::steady_clock::now() >= nextReconciliation) {
+        co_await reconcile(context);
+        nextReconciliation = std::chrono::steady_clock::now() + kReconciliationInterval;
+    }
+    co_return;
+}
+
+inline ruvia::Task<void> run(service::background::WorkerContext& context) {
+    co_await service::background::runMarkerWorkerLoop(
+        context, kIdlePollInterval, "Provider verification worker failure: ", "未知供应商检测错误",
+        runMaintenance, processMarkers, boundedError);
     co_return;
 }
 

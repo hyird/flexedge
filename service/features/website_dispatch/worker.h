@@ -9,8 +9,8 @@
 #include <string_view>
 
 #include <ruvia/core/Task.h>
-#include <ruvia/core/Timer.h>
 
+#include "service/features/background/marker_worker_loop.h"
 #include "service/features/background/worker_pool.h"
 #include "service/features/logging/logger.h"
 #include "service/features/sync_runtime/state.h"
@@ -23,12 +23,12 @@ namespace detail {
 inline constexpr std::chrono::seconds kIdlePollInterval{2};
 inline constexpr std::chrono::seconds kLeaseRecoveryInterval{15};
 inline constexpr std::chrono::minutes kReconciliationInterval{15};
+inline constexpr std::size_t kMaxJobsPerTick{8};
 
 struct WebsiteMarker final {
     std::string id;
     std::string tenantId;
     std::string resourceId;
-    std::string operation;
     std::int64_t version{};
     std::int64_t failures{};
 };
@@ -54,8 +54,9 @@ inline ruvia::Task<void> reconcileMarkers(service::background::WorkerContext& co
             "AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
             tenantId, websiteId, revision);
         if (!locked.empty()) {
-            (void)co_await service::sync_runtime::upsertMarker(transaction, tenantId, "website",
-                                                               websiteId, "apply", revision);
+            (void)co_await service::sync_runtime::upsertMarker(
+                transaction, tenantId, service::sync_runtime::MarkerResourceType::website,
+                websiteId, service::sync_runtime::MarkerOperation::apply, revision);
         }
         co_await transaction.commit();
     }
@@ -63,7 +64,8 @@ inline ruvia::Task<void> reconcileMarkers(service::background::WorkerContext& co
 }
 
 inline ruvia::Task<void> recoverStaleMarkers(service::background::WorkerContext& context) {
-    co_await service::sync_runtime::recoverStaleRunning(context.db(), "website");
+    co_await service::sync_runtime::recoverStaleRunning(
+        context.db(), service::sync_runtime::MarkerResourceType::website);
     co_return;
 }
 
@@ -79,8 +81,7 @@ claim(service::background::WorkerContext& context) {
         "1) "
         "UPDATE sys_sync_task marker SET lease_owner = $1, lease_until = NOW() + INTERVAL '60 "
         "seconds', updated_at = NOW() FROM candidate WHERE marker.id = candidate.id RETURNING "
-        "marker.id, marker.tenant_id, marker.resource_id, marker.operation, marker.version, "
-        "marker.count_fails",
+        "marker.id, marker.tenant_id, marker.resource_id, marker.version, marker.count_fails",
         context.leaseOwner());
     if (rows.empty()) {
         co_return std::nullopt;
@@ -90,78 +91,83 @@ claim(service::background::WorkerContext& context) {
         .id = std::string(row[0].value().value_or("")),
         .tenantId = std::string(row[1].value().value_or("")),
         .resourceId = std::string(row[2].value().value_or("")),
-        .operation = std::string(row[3].value().value_or("apply")),
-        .version = row[4].as<std::int64_t>().value_or(1),
-        .failures = row[5].as<std::int64_t>().value_or(0),
+        .version = row[3].as<std::int64_t>().value_or(1),
+        .failures = row[4].as<std::int64_t>().value_or(0),
     };
 }
 
 inline ruvia::Task<void> execute(service::background::WorkerContext& context,
                                  const WebsiteMarker& marker) {
-    const service::sync_runtime::RunningMarkerLease lease{
-        .marker = {.tenantId = marker.tenantId, .markerId = marker.id, .version = marker.version},
-        .owner = context.leaseOwner(),
-    };
+    const auto lease = service::sync_runtime::makeRunningLease(
+        marker.tenantId, marker.id, marker.version, context.leaseOwner());
     co_await service::website_dns::probeWebsite(context, marker.resourceId, lease, marker.version);
     co_return;
 }
 
 inline ruvia::Task<void> fail(service::background::WorkerContext& context,
                               const WebsiteMarker& marker, std::string_view error) {
-    const service::sync_runtime::RunningMarkerLease lease{
-        .marker = {.tenantId = marker.tenantId, .markerId = marker.id, .version = marker.version},
-        .owner = context.leaseOwner(),
-    };
+    const auto lease = service::sync_runtime::makeRunningLease(
+        marker.tenantId, marker.id, marker.version, context.leaseOwner());
     auto transaction = co_await context.db().beginTransaction();
-    const auto transitioned =
-        co_await service::sync_runtime::failRunning(transaction, lease, boundedError(error));
+    const auto resultTransition = co_await service::sync_runtime::failRunningAndRecordEvent(
+        transaction, lease, boundedError(error));
     co_await transaction.commit();
-    if (transitioned) {
+    if (resultTransition.eventRecorded) {
+        service::sync_runtime::publishResultEvent(lease);
+    }
+    if (resultTransition.markerTransitioned) {
         service::logging::error("Website sync marker " + marker.id +
                                 " failed: " + boundedError(error));
     }
     co_return;
 }
 
-inline ruvia::Task<void> run(service::background::WorkerContext& context) {
-    auto nextLeaseRecovery = std::chrono::steady_clock::now();
-    auto nextReconciliation = std::chrono::steady_clock::now();
-    while (!context.stopToken().stopRequested()) {
-        bool processed = false;
-        try {
-            if (std::chrono::steady_clock::now() >= nextLeaseRecovery) {
-                co_await recoverStaleMarkers(context);
-                nextLeaseRecovery = std::chrono::steady_clock::now() + kLeaseRecoveryInterval;
-            }
-            if (std::chrono::steady_clock::now() >= nextReconciliation) {
-                co_await reconcileMarkers(context);
-                nextReconciliation = std::chrono::steady_clock::now() + kReconciliationInterval;
-            }
-            if (const auto marker = co_await claim(context)) {
-                processed = true;
-                std::string markerError;
-                try {
-                    co_await execute(context, *marker);
-                } catch (const std::exception& error) {
-                    markerError = boundedError(error.what());
-                } catch (...) {
-                    markerError = "网站同步发生未知错误";
-                }
-                if (!markerError.empty()) {
-                    co_await fail(context, *marker, markerError);
-                }
-            }
-        } catch (const std::exception& error) {
-            service::logging::error("Website sync worker failure: " + boundedError(error.what()));
-        } catch (...) {
-            service::logging::error("Website sync worker failure: unknown error");
-        }
-        if (!processed &&
-            co_await ruvia::sleepFor(context.worker(), kIdlePollInterval, context.stopToken()) ==
-                ruvia::TimerSleepResult::kStopRequested) {
+inline ruvia::Task<void> processMarker(service::background::WorkerContext& context,
+                                       const WebsiteMarker& marker) {
+    std::string markerError;
+    try {
+        co_await execute(context, marker);
+    } catch (const std::exception& error) {
+        markerError = boundedError(error.what());
+    } catch (...) {
+        markerError = "网站同步发生未知错误";
+    }
+    if (!markerError.empty()) {
+        co_await fail(context, marker, markerError);
+    }
+    co_return;
+}
+
+inline ruvia::Task<void> processMarkers(service::background::WorkerContext& context,
+                                        std::size_t& processed) {
+    for (; processed < kMaxJobsPerTick; ++processed) {
+        const auto marker = co_await claim(context);
+        if (!marker) {
             break;
         }
+        co_await processMarker(context, *marker);
     }
+    co_return;
+}
+
+inline ruvia::Task<void> runMaintenance(service::background::WorkerContext& context,
+                                        std::chrono::steady_clock::time_point& nextLeaseRecovery,
+                                        std::chrono::steady_clock::time_point& nextReconciliation) {
+    if (std::chrono::steady_clock::now() >= nextLeaseRecovery) {
+        co_await recoverStaleMarkers(context);
+        nextLeaseRecovery = std::chrono::steady_clock::now() + kLeaseRecoveryInterval;
+    }
+    if (std::chrono::steady_clock::now() >= nextReconciliation) {
+        co_await reconcileMarkers(context);
+        nextReconciliation = std::chrono::steady_clock::now() + kReconciliationInterval;
+    }
+    co_return;
+}
+
+inline ruvia::Task<void> run(service::background::WorkerContext& context) {
+    co_await service::background::runMarkerWorkerLoop(
+        context, kIdlePollInterval, "Website sync worker failure: ", "网站同步发生未知错误",
+        runMaintenance, processMarkers, boundedError);
     co_return;
 }
 

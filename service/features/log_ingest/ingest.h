@@ -224,10 +224,12 @@ inline ruvia::Task<void> insertEnvelope(ruvia::WebWorkerContext& context,
     co_await transaction.commit();
     try {
         for (const auto& websiteId : accessWebsiteIds) {
-            co_await notifications::publishAccess(context.redis(), tenantId, websiteId);
+            co_await notifications::publish(context.redis(), notifications::LogResourceType::access,
+                                            tenantId, websiteId);
         }
         if (nodeCount > 0) {
-            co_await notifications::publishNode(context.redis(), tenantId, nodeId);
+            co_await notifications::publish(context.redis(), notifications::LogResourceType::node,
+                                            tenantId, nodeId);
         }
     } catch (const std::exception& error) {
         service::logging::error("Log notification failed: " + std::string(error.what()));

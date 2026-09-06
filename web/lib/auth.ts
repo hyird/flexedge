@@ -1,9 +1,10 @@
 import { queryOptions } from '@tanstack/react-query'
 import { getData, sendData } from '@/lib/api'
+import { queryKeys } from '@/lib/query-keys'
 import type { AuthUser } from '@/lib/types'
 
 export const sessionQueryOptions = queryOptions({
-  queryKey: ['session'],
+  queryKey: queryKeys.session,
   queryFn: () => getData<AuthUser>('/auth/me'),
   retry: false,
   staleTime: 30_000,

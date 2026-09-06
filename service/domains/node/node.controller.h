@@ -1,8 +1,6 @@
 #pragma once
 
-#include <chrono>
 #include <cstdint>
-#include <exception>
 #include <initializer_list>
 #include <optional>
 #include <string>
@@ -19,6 +17,7 @@
 #include "service/domains/node/node.schema.h"
 #include "service/domains/node/node.service.h"
 #include "service/features/log_ingest/fanout.h"
+#include "service/features/log_ingest/sse_tail.h"
 #include "service/features/log_ingest/tail.h"
 #include "service/middleware/auth.h"
 
@@ -48,24 +47,6 @@ class NodeController final : public ruvia::Controller<NodeController> {
 
     static std::int64_t expectedRevision(ruvia::Context& c) {
         return service::common::requireExpectedRevision(c);
-    }
-
-    static std::optional<std::string> cursorValue(const NodeLogTailDataDto& data) {
-        const auto& cursor = data.get<"cursor">();
-        if (!cursor) {
-            return std::nullopt;
-        }
-        return std::string(cursor->view());
-    }
-
-    static void advanceCursor(std::optional<service::log_ingest::TailCursor>& target,
-                              const std::optional<std::string>& cursor) {
-        if (!cursor) {
-            return;
-        }
-        if (const auto parsed = service::log_ingest::parseTailCursor(*cursor)) {
-            target = *parsed;
-        }
     }
 
     static ruvia::Task<void> writeLogEvent(ruvia::Context& c, ruvia::SseWriter& events,
@@ -155,54 +136,21 @@ class NodeController final : public ruvia::Controller<NodeController> {
     }
 
     ruvia::Task<void> logStream(ruvia::Context& c) {
-        try {
-            co_await logStreamBody(c);
-        } catch (const std::exception& error) {
-            if (service::log_ingest::sseClientDisconnected(error)) {
-                co_return;
-            }
-            throw;
-        }
-    }
-
-    static ruvia::Task<void> logStreamBody(ruvia::Context& c) {
         const auto tenant = tenantId(c);
         const auto id = requireId(c);
         const auto limit = service::log_ingest::requireTailLimit(c);
-        auto after = service::log_ingest::optionalSseTailCursor(c);
-        auto subscription =
-            service::log_ingest::fanout::hub().subscribeNode(c.worker(), tenant, id);
-        auto initial = co_await nodeService().logs(c, tenant, id, limit, after);
-        const auto initialCursor = cursorValue(initial);
-        advanceCursor(after, initialCursor);
-
-        auto events = c.streamSse();
-        co_await events.write(
-            {.data = "{}", .event = "ready", .retry = std::chrono::milliseconds{3000}});
-        co_await writeLogEvent(c, events, std::move(initial), initialCursor);
-
-        while (!events.aborted()) {
-            const auto signal = co_await subscription.receiveFor(
-                service::log_ingest::fanout::kSseHeartbeatInterval, c.stopToken());
-            if (events.aborted()) {
-                co_return;
-            }
-            if (!signal.hasValue()) {
-                if (signal.status() != ruvia::WorkerWaitStatus::kTimedOut) {
-                    co_return;
-                }
-                co_await events.write({.event = "heartbeat"});
-                continue;
-            }
-
-            auto update = co_await nodeService().logs(c, tenant, id, limit, after);
-            const auto updateCursor = cursorValue(update);
-            if (!updateCursor) {
-                continue;
-            }
-            advanceCursor(after, updateCursor);
-            co_await writeLogEvent(c, events, std::move(update), updateCursor);
-        }
+        co_await service::log_ingest::streamSseTail(
+            c,
+            service::log_ingest::fanout::hub().subscribe(
+                c.worker(), service::log_ingest::notifications::LogResourceType::node, tenant, id),
+            service::log_ingest::optionalSseTailCursor(c),
+            [&c, tenant, id, limit](const std::optional<service::log_ingest::TailCursor>& after) {
+                return nodeService().logs(c, tenant, id, limit, after);
+            },
+            [](const NodeLogTailDataDto& data) {
+                return service::log_ingest::tailResponseCursor(data);
+            },
+            writeLogEvent);
     }
 };
 

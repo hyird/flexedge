@@ -1,5 +1,4 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
 import {
   AlertTriangle,
   Boxes,
@@ -10,6 +9,7 @@ import {
 } from 'lucide-react'
 import { getData } from '@/lib/api'
 import { formatDate } from '@/lib/format'
+import { queryKeys } from '@/lib/query-keys'
 import type { OverviewData } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import {
@@ -27,7 +27,7 @@ import { StatusBadge } from '@/components/status-badge'
 
 export function Overview() {
   const query = useQuery({
-    queryKey: ['overview'],
+    queryKey: queryKeys.overview,
     queryFn: () => getData<OverviewData>('/overview/'),
   })
   const data = query.data
@@ -44,7 +44,7 @@ export function Overview() {
   return (
     <FeatureShell
       title='运行概览'
-      description='查看边缘资源、风险事项和最近任务。'
+      description='查看边缘资源、风险事项和最近同步状态。'
       actions={
         <Button
           variant='outline'
@@ -82,7 +82,7 @@ export function Overview() {
         <Tabs defaultValue='overview' className='space-y-4'>
           <TabsList>
             <TabsTrigger value='overview'>资源概览</TabsTrigger>
-            <TabsTrigger value='issues'>风险与任务</TabsTrigger>
+            <TabsTrigger value='issues'>风险与同步</TabsTrigger>
           </TabsList>
           <TabsContent value='overview' className='space-y-4'>
             <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-4'>
@@ -150,35 +150,30 @@ export function Overview() {
               </Card>
               <Card className='lg:col-span-3'>
                 <CardHeader>
-                  <CardTitle>最近任务</CardTitle>
+                  <CardTitle>最近同步状态</CardTitle>
                   <CardDescription>
-                    {data?.recent_tasks.length
-                      ? `最近 ${data.recent_tasks.length} 条变更`
-                      : '暂无任务记录'}
+                    {data?.recent_markers.length
+                      ? `最近 ${data.recent_markers.length} 条状态变更`
+                      : '暂无同步状态'}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className='space-y-5'>
-                  {data?.recent_tasks.slice(0, 5).map((task) => (
-                    <div key={task.id} className='flex items-start gap-3'>
+                  {data?.recent_markers.slice(0, 5).map((marker) => (
+                    <div key={marker.id} className='flex items-start gap-3'>
                       <div className='mt-1 size-2 rounded-full bg-primary' />
                       <div className='min-w-0 flex-1'>
                         <div className='flex items-center justify-between gap-2'>
                           <p className='truncate text-sm font-medium'>
-                            {task.resource_name}
+                            {marker.resource_name}
                           </p>
-                          <StatusBadge status={task.status} />
+                          <StatusBadge status={marker.status} />
                         </div>
                         <p className='mt-1 truncate text-xs text-muted-foreground'>
-                          {task.operation} · {formatDate(task.updated_at)}
+                          {marker.operation} · {formatDate(marker.updated_at)}
                         </p>
                       </div>
                     </div>
                   ))}
-                  {data?.recent_tasks.length ? (
-                    <Button variant='outline' className='w-full' asChild>
-                      <Link to='/tasks'>查看全部任务</Link>
-                    </Button>
-                  ) : null}
                 </CardContent>
               </Card>
             </div>
@@ -204,9 +199,9 @@ export function Overview() {
                 icon={AlertTriangle}
               />
               <MetricCard
-                label='活动任务'
-                value={issues?.active_task_count ?? 0}
-                hint={`${issues?.failed_task_count ?? 0} 条失败任务`}
+                label='同步中'
+                value={issues?.active_marker_count ?? 0}
+                hint={`${issues?.retry_marker_count ?? 0} 条待重试`}
                 icon={RefreshCw}
               />
             </div>
