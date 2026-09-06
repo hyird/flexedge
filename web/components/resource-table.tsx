@@ -22,6 +22,8 @@ import { DataTablePagination } from '@/components/data-table'
 type Props<T> = {
   columns: ColumnDef<T>[]
   data: T[]
+  tableClassName?: string
+  fixedLayout?: boolean
   loading?: boolean
   error?: boolean
   onRetry?: () => void
@@ -36,6 +38,8 @@ type Props<T> = {
 export function ResourceTable<T>({
   columns,
   data,
+  tableClassName,
+  fixedLayout = false,
   loading = false,
   error = false,
   onRetry,
@@ -73,12 +77,19 @@ export function ResourceTable<T>({
       )}
       <div className='overflow-hidden rounded-lg border bg-card shadow-sm'>
         <div className='overflow-x-auto'>
-          <Table>
+          <Table
+            className={cn(fixedLayout && 'table-fixed', tableClassName)}
+          >
             <TableHeader className='bg-muted/35'>
               {table.getHeaderGroups().map((group) => (
                 <TableRow key={group.id}>
                   {group.headers.map((header) => (
-                    <TableHead key={header.id}>
+                    <TableHead
+                      key={header.id}
+                      style={
+                        fixedLayout ? { width: header.getSize() } : undefined
+                      }
+                    >
                       {header.isPlaceholder
                         ? null
                         : flexRender(
@@ -142,7 +153,14 @@ export function ResourceTable<T>({
                 table.getRowModel().rows.map((row) => (
                   <TableRow key={row.id}>
                     {row.getVisibleCells().map((cell) => (
-                      <TableCell key={cell.id}>
+                      <TableCell
+                        key={cell.id}
+                        style={
+                          fixedLayout
+                            ? { width: cell.column.getSize() }
+                            : undefined
+                        }
+                      >
                         {flexRender(
                           cell.column.columnDef.cell,
                           cell.getContext()

@@ -217,9 +217,9 @@ export function Clusters() {
           aria-label='节点列表'
           className='min-h-0 min-w-0 space-y-3 md:overflow-auto'
         >
-          <div className='flex flex-wrap items-center justify-between gap-2'>
+          <div className='flex min-h-10 flex-wrap items-center justify-between gap-3'>
             <div className='flex min-w-0 items-center gap-2'>
-              <h2 className='truncate font-semibold'>
+              <h2 className='truncate text-base font-semibold leading-none'>
                 {search.cluster_id
                   ? (selected?.name ?? '所选集群')
                   : '全部节点'}
@@ -233,8 +233,8 @@ export function Clusters() {
           </div>
           {selected && (
             <div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-4'>
-              <Card className='h-full py-2 shadow-none'>
-                <CardContent className='px-4 py-0 text-sm'>
+              <Card className='min-h-20 py-0 shadow-none'>
+                <CardContent className='flex h-full flex-col justify-center px-4 py-3 text-sm'>
                   <div className='text-xs text-muted-foreground'>托管域名</div>
                   <div
                     className='truncate font-medium'
@@ -247,16 +247,16 @@ export function Clusters() {
                   </div>
                 </CardContent>
               </Card>
-              <Card className='h-full py-2 shadow-none'>
-                <CardContent className='px-4 py-0 text-sm'>
+              <Card className='min-h-20 py-0 shadow-none'>
+                <CardContent className='flex h-full flex-col justify-center px-4 py-3 text-sm'>
                   <div className='text-xs text-muted-foreground'>主机前缀</div>
                   <code className='block truncate'>
                     {selected.hostname_prefix}
                   </code>
                 </CardContent>
               </Card>
-              <Card className='h-full py-2 shadow-none'>
-                <CardContent className='px-4 py-0 text-sm'>
+              <Card className='min-h-20 py-0 shadow-none'>
+                <CardContent className='flex h-full flex-col justify-center px-4 py-3 text-sm'>
                   <div className='text-xs text-muted-foreground'>接入域名</div>
                   <code
                     className='block truncate'
@@ -266,8 +266,8 @@ export function Clusters() {
                   </code>
                 </CardContent>
               </Card>
-              <Card className='h-full py-2 shadow-none'>
-                <CardContent className='px-4 py-0 text-sm'>
+              <Card className='min-h-20 py-0 shadow-none'>
+                <CardContent className='flex h-full flex-col justify-center px-4 py-3 text-sm'>
                   <div className='text-xs text-muted-foreground'>节点状态</div>
                   <div className='font-medium'>
                     {selected.online_node_count}/{selected.node_count} 在线

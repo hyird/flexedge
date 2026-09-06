@@ -52,7 +52,6 @@ import {
 } from '@/components/ui/sheet'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTableColumnHeader } from '@/components/data-table'
-import { DataTableCellContent } from '@/components/data-table/cell-content'
 import { DnsLineSelect } from '@/components/dns-line-tree'
 import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
@@ -165,54 +164,66 @@ export function NodesPanel({
     () => [
       {
         accessorKey: 'name',
+        size: 250,
         header: ({ column }) => (
           <DataTableColumnHeader column={column} title='节点 / 集群' />
         ),
         cell: ({ row }) => (
-          <DataTableCellContent>
-            <div className='font-medium'>{row.original.name}</div>
-            <div className='text-xs text-muted-foreground'>
+          <div className='flex min-w-0 flex-col justify-center gap-0.5'>
+            <div className='truncate font-medium' title={row.original.name}>
+              {row.original.name}
+            </div>
+            <div className='truncate text-xs text-muted-foreground'>
               {row.original.cluster_name} ·{' '}
               {row.original.runtime.agent_version || '未注册'}
             </div>
-          </DataTableCellContent>
+          </div>
         ),
       },
       {
         id: 'connection',
+        size: 210,
         header: '连接 / 心跳',
         cell: ({ row }) => (
-          <DataTableCellContent>
+          <div className='flex min-w-0 flex-col justify-center gap-1'>
             <StatusBadge status={row.original.runtime.connection_status} />
-            <div className='text-xs text-muted-foreground'>
+            <time
+              className='truncate text-xs text-muted-foreground tabular-nums'
+              dateTime={row.original.runtime.last_heartbeat_at}
+              title={row.original.runtime.last_heartbeat_at}
+            >
               {formatDate(row.original.runtime.last_heartbeat_at)}
-            </div>
-          </DataTableCellContent>
+            </time>
+          </div>
         ),
       },
       {
         id: 'ip',
+        size: 175,
         header: '节点 IP',
         cell: ({ row }) => (
-          <DataTableCellContent>
+          <div className='flex min-w-0 flex-col justify-center gap-1'>
             {row.original.config.endpoints.slice(0, 2).map((endpoint) => (
-              <code key={endpoint.id}>{endpoint.ip_address}</code>
+              <code key={endpoint.id} className='truncate' title={endpoint.ip_address}>
+                {endpoint.ip_address}
+              </code>
             ))}
             {row.original.config.endpoints.length > 2 && (
               <span className='text-xs text-muted-foreground'>
                 +{row.original.config.endpoints.length - 2}
               </span>
             )}
-          </DataTableCellContent>
+          </div>
         ),
       },
       {
         id: 'line',
+        size: 130,
         header: 'DNS 线路',
         cell: ({ row }) => (
-          <DataTableCellContent>
+          <div className='flex min-w-0 flex-col justify-center gap-1'>
             {row.original.config.endpoints.slice(0, 2).map((endpoint) => (
-              <span key={endpoint.id}>
+              <span key={endpoint.id} className='truncate'>
                 {dnsLinePath(
                   linesQuery.data?.[row.original.cluster_id] ?? [],
                   endpoint.line_code
@@ -224,49 +235,63 @@ export function NodesPanel({
                 +{row.original.config.endpoints.length - 2}
               </span>
             )}
-          </DataTableCellContent>
+          </div>
         ),
       },
       {
         id: 'metrics',
+        size: 300,
         header: '实时负载',
         cell: ({ row }) => (
-          <div className='text-xs whitespace-nowrap text-muted-foreground'>
-            CPU {row.original.runtime.cpu_usage?.toFixed(1) ?? '—'}% · 内存{' '}
-            {row.original.runtime.memory_usage?.toFixed(1) ?? '—'}% ·{' '}
-            {formatBytesPerSecond(row.original.runtime.traffic_out_bps)} ·{' '}
-            {row.original.runtime.connection_count ?? '—'} 连接
+          <div className='grid min-w-0 gap-0.5 text-xs text-muted-foreground'>
+            <span className='truncate'>
+              CPU {row.original.runtime.cpu_usage?.toFixed(1) ?? '—'}% · 内存{' '}
+              {row.original.runtime.memory_usage?.toFixed(1) ?? '—'}%
+            </span>
+            <span className='truncate'>
+              {formatBytesPerSecond(row.original.runtime.traffic_out_bps)} ·{' '}
+              {row.original.runtime.connection_count ?? '—'} 连接
+            </span>
           </div>
         ),
       },
       {
         accessorKey: 'status',
+        size: 120,
         header: '启用状态',
-        cell: ({ row }) => <StatusBadge status={row.original.status} />,
+        cell: ({ row }) => (
+          <div className='flex h-full items-center'>
+            <StatusBadge status={row.original.status} />
+          </div>
+        ),
       },
       {
         id: 'actions',
+        size: 52,
+        header: () => <span className='sr-only'>操作</span>,
         cell: ({ row }) => (
-          <RowActions>
-            <DropdownMenuItem onSelect={() => setDialog(row.original)}>
-              <Pencil /> 编辑
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onSelect={() => loadNodeCredentials(row.original)}
-            >
-              <KeyRound /> 接入凭据
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setLogNode(row.original)}>
-              <FileTerminal /> 实时日志
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              variant='destructive'
-              onSelect={() => setRemoveTarget(row.original)}
-            >
-              <Trash2 /> 删除
-            </DropdownMenuItem>
-          </RowActions>
+          <div className='flex justify-end'>
+            <RowActions>
+              <DropdownMenuItem onSelect={() => setDialog(row.original)}>
+                <Pencil /> 编辑
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => loadNodeCredentials(row.original)}
+              >
+                <KeyRound /> 接入凭据
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setLogNode(row.original)}>
+                <FileTerminal /> 实时日志
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                variant='destructive'
+                onSelect={() => setRemoveTarget(row.original)}
+              >
+                <Trash2 /> 删除
+              </DropdownMenuItem>
+            </RowActions>
+          </div>
         ),
       },
     ],
@@ -329,6 +354,8 @@ export function NodesPanel({
       <ResourceTable
         columns={columns}
         data={query.data?.list ?? []}
+        fixedLayout
+        tableClassName='min-w-[68.75rem]'
         loading={query.isLoading}
         error={query.isError}
         onRetry={() => void query.refetch()}
