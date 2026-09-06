@@ -272,6 +272,13 @@ int main() {
     const auto websiteConfigTransport = source("service/features/website_config/transport.h");
     REQUIRE(websiteConfigTransport.contains("RUVIA_REQUEST_MODEL(WebsiteDomainInput"));
     REQUIRE(websiteConfigTransport.contains("WebsiteConfigOutput, RUVIA_OPTIONAL_FIELD(name"));
+    const auto websiteService = source("service/domains/website/website.service.h");
+    REQUIRE(websiteService.contains("website_dashboard.service.h"));
+    REQUIRE(websiteService.contains("websiteDashboardService().dashboard"));
+    REQUIRE(!websiteService.contains("minute_buckets AS"));
+    const auto websiteDashboard = source("service/domains/website/website_dashboard.service.h");
+    REQUIRE(websiteDashboard.contains("class WebsiteDashboardService final"));
+    REQUIRE(websiteDashboard.contains("minute_buckets AS"));
     const auto websitePage = source("web/features/websites/index.tsx");
     REQUIRE(websitePage.contains("import { AccessLogSheet } from './access-log-sheet'"));
     REQUIRE(websitePage.contains("import { WebsiteDialog } from './website-dialog'"));
