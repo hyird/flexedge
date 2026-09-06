@@ -659,7 +659,8 @@ inline ruvia::Task<void> reconcileTasks(service::background::WorkerContext& cont
         "zone.deleted_at IS NULL AND zone.synced_revision < zone.desired_revision AND NOT EXISTS "
         "(SELECT 1 FROM sys_sync_task task WHERE task.resource_type = 'dns_zone' AND "
         "task.tenant_id = zone.tenant_id AND task.resource_id = zone.id AND "
-        "task.version = zone.desired_revision) ORDER BY zone.sort ASC LIMIT 32");
+        "task.version = zone.desired_revision AND NOT task.is_done) ORDER BY zone.sort ASC LIMIT "
+        "32");
     for (const auto& row : missing) {
         auto transaction = co_await context.db().beginTransaction();
         const auto revision = row[2].as<std::int64_t>().value_or(1);
