@@ -279,6 +279,12 @@ int main() {
     const auto websiteDashboard = source("service/domains/website/website_dashboard.service.h");
     REQUIRE(websiteDashboard.contains("class WebsiteDashboardService final"));
     REQUIRE(websiteDashboard.contains("minute_buckets AS"));
+    REQUIRE(websiteService.contains("website_access_log.mapper.h"));
+    REQUIRE(!websiteService.contains("static void fillAccessLog"));
+    const auto websiteAccessLogMapper =
+        source("service/domains/website/website_access_log.mapper.h");
+    REQUIRE(websiteAccessLogMapper.contains("fillWebsiteAccessLog"));
+    REQUIRE(websiteAccessLogMapper.contains("clientIpLocation"));
     const auto websitePage = source("web/features/websites/index.tsx");
     REQUIRE(websitePage.contains("import { AccessLogSheet } from './access-log-sheet'"));
     REQUIRE(websitePage.contains("import { WebsiteDialog } from './website-dialog'"));
