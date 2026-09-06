@@ -10,19 +10,18 @@
 
 #include <ruvia/core/Task.h>
 #include <ruvia/web/Context.h>
-#include <ruvia/web/ModelJson.h>
 #include <ruvia/web/db/DbTransaction.h>
 
 #include "service/common/database.h"
 #include "service/common/http.h"
 #include "service/domains/node/node.error.h"
+#include "service/domains/node/node.mapper.h"
 #include "service/domains/node/node.types.h"
 #include "service/features/cluster_dns/projection.h"
 #include "service/features/dns_sync/snapshot.h"
 #include "service/features/log_ingest/tail.h"
 #include "service/features/node_config/model.h"
 #include "service/features/node_dispatch/queue.h"
-#include "service/features/node_runtime/model.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
 #include "service/utils/token.h"
@@ -105,13 +104,13 @@ class NodeService {
                                            const ruvia::ValidatedJson<NodeSaveInput>& config) {
         const auto normalized = normalize(config.value());
         if (!normalized) {
-            throwCorruptConfig();
+            throwCorruptNodeConfig();
         }
         const auto& clusterId = normalized->clusterId;
         const auto& name = normalized->name;
         const auto& status = normalized->status;
         const auto& storedConfig = normalized->config;
-        const auto configJson = serializeConfig(c, storedConfig);
+        const auto configJson = serializeNodeConfig(c, storedConfig);
 
         NodeCredentialsDto result(c);
         try {
@@ -227,13 +226,13 @@ class NodeService {
                              const ruvia::ValidatedJson<NodeSaveInput>& config) {
         const auto normalized = normalize(config.value());
         if (!normalized) {
-            throwCorruptConfig();
+            throwCorruptNodeConfig();
         }
         const auto& clusterId = normalized->clusterId;
         const auto& name = normalized->name;
         const auto& status = normalized->status;
         const auto& storedConfig = normalized->config;
-        const auto configJson = serializeConfig(c, storedConfig);
+        const auto configJson = serializeNodeConfig(c, storedConfig);
 
         try {
             auto transaction = co_await c.db().beginTransaction();
@@ -397,91 +396,6 @@ class NodeService {
     }
 
   private:
-    template <typename Row> static void fillNode(ruvia::Context& c, NodeDto& item, const Row& row) {
-        const std::optional<service::node_config::NodeConfigData> config =
-            service::node_config::parseStored(row[5].value().value_or("{}"),
-                                              {.resource = c.resource()});
-        const auto runtime = service::node_runtime::parseStored(row[6].value().value_or("{}"),
-                                                                {.resource = c.resource()});
-        if (!config || !runtime) {
-            throwCorruptConfig();
-        }
-
-        item.set<"id">(row[0].value().value_or(""));
-        item.set<"clusterId">(row[1].value().value_or(""));
-        item.set<"clusterName">(row[2].value().value_or(""));
-        item.set<"name">(row[13].value().value_or(""));
-        item.set<"status">(row[14].value().value_or(""));
-        item.set<"revision">(row[3].template as<std::int64_t>().value_or(1));
-        item.set<"nodeSpecRevision">(row[4].template as<std::int64_t>().value_or(1));
-        item.set<"config">(toConfig(c, *config));
-        item.set<"runtime">(toRuntime(c, *runtime, row));
-        item.set<"createdAt">(row[11].value().value_or(""));
-        item.set<"updatedAt">(row[12].value().value_or(""));
-    }
-
-    static service::node_config::NodeConfigOutput
-    toConfig(ruvia::Context& c, const service::node_config::NodeConfigData& input) {
-        return service::node_config::toOutput(input, {.resource = c.resource()});
-    }
-
-    static std::string serializeConfig(ruvia::Context& c,
-                                       const service::node_config::NodeConfigData& input) {
-        const auto output = service::node_config::toOutput(input, {.resource = c.resource()});
-        const auto json = ruvia::toJson(output, {.resource = c.resource()});
-        return std::string(json.data(), json.size());
-    }
-
-    template <typename Row>
-    static NodeRuntimeDto toRuntime(ruvia::Context& c,
-                                    const service::node_runtime::NodeRuntimeData& input,
-                                    const Row& row) {
-        NodeRuntimeDto output(c);
-        output.set<"registrationStatus">(row[7].value().value_or("pending"));
-        output.set<"connectionStatus">(row[8].value().value_or("unregistered"));
-        output.set<"appliedNodeSpecRevision">(row[10].template as<std::int64_t>().value_or(0));
-        if (const auto& lastHeartbeatAt = row[9].value()) {
-            output.set<"lastHeartbeatAt">(*lastHeartbeatAt);
-        }
-        if (input.agentVersion) {
-            output.set<"agentVersion">(*input.agentVersion);
-        }
-        if (input.cpuUsage) {
-            output.set<"cpuUsage">(*input.cpuUsage);
-        }
-        if (input.memoryUsage) {
-            output.set<"memoryUsage">(*input.memoryUsage);
-        }
-        if (input.trafficOutBps) {
-            output.set<"trafficOutBps">(*input.trafficOutBps);
-        }
-        if (input.connectionCount) {
-            output.set<"connectionCount">(*input.connectionCount);
-        }
-        if (input.load1m) {
-            output.set<"load1m">(*input.load1m);
-        }
-        if (input.queuedLogEvents) {
-            output.set<"queuedLogEvents">(*input.queuedLogEvents);
-        }
-        if (input.droppedLogEvents) {
-            output.set<"droppedLogEvents">(*input.droppedLogEvents);
-        }
-        if (input.health) {
-            output.set<"health">(*input.health);
-        }
-        if (input.lastError) {
-            output.set<"lastError">(*input.lastError);
-        }
-        if (const auto& activeReleaseId = row[15].value()) {
-            output.set<"activeReleaseId">(*activeReleaseId);
-        }
-        if (const auto& activeManifestDigest = row[16].value()) {
-            output.set<"activeManifestDigest">(*activeManifestDigest);
-        }
-        return output;
-    }
-
     static ruvia::Task<void> requireCluster(ruvia::DbTransaction& transaction,
                                             const std::string& tenantId,
                                             const std::string& clusterId,
@@ -499,7 +413,7 @@ class NodeService {
         const auto runtime =
             service::dns_sync::parseStoredRuntime(rows.front()[0].value().value_or("{}"));
         if (!runtime) {
-            throwCorruptConfig();
+            throwCorruptNodeConfig();
         }
         for (const auto& endpoint : config.endpoints) {
             const auto& lineCode = endpoint.lineCode;
@@ -550,10 +464,6 @@ class NodeService {
         }
         (void)co_await transaction.execute(endpointInsertSql, endpointInsertParams);
         co_return;
-    }
-
-    [[noreturn]] static void throwCorruptConfig() {
-        service::common::throwAppError(service::common::kServerErrorCode, "聚合配置损坏", 500);
     }
 };
 
