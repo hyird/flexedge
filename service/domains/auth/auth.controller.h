@@ -9,6 +9,7 @@
 #include "service/common/http.h"
 #include "service/middleware/auth.h"
 #include "service/domains/auth/auth.schema.h"
+#include "service/domains/auth/auth_session.service.h"
 #include "service/domains/auth/auth.service.h"
 
 namespace service::auth {
@@ -30,12 +31,12 @@ class AuthController final : public ruvia::Controller<AuthController> {
     }
 
     ruvia::Task<ruvia::HttpResponse> refresh(ruvia::Context& c) {
-        auto data = co_await authService().refresh(c);
+        auto data = co_await authSessionService().refresh(c);
         co_return c.json(service::common::ok<AuthSessionResponse>(c, std::move(data)));
     }
 
     ruvia::Task<ruvia::HttpResponse> logout(ruvia::Context& c) {
-        co_await authService().logout(c);
+        co_await authSessionService().logout(c);
         co_return c.json(service::common::operation(c, "退出成功"));
     }
 
