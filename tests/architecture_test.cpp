@@ -487,7 +487,22 @@ int main() {
     const auto dnsFailure = source("service/features/dns_sync/failure.h");
     REQUIRE(dnsFailure.contains("struct TaskFailure final"));
     REQUIRE(dnsFailure.contains("inline TaskFailure classifyTaskFailure"));
-    REQUIRE(dnsFailure.contains("inline std::string boundedError"));
+    REQUIRE(dnsFailure.contains("sync_runtime/error.h"));
+    REQUIRE(!dnsFailure.contains("inline std::string boundedError"));
+
+    const auto syncRuntimeError = source("service/features/sync_runtime/error.h");
+    REQUIRE(syncRuntimeError.contains("kMaxErrorMessageLength{1000}"));
+    REQUIRE(syncRuntimeError.contains("inline std::string boundedError"));
+    for (const auto workerPath : {
+             "service/features/provider_verification/worker.h",
+             "service/features/certificate/worker.h",
+             "service/features/website_dispatch/worker.h",
+         }) {
+        const auto worker = source(workerPath);
+        REQUIRE(worker.contains("sync_runtime/error.h"));
+        REQUIRE(!worker.contains("inline std::string boundedError"));
+        REQUIRE(worker.contains("service::sync_runtime::boundedError"));
+    }
 
     const auto markerWorkerLoop = source("service/features/background/marker_worker_loop.h");
     REQUIRE(markerWorkerLoop.contains("runMarkerWorkerLoop"));

@@ -778,7 +778,7 @@ inline ruvia::Task<std::int64_t> syncZone(service::background::WorkerContext& co
 
 inline ruvia::Task<void> fail(service::background::WorkerContext& context, const DnsTask& task,
                               std::string_view error, bool permanent) {
-    const auto message = boundedError(error);
+    const auto message = service::sync_runtime::boundedError(error);
     const auto lease = service::sync_runtime::makeRunningLease(task.tenantId, task.id, task.version,
                                                                context.leaseOwner());
     auto transaction = co_await context.db().beginTransaction();
@@ -848,7 +848,7 @@ inline ruvia::Task<void> runMaintenance(service::background::WorkerContext& cont
 inline ruvia::Task<void> run(service::background::WorkerContext& context) {
     co_await service::background::runMarkerWorkerLoop(
         context, kIdlePollInterval, "DNS sync worker failure: ", "未知 DNS 同步错误",
-        runMaintenance, processTasks, boundedError);
+        runMaintenance, processTasks, service::sync_runtime::boundedError);
     co_return;
 }
 
