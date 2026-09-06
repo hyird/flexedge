@@ -705,6 +705,7 @@ int main() {
     const auto providerVerificationWorker =
         source("service/features/provider_verification/worker.h");
     REQUIRE(providerVerificationWorker.contains("provider_verification/failure.h"));
+    REQUIRE(providerVerificationWorker.contains("provider_verification/persistence.h"));
     REQUIRE(providerVerificationWorker.contains("provider_verification/task.h"));
     REQUIRE(providerVerificationWorker.contains("provider_verification/verification.h"));
     REQUIRE(!providerVerificationWorker.contains("class VerificationError final"));
@@ -713,6 +714,10 @@ int main() {
     REQUIRE(!providerVerificationWorker.contains("struct VerificationResult final"));
     REQUIRE(!providerVerificationWorker.contains("parseRuntimeEab"));
     REQUIRE(!providerVerificationWorker.contains("fetchZeroSslEab"));
+    REQUIRE(!providerVerificationWorker.contains("inline ruvia::Task<void> completeMarker"));
+    REQUIRE(!providerVerificationWorker.contains("inline ruvia::Task<void> fail("));
+    REQUIRE(!providerVerificationWorker.contains("commitAndPublishResultEvent"));
+    REQUIRE(!providerVerificationWorker.contains("eventRecorded"));
     const auto providerVerificationTask = source("service/features/provider_verification/task.h");
     REQUIRE(providerVerificationTask.contains("struct VerificationTask final"));
     const auto providerVerification =
@@ -722,6 +727,15 @@ int main() {
     REQUIRE(providerVerification.contains("fetchZeroSslEab"));
     REQUIRE(providerVerification.contains("verifyDns"));
     REQUIRE(providerVerification.contains("verifyCertificate"));
+    const auto providerVerificationPersistence =
+        source("service/features/provider_verification/persistence.h");
+    REQUIRE(providerVerificationPersistence.contains("inline ruvia::Task<void> reconcile"));
+    REQUIRE(providerVerificationPersistence.contains("loadCurrentRuntime"));
+    REQUIRE(providerVerificationPersistence.contains("completeVerification"));
+    REQUIRE(providerVerificationPersistence.contains("failVerification"));
+    REQUIRE(providerVerificationPersistence.contains("completeRunningAndRecordEvent"));
+    REQUIRE(providerVerificationPersistence.contains("failRunningAndRecordEvent"));
+    REQUIRE(providerVerificationPersistence.contains("commitAndPublishResultEvent"));
     const auto providerVerificationFailure =
         source("service/features/provider_verification/failure.h");
     REQUIRE(providerVerificationFailure.contains("class VerificationError final"));
@@ -870,8 +884,7 @@ int main() {
     REQUIRE(server.contains("website-dispatch"));
 
     for (const auto* path :
-         {"service/features/provider_verification/worker.h", "service/features/dns_sync/worker.h",
-          "service/features/website_dispatch/worker.h"}) {
+         {"service/features/dns_sync/worker.h", "service/features/website_dispatch/worker.h"}) {
         const auto worker = source(path);
         REQUIRE(worker.contains("sys_sync_task"));
         REQUIRE(worker.contains("recoverStaleRunning"));
