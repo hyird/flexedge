@@ -9,6 +9,7 @@ import { toast } from 'sonner'
 import { getData, sendData } from '@/lib/api'
 import { formatDate } from '@/lib/format'
 import type { CertificateProvider, DnsProvider, PageData } from '@/lib/types'
+import { useResourceFilters } from '@/hooks/use-resource-filters'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenuItem,
@@ -41,6 +42,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTableColumnHeader } from '@/components/data-table'
+import { DataTableCellContent } from '@/components/data-table/cell-content'
 import { FeatureShell } from '@/components/feature-shell'
 import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
@@ -85,12 +87,24 @@ const certificateSchema = z
 
 type CertificateValues = z.infer<typeof certificateSchema>
 
+function providerLabel(provider: string) {
+  if (provider === 'cloudflare') return 'Cloudflare'
+  if (provider === 'aliyun') return '阿里云'
+  if (provider === 'letsencrypt') return "Let's Encrypt"
+  if (provider === 'zerossl') return 'ZeroSSL'
+  return provider
+}
+
 export function Providers() {
+  const [tab, setTab] = useState('dns')
+  const certificateFilter = useResourceFilters({ keyword: '' })
+  const [certificatePage, setCertificatePage] = useState(1)
+  const [certificatePageSize, setCertificatePageSize] = useState(10)
   const queryClient = useQueryClient()
   const [dnsPage, setDnsPage] = useState(1)
   const [dnsPageSize, setDnsPageSize] = useState(10)
-  const [draftKeyword, setDraftKeyword] = useState('')
-  const [keyword, setKeyword] = useState('')
+  const filter = useResourceFilters({ keyword: '' })
+  const { keyword } = filter.filters
   const [dnsDialog, setDnsDialog] = useState<DnsProvider | 'new' | null>(null)
   const [certificateDialog, setCertificateDialog] = useState<
     CertificateProvider | 'new' | null
@@ -114,6 +128,12 @@ export function Providers() {
     queryKey: ['providers', 'certificate'],
     queryFn: () => getData<CertificateProvider[]>('/providers/certificate'),
   })
+  // This endpoint returns the complete list; filter and paginate it locally.
+  const certificates = (certificateQuery.data ?? []).filter((item) =>
+    `${item.provider} ${item.account_email ?? ''}`
+      .toLowerCase()
+      .includes(certificateFilter.filters.keyword.toLowerCase())
+  )
 
   const { mutate: verifyProvider } = useMutation({
     mutationFn: ({
@@ -154,17 +174,19 @@ export function Providers() {
   const dnsColumns = useMemo<ColumnDef<DnsProvider>[]>(
     () => [
       {
+        accessorKey: 'provider',
+        header: '平台',
+        cell: ({ row }) => providerLabel(row.original.provider),
+      },
+      {
         accessorKey: 'name',
         header: ({ column }) => (
           <DataTableColumnHeader column={column} title='账号名称' />
         ),
         cell: ({ row }) => (
-          <div>
+          <DataTableCellContent>
             <div className='font-medium'>{row.original.name}</div>
-            <div className='text-xs text-muted-foreground'>
-              {row.original.provider === 'cloudflare' ? 'Cloudflare' : '阿里云'}
-            </div>
-          </div>
+          </DataTableCellContent>
         ),
       },
       {
@@ -175,13 +197,11 @@ export function Providers() {
         ),
       },
       {
-        accessorKey: 'status',
-        header: '状态',
-        cell: ({ row }) => <StatusBadge status={row.original.status} />,
-      },
-      {
         accessorKey: 'zone_count',
         header: '托管域名',
+        cell: ({ row }) => (
+          <span className='tabular-nums'>{row.original.zone_count} 个</span>
+        ),
       },
       {
         accessorKey: 'last_verified_at',
@@ -191,6 +211,11 @@ export function Providers() {
             {formatDate(row.original.last_verified_at)}
           </span>
         ),
+      },
+      {
+        accessorKey: 'status',
+        header: '状态',
+        cell: ({ row }) => <StatusBadge status={row.original.status} />,
       },
       {
         id: 'actions',
@@ -231,13 +256,7 @@ export function Providers() {
       {
         accessorKey: 'provider',
         header: '供应商',
-        cell: ({ row }) => (
-          <div className='font-medium'>
-            {row.original.provider === 'letsencrypt'
-              ? "Let's Encrypt"
-              : 'ZeroSSL'}
-          </div>
-        ),
+        cell: ({ row }) => <div className='font-medium'>{providerLabel(row.original.provider)}</div>,
       },
       {
         accessorKey: 'credential_mode',
@@ -252,11 +271,6 @@ export function Providers() {
           row.original.account_email || row.original.access_key_hint || '—',
       },
       {
-        accessorKey: 'status',
-        header: '状态',
-        cell: ({ row }) => <StatusBadge status={row.original.status} />,
-      },
-      {
         accessorKey: 'last_verified_at',
         header: '最近验证',
         cell: ({ row }) => (
@@ -264,6 +278,11 @@ export function Providers() {
             {formatDate(row.original.last_verified_at)}
           </span>
         ),
+      },
+      {
+        accessorKey: 'status',
+        header: '状态',
+        cell: ({ row }) => <StatusBadge status={row.original.status} />,
       },
       {
         id: 'actions',
@@ -306,33 +325,39 @@ export function Providers() {
 
   return (
     <FeatureShell title='服务商' description='管理 DNS 与证书供应商凭据。'>
-      <Tabs defaultValue='dns' className='space-y-4'>
-        <TabsList>
-          <TabsTrigger value='dns'>DNS 服务商</TabsTrigger>
-          <TabsTrigger value='certificate'>证书供应商</TabsTrigger>
-        </TabsList>
-        <TabsContent value='dns' className='space-y-4'>
-          <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
-            <ResourceToolbar
-              value={draftKeyword}
-              onChange={setDraftKeyword}
-              onSearch={() => {
-                setKeyword(draftKeyword.trim())
-                setDnsPage(1)
-              }}
-              onReset={() => {
-                setDraftKeyword('')
-                setKeyword('')
-                setDnsPage(1)
-              }}
-              onRefresh={() => dnsQuery.refetch()}
-              refreshing={dnsQuery.isFetching}
-              placeholder='搜索账号名称…'
-            />
-            <Button className='sm:ms-auto' onClick={() => setDnsDialog('new')}>
+      <Tabs value={tab} onValueChange={setTab} className='space-y-4'>
+        <div className='flex flex-wrap items-center justify-between gap-2'>
+          <TabsList>
+            <TabsTrigger value='dns'>DNS 服务商</TabsTrigger>
+            <TabsTrigger value='certificate'>证书供应商</TabsTrigger>
+          </TabsList>
+          {tab === 'dns' ? (
+            <Button onClick={() => setDnsDialog('new')}>
               <Plus /> 添加 DNS 账号
             </Button>
-          </div>
+          ) : (
+            <Button onClick={() => setCertificateDialog('new')}>
+              <Plus /> 添加证书供应商
+            </Button>
+          )}
+        </div>
+        <TabsContent value='dns' className='space-y-4'>
+          <ResourceToolbar
+            value={filter.draft.keyword}
+            onChange={(value) => filter.setField('keyword', value)}
+            onSearch={() => {
+              const changed = filter.apply()
+              setDnsPage(1)
+              if (!changed && dnsPage === 1) void dnsQuery.refetch()
+            }}
+            onReset={() => {
+              const changed = filter.reset()
+              setDnsPage(1)
+              if (!changed && dnsPage === 1) void dnsQuery.refetch()
+            }}
+            refreshing={dnsQuery.isFetching}
+            placeholder='搜索账号名称…'
+          />
           <ResourceTable
             columns={dnsColumns}
             data={dnsQuery.data?.list ?? []}
@@ -349,21 +374,43 @@ export function Providers() {
           />
         </TabsContent>
         <TabsContent value='certificate' className='space-y-4'>
-          <div className='flex justify-end'>
-            <Button onClick={() => setCertificateDialog('new')}>
-              <Plus /> 添加证书供应商
-            </Button>
-          </div>
+          <ResourceToolbar
+            value={certificateFilter.draft.keyword}
+            onChange={(value) => certificateFilter.setField('keyword', value)}
+            placeholder='搜索供应商或邮箱…'
+            onSearch={() => {
+              certificateFilter.apply()
+              setCertificatePage(1)
+              void certificateQuery.refetch()
+            }}
+            onReset={() => {
+              const changed = certificateFilter.reset()
+              setCertificatePage(1)
+              if (!changed && certificatePage === 1) {
+                void certificateQuery.refetch()
+              }
+            }}
+            refreshing={certificateQuery.isFetching}
+          />
           <ResourceTable
             columns={certificateColumns}
-            data={certificateQuery.data ?? []}
+            data={certificates.slice(
+              (certificatePage - 1) * certificatePageSize,
+              certificatePage * certificatePageSize
+            )}
             loading={certificateQuery.isLoading}
             error={certificateQuery.isError}
             onRetry={() => void certificateQuery.refetch()}
-            page={1}
-            pageSize={Math.max(certificateQuery.data?.length ?? 10, 10)}
-            totalPages={1}
-            onPaginationChange={() => undefined}
+            page={certificatePage}
+            pageSize={certificatePageSize}
+            totalPages={Math.max(
+              1,
+              Math.ceil(certificates.length / certificatePageSize)
+            )}
+            onPaginationChange={(nextPage, nextSize) => {
+              setCertificatePage(nextPage)
+              setCertificatePageSize(nextSize)
+            }}
           />
         </TabsContent>
       </Tabs>

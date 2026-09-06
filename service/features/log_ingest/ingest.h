@@ -85,7 +85,8 @@ inline ruvia::Task<void> insertEnvelope(ruvia::WebWorkerContext& context,
     accessWebsiteIds.reserve(static_cast<std::size_t>(delivery.events_size()));
     std::string accessSql =
         "INSERT INTO sys_website_access_log (tenant_id, occurred_at, id, node_id, website_id, "
-        "client_ip, protocol, method, host, target, status_code, response_bytes, duration_ms, "
+        "client_ip, protocol, method, host, target, status_code, request_bytes, response_bytes, "
+        "duration_ms, "
         "user_agent, referer, request_headers, request_body, request_body_truncated, "
         "tls_fingerprint, response_headers, query_string, cookies, created_at) VALUES ";
     std::string nodeSql =
@@ -133,6 +134,9 @@ inline ruvia::Task<void> insertEnvelope(ruvia::WebWorkerContext& context,
             accessSql += ", ";
             appendParam(accessSql, accessParams,
                         ruvia::DbValue{static_cast<std::int64_t>(access.status_code())});
+            accessSql += ", ";
+            appendParam(accessSql, accessParams,
+                        ruvia::DbValue{static_cast<std::int64_t>(access.request_bytes())});
             accessSql += ", ";
             appendParam(accessSql, accessParams,
                         ruvia::DbValue{static_cast<std::int64_t>(access.response_bytes())});

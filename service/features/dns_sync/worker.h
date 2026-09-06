@@ -202,7 +202,8 @@ inline bool recordMatches(const ManagedRecord& local, const service::dns::Provid
                           const service::dns::DnsProviderDriver& driver, std::string_view domain) {
     const auto expected = toRemoteRecord(local, driver, domain);
     return expected.type == remote.type && expected.content == remote.content &&
-           expected.ttl == remote.ttl && expected.priority == remote.priority &&
+           expected.ttl == remote.ttl &&
+           (expected.type != "MX" || expected.priority == remote.priority) &&
            expected.proxied == remote.proxied && expected.lineCode == remote.lineCode &&
            service::common::normalizeDomainName(expected.name) ==
                service::common::normalizeDomainName(remote.name);

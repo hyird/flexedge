@@ -15,19 +15,28 @@ const labels: Record<string, string> = {
   unverified: '未验证',
   invalid: '无效',
   pending: '等待中',
+  waiting: '等待执行',
   running: '执行中',
   retry: '重试中',
   completed: '已完成',
+  cancelled: '已取消',
+  dead: '已终止',
+  superseded: '已替代',
   valid: '有效',
   issuing: '签发中',
   renewing: '续签中',
   failed: '失败',
   expired: '已过期',
-  synced: '已同步',
-  syncing: '同步中',
+  synced: '本地与远端已同步',
+  syncing: '本地与远端同步中',
   conflict: '有冲突',
+  consistent: '本地与远端已同步',
+  out_of_sync: '本地与远端未同步',
   healthy: '健康',
   unhealthy: '异常',
+  applied: '已发布',
+  partial: '发布中',
+  no_nodes: '无可用节点',
 }
 
 const positive = new Set([
@@ -37,17 +46,20 @@ const positive = new Set([
   'registered',
   'verified',
   'completed',
+  'applied',
   'valid',
   'synced',
   'healthy',
 ])
 const pending = new Set([
   'pending',
+  'waiting',
   'running',
   'retry',
   'issuing',
   'renewing',
   'syncing',
+  'partial',
 ])
 const danger = new Set([
   'failed',
@@ -57,6 +69,8 @@ const danger = new Set([
   'offline',
   'disconnected',
   'unhealthy',
+  'out_of_sync',
+  'dead',
 ])
 
 export function StatusBadge({ status }: { status?: string }) {

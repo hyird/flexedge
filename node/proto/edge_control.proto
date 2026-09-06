@@ -151,6 +151,7 @@ message AccessLog {
     string response_headers = 18;
     string query_string = 19;
     string cookies = 20;
+    uint64 request_bytes = 21;
 }
 
 message NodeLog {

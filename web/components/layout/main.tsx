@@ -10,7 +10,7 @@ export function Main({ fixed, className, ...props }: MainProps) {
     <main
       data-layout={fixed ? 'fixed' : 'auto'}
       className={cn(
-        'w-full min-w-0 px-4 py-4',
+        'w-full min-w-0 px-4 py-5 sm:px-6 sm:py-6',
 
         // If layout is fixed, make the main container flex and grow
         fixed && 'flex grow flex-col overflow-hidden',

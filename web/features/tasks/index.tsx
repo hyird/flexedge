@@ -5,7 +5,7 @@ import { CheckCircle2, Clock3, LoaderCircle, RotateCcw } from 'lucide-react'
 import { getData } from '@/lib/api'
 import { formatDate } from '@/lib/format'
 import type { Task, TaskPage } from '@/lib/types'
-import { Button } from '@/components/ui/button'
+import { useResourceFilters } from '@/hooks/use-resource-filters'
 import {
   Select,
   SelectContent,
@@ -14,9 +14,11 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { DataTableColumnHeader } from '@/components/data-table'
+import { DataTableCellContent } from '@/components/data-table/cell-content'
 import { FeatureShell } from '@/components/feature-shell'
 import { MetricCard } from '@/components/metric-card'
 import { ResourceTable } from '@/components/resource-table'
+import { ResourceToolbar } from '@/components/resource-toolbar'
 import { StatusBadge } from '@/components/status-badge'
 
 const columns: ColumnDef<Task>[] = [
@@ -26,14 +28,14 @@ const columns: ColumnDef<Task>[] = [
       <DataTableColumnHeader column={column} title='资源' />
     ),
     cell: ({ row }) => (
-      <div>
+      <DataTableCellContent>
         <div className='max-w-60 truncate font-medium'>
           {row.original.resource_name}
         </div>
         <div className='text-xs text-muted-foreground'>
           {row.original.resource_type} · #{row.original.sequence}
         </div>
-      </div>
+      </DataTableCellContent>
     ),
   },
   {
@@ -83,7 +85,8 @@ const columns: ColumnDef<Task>[] = [
 export function Tasks() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
-  const [status, setStatus] = useState('all')
+  const filter = useResourceFilters({ status: 'all' })
+  const { status } = filter.filters
   const query = useQuery({
     queryKey: ['tasks', page, pageSize, status],
     queryFn: () =>
@@ -127,37 +130,36 @@ export function Tasks() {
           icon={CheckCircle2}
         />
       </div>
-      <div className='flex items-center gap-2'>
-        <Select
-          value={status}
-          onValueChange={(value) => {
-            setStatus(value)
-            setPage(1)
-          }}
-        >
-          <SelectTrigger className='w-40'>
-            <SelectValue placeholder='全部状态' />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value='all'>全部状态</SelectItem>
-            <SelectItem value='pending'>等待中</SelectItem>
-            <SelectItem value='running'>执行中</SelectItem>
-            <SelectItem value='retry'>重试中</SelectItem>
-            <SelectItem value='completed'>已完成</SelectItem>
-          </SelectContent>
-        </Select>
-        <Button
-          variant='outline'
-          size='icon'
-          aria-label='刷新任务'
-          disabled={query.isFetching}
-          onClick={() => query.refetch()}
-        >
-          <RotateCcw
-            className={query.isFetching ? 'animate-spin' : undefined}
-          />
-        </Button>
-      </div>
+      <ResourceToolbar
+        onSearch={() => {
+          const changed = filter.apply()
+          setPage(1)
+          if (!changed && page === 1) void query.refetch()
+        }}
+        onReset={() => {
+          const changed = filter.reset()
+          setPage(1)
+          if (!changed && page === 1) void query.refetch()
+        }}
+        refreshing={query.isFetching}
+        filters={
+          <Select
+            value={filter.draft.status}
+            onValueChange={(value) => filter.setField('status', value)}
+          >
+            <SelectTrigger className='w-40'>
+              <SelectValue placeholder='全部状态' />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value='all'>全部状态</SelectItem>
+              <SelectItem value='pending'>等待中</SelectItem>
+              <SelectItem value='running'>执行中</SelectItem>
+              <SelectItem value='retry'>重试中</SelectItem>
+              <SelectItem value='completed'>已完成</SelectItem>
+            </SelectContent>
+          </Select>
+        }
+      />
       <ResourceTable
         columns={columns}
         data={query.data?.list ?? []}

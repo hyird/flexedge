@@ -315,3 +315,37 @@ export type Website = Revisioned & {
     synced_node_count: number
   }
 }
+
+export type WebsiteDashboardSeriesPoint = {
+  timestamp: string
+  request_count: number
+  response_bytes: number
+  bandwidth_bps: number
+}
+
+export type WebsiteDashboardRanking = {
+  label: string
+  request_count: number
+  response_bytes: number
+}
+
+export type WebsiteDashboard = {
+  summary: {
+    previous_month_peak_bps: number
+    current_month_peak_bps: number
+    today_peak_bps: number
+    current_bandwidth_bps: number
+    today_unique_ips: number
+    today_response_bytes: number
+  }
+  hourly: WebsiteDashboardSeriesPoint[]
+  daily: WebsiteDashboardSeriesPoint[]
+  status_codes: WebsiteDashboardRanking[]
+  methods: WebsiteDashboardRanking[]
+  countries: WebsiteDashboardRanking[]
+  hosts: WebsiteDashboardRanking[]
+  referers: WebsiteDashboardRanking[]
+  paths: WebsiteDashboardRanking[]
+  client_ips_by_bytes: WebsiteDashboardRanking[]
+  client_ips_by_requests: WebsiteDashboardRanking[]
+}

@@ -28,6 +28,7 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
     RUVIA_ROUTES_BEGIN
     RUVIA_GET("/", list);
     RUVIA_GET_SSE("/:id/access-logs/stream", accessLogStream);
+    RUVIA_GET("/:id/dashboard", dashboard);
     RUVIA_GET("/:id", detail);
     RUVIA_POST("/", create, WebsiteConfigValidator);
     RUVIA_PUT("/:id", update, WebsiteConfigValidator);
@@ -114,6 +115,11 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
         auto data = co_await websiteService().detail(c, tenantId(c), requireId(c));
         service::common::setRevisionEtag(c, data.get<"revision">().value);
         co_return c.json(service::common::ok<WebsiteDetailResponse>(c, std::move(data)));
+    }
+
+    ruvia::Task<ruvia::HttpResponse> dashboard(ruvia::Context& c) {
+        auto data = co_await websiteService().dashboard(c, tenantId(c), requireId(c));
+        co_return c.json(service::common::ok<WebsiteDashboardResponse>(c, std::move(data)));
     }
 
     ruvia::Task<void> accessLogStream(ruvia::Context& c) {

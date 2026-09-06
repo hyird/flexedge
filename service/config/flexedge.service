@@ -10,6 +10,8 @@ User=flexedge
 Group=flexedge
 WorkingDirectory=/opt/flexedge
 ExecStart=/opt/flexedge/server
+Environment=FLEXEDGE_XDB_V4_PATH=/opt/flexedge/geo/ip2region_v4.xdb
+Environment=FLEXEDGE_XDB_V6_PATH=/opt/flexedge/geo/ip2region_v6.xdb
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

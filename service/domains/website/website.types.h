@@ -85,14 +85,52 @@ RUVIA_RESPONSE_MODEL(WebsiteDetailResponse, RUVIA_REQUIRED_FIELD(code, ruvia::In
                      RUVIA_REQUIRED_FIELD(data, WebsiteDto));
 
 RUVIA_RESPONSE_MODEL(
+    WebsiteDashboardSummaryDto,
+    RUVIA_REQUIRED_FIELD_NAME("previous_month_peak_bps", previousMonthPeakBps, ruvia::Int64),
+    RUVIA_REQUIRED_FIELD_NAME("current_month_peak_bps", currentMonthPeakBps, ruvia::Int64),
+    RUVIA_REQUIRED_FIELD_NAME("today_peak_bps", todayPeakBps, ruvia::Int64),
+    RUVIA_REQUIRED_FIELD_NAME("current_bandwidth_bps", currentBandwidthBps, ruvia::Int64),
+    RUVIA_REQUIRED_FIELD_NAME("today_unique_ips", todayUniqueIps, ruvia::Int64),
+    RUVIA_REQUIRED_FIELD_NAME("today_response_bytes", todayResponseBytes, ruvia::Int64));
+RUVIA_RESPONSE_MODEL(WebsiteDashboardSeriesPointDto,
+                     RUVIA_REQUIRED_FIELD(timestamp, ruvia::String),
+                     RUVIA_REQUIRED_FIELD_NAME("request_count", requestCount, ruvia::Int64),
+                     RUVIA_REQUIRED_FIELD_NAME("response_bytes", responseBytes, ruvia::Int64),
+                     RUVIA_REQUIRED_FIELD_NAME("bandwidth_bps", bandwidthBps, ruvia::Int64));
+RUVIA_RESPONSE_MODEL(WebsiteDashboardRankingDto, RUVIA_REQUIRED_FIELD(label, ruvia::String),
+                     RUVIA_REQUIRED_FIELD_NAME("request_count", requestCount, ruvia::Int64),
+                     RUVIA_REQUIRED_FIELD_NAME("response_bytes", responseBytes, ruvia::Int64));
+RUVIA_RESPONSE_MODEL(
+    WebsiteDashboardDto, RUVIA_REQUIRED_FIELD(summary, WebsiteDashboardSummaryDto),
+    RUVIA_REQUIRED_FIELD(hourly, ruvia::Array<WebsiteDashboardSeriesPointDto>),
+    RUVIA_REQUIRED_FIELD(daily, ruvia::Array<WebsiteDashboardSeriesPointDto>),
+    RUVIA_REQUIRED_FIELD_NAME("status_codes", statusCodes,
+                              ruvia::Array<WebsiteDashboardRankingDto>),
+    RUVIA_REQUIRED_FIELD(methods, ruvia::Array<WebsiteDashboardRankingDto>),
+    RUVIA_REQUIRED_FIELD(countries, ruvia::Array<WebsiteDashboardRankingDto>),
+    RUVIA_REQUIRED_FIELD(hosts, ruvia::Array<WebsiteDashboardRankingDto>),
+    RUVIA_REQUIRED_FIELD(referers, ruvia::Array<WebsiteDashboardRankingDto>),
+    RUVIA_REQUIRED_FIELD(paths, ruvia::Array<WebsiteDashboardRankingDto>),
+    RUVIA_REQUIRED_FIELD_NAME("client_ips_by_bytes", clientIpsByBytes,
+                              ruvia::Array<WebsiteDashboardRankingDto>),
+    RUVIA_REQUIRED_FIELD_NAME("client_ips_by_requests", clientIpsByRequests,
+                              ruvia::Array<WebsiteDashboardRankingDto>));
+RUVIA_RESPONSE_MODEL(WebsiteDashboardResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+                     RUVIA_REQUIRED_FIELD(message, ruvia::String),
+                     RUVIA_REQUIRED_FIELD(data, WebsiteDashboardDto));
+
+RUVIA_RESPONSE_MODEL(
     WebsiteAccessLogDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("occurred_at", occurredAt, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("node_id", nodeId, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("node_name", nodeName, ruvia::String),
     RUVIA_OPTIONAL_FIELD_NAME("client_ip", clientIp, ruvia::String, RUVIA_OMIT_EMPTY),
+    RUVIA_OPTIONAL_FIELD_NAME("client_ip_location", clientIpLocation, ruvia::String,
+                              RUVIA_OMIT_EMPTY),
     RUVIA_REQUIRED_FIELD(protocol, ruvia::String), RUVIA_REQUIRED_FIELD(method, ruvia::String),
     RUVIA_REQUIRED_FIELD(host, ruvia::String), RUVIA_REQUIRED_FIELD(target, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("status_code", statusCode, ruvia::Int64),
+    RUVIA_REQUIRED_FIELD_NAME("request_bytes", requestBytes, ruvia::Int64),
     RUVIA_REQUIRED_FIELD_NAME("response_bytes", responseBytes, ruvia::Int64),
     RUVIA_REQUIRED_FIELD_NAME("duration_ms", durationMs, ruvia::Int64),
     RUVIA_OPTIONAL_FIELD_NAME("user_agent", userAgent, ruvia::String, RUVIA_OMIT_EMPTY),

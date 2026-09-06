@@ -1,12 +1,9 @@
-import { useState } from 'react'
 import {
   flexRender,
   getCoreRowModel,
-  getSortedRowModel,
   useReactTable,
   type ColumnDef,
   type PaginationState,
-  type SortingState,
 } from '@tanstack/react-table'
 import { CircleAlert, Inbox, RotateCcw } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -49,7 +46,6 @@ export function ResourceTable<T>({
   emptyTitle = '暂无数据',
   emptyDescription = '调整筛选条件或创建第一条记录。',
 }: Props<T>) {
-  const [sorting, setSorting] = useState<SortingState>([])
   const pagination: PaginationState = {
     pageIndex: Math.max(0, page - 1),
     pageSize,
@@ -58,23 +54,27 @@ export function ResourceTable<T>({
     data,
     columns,
     pageCount: Math.max(totalPages, 1),
-    state: { sorting, pagination },
+    state: { pagination },
     manualPagination: true,
-    onSortingChange: setSorting,
+    defaultColumn: { enableSorting: false },
     onPaginationChange: (updater) => {
       const next = typeof updater === 'function' ? updater(pagination) : updater
       onPaginationChange(next.pageIndex + 1, next.pageSize)
     },
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
   })
 
   return (
-    <div className='min-w-0 space-y-3'>
-      <div className='overflow-hidden rounded-md border'>
+    <div className='min-w-0 space-y-3' aria-busy={loading}>
+      {loading && (
+        <span role='status' className='sr-only'>
+          正在加载数据…
+        </span>
+      )}
+      <div className='overflow-hidden rounded-lg border bg-card shadow-sm'>
         <div className='overflow-x-auto'>
           <Table>
-            <TableHeader>
+            <TableHeader className='bg-muted/35'>
               {table.getHeaderGroups().map((group) => (
                 <TableRow key={group.id}>
                   {group.headers.map((header) => (
@@ -173,7 +173,7 @@ export function ResourceTable<T>({
           </Table>
         </div>
       </div>
-      {!error && <DataTablePagination table={table} />}
+      {!error && <DataTablePagination table={table} disabled={loading} />}
     </div>
   )
 }

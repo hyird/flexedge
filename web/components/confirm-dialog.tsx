@@ -1,3 +1,4 @@
+import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import {
@@ -42,8 +43,16 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
     ...actions
   } = props
   return (
-    <Sheet {...actions}>
-      <SheetContent className={cn('sm:max-w-md', className)}>
+    <Sheet
+      {...actions}
+      onOpenChange={(open) => {
+        if (!isLoading) actions.onOpenChange(open)
+      }}
+    >
+      <SheetContent
+        showCloseButton={!isLoading}
+        className={cn('overflow-y-auto sm:max-w-md', className)}
+      >
         <SheetHeader>
           <SheetTitle>{title}</SheetTitle>
           <SheetDescription asChild>
@@ -66,7 +75,11 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
             onClick={handleConfirm}
             variant={destructive ? 'destructive' : 'default'}
             disabled={disabled || isLoading}
+            aria-busy={isLoading}
           >
+            {isLoading && (
+              <Loader2 className='animate-spin' aria-hidden='true' />
+            )}
             {confirmText ?? '继续'}
           </Button>
         </SheetFooter>
