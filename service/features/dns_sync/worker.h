@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -22,6 +21,7 @@
 #include "service/features/background/worker_pool.h"
 #include "service/features/dns/driver.h"
 #include "service/features/dns/provider_config.h"
+#include "service/features/dns_sync/failure.h"
 #include "service/features/dns_sync/queue.h"
 #include "service/features/dns_sync/reconciliation.h"
 #include "service/features/dns_sync/snapshot.h"
@@ -47,11 +47,6 @@ struct DnsTask final {
     std::int64_t version;
     std::int64_t failures;
 };
-
-inline std::string boundedError(std::string_view value) {
-    constexpr std::size_t limit{1000};
-    return std::string(value.substr(0, std::min(value.size(), limit)));
-}
 
 inline ruvia::Task<void>
 importInitialRemoteRecords(service::background::WorkerContext& context, const DnsTask& task,
@@ -807,39 +802,6 @@ inline ruvia::Task<void> fail(service::background::WorkerContext& context, const
         service::logging::error("DNS sync task " + task.id + " failed: " + message);
     }
     co_return;
-}
-
-struct TaskFailure final {
-    std::string message;
-    bool permanent{};
-};
-
-inline TaskFailure classifyTaskFailure(const std::exception_ptr& exception) {
-    try {
-        std::rethrow_exception(exception);
-    } catch (const std::exception& error) {
-        if (const auto* cloudflare = dynamic_cast<const service::dns::CloudflareError*>(&error)) {
-            return {
-                .message = boundedError(cloudflare->what()),
-                .permanent =
-                    cloudflare->code() == service::dns::CloudflareErrorCode::authorizationFailed ||
-                    cloudflare->code() == service::dns::CloudflareErrorCode::credentialInvalid ||
-                    cloudflare->code() == service::dns::CloudflareErrorCode::recordConflict,
-            };
-        }
-        if (const auto* aliyun = dynamic_cast<const service::dns::AliyunError*>(&error)) {
-            return {
-                .message = boundedError(aliyun->what()),
-                .permanent = aliyun->code() == service::dns::AliyunErrorCode::authorizationFailed ||
-                             aliyun->code() == service::dns::AliyunErrorCode::credentialInvalid ||
-                             aliyun->code() == service::dns::AliyunErrorCode::recordConflict ||
-                             aliyun->code() == service::dns::AliyunErrorCode::domainNotFound,
-            };
-        }
-        return {.message = boundedError(error.what()), .permanent = false};
-    } catch (...) {
-        return {.message = "同步任务发生未知错误", .permanent = false};
-    }
 }
 
 inline ruvia::Task<void> processTask(service::background::WorkerContext& context,
