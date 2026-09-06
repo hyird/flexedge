@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import { apiErrorMessage } from './api'
-import { formatBytesPerSecond, formatDate, initials } from './format'
+import { formatBytes, formatBytesPerSecond, formatDate, initials } from './format'
 
 describe('format helpers', () => {
   it('formats transfer rates with binary units', () => {
     expect(formatBytesPerSecond(0)).toBe('0 B/s')
     expect(formatBytesPerSecond(1536)).toBe('1.5 KB/s')
     expect(formatBytesPerSecond(undefined)).toBe('—')
+  })
+
+  it('formats byte sizes with adaptive units', () => {
+    expect(formatBytes(0)).toBe('0 B')
+    expect(formatBytes(1536)).toBe('1.5 KB')
+    expect(formatBytes(1024 * 1024)).toBe('1.0 MB')
+    expect(formatBytes(undefined)).toBe('—')
   })
 
   it('keeps invalid timestamps visible for diagnosis', () => {

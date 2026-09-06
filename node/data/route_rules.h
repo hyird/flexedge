@@ -34,11 +34,12 @@ inline bool routeHeaderName(std::string_view value) noexcept {
         return false;
     }
     for (const auto ch : value) {
-        const auto value = static_cast<unsigned char>(ch);
-        if (!std::isalnum(value) && value != '!' && value != '#' && value != '$' && value != '%' &&
-            value != '&' && value != '\'' && value != '*' && value != '+' && value != '-' &&
-            value != '.' && value != '^' && value != '_' && value != '`' && value != '|' &&
-            value != '~') {
+        const auto character = static_cast<unsigned char>(ch);
+        if (!std::isalnum(character) && character != '!' && character != '#' &&
+            character != '$' && character != '%' && character != '&' && character != '\'' &&
+            character != '*' && character != '+' && character != '-' && character != '.' &&
+            character != '^' && character != '_' && character != '`' && character != '|' &&
+            character != '~') {
             return false;
         }
     }

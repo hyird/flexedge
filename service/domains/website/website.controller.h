@@ -27,6 +27,7 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
     RUVIA_CONTROLLER_GROUP("/api/websites", service::middleware::AuthMiddleware)
     RUVIA_ROUTES_BEGIN
     RUVIA_GET("/", list);
+    RUVIA_GET("/:id/access-logs", accessLogHistory);
     RUVIA_GET_SSE("/:id/access-logs/stream", accessLogStream);
     RUVIA_GET("/:id/dashboard", dashboard);
     RUVIA_GET("/:id", detail);
@@ -120,6 +121,34 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
     ruvia::Task<ruvia::HttpResponse> dashboard(ruvia::Context& c) {
         auto data = co_await websiteService().dashboard(c, tenantId(c), requireId(c));
         co_return c.json(service::common::ok<WebsiteDashboardResponse>(c, std::move(data)));
+    }
+
+    ruvia::Task<ruvia::HttpResponse> accessLogHistory(ruvia::Context& c) {
+        const auto [page, pageSize, skip] = service::common::requirePagination(c, 50);
+        const auto keyword = service::common::requireKeyword(c.req().query("keyword"));
+        std::optional<std::string> method;
+        if (const auto value = c.req().query("method")) {
+            if (*value != "GET" && *value != "POST" && *value != "PUT" &&
+                *value != "PATCH" && *value != "DELETE" && *value != "HEAD" &&
+                *value != "OPTIONS") {
+                service::common::throwAppError(service::common::kValidationErrorCode,
+                                               "method 不正确", 400);
+            }
+            method.emplace(*value);
+        }
+        std::optional<std::string> statusClass;
+        if (const auto value = c.req().query("status_class")) {
+            if (*value != "1xx" && *value != "2xx" && *value != "3xx" &&
+                *value != "4xx" && *value != "5xx") {
+                service::common::throwAppError(service::common::kValidationErrorCode,
+                                               "status_class 不正确", 400);
+            }
+            statusClass.emplace(*value);
+        }
+        co_return c.json(service::common::ok<WebsiteAccessLogPageResponse>(
+            c, co_await websiteService().accessLogHistory(c, tenantId(c), requireId(c), page,
+                                                          pageSize, skip, keyword, method,
+                                                          statusClass)));
     }
 
     ruvia::Task<void> accessLogStream(ruvia::Context& c) {

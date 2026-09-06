@@ -164,55 +164,82 @@ class WebsiteService {
                 continue;
             }
             auto& item = items.emplace_back(c);
-            item.set<"id">(row[0].value().value_or(""));
-            item.set<"occurredAt">(row[1].value().value_or(""));
-            item.set<"nodeId">(row[2].value().value_or(""));
-            item.set<"nodeName">(row[3].value().value_or(""));
-            item.set<"protocol">(row[5].value().value_or(""));
-            item.set<"method">(row[6].value().value_or(""));
-            item.set<"host">(row[7].value().value_or(""));
-            item.set<"target">(row[8].value().value_or(""));
-            item.set<"statusCode">(row[9].as<std::int64_t>().value_or(0));
-            item.set<"requestBytes">(row[10].as<std::int64_t>().value_or(0));
-            item.set<"responseBytes">(row[11].as<std::int64_t>().value_or(0));
-            item.set<"durationMs">(row[12].as<std::int64_t>().value_or(0));
-            item.set<"requestBodyTruncated">(row[17].as<bool>().value_or(false));
-            if (const auto value = row[4].value()) {
-                item.set<"clientIp">(*value);
-                if (const auto location = service::geoip::xdbDatabase().lookup(*value)) {
-                    item.set<"clientIpLocation">(location->display);
-                }
-            }
-            if (const auto value = row[13].value()) {
-                item.set<"userAgent">(*value);
-            }
-            if (const auto value = row[14].value()) {
-                item.set<"referer">(*value);
-            }
-            if (const auto value = row[15].value()) {
-                item.set<"requestHeaders">(*value);
-            }
-            if (const auto value = row[16].value()) {
-                item.set<"requestBody">(*value);
-            }
-            if (const auto value = row[18].value()) {
-                item.set<"tlsFingerprint">(*value);
-            }
-            if (const auto value = row[19].value()) {
-                item.set<"responseHeaders">(*value);
-            }
-            if (const auto value = row[20].value()) {
-                item.set<"queryString">(*value);
-            }
-            if (const auto value = row[21].value()) {
-                item.set<"cookies">(*value);
-            }
+            fillAccessLog(item, row);
         }
         if (!items.empty()) {
             result.set<"cursor">(service::log_ingest::encodeTailCursor(
                 rows.front()[22].as<std::int64_t>().value_or(0),
                 rows.front()[0].value().value_or("")));
         }
+        co_return result;
+    }
+
+    ruvia::Task<WebsiteAccessLogPageDataDto>
+    accessLogHistory(ruvia::Context& c, const std::string& tenantId, const std::string& id,
+                     std::int64_t page, std::int64_t pageSize, std::int64_t skip,
+                     const std::optional<std::string>& keyword,
+                     const std::optional<std::string>& method,
+                     const std::optional<std::string>& statusClass) {
+        const auto website = co_await c.db().query(
+            "SELECT 1 FROM sys_website WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL "
+            "LIMIT 1",
+            tenantId, id);
+        if (website.empty()) {
+            service::common::throwAppError(WebsiteError::NOT_FOUND);
+        }
+
+        std::string where =
+            " FROM sys_website_access_log access LEFT JOIN sys_node node ON "
+            "node.tenant_id = access.tenant_id AND node.id = access.node_id WHERE "
+            "access.tenant_id = $1 AND access.website_id = $2";
+        std::vector<ruvia::DbValue> params{ruvia::DbValue{tenantId}, ruvia::DbValue{id}};
+        std::optional<std::string> keywordPattern;
+        if (keyword) {
+            keywordPattern = "%" + service::common::escapeLikePattern(*keyword) + "%";
+            const auto placeholder = "$" + std::to_string(params.size() + 1);
+            where += " AND (access.host ILIKE " + placeholder + " OR access.target ILIKE " +
+                     placeholder + " OR access.method ILIKE " + placeholder +
+                     " OR access.client_ip::text ILIKE " + placeholder +
+                     " OR COALESCE(node.name, '') ILIKE " + placeholder + ")";
+            params.emplace_back(std::string_view(*keywordPattern));
+        }
+        if (method) {
+            where += " AND access.method = $" + std::to_string(params.size() + 1);
+            params.emplace_back(std::string_view(*method));
+        }
+        if (statusClass) {
+            const auto minimum = static_cast<std::int64_t>((*statusClass)[0] - '0') * 100;
+            where += " AND access.status_code >= $" + std::to_string(params.size() + 1);
+            params.emplace_back(minimum);
+            where += " AND access.status_code < $" + std::to_string(params.size() + 1);
+            params.emplace_back(minimum + 100);
+        }
+
+        const auto countRows = co_await c.db().query("SELECT COUNT(*)" + where, params);
+        const auto total = countRows.empty() ? std::int64_t{0}
+                                             : countRows.front()[0].as<std::int64_t>().value_or(0);
+        const auto rows = co_await c.db().query(
+            "SELECT access.id, TO_CHAR(access.occurred_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
+            "access.node_id, COALESCE(node.name, ''), access.client_ip::text, access.protocol, "
+            "access.method, access.host, access.target, access.status_code, access.request_bytes, "
+            "access.response_bytes, access.duration_ms, access.user_agent, access.referer, "
+            "access.request_headers, access.request_body, access.request_body_truncated, "
+            "access.tls_fingerprint, access.response_headers, access.query_string, access.cookies" +
+                where + " ORDER BY access.created_at DESC, access.id DESC LIMIT " +
+                std::to_string(pageSize) + " OFFSET " + std::to_string(skip),
+            params);
+
+        WebsiteAccessLogPageDataDto result(c);
+        auto& items = result.ensure<"list">();
+        items.reserve(rows.size());
+        for (const auto& row : rows) {
+            auto& item = items.emplace_back(c);
+            fillAccessLog(item, row);
+        }
+        result.set<"total">(total);
+        result.set<"page">(page);
+        result.set<"pageSize">(pageSize);
+        result.set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
         co_return result;
     }
 
@@ -598,6 +625,53 @@ class WebsiteService {
         std::string nodeName;
         service::node_runtime::NodeRuntimeData::OriginHealth health;
     };
+
+    template <typename Row>
+    static void fillAccessLog(WebsiteAccessLogDto& item, const Row& row) {
+        item.set<"id">(row[0].value().value_or(""));
+        item.set<"occurredAt">(row[1].value().value_or(""));
+        item.set<"nodeId">(row[2].value().value_or(""));
+        item.set<"nodeName">(row[3].value().value_or(""));
+        item.set<"protocol">(row[5].value().value_or(""));
+        item.set<"method">(row[6].value().value_or(""));
+        item.set<"host">(row[7].value().value_or(""));
+        item.set<"target">(row[8].value().value_or(""));
+        item.set<"statusCode">(row[9].as<std::int64_t>().value_or(0));
+        item.set<"requestBytes">(row[10].as<std::int64_t>().value_or(0));
+        item.set<"responseBytes">(row[11].as<std::int64_t>().value_or(0));
+        item.set<"durationMs">(row[12].as<std::int64_t>().value_or(0));
+        item.set<"requestBodyTruncated">(row[17].as<bool>().value_or(false));
+        if (const auto value = row[4].value()) {
+            item.set<"clientIp">(*value);
+            if (const auto location = service::geoip::xdbDatabase().lookup(*value)) {
+                item.set<"clientIpLocation">(location->display);
+            }
+        }
+        if (const auto value = row[13].value()) {
+            item.set<"userAgent">(*value);
+        }
+        if (const auto value = row[14].value()) {
+            item.set<"referer">(*value);
+        }
+        if (const auto value = row[15].value()) {
+            item.set<"requestHeaders">(*value);
+        }
+        if (const auto value = row[16].value()) {
+            item.set<"requestBody">(*value);
+        }
+        if (const auto value = row[18].value()) {
+            item.set<"tlsFingerprint">(*value);
+        }
+        if (const auto value = row[19].value()) {
+            item.set<"responseHeaders">(*value);
+        }
+        if (const auto value = row[20].value()) {
+            item.set<"queryString">(*value);
+        }
+        if (const auto value = row[21].value()) {
+            item.set<"cookies">(*value);
+        }
+    }
 
     static std::string selectColumns() {
         return "SELECT website.id, website.cluster_id, cluster.name, "

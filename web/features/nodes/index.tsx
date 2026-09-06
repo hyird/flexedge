@@ -661,6 +661,21 @@ function CredentialsDialog({
   )
 }
 
+function nodeLogLevelClass(level: string) {
+  switch (level.toLocaleLowerCase()) {
+    case 'error':
+    case 'fatal':
+      return 'border-destructive/30 bg-destructive/10 text-destructive'
+    case 'warn':
+    case 'warning':
+      return 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+    case 'debug':
+      return 'border-slate-500/30 bg-slate-500/10 text-slate-700 dark:text-slate-300'
+    default:
+      return 'border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-400'
+  }
+}
+
 function NodeLogSheet({
   node,
   onOpenChange,
@@ -673,7 +688,7 @@ function NodeLogSheet({
 
   useEffect(() => {
     const source = new EventSource(
-      `/api/nodes/${node.id}/logs/stream?limit=100`,
+      `/api/nodes/${node.id}/logs/stream?limit=1000`,
       { withCredentials: true }
     )
     source.addEventListener('ready', () => setConnected(true))
@@ -694,28 +709,43 @@ function NodeLogSheet({
     })
     source.onerror = () => setConnected(false)
     return () => source.close()
-  }, [node])
+  }, [node.id])
 
   return (
     <Sheet open onOpenChange={onOpenChange}>
       <SheetContent className='flex w-full flex-col sm:max-w-2xl'>
         <SheetHeader className='text-start'>
           <div className='flex items-center gap-2'>
-            <SheetTitle>{node?.name} · 实时日志</SheetTitle>
-            <Badge variant='outline'>{connected ? '已连接' : '连接中'}</Badge>
+            <SheetTitle>{node.name} · 实时日志</SheetTitle>
+            <Badge variant='outline' role='status'>
+              {connected ? '已连接' : '正在重连'}
+            </Badge>
           </div>
-          <SheetDescription>最多保留最近 200 条节点日志。</SheetDescription>
+          <SheetDescription>实时显示最近 200 条节点日志，按接收时间倒序。</SheetDescription>
         </SheetHeader>
         <ScrollArea className='min-h-0 flex-1 px-4'>
-          <div className='space-y-2 pb-5 font-mono text-xs'>
+          <div className='font-mono text-xs' role='region' aria-label='节点实时日志列表'>
             {logs.map((log) => (
-              <div key={log.id} className='rounded-md border p-3'>
-                <div className='mb-1 flex flex-wrap gap-2 text-muted-foreground'>
-                  <span>{formatDate(log.occurred_at)}</span>
-                  <Badge variant='secondary'>{log.level}</Badge>
-                  <span>{log.category}</span>
+              <div
+                key={log.id}
+                className='border-b px-3 py-2 last:border-b-0 hover:bg-muted/50'
+              >
+                <div className='flex min-w-0 items-center gap-2 text-muted-foreground'>
+                  <time dateTime={log.occurred_at} className='shrink-0 tabular-nums'>
+                    {formatDate(log.occurred_at)}
+                  </time>
+                  <Badge
+                    variant='outline'
+                    className={nodeLogLevelClass(log.level)}
+                    aria-label={`日志等级 ${log.level}`}
+                  >
+                    {log.level}
+                  </Badge>
+                  <span className='min-w-0 truncate' title={log.category}>
+                    {log.category}
+                  </span>
                 </div>
-                <p className='break-words'>{log.message}</p>
+                <p className='mt-1 break-words text-foreground'>{log.message}</p>
               </div>
             ))}
             {!logs.length && (
