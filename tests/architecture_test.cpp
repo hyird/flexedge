@@ -286,7 +286,7 @@ int main() {
     REQUIRE(websiteAccessLogMapper.contains("clientIpLocation"));
     REQUIRE(websiteService.contains("website_access_log.service.h"));
     REQUIRE(websiteService.contains("websiteAccessLogService().tail"));
-    REQUIRE(!websiteService.contains("sys_website_access_log access LEFT JOIN"));
+    REQUIRE(!websiteService.contains("sys_website_access_log"));
     const auto websiteAccessLogs = source("service/domains/website/website_access_log.service.h");
     REQUIRE(websiteAccessLogs.contains("class WebsiteAccessLogService final"));
     REQUIRE(websiteAccessLogs.contains("sys_website_access_log access LEFT JOIN"));
