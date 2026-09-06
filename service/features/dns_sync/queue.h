@@ -131,12 +131,11 @@ loadProjectedRecords(Db& db, const std::string& tenantId, const std::string& zon
     co_return std::move(records.at(zoneId));
 }
 
-inline ruvia::Task<std::string> enqueueZoneRevision(ruvia::DbTransaction& transaction,
-                                                    const std::string& tenantId,
-                                                    const std::string& zoneId,
-                                                    std::int64_t revision,
-                                                    service::sync_runtime::MarkerOperation operation =
-                                                        service::sync_runtime::MarkerOperation::sync) {
+inline ruvia::Task<std::string>
+enqueueZoneRevision(ruvia::DbTransaction& transaction, const std::string& tenantId,
+                    const std::string& zoneId, std::int64_t revision,
+                    service::sync_runtime::MarkerOperation operation =
+                        service::sync_runtime::MarkerOperation::sync) {
     const auto operationValue = service::sync_runtime::markerOperationName(operation);
     const auto rows = co_await transaction.query(
         "SELECT id FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 AND "
@@ -154,9 +153,8 @@ inline ruvia::Task<std::string> enqueueZoneDeletion(ruvia::DbTransaction& transa
                                                     const std::string& tenantId,
                                                     const std::string& zoneId,
                                                     std::int64_t revision) {
-    co_return co_await enqueueZoneRevision(
-        transaction, tenantId, zoneId, revision,
-        service::sync_runtime::MarkerOperation::remove);
+    co_return co_await enqueueZoneRevision(transaction, tenantId, zoneId, revision,
+                                           service::sync_runtime::MarkerOperation::remove);
 }
 
 inline ruvia::Task<std::optional<std::string>>

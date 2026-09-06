@@ -106,7 +106,7 @@ parseMarkerOperation(std::string_view operation) {
 }
 
 [[nodiscard]] inline constexpr bool supportsMarkerOperation(MarkerResourceType resourceType,
-                                                             MarkerOperation operation) {
+                                                            MarkerOperation operation) {
     switch (resourceType) {
     case MarkerResourceType::provider:
         return operation == MarkerOperation::verify;
@@ -178,8 +178,8 @@ inline void publishResultEvent(const RunningMarkerLease& lease) {
 inline ruvia::Task<std::string> upsertMarker(ruvia::DbTransaction& transaction,
                                              std::string_view tenantId,
                                              MarkerResourceType resourceType,
-                                             std::string_view resourceId,
-                                             MarkerOperation operation, std::int64_t version) {
+                                             std::string_view resourceId, MarkerOperation operation,
+                                             std::int64_t version) {
     if (version <= 0) {
         throw std::invalid_argument("sync marker version must be positive");
     }

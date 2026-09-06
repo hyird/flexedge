@@ -12,6 +12,8 @@
 #include <ruvia/core/Task.h>
 #include <ruvia/web/redis/Redis.h>
 
+#include "service/features/log_ingest/redis_protocol.h"
+
 namespace service::log_ingest::notifications {
 
 inline constexpr std::string_view kStreamKey{"flexedge:log-notifications:v2"};
@@ -57,12 +59,6 @@ struct ReadBatch final {
     std::optional<std::string> cursor;
 };
 
-inline void requireNoError(const ruvia::RedisValue& value, std::string_view operation) {
-    if (value.kind() == ruvia::RedisValue::Kind::kError) {
-        throw std::runtime_error(std::string(operation) + ": " + std::string(value.error()));
-    }
-}
-
 inline ruvia::Task<void> publish(ruvia::RedisHandle redis, LogResourceType resourceType,
                                  std::string_view tenantId, std::string_view resourceId) {
     if (tenantId.empty() || resourceId.empty()) {
@@ -72,14 +68,14 @@ inline ruvia::Task<void> publish(ruvia::RedisHandle redis, LogResourceType resou
     const auto result = co_await redis.command(
         "XADD", kStreamKey, "MAXLEN", "~", maximumEntries, "*", "tenant_id", tenantId,
         "resource_type", resourceTypeName(resourceType), "resource_id", resourceId);
-    requireNoError(result, "could not publish log notification");
+    requireRedisSuccess(result, "could not publish log notification");
     if (result.kind() != ruvia::RedisValue::Kind::kString || result.string().empty()) {
         throw std::runtime_error("unexpected log notification publish reply");
     }
 }
 
 inline std::string currentEntryId(const ruvia::RedisValue& value) {
-    requireNoError(value, "could not read log notification cursor");
+    requireRedisSuccess(value, "could not read log notification cursor");
     if (value.null()) {
         return "0-0";
     }
@@ -159,7 +155,7 @@ inline std::optional<std::string> entryId(const ruvia::RedisValue& value) {
 }
 
 inline ReadBatch parseReadResult(const ruvia::RedisValue& value) {
-    requireNoError(value, "could not read log notifications");
+    requireRedisSuccess(value, "could not read log notifications");
     ReadBatch output;
     if (value.null()) {
         return output;
