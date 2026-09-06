@@ -344,6 +344,10 @@ int main() {
     REQUIRE(!agentDomainService.contains("struct HeartbeatReport final"));
     const auto agentTypes = source("service/domains/agent/agent.types.h");
     REQUIRE(agentTypes.contains("struct HeartbeatReport final"));
+    REQUIRE(agentDomainService.contains("agent_runtime.mapper.h"));
+    REQUIRE(!agentDomainService.contains("NodeRuntimeOutput runtime"));
+    const auto agentRuntimeMapper = source("service/domains/agent/agent_runtime.mapper.h");
+    REQUIRE(agentRuntimeMapper.contains("inline std::string heartbeatRuntimeJson"));
     REQUIRE(!acme.contains("struct AcmeSettings final"));
     const auto acmeTypes = source("service/features/certificate/acme_types.h");
     REQUIRE(acmeTypes.contains("struct AcmeSettings final"));
