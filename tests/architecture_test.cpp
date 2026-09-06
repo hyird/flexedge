@@ -295,6 +295,13 @@ int main() {
     REQUIRE(websiteAccessLogs.contains("website_access_log.mapper.h"));
     const auto acme = source("service/features/certificate/acme.h");
     REQUIRE(acme.contains("certificate/acme_types.h"));
+    REQUIRE(acme.contains("certificate/acme_jws.h"));
+    REQUIRE(!acme.contains("inline std::string hmacSha256"));
+    REQUIRE(!acme.contains("inline std::string jwkThumbprint"));
+    const auto acmeJws = source("service/features/certificate/acme_jws.h");
+    REQUIRE(acmeJws.contains("inline std::string hmacSha256"));
+    REQUIRE(acmeJws.contains("inline std::string jwkThumbprint"));
+    REQUIRE(acmeJws.contains("inline EvpPkeyPtr generateRsaKey"));
     REQUIRE(!acme.contains("struct AcmeSettings final"));
     const auto acmeTypes = source("service/features/certificate/acme_types.h");
     REQUIRE(acmeTypes.contains("struct AcmeSettings final"));
