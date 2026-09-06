@@ -302,7 +302,6 @@ export function NodesPanel({
         columns={columns}
         data={query.data?.list ?? []}
         fixedLayout
-        tableClassName='min-w-[68.75rem]'
         loading={query.isLoading}
         error={query.isError}
         onRetry={() => void query.refetch()}
