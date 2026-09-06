@@ -475,12 +475,19 @@ int main() {
 
     const auto dnsSyncWorker = source("service/features/dns_sync/worker.h");
     REQUIRE(dnsSyncWorker.contains("dns_sync/reconciliation.h"));
+    REQUIRE(dnsSyncWorker.contains("dns_sync/failure.h"));
     REQUIRE(!dnsSyncWorker.contains("struct ManagedRecord final"));
     REQUIRE(!dnsSyncWorker.contains("inline RemoteMergePlan\nplanRemoteMerge"));
+    REQUIRE(!dnsSyncWorker.contains("struct TaskFailure final"));
+    REQUIRE(!dnsSyncWorker.contains("inline TaskFailure classifyTaskFailure"));
     const auto dnsReconciliation = source("service/features/dns_sync/reconciliation.h");
     REQUIRE(dnsReconciliation.contains("struct ManagedRecord final"));
     REQUIRE(dnsReconciliation.contains("inline RemoteMergePlan\nplanRemoteMerge"));
     REQUIRE(dnsReconciliation.contains("kMaxReconciliationRecords"));
+    const auto dnsFailure = source("service/features/dns_sync/failure.h");
+    REQUIRE(dnsFailure.contains("struct TaskFailure final"));
+    REQUIRE(dnsFailure.contains("inline TaskFailure classifyTaskFailure"));
+    REQUIRE(dnsFailure.contains("inline std::string boundedError"));
 
     const auto markerWorkerLoop = source("service/features/background/marker_worker_loop.h");
     REQUIRE(markerWorkerLoop.contains("runMarkerWorkerLoop"));
