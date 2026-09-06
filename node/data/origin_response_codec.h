@@ -83,6 +83,7 @@ class OriginResponseCodec final {
 
     [[nodiscard]] std::string takeOutput() { return std::move(output_); }
     [[nodiscard]] bool complete() const noexcept { return complete_; }
+    [[nodiscard]] bool chunked() const noexcept { return bodyKind_ == BodyKind::kChunked; }
     [[nodiscard]] bool tunnel() const noexcept { return tunnel_; }
     [[nodiscard]] bool originReusable() const noexcept {
         return complete_ && !tunnel_ && originReusable_;
