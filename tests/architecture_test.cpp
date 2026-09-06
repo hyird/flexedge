@@ -465,14 +465,26 @@ int main() {
     REQUIRE(certificateWorker.contains("certificate/acme_account.h"));
     REQUIRE(certificateWorker.contains("certificate/task.h"));
     REQUIRE(certificateWorker.contains("certificate/work_loader.h"));
+    REQUIRE(certificateWorker.contains("certificate/persistence.h"));
     REQUIRE(!certificateWorker.contains("struct CertificateTask final"));
     REQUIRE(!certificateWorker.contains("struct CertificateWork final"));
     REQUIRE(!certificateWorker.contains("inline ruvia::Task<CertificateWork>\nloadWork"));
+    REQUIRE(!certificateWorker.contains("CertificateMaterialOutput material"));
+    REQUIRE(!certificateWorker.contains("inline ruvia::Task<void>\nfail("));
     const auto certificateTask = source("service/features/certificate/task.h");
     REQUIRE(certificateTask.contains("struct CertificateTask final"));
     const auto certificateWorkLoader = source("service/features/certificate/work_loader.h");
     REQUIRE(certificateWorkLoader.contains("struct CertificateWork final"));
     REQUIRE(certificateWorkLoader.contains("loadWork"));
+    const auto certificatePersistence = source("service/features/certificate/persistence.h");
+    REQUIRE(certificatePersistence.contains("markIssuanceStarted"));
+    REQUIRE(certificatePersistence.contains("persistIssuedCertificate"));
+    REQUIRE(certificatePersistence.contains("failCertificateTask"));
+    REQUIRE(certificatePersistence.contains("commitAndPublishResultEvent"));
+    REQUIRE(certificatePersistence.contains("completeRunningAndRecordEvent"));
+    REQUIRE(certificatePersistence.contains("failRunningAndRecordEvent"));
+    REQUIRE(!certificateWorker.contains("commitAndPublishResultEvent"));
+    REQUIRE(!certificateWorker.contains("eventRecorded"));
     const auto websitePage = source("web/features/websites/index.tsx");
     REQUIRE(websitePage.contains("import { AccessLogSheet } from './access-log-sheet'"));
     REQUIRE(websitePage.contains("import { WebsiteDialog } from './website-dialog'"));
@@ -844,7 +856,7 @@ int main() {
 
     for (const auto* path :
          {"service/features/provider_verification/worker.h", "service/features/dns_sync/worker.h",
-          "service/features/certificate/worker.h", "service/features/website_dispatch/worker.h"}) {
+          "service/features/website_dispatch/worker.h"}) {
         const auto worker = source(path);
         REQUIRE(worker.contains("sys_sync_task"));
         REQUIRE(worker.contains("recoverStaleRunning"));
