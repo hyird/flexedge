@@ -4,10 +4,8 @@
 #include <cctype>
 #include <cstdint>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include <ruvia/core/Task.h>
 #include <ruvia/web/Context.h>
@@ -16,6 +14,7 @@
 #include "service/common/database.h"
 #include "service/common/http.h"
 #include "service/domains/provider/dns_provider.error.h"
+#include "service/domains/provider/dns_provider_read.service.h"
 #include "service/domains/provider/dns_provider.types.h"
 #include "service/features/dns/provider_config.h"
 #include "service/features/provider_verification/queue.h"
@@ -23,79 +22,20 @@
 
 namespace service::provider {
 
-class DnsProviderService {
+class DnsProviderService final {
   public:
     ruvia::Task<DnsProviderPageDataDto> list(ruvia::Context& c, const std::string& tenantId,
                                              std::int64_t page, std::int64_t pageSize,
                                              std::int64_t skip,
                                              const std::optional<std::string>& keyword,
                                              const std::optional<std::string>& status) {
-        std::string where =
-            " FROM sys_provider provider WHERE provider.tenant_id = $1 AND provider.kind = "
-            "'dns' AND provider.deleted_at IS NULL";
-        std::vector<ruvia::DbValue> params{ruvia::DbValue{tenantId}};
-        std::optional<std::string> pattern;
-        if (status) {
-            where += " AND provider.status = $" + std::to_string(params.size() + 1);
-            params.emplace_back(std::string_view(*status));
-        }
-        if (keyword) {
-            pattern = "%" + service::common::escapeLikePattern(*keyword) + "%";
-            const auto placeholder = "$" + std::to_string(params.size() + 1);
-            where += " AND (provider.name ILIKE " + placeholder + " OR provider.account_id ILIKE " +
-                     placeholder + ")";
-            params.emplace_back(std::string_view(*pattern));
-        }
-        const auto countRows = co_await c.db().query("SELECT COUNT(*)" + where, params);
-        const auto total = countRows.empty() ? std::int64_t{0}
-                                             : countRows.front()[0].as<std::int64_t>().value_or(0);
-        const auto rows = co_await c.db().query(
-            "SELECT provider.id, provider.provider, provider.revision, provider.name, "
-            "provider.account_id, provider.config::text, "
-            "provider.status, TO_CHAR(provider.last_verified_at, "
-            "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), provider.last_error, "
-            "TO_CHAR(provider.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-            "TO_CHAR(provider.updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-            "(SELECT COUNT(*) FROM sys_dns_zone zone WHERE zone.tenant_id = "
-            "provider.tenant_id AND zone.provider_id = provider.id AND zone.deleted_at IS "
-            "NULL)" +
-                where + " ORDER BY provider.sort DESC LIMIT " + std::to_string(pageSize) +
-                " OFFSET " + std::to_string(skip),
-            params);
-
-        DnsProviderPageDataDto result(c);
-        result.set<"total">(total);
-        result.set<"page">(page);
-        result.set<"pageSize">(pageSize);
-        result.set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
-        auto& items = result.ensure<"list">();
-        for (const auto& row : rows) {
-            fill(items.emplace_back(c), parseRow(c, row));
-        }
-        co_return result;
+        co_return co_await dnsProviderReadService().list(c, tenantId, page, pageSize, skip, keyword,
+                                                         status);
     }
 
     ruvia::Task<DnsProviderDto> get(ruvia::Context& c, const std::string& tenantId,
                                     const std::string& id) {
-        const auto rows = co_await c.db().query(
-            "SELECT provider.id, provider.provider, provider.revision, provider.name, "
-            "provider.account_id, provider.config::text, "
-            "provider.status, TO_CHAR(provider.last_verified_at, "
-            "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), provider.last_error, "
-            "TO_CHAR(provider.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-            "TO_CHAR(provider.updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-            "(SELECT COUNT(*) FROM sys_dns_zone zone WHERE zone.tenant_id = "
-            "provider.tenant_id AND zone.provider_id = provider.id AND zone.deleted_at IS "
-            "NULL) FROM sys_provider provider WHERE provider.id = $1 AND "
-            "provider.tenant_id = $2 AND provider.kind = 'dns' AND provider.deleted_at IS "
-            "NULL LIMIT 1",
-            id, tenantId);
-        if (rows.empty()) {
-            service::common::throwAppError(DnsProviderError::NOT_FOUND);
-        }
-        DnsProviderDto result(c);
-        fill(result, parseRow(c, rows.front()));
-        co_return result;
+        co_return co_await dnsProviderReadService().get(c, tenantId, id);
     }
 
     ruvia::Task<void> create(ruvia::Context& c, const std::string& tenantId,
@@ -113,8 +53,8 @@ class DnsProviderService {
         const auto accountId = normalizeAccountId(provider, accountIdInput->view());
         const auto token = tokenInput->view();
         validateCredentialShape(provider, accountId, token);
-        const auto config =
-            serializeConfig(c, service::utils::sealSecret(token), secretHint(token));
+        const auto config = service::dns::serializeDnsProviderConfig(
+            service::utils::sealSecret(token), secretHint(token), c.resource());
         try {
             auto transaction = co_await c.db().beginTransaction();
             (void)co_await transaction.execute(
@@ -152,7 +92,8 @@ class DnsProviderService {
 
         const auto provider = std::string(rows.front()[0].value().value_or(""));
         const auto accountId = std::string(rows.front()[2].value().value_or(""));
-        const auto current = parseConfig(c, rows.front()[3].value().value_or("{}"));
+        const auto current = service::dns::parseDnsProviderConfig(
+            rows.front()[3].value().value_or("{}"), c.resource());
         const auto& nameInput = body.get<"name">();
         if (!nameInput) {
             service::common::throwAppError(service::common::kValidationErrorCode,
@@ -170,7 +111,7 @@ class DnsProviderService {
             hint = secretHint(token->view());
             credentialsChanged = true;
         }
-        const auto config = serializeConfig(c, envelope, hint);
+        const auto config = service::dns::serializeDnsProviderConfig(envelope, hint, c.resource());
         try {
             auto transaction = co_await c.db().beginTransaction();
             const auto result = co_await transaction.execute(
@@ -252,75 +193,6 @@ class DnsProviderService {
     }
 
   private:
-    struct StoredProvider final {
-        std::string id;
-        std::string provider;
-        std::int64_t revision{};
-        std::string name;
-        std::string accountId;
-        std::string hint;
-        std::string status;
-        std::optional<std::string> lastVerifiedAt;
-        std::optional<std::string> lastError;
-        std::string createdAt;
-        std::string updatedAt;
-        std::int64_t zoneCount{};
-    };
-
-    template <typename Row> static StoredProvider parseRow(ruvia::Context& c, const Row& row) {
-        const auto config = parseConfig(c, row[5].value().value_or("{}"));
-        return {
-            .id = std::string(row[0].value().value_or("")),
-            .provider = std::string(row[1].value().value_or("")),
-            .revision = row[2].template as<std::int64_t>().value_or(0),
-            .name = std::string(row[3].value().value_or("")),
-            .accountId = std::string(row[4].value().value_or("")),
-            .hint = config.credentialHint,
-            .status = std::string(row[6].value().value_or("")),
-            .lastVerifiedAt = optionalString(row[7]),
-            .lastError = optionalString(row[8]),
-            .createdAt = std::string(row[9].value().value_or("")),
-            .updatedAt = std::string(row[10].value().value_or("")),
-            .zoneCount = row[11].template as<std::int64_t>().value_or(0),
-        };
-    }
-
-    template <typename Value> static std::optional<std::string> optionalString(const Value& value) {
-        if (const auto result = value.value()) {
-            return std::string(*result);
-        }
-        return std::nullopt;
-    }
-
-    static service::dns::DnsProviderConfigData parseConfig(ruvia::Context& c,
-                                                           std::string_view json) {
-        return service::dns::parseDnsProviderConfig(json, c.resource());
-    }
-
-    static std::string serializeConfig(ruvia::Context& c, std::string_view envelope,
-                                       std::string_view hint) {
-        return service::dns::serializeDnsProviderConfig(envelope, hint, c.resource());
-    }
-
-    static void fill(DnsProviderDto& item, const StoredProvider& provider) {
-        item.set<"id">(provider.id);
-        item.set<"revision">(provider.revision);
-        item.set<"name">(provider.name);
-        item.set<"accountId">(provider.accountId);
-        item.set<"provider">(provider.provider);
-        item.set<"tokenHint">(provider.hint);
-        item.set<"status">(provider.status);
-        item.set<"createdAt">(provider.createdAt);
-        item.set<"updatedAt">(provider.updatedAt);
-        item.set<"zoneCount">(provider.zoneCount);
-        if (provider.lastVerifiedAt) {
-            item.set<"lastVerifiedAt">(*provider.lastVerifiedAt);
-        }
-        if (provider.lastError) {
-            item.set<"lastError">(*provider.lastError);
-        }
-    }
-
     static ruvia::Task<void> ensureAvailable(ruvia::Context& c, const std::string& tenantId,
                                              std::string_view provider, std::string_view name,
                                              std::string_view accountId,

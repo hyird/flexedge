@@ -377,6 +377,17 @@ int main() {
     const auto authController = source("service/domains/auth/auth.controller.h");
     REQUIRE(authController.contains("authSessionService().refresh"));
     REQUIRE(authController.contains("authSessionService().logout"));
+    const auto dnsProviderServiceSource = source("service/domains/provider/dns_provider.service.h");
+    REQUIRE(dnsProviderServiceSource.contains("dns_provider_read.service.h"));
+    REQUIRE(dnsProviderServiceSource.contains("dnsProviderReadService().list"));
+    REQUIRE(dnsProviderServiceSource.contains("dnsProviderReadService().get"));
+    REQUIRE(!dnsProviderServiceSource.contains("struct StoredProvider final"));
+    REQUIRE(!dnsProviderServiceSource.contains("static StoredProvider parseRow"));
+    const auto dnsProviderReadService =
+        source("service/domains/provider/dns_provider_read.service.h");
+    REQUIRE(dnsProviderReadService.contains("class DnsProviderReadService final"));
+    REQUIRE(dnsProviderReadService.contains("struct StoredProvider final"));
+    REQUIRE(dnsProviderReadService.contains("static StoredProvider parseRow"));
     REQUIRE(!acme.contains("struct AcmeSettings final"));
     const auto acmeTypes = source("service/features/certificate/acme_types.h");
     REQUIRE(acmeTypes.contains("struct AcmeSettings final"));
