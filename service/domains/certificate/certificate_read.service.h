@@ -56,7 +56,7 @@ class CertificateReadService final {
         }
         if (usable) {
             where += " AND COALESCE(cert.issued_revision > 0 AND cert.expires_at > NOW(), FALSE) "
-                     "= " +
+                     "= $" +
                      std::to_string(params.size() + 1);
             params.emplace_back(*usable);
         }
