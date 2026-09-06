@@ -285,6 +285,15 @@ int main() {
         source("service/domains/website/website_access_log.mapper.h");
     REQUIRE(websiteAccessLogMapper.contains("fillWebsiteAccessLog"));
     REQUIRE(websiteAccessLogMapper.contains("clientIpLocation"));
+    const auto acme = source("service/features/certificate/acme.h");
+    REQUIRE(acme.contains("certificate/acme_types.h"));
+    REQUIRE(!acme.contains("struct AcmeSettings final"));
+    const auto acmeTypes = source("service/features/certificate/acme_types.h");
+    REQUIRE(acmeTypes.contains("struct AcmeSettings final"));
+    REQUIRE(acmeTypes.contains("class AcmeError final"));
+    const auto certificateProvider = source("service/features/certificate/provider.h");
+    REQUIRE(certificateProvider.contains("certificate/acme_types.h"));
+    REQUIRE(!certificateProvider.contains("certificate/acme.h"));
     const auto websitePage = source("web/features/websites/index.tsx");
     REQUIRE(websitePage.contains("import { AccessLogSheet } from './access-log-sheet'"));
     REQUIRE(websitePage.contains("import { WebsiteDialog } from './website-dialog'"));
