@@ -676,6 +676,14 @@ int main() {
     const auto nodeService = source("service/domains/node/node.service.h");
     REQUIRE(nodeService.contains("service::utils::randomToken().substr(0, 32)"));
     REQUIRE(!nodeService.contains("gen_random_bytes"));
+    REQUIRE(nodeService.contains("node.mapper.h"));
+    REQUIRE(!nodeService.contains("static void fillNode"));
+    REQUIRE(!nodeService.contains("static NodeRuntimeDto toRuntime"));
+    REQUIRE(!nodeService.contains("static std::string serializeConfig"));
+    const auto nodeResponseMapper = source("service/domains/node/node.mapper.h");
+    REQUIRE(nodeResponseMapper.contains("inline void fillNode"));
+    REQUIRE(nodeResponseMapper.contains("inline NodeRuntimeDto nodeRuntimeDto"));
+    REQUIRE(nodeResponseMapper.contains("inline std::string serializeNodeConfig"));
     const auto agentService = source("service/domains/agent/agent.service.h");
     REQUIRE(!agentService.contains("reconcileReleaseTask"));
     REQUIRE(!agentService.contains("sys_task"));
