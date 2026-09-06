@@ -28,6 +28,7 @@
 #include "service/features/certificate/model.h"
 #include "service/features/certificate/dns_challenge.h"
 #include "service/features/certificate_material/model.h"
+#include "service/features/certificate_material/download.h"
 #include "service/features/certificate/queue.h"
 #include "service/features/dns/registry.h"
 #include "service/features/sync_runtime/state.h"
@@ -323,7 +324,8 @@ class CertificateService {
         if (!material->certificateChainPem || !material->privateKeyEnvelope) {
             service::common::throwAppError(CertificateError::CERTIFICATE_UNAVAILABLE);
         }
-        const auto filename = certificateFilename(rows.front()[0].value().value_or("certificate"));
+        const auto filename = service::certificate_material::archiveFilename(
+            rows.front()[0].value().value_or("certificate"));
         auto archive = co_await c.runBlocking(
             [archiveFilename = filename, chain = std::move(*material->certificateChainPem),
              privateKey = service::utils::SensitiveString(
@@ -508,20 +510,6 @@ class CertificateService {
         appendLittleEndian<std::uint32_t>(archive, centralOffset);
         appendLittleEndian<std::uint16_t>(archive, 0);
         return archive;
-    }
-
-    static std::string certificateFilename(std::string_view domain) {
-        std::string result;
-        if (domain.starts_with("*.")) {
-            domain.remove_prefix(2);
-        }
-        result.reserve(domain.size());
-        for (const auto character : domain) {
-            const auto value = static_cast<unsigned char>(character);
-            result.push_back(
-                std::isalnum(value) != 0 || character == '.' || character == '-' ? character : '_');
-        }
-        return result.empty() ? "certificate" : result;
     }
 
     static std::string normalizeDomain(std::string_view input) {
