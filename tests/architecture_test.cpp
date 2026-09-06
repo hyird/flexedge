@@ -180,6 +180,16 @@ int main() {
     REQUIRE(dnsZoneReadService.contains("SELECT zone.id, provider.id"));
     REQUIRE(dnsZoneReadService.contains("parseDnsProviderRuntime"));
     REQUIRE(dnsZoneReadService.contains("loadProjectedRecordsByZone"));
+    const auto clusterService = source("service/domains/cluster/cluster.service.h");
+    REQUIRE(clusterService.contains("cluster_read.service.h"));
+    REQUIRE(clusterService.contains("clusterReadService().list"));
+    REQUIRE(!clusterService.contains("SELECT cluster.id, cluster.name"));
+    REQUIRE(clusterService.contains("publishClusterRelease"));
+    REQUIRE(clusterService.contains("reconcileZoneTransition"));
+    const auto clusterReadService = source("service/domains/cluster/cluster_read.service.h");
+    REQUIRE(clusterReadService.contains("class ClusterReadService final"));
+    REQUIRE(clusterReadService.contains("SELECT cluster.id, cluster.name"));
+    REQUIRE(clusterReadService.contains("onlineNodeCount"));
     static_assert(service::node_dispatch::canReportAppliedNodeSpecRevision(2, 2, 3));
     static_assert(service::node_dispatch::canReportAppliedNodeSpecRevision(2, 3, 3));
     static_assert(!service::node_dispatch::canReportAppliedNodeSpecRevision(3, 2, 4));
