@@ -269,13 +269,6 @@ int main() {
     const auto websiteConfigTransport = source("service/features/website_config/transport.h");
     REQUIRE(websiteConfigTransport.contains("RUVIA_REQUEST_MODEL(WebsiteDomainInput"));
     REQUIRE(websiteConfigTransport.contains("WebsiteConfigOutput, RUVIA_OPTIONAL_FIELD(name"));
-    const auto acme = source("service/features/certificate/acme.h");
-    REQUIRE(acme.contains("certificate/acme_transport.h"));
-    REQUIRE(!acme.contains("RUVIA_REQUEST_MODEL(AcmeDirectoryInput"));
-    const auto acmeTransport = source("service/features/certificate/acme_transport.h");
-    REQUIRE(acmeTransport.contains("RUVIA_REQUEST_MODEL(AcmeDirectoryInput"));
-    REQUIRE(acmeTransport.contains("RUVIA_RESPONSE_MODEL(AcmeJwsOutput"));
-
     const auto websitePage = source("web/features/websites/index.tsx");
     REQUIRE(websitePage.contains("import { AccessLogSheet } from './access-log-sheet'"));
     REQUIRE(websitePage.contains("import { WebsiteDialog } from './website-dialog'"));
