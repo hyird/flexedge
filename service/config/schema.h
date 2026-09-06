@@ -194,12 +194,14 @@ CREATE TABLE public.sys_node (
     revision bigint DEFAULT 1 NOT NULL,
     node_spec_revision bigint DEFAULT 1 NOT NULL,
     applied_node_spec_revision bigint DEFAULT 0 NOT NULL,
-    agent_id varchar(32),
+    agent_id varchar(64),
     registered_at timestamptz,
     last_heartbeat_at timestamptz,
     config jsonb DEFAULT '{"endpoints":[]}'::jsonb NOT NULL,
     runtime jsonb DEFAULT '{}'::jsonb NOT NULL,
     node_spec_digest char(64),
+    device_key_fingerprint char(64),
+    device_public_key_pem text,
     desired_release_id uuid,
     active_release_id uuid,
     active_manifest_digest char(64),
@@ -207,8 +209,7 @@ CREATE TABLE public.sys_node (
     last_apply_error_code varchar(64),
     last_apply_error varchar(1000),
     last_apply_retryable boolean,
-    node_secret_hash char(64),
-    node_secret_envelope text,
+    node_key_hash char(64),
     created_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL,
     deleted_at timestamptz,
@@ -227,15 +228,15 @@ CREATE TABLE public.sys_node (
     CONSTRAINT ck_node_active_manifest_digest CHECK (
         active_manifest_digest IS NULL OR active_manifest_digest ~ '^[0-9a-f]{64}$'
     ),
-    CONSTRAINT ck_node_secret_hash CHECK (
-        node_secret_hash IS NULL OR node_secret_hash ~ '^[0-9a-f]{64}$'
+    CONSTRAINT ck_node_key_hash CHECK (
+        node_key_hash IS NULL OR node_key_hash ~ '^[0-9a-f]{64}$'
     ),
-    CONSTRAINT ck_node_credentials CHECK (
-        deleted_at IS NOT NULL OR
-        (agent_id ~ '^[0-9a-f]{32}$' AND node_secret_hash ~ '^[0-9a-f]{64}$' AND
-         node_secret_envelope IS NOT NULL AND
-         ((registration_status = 'pending' AND registered_at IS NULL) OR
-          (registration_status = 'registered' AND registered_at IS NOT NULL)))
+    CONSTRAINT ck_node_device_identity CHECK (
+        (registration_status = 'pending' AND agent_id IS NULL AND
+         device_key_fingerprint IS NULL AND device_public_key_pem IS NULL) OR
+        (registration_status = 'registered' AND node_key_hash ~ '^[0-9a-f]{64}$' AND
+         agent_id IS NOT NULL AND device_key_fingerprint ~ '^[0-9a-f]{64}$' AND
+         device_public_key_pem IS NOT NULL AND octet_length(device_public_key_pem) <= 4096)
     ),
     CONSTRAINT ck_node_json CHECK (
         jsonb_typeof(config) = 'object' AND jsonb_typeof(runtime) = 'object'
@@ -244,8 +245,10 @@ CREATE TABLE public.sys_node (
 
 CREATE UNIQUE INDEX uk_node_name
     ON public.sys_node (tenant_id, cluster_id, name) WHERE deleted_at IS NULL;
-CREATE UNIQUE INDEX uk_node_agent
-    ON public.sys_node (agent_id) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX uk_node_agent ON public.sys_node (tenant_id, agent_id)
+    WHERE deleted_at IS NULL AND agent_id IS NOT NULL;
+CREATE UNIQUE INDEX uk_node_device_key ON public.sys_node (device_key_fingerprint)
+    WHERE deleted_at IS NULL AND device_key_fingerprint IS NOT NULL;
 CREATE INDEX idx_node_heartbeat ON public.sys_node (last_heartbeat_at)
     WHERE deleted_at IS NULL AND registration_status = 'registered';
 
@@ -281,7 +284,6 @@ CREATE TABLE public.sys_cluster_release (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     cluster_id uuid NOT NULL,
     generation bigint NOT NULL,
-    schema_version integer NOT NULL,
     manifest_digest char(64),
     manifest_envelope text,
     status varchar(16) DEFAULT 'building' NOT NULL,
@@ -293,7 +295,6 @@ CREATE TABLE public.sys_cluster_release (
         REFERENCES public.sys_cluster(tenant_id, id),
     CONSTRAINT uq_cluster_release_generation UNIQUE (tenant_id, cluster_id, generation),
     CONSTRAINT ck_cluster_release_generation CHECK (generation > 0),
-    CONSTRAINT ck_cluster_release_schema_version CHECK (schema_version > 0),
     CONSTRAINT ck_cluster_release_status CHECK (status IN ('building', 'active', 'superseded')),
     CONSTRAINT ck_cluster_release_manifest CHECK (
         (status = 'building' AND manifest_digest IS NULL AND manifest_envelope IS NULL) OR
@@ -394,6 +395,100 @@ CREATE UNIQUE INDEX uk_certificate_domain
     ON public.sys_certificate (tenant_id, domain) WHERE deleted_at IS NULL;
 CREATE INDEX idx_certificate_expiry ON public.sys_certificate (status, expires_at);
 
+CREATE SEQUENCE public.sys_task_sort_seq START WITH 1;
+
+CREATE TABLE public.sys_task (
+    sort bigint DEFAULT nextval('public.sys_task_sort_seq') NOT NULL UNIQUE,
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+    tenant_id uuid NOT NULL REFERENCES public.sys_tenant(id),
+    parent_task_id uuid,
+    kind varchar(32) NOT NULL,
+    resource_type varchar(32) NOT NULL,
+    provider_id uuid,
+    dns_zone_id uuid,
+    certificate_id uuid,
+    website_id uuid,
+    cluster_id uuid,
+    resource_id uuid GENERATED ALWAYS AS (
+        COALESCE(provider_id, dns_zone_id, certificate_id, website_id, cluster_id)
+    ) STORED,
+    operation varchar(32) NOT NULL,
+    requested_revision bigint NOT NULL,
+    processed_revision bigint DEFAULT 0 NOT NULL,
+    spec_snapshot jsonb DEFAULT '{}'::jsonb NOT NULL,
+    result jsonb DEFAULT '{}'::jsonb NOT NULL,
+    logs jsonb DEFAULT '{"entries":[]}'::jsonb NOT NULL,
+    status varchar(16) DEFAULT 'pending' NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    max_attempts integer DEFAULT 4 NOT NULL,
+    available_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    locked_at timestamptz,
+    locked_by varchar(100),
+    last_error varchar(1000),
+    completed_at timestamptz,
+    version bigint DEFAULT 0 NOT NULL,
+    created_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT uq_task_tenant_id UNIQUE (tenant_id, id),
+    CONSTRAINT fk_task_parent FOREIGN KEY (tenant_id, parent_task_id)
+        REFERENCES public.sys_task(tenant_id, id),
+    CONSTRAINT fk_task_provider FOREIGN KEY (tenant_id, provider_id)
+        REFERENCES public.sys_provider(tenant_id, id),
+    CONSTRAINT fk_task_dns_zone FOREIGN KEY (tenant_id, dns_zone_id)
+        REFERENCES public.sys_dns_zone(tenant_id, id),
+    CONSTRAINT fk_task_certificate FOREIGN KEY (tenant_id, certificate_id)
+        REFERENCES public.sys_certificate(tenant_id, id),
+    CONSTRAINT fk_task_cluster FOREIGN KEY (tenant_id, cluster_id)
+        REFERENCES public.sys_cluster(tenant_id, id),
+    CONSTRAINT ck_task_kind CHECK (
+        kind IN ('provider', 'dns', 'certificate', 'website', 'release')
+    ),
+    CONSTRAINT ck_task_resource CHECK (
+        num_nonnulls(provider_id, dns_zone_id, certificate_id, website_id, cluster_id) = 1 AND
+        ((kind = 'provider' AND resource_type = 'provider' AND provider_id IS NOT NULL) OR
+         (kind = 'dns' AND resource_type = 'dns_zone' AND dns_zone_id IS NOT NULL) OR
+         (kind = 'certificate' AND resource_type = 'certificate' AND certificate_id IS NOT NULL) OR
+         (kind = 'website' AND resource_type = 'website' AND website_id IS NOT NULL) OR
+         (kind = 'release' AND resource_type = 'cluster' AND cluster_id IS NOT NULL))
+    ),
+    CONSTRAINT ck_task_operation CHECK (
+        (kind = 'provider' AND operation = 'verify') OR
+        (kind = 'dns' AND operation IN ('sync', 'sync_local', 'sync_remote', 'delete')) OR
+        (kind = 'certificate' AND operation IN ('issue', 'renew')) OR
+        (kind = 'website' AND operation IN ('apply', 'delete')) OR
+        (kind = 'release' AND operation = 'publish')
+    ),
+    CONSTRAINT ck_task_status CHECK (status IN ('pending', 'running', 'waiting', 'retry', 'completed', 'dead', 'cancelled', 'superseded')),
+    CONSTRAINT ck_task_revision CHECK (
+        requested_revision > 0 AND processed_revision >= 0 AND
+        processed_revision <= requested_revision
+    ),
+    CONSTRAINT ck_task_attempts CHECK (attempts >= 0 AND max_attempts > 0),
+    CONSTRAINT ck_task_lifecycle CHECK (
+        (status = 'running' AND locked_at IS NOT NULL AND locked_by IS NOT NULL
+            AND completed_at IS NULL) OR
+        (status IN ('pending', 'waiting', 'retry') AND locked_at IS NULL AND locked_by IS NULL
+            AND completed_at IS NULL) OR
+        (status IN ('completed', 'dead', 'cancelled', 'superseded')
+            AND locked_at IS NULL AND locked_by IS NULL AND completed_at IS NOT NULL)
+    ),
+    CONSTRAINT ck_task_json CHECK (jsonb_typeof(spec_snapshot) = 'object' AND jsonb_typeof(result) = 'object' AND jsonb_typeof(logs) = 'object')
+);
+
+CREATE INDEX idx_task_claim ON public.sys_task (kind, status, available_at, sort);
+CREATE INDEX idx_task_tenant ON public.sys_task (tenant_id, sort DESC);
+CREATE INDEX idx_task_parent ON public.sys_task (tenant_id, parent_task_id, sort);
+CREATE UNIQUE INDEX uk_task_root_revision
+    ON public.sys_task (tenant_id, kind, resource_type, resource_id, requested_revision)
+    WHERE parent_task_id IS NULL;
+CREATE UNIQUE INDEX uk_task_child_revision
+    ON public.sys_task (
+        tenant_id, parent_task_id, kind, resource_type, resource_id, requested_revision
+    ) WHERE parent_task_id IS NOT NULL;
+CREATE UNIQUE INDEX uk_task_one_running_resource
+    ON public.sys_task (tenant_id, kind, resource_type, resource_id)
+    WHERE status = 'running' AND parent_task_id IS NULL;
+
 CREATE TABLE public.sys_website (
     sort bigint GENERATED BY DEFAULT AS IDENTITY NOT NULL,
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -403,7 +498,7 @@ CREATE TABLE public.sys_website (
     revision bigint DEFAULT 1 NOT NULL,
     category varchar(50) DEFAULT '默认' NOT NULL,
     remark varchar(200) DEFAULT '' NOT NULL,
-    config jsonb NOT NULL,
+    config jsonb DEFAULT '{"domains":[],"origins":[],"origin_host_header":"$host","origin_connect_timeout_seconds":10,"origin_read_timeout_seconds":30,"pass_client_ip":true,"health_check_enabled":true,"https_enabled":false,"minimum_tls_version":"1.2","force_https":true,"http2_enabled":true,"hsts_enabled":false,"certificate_ids":[]}'::jsonb NOT NULL,
     runtime jsonb DEFAULT '{}'::jsonb NOT NULL,
     created_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL,
@@ -469,9 +564,53 @@ CREATE TABLE public.sys_website_certificate_binding (
 CREATE INDEX idx_website_certificate_binding_consumer
     ON public.sys_website_certificate_binding (tenant_id, certificate_id, website_id);
 
+ALTER TABLE public.sys_task
+    ADD CONSTRAINT fk_task_website FOREIGN KEY (tenant_id, website_id)
+    REFERENCES public.sys_website(tenant_id, id);
+
+END;
+$flexedge_baseline$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0002_node_key_envelope",
+        .sql = std::string{R"sql(
+ALTER TABLE public.sys_node
+    ADD COLUMN IF NOT EXISTS node_key_envelope text;
+)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0003_remove_response_compression_policy_flags",
+        .sql = std::string{R"sql(
+DO $flexedge_remove_response_compression_policy_flags$
+BEGIN
+UPDATE public.sys_website
+SET config = config - 'response_compression_recompress' - 'response_compression_partial_content'
+WHERE config ? 'response_compression_recompress'
+   OR config ? 'response_compression_partial_content';
+
+UPDATE public.sys_task
+SET spec_snapshot = jsonb_set(
+    spec_snapshot,
+    '{config}',
+    (spec_snapshot -> 'config') - 'response_compression_recompress' - 'response_compression_partial_content',
+    false
+)
+WHERE kind = 'website'
+  AND jsonb_typeof(spec_snapshot -> 'config') = 'object'
+  AND ((spec_snapshot -> 'config') ? 'response_compression_recompress'
+       OR (spec_snapshot -> 'config') ? 'response_compression_partial_content');
+END;
+$flexedge_remove_response_compression_policy_flags$
+)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0004_logs",
+        .sql = std::string{R"sql(DO $flexedge_logs$
+BEGIN
+
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
-CREATE TABLE public.sys_website_access_log (
+CREATE TABLE IF NOT EXISTS public.sys_website_access_log (
     tenant_id uuid NOT NULL REFERENCES public.sys_tenant(id),
     occurred_at timestamptz NOT NULL,
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -483,18 +622,10 @@ CREATE TABLE public.sys_website_access_log (
     host varchar(253) NOT NULL,
     target varchar(2048) NOT NULL,
     status_code integer NOT NULL,
-    request_bytes bigint DEFAULT 0 NOT NULL,
     response_bytes bigint DEFAULT 0 NOT NULL,
     duration_ms integer DEFAULT 0 NOT NULL,
     user_agent varchar(512),
     referer varchar(512),
-    request_headers text,
-    request_body text,
-    request_body_truncated boolean DEFAULT false NOT NULL,
-    tls_fingerprint varchar(128),
-    response_headers text,
-    query_string text,
-    cookies text,
     created_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL,
     CONSTRAINT pk_website_access_log PRIMARY KEY (tenant_id, occurred_at, id),
     CONSTRAINT fk_website_access_log_node FOREIGN KEY (tenant_id, node_id)
@@ -509,14 +640,12 @@ CREATE TABLE public.sys_website_access_log (
     CONSTRAINT ck_website_access_log_target CHECK (target <> '')
 );
 
-CREATE INDEX idx_website_access_log_website_ingested
-    ON public.sys_website_access_log (tenant_id, website_id, created_at DESC, id DESC);
-CREATE INDEX idx_website_access_log_node
-    ON public.sys_website_access_log (tenant_id, node_id, occurred_at DESC);
-CREATE INDEX idx_website_access_log_website_occurred
+CREATE INDEX IF NOT EXISTS idx_website_access_log_website
     ON public.sys_website_access_log (tenant_id, website_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_website_access_log_node
+    ON public.sys_website_access_log (tenant_id, node_id, occurred_at DESC);
 
-CREATE TABLE public.sys_node_log (
+CREATE TABLE IF NOT EXISTS public.sys_node_log (
     tenant_id uuid NOT NULL REFERENCES public.sys_tenant(id),
     occurred_at timestamptz NOT NULL,
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -533,14 +662,258 @@ CREATE TABLE public.sys_node_log (
     CONSTRAINT ck_node_log_message CHECK (message <> '')
 );
 
+CREATE INDEX IF NOT EXISTS idx_node_log_node
+    ON public.sys_node_log (tenant_id, node_id, occurred_at DESC);
+
+PERFORM create_hypertable('public.sys_website_access_log', 'occurred_at',
+                          if_not_exists => TRUE, migrate_data => TRUE);
+PERFORM create_hypertable('public.sys_node_log', 'occurred_at',
+                          if_not_exists => TRUE, migrate_data => TRUE);
+
+END;
+$flexedge_logs$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0005_access_log_details",
+        .sql = std::string{R"sql(DO $flexedge_access_log_details$
+BEGIN
+
+ALTER TABLE public.sys_website_access_log
+    ADD COLUMN IF NOT EXISTS request_headers text,
+    ADD COLUMN IF NOT EXISTS request_body text,
+    ADD COLUMN IF NOT EXISTS request_body_truncated boolean DEFAULT false NOT NULL,
+    ADD COLUMN IF NOT EXISTS tls_fingerprint varchar(128);
+
+END;
+$flexedge_access_log_details$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0006_persistent_node_credentials",
+        .sql = std::string{R"sql(DO $flexedge_node_credentials$
+BEGIN
+
+ALTER TABLE public.sys_node
+    DROP CONSTRAINT IF EXISTS ck_node_registration,
+    DROP CONSTRAINT IF EXISTS ck_node_device_identity,
+    DROP CONSTRAINT IF EXISTS ck_node_key_hash;
+
+ALTER TABLE public.sys_node
+    RENAME COLUMN node_key_hash TO node_secret_hash;
+
+ALTER TABLE public.sys_node
+    RENAME COLUMN node_key_envelope TO node_secret_envelope;
+
+ALTER TABLE public.sys_node
+    DROP COLUMN device_key_fingerprint,
+    DROP COLUMN device_public_key_pem;
+
+UPDATE public.sys_node
+SET registration_status = 'pending',
+    agent_id = replace(gen_random_uuid()::text, '-', ''),
+    registered_at = NULL,
+    last_heartbeat_at = NULL,
+    applied_node_spec_revision = 0,
+    node_spec_digest = NULL,
+    active_release_id = NULL,
+    active_manifest_digest = NULL,
+    last_apply_phase = NULL,
+    last_apply_error_code = NULL,
+    last_apply_error = NULL,
+    last_apply_retryable = NULL,
+    runtime = '{}'::jsonb,
+    revision = revision + 1,
+    updated_at = NOW()
+WHERE deleted_at IS NULL;
+
+UPDATE public.sys_node
+SET agent_id = NULL
+WHERE deleted_at IS NOT NULL;
+
+DROP INDEX IF EXISTS public.uk_node_agent;
+DROP INDEX IF EXISTS public.uk_node_device_key;
+
+ALTER TABLE public.sys_node
+    ALTER COLUMN agent_id TYPE varchar(32);
+
+CREATE UNIQUE INDEX uk_node_agent
+    ON public.sys_node (agent_id) WHERE deleted_at IS NULL;
+
+ALTER TABLE public.sys_node
+    ADD CONSTRAINT ck_node_secret_hash CHECK (
+        node_secret_hash IS NULL OR node_secret_hash ~ '^[0-9a-f]{64}$'
+    ),
+    ADD CONSTRAINT ck_node_registration
+        CHECK (registration_status IN ('pending', 'registered')),
+    ADD CONSTRAINT ck_node_credentials CHECK (
+        deleted_at IS NOT NULL OR
+        (agent_id ~ '^[0-9a-f]{32}$' AND node_secret_hash ~ '^[0-9a-f]{64}$' AND
+         node_secret_envelope IS NOT NULL AND
+         ((registration_status = 'pending' AND registered_at IS NULL) OR
+          (registration_status = 'registered' AND registered_at IS NOT NULL)))
+    );
+
+END;
+$flexedge_node_credentials$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0007_access_log_advanced_fields",
+        .sql = std::string{R"sql(DO $flexedge_access_log_advanced_fields$
+BEGIN
+
+ALTER TABLE public.sys_website_access_log
+    ADD COLUMN IF NOT EXISTS response_headers text,
+    ADD COLUMN IF NOT EXISTS query_string text,
+    ADD COLUMN IF NOT EXISTS cookies text;
+
+END;
+$flexedge_access_log_advanced_fields$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0008_canonical_website_config",
+        .sql = std::string{R"sql(DO $flexedge_canonical_website_config$
+BEGIN
+
+UPDATE public.sys_website
+SET config = '{
+    "access_log_enabled": true,
+    "access_log_request_headers": false,
+    "access_log_request_body": false,
+    "access_log_response_headers": false,
+    "access_log_query_params": false,
+    "access_log_cookies": false,
+    "access_log_referer": false,
+    "access_log_user_agent": false,
+    "access_log_status_code_ranges": ["1xx", "2xx", "3xx", "4xx", "5xx"],
+    "access_log_client_abort": false,
+    "response_compression_enabled": true,
+    "response_compression_min_bytes": 1024,
+    "response_compression_max_bytes": 33554432,
+    "response_compression_algorithms": ["zstd", "br", "gzip"],
+    "response_compression_mime_types": [
+        "text/*", "application/javascript", "application/json", "application/atom+xml",
+        "application/rss+xml", "application/xhtml+xml", "image/svg+xml"
+    ],
+    "response_compression_extensions": [
+        ".js", ".json", ".html", ".htm", ".xml", ".css", ".woff2", ".txt"
+    ],
+    "response_compression_excluded_extensions": [".apk", ".ipa"]
+}'::jsonb || config
+WHERE deleted_at IS NULL;
+
+ALTER TABLE public.sys_website
+    ALTER COLUMN config DROP DEFAULT;
+
+END;
+$flexedge_canonical_website_config$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0009_cluster_release_protocol_version",
+        .sql = std::string{R"sql(DO $flexedge_cluster_release_protocol_version$
+BEGIN
+
+ALTER TABLE public.sys_cluster_release
+    ADD COLUMN protocol_version integer;
+
+UPDATE public.sys_cluster_release
+SET protocol_version = 1;
+
+ALTER TABLE public.sys_cluster_release
+    ALTER COLUMN protocol_version SET NOT NULL,
+    ADD CONSTRAINT ck_cluster_release_protocol_version CHECK (protocol_version > 0);
+
+END;
+$flexedge_cluster_release_protocol_version$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0010_cluster_release_schema_version",
+        .sql = std::string{R"sql(DO $flexedge_cluster_release_schema_version$
+BEGIN
+
+ALTER TABLE public.sys_cluster_release
+    DROP CONSTRAINT ck_cluster_release_protocol_version;
+
+ALTER TABLE public.sys_cluster_release
+    RENAME COLUMN protocol_version TO schema_version;
+
+ALTER TABLE public.sys_cluster_release
+    ADD CONSTRAINT ck_cluster_release_schema_version CHECK (schema_version > 0);
+
+END;
+$flexedge_cluster_release_schema_version$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0011_cluster_release_schema_constraint",
+        .sql = std::string{R"sql(DO $flexedge_cluster_release_schema_constraint$
+BEGIN
+
+IF EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid = 'public.sys_cluster_release'::regclass
+      AND conname = 'sys_cluster_release_protocol_version_not_null'
+) THEN
+    ALTER TABLE public.sys_cluster_release
+        RENAME CONSTRAINT sys_cluster_release_protocol_version_not_null
+        TO sys_cluster_release_schema_version_not_null;
+END IF;
+
+END;
+$flexedge_cluster_release_schema_constraint$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0012_access_log_tail_index",
+        .sql = std::string{R"sql(DO $flexedge_access_log_tail_index$
+BEGIN
+
+DROP INDEX IF EXISTS public.idx_website_access_log_website;
+
+CREATE INDEX idx_website_access_log_website_ingested
+    ON public.sys_website_access_log
+    (tenant_id, website_id, created_at DESC, id DESC);
+
+END;
+$flexedge_access_log_tail_index$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0013_node_log_tail_index",
+        .sql = std::string{R"sql(DO $flexedge_node_log_tail_index$
+BEGIN
+
+DROP INDEX IF EXISTS public.idx_node_log_node;
+
 CREATE INDEX idx_node_log_node_ingested
-    ON public.sys_node_log (tenant_id, node_id, created_at DESC, id DESC);
+    ON public.sys_node_log
+    (tenant_id, node_id, created_at DESC, id DESC);
 
-PERFORM create_hypertable('public.sys_website_access_log', 'occurred_at');
-PERFORM create_hypertable('public.sys_node_log', 'occurred_at');
+END;
+$flexedge_node_log_tail_index$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0014_release_task_deadline",
+        .sql = std::string{R"sql(DO $flexedge_release_task_deadline$
+BEGIN
 
--- One row is the current dirty marker for an aggregate. The aggregate revision and
--- its current configuration remain the source of truth; completed work is not kept.
+ALTER TABLE public.sys_task
+    ADD COLUMN deadline_at timestamptz;
+
+UPDATE public.sys_task
+SET deadline_at = created_at + INTERVAL '2 minutes'
+WHERE kind = 'release' AND status = 'waiting' AND deadline_at IS NULL;
+
+CREATE INDEX idx_task_release_deadline
+    ON public.sys_task (deadline_at)
+    WHERE kind = 'release' AND status = 'waiting' AND deadline_at IS NOT NULL;
+
+END;
+$flexedge_release_task_deadline$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0015_edgeadmin_sync_markers",
+        .sql = std::string{R"sql(DO $flexedge_edgeadmin_sync_markers$
+BEGIN
+
+-- A sync row is the current dirty marker for one aggregate. New changes update this
+-- row in place; the aggregate revision and current config remain the source of truth.
 CREATE TABLE public.sys_sync_task (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
     tenant_id uuid NOT NULL REFERENCES public.sys_tenant(id),
@@ -584,7 +957,7 @@ CREATE TABLE public.sys_sync_task (
         (resource_type = 'provider' AND operation = 'verify') OR
         (resource_type = 'dns_zone' AND operation IN ('sync', 'sync_local', 'sync_remote', 'delete')) OR
         (resource_type = 'certificate' AND operation IN ('issue', 'renew')) OR
-        (resource_type = 'website' AND operation = 'apply')
+        (resource_type = 'website' AND operation IN ('apply', 'delete'))
     ),
     CONSTRAINT ck_sync_task_version CHECK (
         version > 0 AND processed_version >= 0 AND processed_version <= version
@@ -600,8 +973,66 @@ CREATE INDEX idx_sync_task_claim
     ON public.sys_sync_task (tenant_id, resource_type, is_done, is_ok, next_attempt_at, updated_at)
     WHERE lease_until IS NULL;
 
--- Immutable result events let connected clients consume every worker result without
--- inferring transitions from a bounded snapshot of the current-state markers.
+DROP TABLE IF EXISTS public.sys_task;
+DROP SEQUENCE IF EXISTS public.sys_task_sort_seq;
+
+END;
+$flexedge_edgeadmin_sync_markers$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0016_sync_task_infinite_retry",
+        .sql = std::string{R"sql(DO $flexedge_sync_task_infinite_retry$
+BEGIN
+
+UPDATE public.sys_sync_task
+SET is_done = FALSE,
+    is_ok = FALSE,
+    next_attempt_at = NOW(),
+    lease_owner = NULL,
+    lease_until = NULL,
+    updated_at = NOW()
+WHERE is_done AND NOT is_ok;
+
+END;
+$flexedge_sync_task_infinite_retry$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0017_website_route_rules",
+        .sql = std::string{R"sql(DO $flexedge_website_route_rules$
+BEGIN
+
+UPDATE public.sys_website
+SET config = '{"route_rules": []}'::jsonb || config
+WHERE deleted_at IS NULL;
+
+END;
+$flexedge_website_route_rules$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0018_website_dashboard_index",
+        .sql = std::string{R"sql(DO $flexedge_website_dashboard_index$
+BEGIN
+
+CREATE INDEX IF NOT EXISTS idx_website_access_log_website_occurred
+    ON public.sys_website_access_log (tenant_id, website_id, occurred_at DESC);
+
+END;
+$flexedge_website_dashboard_index$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0019_access_log_request_bytes",
+        .sql = std::string{R"sql(DO $flexedge_access_log_request_bytes$
+BEGIN
+
+ALTER TABLE public.sys_website_access_log
+    ADD COLUMN IF NOT EXISTS request_bytes bigint DEFAULT 0 NOT NULL;
+
+END;
+$flexedge_access_log_request_bytes$)sql"},
+    }},
+    ruvia::DbMigration{{
+        .id = "0020_sync_result_events",
+        .sql = std::string{R"sql(
 CREATE TABLE public.sys_sync_event (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tenant_id uuid NOT NULL REFERENCES public.sys_tenant(id),
@@ -623,10 +1054,9 @@ CREATE INDEX idx_sync_event_tenant_id
     ON public.sys_sync_event (tenant_id, id);
 CREATE INDEX idx_sync_event_emitted_at
     ON public.sys_sync_event (emitted_at);
-
-END;
-$flexedge_baseline$)sql"},
+)sql"},
     }},
+
 };
 
 } // namespace service::config
