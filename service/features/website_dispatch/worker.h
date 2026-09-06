@@ -1,19 +1,18 @@
 #pragma once
 
 #include <chrono>
-#include <cstdint>
+#include <cstddef>
 #include <exception>
-#include <optional>
 #include <string>
-#include <string_view>
 
 #include <ruvia/core/Task.h>
 
 #include "service/features/background/marker_worker_loop.h"
 #include "service/features/background/worker_pool.h"
-#include "service/features/logging/logger.h"
 #include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
+#include "service/features/website_dispatch/persistence.h"
+#include "service/features/website_dispatch/task.h"
 #include "service/features/website_dns/runtime.h"
 
 namespace service::website_dispatch {
@@ -25,71 +24,10 @@ inline constexpr std::chrono::seconds kLeaseRecoveryInterval{15};
 inline constexpr std::chrono::minutes kReconciliationInterval{15};
 inline constexpr std::size_t kMaxJobsPerTick{8};
 
-struct WebsiteMarker final {
-    std::string id;
-    std::string tenantId;
-    std::string resourceId;
-    std::int64_t version{};
-    std::int64_t failures{};
-};
-
-inline ruvia::Task<void> reconcileMarkers(service::background::WorkerContext& context) {
-    const auto missing = co_await context.db().query(
-        "SELECT website.tenant_id, website.id, website.revision FROM sys_website website WHERE "
-        "website.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM sys_sync_task marker WHERE "
-        "marker.tenant_id = website.tenant_id AND marker.resource_type = 'website' AND "
-        "marker.resource_id = website.id AND marker.version = website.revision) ORDER BY "
-        "website.updated_at ASC LIMIT 64");
-    for (const auto& row : missing) {
-        auto transaction = co_await context.db().beginTransaction();
-        const auto tenantId = std::string(row[0].value().value_or(""));
-        const auto websiteId = std::string(row[1].value().value_or(""));
-        const auto revision = row[2].as<std::int64_t>().value_or(1);
-        const auto locked = co_await transaction.query(
-            "SELECT revision FROM sys_website WHERE tenant_id = $1 AND id = $2 AND revision = $3 "
-            "AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
-            tenantId, websiteId, revision);
-        if (!locked.empty()) {
-            (void)co_await service::sync_runtime::upsertMarker(
-                transaction, tenantId, service::sync_runtime::MarkerResourceType::website,
-                websiteId, service::sync_runtime::MarkerOperation::apply, revision);
-        }
-        co_await transaction.commit();
-    }
-    co_return;
-}
-
 inline ruvia::Task<void> recoverStaleMarkers(service::background::WorkerContext& context) {
     co_await service::sync_runtime::recoverStaleRunning(
         context.db(), service::sync_runtime::MarkerResourceType::website);
     co_return;
-}
-
-inline ruvia::Task<std::optional<WebsiteMarker>>
-claim(service::background::WorkerContext& context) {
-    const auto rows = co_await context.db().query(
-        "WITH candidate AS (SELECT marker.id FROM sys_sync_task marker INNER JOIN sys_website "
-        "website ON website.tenant_id = marker.tenant_id AND website.id = marker.resource_id "
-        "WHERE marker.resource_type = 'website' AND NOT marker.is_done AND "
-        "marker.next_attempt_at <= NOW() AND marker.lease_until IS NULL AND "
-        "marker.version = website.revision AND website.deleted_at IS NULL ORDER BY "
-        "marker.next_attempt_at ASC, marker.updated_at ASC FOR UPDATE OF marker SKIP LOCKED LIMIT "
-        "1) "
-        "UPDATE sys_sync_task marker SET lease_owner = $1, lease_until = NOW() + INTERVAL '60 "
-        "seconds', updated_at = NOW() FROM candidate WHERE marker.id = candidate.id RETURNING "
-        "marker.id, marker.tenant_id, marker.resource_id, marker.version, marker.count_fails",
-        context.leaseOwner());
-    if (rows.empty()) {
-        co_return std::nullopt;
-    }
-    const auto& row = rows.front();
-    co_return WebsiteMarker{
-        .id = std::string(row[0].value().value_or("")),
-        .tenantId = std::string(row[1].value().value_or("")),
-        .resourceId = std::string(row[2].value().value_or("")),
-        .version = row[3].as<std::int64_t>().value_or(1),
-        .failures = row[4].as<std::int64_t>().value_or(0),
-    };
 }
 
 inline ruvia::Task<void> execute(service::background::WorkerContext& context,
@@ -97,22 +35,6 @@ inline ruvia::Task<void> execute(service::background::WorkerContext& context,
     const auto lease = service::sync_runtime::makeRunningLease(
         marker.tenantId, marker.id, marker.version, context.leaseOwner());
     co_await service::website_dns::probeWebsite(context, marker.resourceId, lease, marker.version);
-    co_return;
-}
-
-inline ruvia::Task<void> fail(service::background::WorkerContext& context,
-                              const WebsiteMarker& marker, std::string_view error) {
-    const auto lease = service::sync_runtime::makeRunningLease(
-        marker.tenantId, marker.id, marker.version, context.leaseOwner());
-    auto transaction = co_await context.db().beginTransaction();
-    const auto resultTransition = co_await service::sync_runtime::failRunningAndRecordEvent(
-        transaction, lease, service::sync_runtime::boundedError(error));
-    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
-                                                                resultTransition);
-    if (resultTransition.markerTransitioned) {
-        service::logging::error("Website sync marker " + marker.id +
-                                " failed: " + service::sync_runtime::boundedError(error));
-    }
     co_return;
 }
 
@@ -127,7 +49,7 @@ inline ruvia::Task<void> processMarker(service::background::WorkerContext& conte
         markerError = "网站同步发生未知错误";
     }
     if (!markerError.empty()) {
-        co_await fail(context, marker, markerError);
+        co_await failWebsiteMarker(context, marker, markerError);
     }
     co_return;
 }

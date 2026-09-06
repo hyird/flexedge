@@ -702,6 +702,24 @@ int main() {
     const auto syncRuntimeError = source("service/features/sync_runtime/error.h");
     REQUIRE(syncRuntimeError.contains("kMaxErrorMessageLength{1000}"));
     REQUIRE(syncRuntimeError.contains("inline std::string boundedError"));
+    const auto websiteDispatchWorker = source("service/features/website_dispatch/worker.h");
+    REQUIRE(websiteDispatchWorker.contains("website_dispatch/persistence.h"));
+    REQUIRE(websiteDispatchWorker.contains("website_dispatch/task.h"));
+    REQUIRE(!websiteDispatchWorker.contains("struct WebsiteMarker final"));
+    REQUIRE(!websiteDispatchWorker.contains("inline ruvia::Task<void> reconcileMarkers"));
+    REQUIRE(!websiteDispatchWorker.contains("inline ruvia::Task<void> fail("));
+    REQUIRE(!websiteDispatchWorker.contains("commitAndPublishResultEvent"));
+    REQUIRE(!websiteDispatchWorker.contains("eventRecorded"));
+    const auto websiteDispatchTask = source("service/features/website_dispatch/task.h");
+    REQUIRE(websiteDispatchTask.contains("struct WebsiteMarker final"));
+    const auto websiteDispatchPersistence =
+        source("service/features/website_dispatch/persistence.h");
+    REQUIRE(websiteDispatchPersistence.contains("reconcileMarkers"));
+    REQUIRE(
+        websiteDispatchPersistence.contains("inline ruvia::Task<std::optional<WebsiteMarker>>"));
+    REQUIRE(websiteDispatchPersistence.contains("failWebsiteMarker"));
+    REQUIRE(websiteDispatchPersistence.contains("failRunningAndRecordEvent"));
+    REQUIRE(websiteDispatchPersistence.contains("commitAndPublishResultEvent"));
     const auto providerVerificationWorker =
         source("service/features/provider_verification/worker.h");
     REQUIRE(providerVerificationWorker.contains("provider_verification/failure.h"));
@@ -799,16 +817,26 @@ int main() {
     REQUIRE(logSseTail.contains("tailResponseCursor"));
     REQUIRE(logSseTail.contains("advanceTailCursor"));
     REQUIRE(logSseTail.contains("sseClientDisconnected"));
-    for (const auto* logControllerPath : {
-             "service/domains/node/node.controller.h",
-             "service/domains/website/website.controller.h",
-         }) {
-        const auto controller = source(logControllerPath);
-        REQUIRE(controller.contains("log_ingest/sse_tail.h"));
-        REQUIRE(controller.contains("streamSseTail"));
-        REQUIRE(!controller.contains("receiveFor("));
-        REQUIRE(!controller.contains("advanceCursor("));
-    }
+    const auto nodeController = source("service/domains/node/node.controller.h");
+    REQUIRE(nodeController.contains("log_ingest/sse_tail.h"));
+    REQUIRE(nodeController.contains("streamSseTail"));
+    REQUIRE(nodeController.contains("node_runtime/fanout.h"));
+    REQUIRE(nodeController.contains("runtimeStreamBody"));
+    REQUIRE(nodeController.contains("node_runtime::fanout::hub().subscribe"));
+    REQUIRE(nodeController.contains("subscription.receiveFor("));
+    REQUIRE(nodeController.contains("event = \"node-state\""));
+    REQUIRE(!nodeController.contains("advanceCursor("));
+    const auto websiteController = source("service/domains/website/website.controller.h");
+    REQUIRE(websiteController.contains("log_ingest/sse_tail.h"));
+    REQUIRE(websiteController.contains("streamSseTail"));
+    REQUIRE(!websiteController.contains("receiveFor("));
+    REQUIRE(!websiteController.contains("advanceCursor("));
+    const auto nodeRuntimeFanout = source("service/features/node_runtime/fanout.h");
+    REQUIRE(nodeRuntimeFanout.contains("kSubscriberSignalCapacity{1}"));
+    REQUIRE(nodeRuntimeFanout.contains("class Hub final"));
+    REQUIRE(nodeRuntimeFanout.contains("Subscription"));
+    REQUIRE(nodeRuntimeFanout.contains("subscribe"));
+    REQUIRE(nodeRuntimeFanout.contains("publish"));
 
     REQUIRE(!std::filesystem::exists(sourceRoot / "service/domains/task/task.controller.h"));
     REQUIRE(!std::filesystem::exists(sourceRoot / "service/domains/task/task.service.h"));
@@ -883,8 +911,7 @@ int main() {
     REQUIRE(!server.contains("node-dispatch"));
     REQUIRE(server.contains("website-dispatch"));
 
-    for (const auto* path :
-         {"service/features/dns_sync/worker.h", "service/features/website_dispatch/worker.h"}) {
+    for (const auto* path : {"service/features/dns_sync/worker.h"}) {
         const auto worker = source(path);
         REQUIRE(worker.contains("sys_sync_task"));
         REQUIRE(worker.contains("recoverStaleRunning"));
