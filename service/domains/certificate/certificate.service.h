@@ -37,11 +37,6 @@
 
 namespace service::certificate {
 
-struct CertificateDownload final {
-    std::string filename;
-    std::string archive;
-};
-
 class CertificateService {
   public:
     ruvia::Task<CertificatePageDataDto>
@@ -303,8 +298,8 @@ class CertificateService {
         co_return;
     }
 
-    ruvia::Task<CertificateDownload> download(ruvia::Context& c, const std::string& tenantId,
-                                              const std::string& id) {
+    ruvia::Task<service::certificate_material::CertificateDownload>
+    download(ruvia::Context& c, const std::string& tenantId, const std::string& id) {
         const auto rows = co_await c.db().query(
             "SELECT domain, material::text, COALESCE(issued_revision > 0 AND expires_at > NOW(), "
             "FALSE) FROM sys_certificate WHERE id = $1 AND tenant_id = $2 AND deleted_at IS "
@@ -333,7 +328,7 @@ class CertificateService {
                 return CertificateService::buildCertificateArchive(archiveFilename, chain,
                                                                    privateKey.view());
             });
-        co_return CertificateDownload{
+        co_return service::certificate_material::CertificateDownload{
             filename + ".zip",
             std::move(archive),
         };

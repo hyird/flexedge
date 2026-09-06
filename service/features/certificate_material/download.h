@@ -6,6 +6,11 @@
 
 namespace service::certificate_material {
 
+struct CertificateDownload final {
+    std::string filename;
+    std::string archive;
+};
+
 inline std::string archiveFilename(std::string_view domain) {
     if (domain.starts_with("*.")) {
         domain.remove_prefix(2);
