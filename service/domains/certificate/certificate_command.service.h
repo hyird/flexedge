@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <string_view>
 
@@ -15,32 +14,17 @@
 #include "service/common/database.h"
 #include "service/common/http.h"
 #include "service/domains/certificate/certificate.error.h"
-#include "service/domains/certificate/certificate_read.service.h"
 #include "service/domains/certificate/certificate.types.h"
 #include "service/features/certificate/model.h"
 #include "service/features/certificate/dns_challenge.h"
-#include "service/features/certificate_material/download.h"
 #include "service/features/certificate/queue.h"
 #include "service/features/dns/registry.h"
 #include "service/features/sync_runtime/state.h"
 
 namespace service::certificate {
 
-class CertificateService final {
+class CertificateCommandService final {
   public:
-    ruvia::Task<CertificatePageDataDto>
-    list(ruvia::Context& c, const std::string& tenantId, std::int64_t page, std::int64_t pageSize,
-         std::int64_t skip, const std::optional<std::string>& keyword,
-         std::optional<std::string_view> status, std::optional<bool> usable) {
-        co_return co_await certificateReadService().list(c, tenantId, page, pageSize, skip, keyword,
-                                                         status, usable);
-    }
-
-    ruvia::Task<CertificateDto> get(ruvia::Context& c, const std::string& tenantId,
-                                    const std::string& id) {
-        co_return co_await certificateReadService().get(c, tenantId, id);
-    }
-
     ruvia::Task<void> create(ruvia::Context& c, const std::string& tenantId,
                              const CreateCertificateBody& body) {
         const auto& domainInput = body.get<"domain">();
@@ -219,11 +203,6 @@ class CertificateService final {
         co_return;
     }
 
-    ruvia::Task<service::certificate_material::CertificateDownload>
-    download(ruvia::Context& c, const std::string& tenantId, const std::string& id) {
-        co_return co_await certificateReadService().download(c, tenantId, id);
-    }
-
   private:
     static std::string
     serializeCertificateConfig(ruvia::Context& c,
@@ -242,8 +221,8 @@ class CertificateService final {
     }
 };
 
-inline CertificateService& certificateService() {
-    static CertificateService service;
+inline CertificateCommandService& certificateCommandService() {
+    static CertificateCommandService service;
     return service;
 }
 

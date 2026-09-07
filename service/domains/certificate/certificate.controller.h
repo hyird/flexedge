@@ -12,7 +12,8 @@
 #include "service/common/http.h"
 #include "service/common/types.h"
 #include "service/domains/certificate/certificate.schema.h"
-#include "service/domains/certificate/certificate.service.h"
+#include "service/domains/certificate/certificate_command.service.h"
+#include "service/domains/certificate/certificate_read.service.h"
 #include "service/middleware/auth.h"
 
 namespace service::certificate {
@@ -70,26 +71,26 @@ class CertificateController final : public ruvia::Controller<CertificateControll
         const auto [page, pageSize, skip] = service::common::requirePagination(c);
         const auto keyword = service::common::requireKeyword(c.req().query("keyword"));
         co_return c.json(service::common::ok<CertificatePageResponse>(
-            c, co_await certificateService().list(c, tenantId(c), page, pageSize, skip, keyword,
-                                                  requireStatus(c), requireUsable(c))));
+            c, co_await certificateReadService().list(c, tenantId(c), page, pageSize, skip, keyword,
+                                                      requireStatus(c), requireUsable(c))));
     }
 
     ruvia::Task<ruvia::HttpResponse> create(ruvia::Context& c) {
-        co_await certificateService().create(c, tenantId(c),
-                                             c.req().validated<CreateCertificateBody>());
+        co_await certificateCommandService().create(c, tenantId(c),
+                                                    c.req().validated<CreateCertificateBody>());
         service::common::setRevisionEtag(c, 1);
         co_return c.json(service::common::operation(c, "证书申请已提交"));
     }
 
     ruvia::Task<ruvia::HttpResponse> get(ruvia::Context& c) {
-        auto data = co_await certificateService().get(c, tenantId(c), requireId(c));
+        auto data = co_await certificateReadService().get(c, tenantId(c), requireId(c));
         service::common::setRevisionEtag(c, data.get<"revision">().value);
         co_return c.json(service::common::ok<CertificateDetailResponse>(c, std::move(data)));
     }
 
     ruvia::Task<ruvia::HttpResponse> update(ruvia::Context& c) {
         const auto revision = expectedRevision(c);
-        co_await certificateService().update(
+        co_await certificateCommandService().update(
             c, tenantId(c), requireId(c), revision,
             c.req().validatedJson<service::certificate_issuance::CertificateConfigInput>());
         service::common::setRevisionEtag(c, revision + 1);
@@ -98,13 +99,13 @@ class CertificateController final : public ruvia::Controller<CertificateControll
 
     ruvia::Task<ruvia::HttpResponse> renew(ruvia::Context& c) {
         const auto revision = expectedRevision(c);
-        co_await certificateService().renew(c, tenantId(c), requireId(c), revision);
+        co_await certificateCommandService().renew(c, tenantId(c), requireId(c), revision);
         service::common::setRevisionEtag(c, revision);
         co_return c.json(service::common::operation(c, "重新签发已提交"));
     }
 
     ruvia::Task<ruvia::HttpResponse> download(ruvia::Context& c) {
-        auto data = co_await certificateService().download(c, tenantId(c), requireId(c));
+        auto data = co_await certificateReadService().download(c, tenantId(c), requireId(c));
         c.header("cache-control", "no-store");
         c.header("content-disposition", "attachment; filename=\"" + data.filename + "\"");
         c.header("content-type", "application/zip");
@@ -114,7 +115,7 @@ class CertificateController final : public ruvia::Controller<CertificateControll
 
     ruvia::Task<ruvia::HttpResponse> remove(ruvia::Context& c) {
         const auto revision = expectedRevision(c);
-        co_await certificateService().remove(c, tenantId(c), requireId(c), revision);
+        co_await certificateCommandService().remove(c, tenantId(c), requireId(c), revision);
         service::common::setRevisionEtag(c, revision + 1);
         co_return c.json(service::common::operation(c, "证书已删除"));
     }
