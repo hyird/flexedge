@@ -688,6 +688,9 @@ int main() {
     REQUIRE(!dnsSyncWorker.contains("inline TaskFailure classifyTaskFailure"));
     REQUIRE(!dnsSyncWorker.contains("struct DnsTask final"));
     REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<std::optional<DnsTask>> claim"));
+    REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<void> fail("));
+    REQUIRE(!dnsSyncWorker.contains("commitAndPublishResultEvent"));
+    REQUIRE(!dnsSyncWorker.contains("eventRecorded"));
     REQUIRE(!dnsSyncWorker.contains("struct ZoneSyncState final"));
     REQUIRE(!dnsSyncWorker.contains("struct RemoteZoneData final"));
     REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<void>\nimportInitialRemoteRecords"));
@@ -709,6 +712,9 @@ int main() {
     REQUIRE(dnsZonePersistence.contains("storeConflicts"));
     REQUIRE(dnsZonePersistence.contains("persistRemoteMerge"));
     REQUIRE(dnsZonePersistence.contains("persistSyncedZone"));
+    REQUIRE(dnsZonePersistence.contains("failDnsTask"));
+    REQUIRE(dnsZonePersistence.contains("failRunningAndRecordEvent"));
+    REQUIRE(dnsZonePersistence.contains("commitAndPublishResultEvent"));
     const auto dnsReconciliation = source("service/features/dns_sync/reconciliation.h");
     REQUIRE(dnsReconciliation.contains("struct ManagedRecord final"));
     REQUIRE(dnsReconciliation.contains("inline RemoteMergePlan\nplanRemoteMerge"));
@@ -940,18 +946,13 @@ int main() {
     REQUIRE(!server.contains("node-dispatch"));
     REQUIRE(server.contains("website-dispatch"));
 
-    for (const auto* path : {"service/features/dns_sync/worker.h"}) {
-        const auto worker = source(path);
-        REQUIRE(worker.contains("sys_sync_task"));
-        REQUIRE(worker.contains("recoverStaleRunning"));
-        REQUIRE(worker.contains("commitAndPublishResultEvent"));
-        REQUIRE(!worker.contains("publishResultEvent"));
-        REQUIRE(!worker.contains("eventRecorded"));
-        REQUIRE(!worker.contains("sys_task"));
-        REQUIRE(!worker.contains("task_runtime"));
-        REQUIRE(!worker.contains("spec_snapshot"));
-        REQUIRE(!worker.contains("RunningMarkerLease lease"));
-    }
+    REQUIRE(dnsSyncWorker.contains("sys_sync_task"));
+    REQUIRE(dnsSyncWorker.contains("recoverStaleRunning"));
+    REQUIRE(!dnsSyncWorker.contains("publishResultEvent"));
+    REQUIRE(!dnsSyncWorker.contains("sys_task"));
+    REQUIRE(!dnsSyncWorker.contains("task_runtime"));
+    REQUIRE(!dnsSyncWorker.contains("spec_snapshot"));
+    REQUIRE(!dnsSyncWorker.contains("RunningMarkerLease lease"));
     const auto dnsSnapshot = source("service/features/dns_sync/snapshot.h");
     REQUIRE(dnsSnapshot.contains("challenge_records"));
     const auto dnsChallenge = source("service/features/certificate/dns_challenge.h");
