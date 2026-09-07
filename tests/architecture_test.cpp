@@ -946,6 +946,9 @@ int main() {
     const auto websiteDetailSheet = source("web/features/websites/website-detail-sheet.tsx");
     REQUIRE(websiteDetailSheet.contains("/dashboard/stream"));
     REQUIRE(!websiteDetailSheet.contains("refetchInterval"));
+    const auto webMain = source("web/main.tsx");
+    REQUIRE(webMain.contains("staleTime: Infinity"));
+    REQUIRE(webMain.contains("refetchOnReconnect: false"));
     const auto nodeRuntimeFanout = source("service/features/node_runtime/fanout.h");
     REQUIRE(nodeRuntimeFanout.contains("kSubscriberSignalCapacity{1}"));
     REQUIRE(nodeRuntimeFanout.contains("class Hub final"));
@@ -974,6 +977,8 @@ int main() {
     const auto syncEventMonitor = source("web/components/sync-event-monitor.tsx");
     REQUIRE(syncEventMonitor.contains("/sync-events/"));
     REQUIRE(syncEventMonitor.contains("queryKeysForSyncEvents"));
+    REQUIRE(syncEventMonitor.contains("stream.addEventListener('ready'"));
+    REQUIRE(syncEventMonitor.contains("const refreshAll"));
     const auto syncEvents = source("web/lib/sync-events.ts");
     REQUIRE(syncEvents.contains("syncEventRefreshKeys"));
     REQUIRE(syncEvents.contains("queryKeys.providers"));
