@@ -439,7 +439,7 @@ export function WebsiteDialog({
                   <TabsTrigger value='routes'>路由规则</TabsTrigger>
                 </TabsList>
               </div>
-              <ScrollArea className='min-h-0 min-w-0 flex-1 rounded-lg border px-4'>
+              <ScrollArea className='min-h-0 min-w-0 flex-1 overflow-hidden rounded-lg border px-4'>
                 <WebsiteBasicTab
                   form={form}
                   clusters={clusters}
