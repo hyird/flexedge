@@ -363,7 +363,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
             respond(streamId, 421);
             return;
         }
-        state.route = matchedRouteRule(*state.website, state.request.method, state.request.target);
+        state.route = matchedRouteRule(*state.website, state.request.method, state.request.target, state.request.authority);
         if (state.route != nullptr && state.route->action() == "redirect") {
             BufferedProxyResponse response;
             response.status = static_cast<std::uint16_t>(state.route->redirect_status());

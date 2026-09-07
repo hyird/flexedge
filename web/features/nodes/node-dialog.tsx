@@ -131,7 +131,7 @@ export function NodeDialog({
             className='grid gap-4 px-4'
             onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
           >
-            <div className='grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto_auto]'>
+            <div className='grid items-start gap-4 sm:grid-cols-3'>
               <FormField
                 control={form.control}
                 name='name'
@@ -217,7 +217,7 @@ export function NodeDialog({
               {endpoints.fields.map((endpoint, index) => (
                 <div
                   key={endpoint.formKey}
-                  className='grid gap-2 rounded-md border p-3 sm:grid-cols-[1fr_160px_auto]'
+                  className='grid items-start gap-3 rounded-md border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'
                 >
                   <FormField
                     control={form.control}

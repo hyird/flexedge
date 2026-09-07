@@ -6,13 +6,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
-import {
-  FilePenLine,
-  FileText,
-  Plus,
-  Trash2,
-  Eye,
-} from 'lucide-react'
+import { FilePenLine, FileText, Plus, Trash2, Eye } from 'lucide-react'
 import { toast } from 'sonner'
 import { getData, sendData } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
@@ -40,11 +34,10 @@ import { ResourceToolbar } from '@/components/resource-toolbar'
 import { RowActions } from '@/components/row-actions'
 import { StatusBadge } from '@/components/status-badge'
 import { AccessLogSheet } from './access-log-sheet'
-import { WebsiteDialog } from './website-dialog'
-import { WebsiteDetailSheet } from './website-detail-sheet'
-import { originGroupLabel } from './website-display'
 import type { Website } from './types'
-
+import { WebsiteDetailSheet } from './website-detail-sheet'
+import { WebsiteDialog } from './website-dialog'
+import { originGroupLabel } from './website-display'
 
 export function Websites() {
   const queryClient = useQueryClient()
@@ -67,7 +60,14 @@ export function Websites() {
       getData<PageData<Cluster>>('/clusters/').then((data) => data.list),
   })
   const query = useQuery({
-    queryKey: [...queryKeys.websites, page, pageSize, keyword, clusterId, status],
+    queryKey: [
+      ...queryKeys.websites,
+      page,
+      pageSize,
+      keyword,
+      clusterId,
+      status,
+    ],
     placeholderData: keepPreviousData,
     queryFn: () =>
       getData<PageData<Website>>('/websites/', {
@@ -206,7 +206,7 @@ export function Websites() {
         ),
       },
     ],
-    []
+    [setDialog]
   )
 
   return (
@@ -284,13 +284,16 @@ export function Websites() {
         emptyTitle='暂无网站'
         emptyDescription='创建网站并将流量分发到边缘集群。'
       />
+
       {dialog && (
         <WebsiteDialog
           key={dialog === 'new' ? 'new' : dialog.id}
           website={dialog === 'new' ? undefined : dialog}
           clusters={clustersQuery.data ?? []}
           open
-          onOpenChange={(open) => !open && setDialog(null)}
+          onOpenChange={(open) => {
+            if (!open) setDialog(null)
+          }}
         />
       )}
       <WebsiteDetailSheet
