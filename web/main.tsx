@@ -20,7 +20,12 @@ const queryClient = new QueryClient({
           error instanceof AxiosError && [401, 403].includes(error.status ?? 0)
         ) && failureCount < 2,
       refetchOnWindowFocus: false,
-      staleTime: 10_000,
+      // Resource data changes only through an explicit local mutation or a
+      // server-sent event. Keep it fresh until one of those signals arrives;
+      // remounting a page or restoring network connectivity must not become a
+      // hidden background refresh loop.
+      staleTime: Infinity,
+      refetchOnReconnect: false,
     },
     mutations: {
       onError: (error) => toast.error(apiErrorMessage(error)),
