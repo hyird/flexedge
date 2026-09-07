@@ -55,7 +55,7 @@ set(RUVIA_ENABLE_REDIS ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
     ruvia
     GIT_REPOSITORY https://github.com/hyird/Ruvia.git
-    GIT_TAG 710bc4841da7253c1db2aa8557f2f0828b313cfb # main, 2026-09-06
+    GIT_TAG 0ca74f8597f32ce9a260c1d669758e1f7721589b # main, 2026-09-07
 )
 FetchContent_MakeAvailable(ruvia)
 find_package(asio CONFIG REQUIRED)
