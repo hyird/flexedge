@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -16,41 +15,14 @@
 #include "service/common/database.h"
 #include "service/common/http.h"
 #include "service/domains/dns_zone/dns_zone.error.h"
-#include "service/domains/dns_zone/dns_zone_read.service.h"
 #include "service/domains/dns_zone/dns_zone.types.h"
 #include "service/features/dns_sync/queue.h"
 #include "service/features/dns_sync/snapshot.h"
 
 namespace service::dns_zone {
 
-class DnsZoneService final {
+class DnsZoneCommandService final {
   public:
-    ruvia::Task<DnsZoneOptionListDataDto> options(ruvia::Context& c, const std::string& tenantId,
-                                                  const std::optional<std::string>& keyword,
-                                                  const std::optional<std::string>& ownerOf,
-                                                  const std::optional<bool>& available) {
-        co_return co_await dnsZoneReadService().options(c, tenantId, keyword, ownerOf, available);
-    }
-
-    ruvia::Task<AvailableDnsZoneListDataDto>
-    available(ruvia::Context& c, const std::string& tenantId, const std::string& providerId) {
-        co_return co_await dnsZoneReadService().available(c, tenantId, providerId);
-    }
-
-    ruvia::Task<DnsZonePageDataDto> list(ruvia::Context& c, const std::string& tenantId,
-                                         std::int64_t page, std::int64_t pageSize,
-                                         std::int64_t skip,
-                                         const std::optional<std::string>& keyword,
-                                         const std::optional<std::string>& providerId) {
-        co_return co_await dnsZoneReadService().list(c, tenantId, page, pageSize, skip, keyword,
-                                                     providerId);
-    }
-
-    ruvia::Task<DnsZoneDto> get(ruvia::Context& c, const std::string& tenantId,
-                                const std::string& id) {
-        co_return co_await dnsZoneReadService().get(c, tenantId, id);
-    }
-
     ruvia::Task<void> create(ruvia::Context& c, const std::string& tenantId,
                              const CreateDnsZoneBody& body) {
         const auto& providerIdInput = body.get<"dnsProviderId">();
@@ -311,8 +283,8 @@ class DnsZoneService final {
     }
 };
 
-inline DnsZoneService& dnsZoneService() {
-    static DnsZoneService service;
+inline DnsZoneCommandService& dnsZoneCommandService() {
+    static DnsZoneCommandService service;
     return service;
 }
 

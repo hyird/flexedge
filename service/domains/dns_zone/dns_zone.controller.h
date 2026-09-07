@@ -11,7 +11,8 @@
 #include "service/common/domain_name.h"
 #include "service/common/http.h"
 #include "service/domains/dns_zone/dns_zone.schema.h"
-#include "service/domains/dns_zone/dns_zone.service.h"
+#include "service/domains/dns_zone/dns_zone_command.service.h"
+#include "service/domains/dns_zone/dns_zone_read.service.h"
 #include "service/middleware/auth.h"
 
 namespace service::dns_zone {
@@ -50,7 +51,7 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
                                            "dns_provider_id 必须是 UUID", 400);
         }
         co_return c.json(service::common::ok<AvailableDnsZoneListResponse>(
-            c, co_await dnsZoneService().available(c, tenantId(c), *providerId)));
+            c, co_await dnsZoneReadService().available(c, tenantId(c), *providerId)));
     }
 
     ruvia::Task<ruvia::HttpResponse> list(ruvia::Context& c) {
@@ -65,8 +66,8 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
             }
         }
         co_return c.json(service::common::ok<DnsZonePageResponse>(
-            c, co_await dnsZoneService().list(c, tenantId(c), page, pageSize, skip, keyword,
-                                              providerId)));
+            c, co_await dnsZoneReadService().list(c, tenantId(c), page, pageSize, skip, keyword,
+                                                  providerId)));
     }
 
     ruvia::Task<ruvia::HttpResponse> options(ruvia::Context& c) {
@@ -88,24 +89,25 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
             }
         }
         co_return c.json(service::common::ok<DnsZoneOptionListResponse>(
-            c, co_await dnsZoneService().options(c, tenantId(c), keyword, ownerOf, available)));
+            c, co_await dnsZoneReadService().options(c, tenantId(c), keyword, ownerOf, available)));
     }
 
     ruvia::Task<ruvia::HttpResponse> create(ruvia::Context& c) {
-        co_await dnsZoneService().create(c, tenantId(c), c.req().validated<CreateDnsZoneBody>());
+        co_await dnsZoneCommandService().create(c, tenantId(c),
+                                                c.req().validated<CreateDnsZoneBody>());
         service::common::setRevisionEtag(c, 1);
         co_return c.json(service::common::operation(c, "域名已保存，同步任务已提交"));
     }
 
     ruvia::Task<ruvia::HttpResponse> get(ruvia::Context& c) {
-        auto data = co_await dnsZoneService().get(c, tenantId(c), requireId(c));
+        auto data = co_await dnsZoneReadService().get(c, tenantId(c), requireId(c));
         service::common::setRevisionEtag(c, data.get<"revision">().value);
         co_return c.json(service::common::ok<DnsZoneDetailResponse>(c, std::move(data)));
     }
 
     ruvia::Task<ruvia::HttpResponse> update(ruvia::Context& c) {
         const auto revision = expectedRevision(c);
-        co_await dnsZoneService().updateConfig(
+        co_await dnsZoneCommandService().updateConfig(
             c, tenantId(c), requireId(c), revision,
             c.req().validatedJson<service::dns_sync::ZoneConfigInput>());
         service::common::setRevisionEtag(c, revision + 1);
@@ -122,13 +124,13 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
                 conflictPolicy = value->view();
             }
         }
-        co_await dnsZoneService().requestSync(c, tenantId(c), requireId(c), conflictPolicy);
+        co_await dnsZoneCommandService().requestSync(c, tenantId(c), requireId(c), conflictPolicy);
         co_return c.json(service::common::operation(c, "同步任务已提交"));
     }
 
     ruvia::Task<ruvia::HttpResponse> remove(ruvia::Context& c) {
         const auto revision = expectedRevision(c);
-        co_await dnsZoneService().remove(c, tenantId(c), requireId(c), revision);
+        co_await dnsZoneCommandService().remove(c, tenantId(c), requireId(c), revision);
         service::common::setRevisionEtag(c, revision + 1);
         co_return c.json(service::common::operation(c, "托管域名已移除"));
     }
