@@ -4,7 +4,6 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
-#include <functional>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -28,6 +27,7 @@
 #include "node/runtime/node_credentials.h"
 #include "node/runtime/runtime_state.h"
 #include "node/runtime/secret_buffer.h"
+#include "node/runtime/self_updater.h"
 #include "node/runtime/state_store.h"
 #include "node/runtime/version.h"
 
@@ -37,16 +37,16 @@ struct ControlChannelConfig final {
     ruvia::WebSocketClientConfig webSocket;
     ruvia::StopToken stopToken;
     std::string agentVersion{std::string(kNodeVersion)};
-    std::function<void(std::string_view)> nodeReleaseAvailable;
 };
 
 class ControlChannel final {
   public:
     ControlChannel(ruvia::EventLoop loop, ControlChannelConfig config, StateStore store,
                    NodeCredentials& credentials, RuntimeState& runtime, DataPlane& dataPlane,
-                   NodeLogBuffer& logs)
+                   NodeLogBuffer& logs, SelfUpdater& updater)
         : loop_(std::move(loop)), config_(std::move(config)), store_(std::move(store)),
-          credentials_(credentials), runtime_(runtime), dataPlane_(dataPlane), logs_(logs) {}
+          credentials_(credentials), runtime_(runtime), dataPlane_(dataPlane), logs_(logs),
+          updater_(updater) {}
 
     ruvia::Task<void> run() {
         const auto worker = loop_.handle();
@@ -90,12 +90,6 @@ class ControlChannel final {
                         std::string_view desiredReleaseId, std::string_view desiredManifestDigest) {
         return nodeSpecRevision != desiredNodeSpecRevision || releaseId != desiredReleaseId ||
                manifestDigest != desiredManifestDigest;
-    }
-
-    void notifyNodeRelease(std::string_view digest) const {
-        if (config_.nodeReleaseAvailable) {
-            config_.nodeReleaseAvailable(digest);
-        }
     }
 
     v2::ClientEnvelope authenticateEnvelope(std::string requestId) const {
@@ -163,6 +157,68 @@ class ControlChannel final {
         envelope.set_request_id("release-probe-" + std::to_string(sequence));
         envelope.mutable_release_probe();
         return envelope;
+    }
+
+    static v2::ClientEnvelope nodeReleaseRequest(std::string_view nodeId,
+                                                 std::string_view digest,
+                                                 std::uint64_t offset) {
+        v2::ClientEnvelope envelope;
+        envelope.set_request_id("node-release-" + std::to_string(offset));
+        auto* payload = envelope.mutable_node_release_request();
+        payload->set_node_id(nodeId);
+        payload->set_digest_sha256(digest);
+        payload->set_offset(offset);
+        return envelope;
+    }
+
+    ruvia::Task<void> updateNodeRelease(const ruvia::WebSocketClientHandle& connection,
+                                        std::string_view nodeId, std::string_view digest) {
+        if (!updater_.updateAvailable(digest)) {
+            co_return;
+        }
+        try {
+            std::uint64_t offset{};
+            std::uint64_t totalBytes{};
+            std::string version;
+            for (;;) {
+                const auto request = nodeReleaseRequest(nodeId, digest, offset);
+                co_await connection.binary(serialize(request));
+                const auto response = co_await readServerEnvelope(connection);
+                if (response.request_id() != request.request_id() ||
+                    !response.has_node_release_chunk()) {
+                    throw std::runtime_error("control plane did not return a node release chunk");
+                }
+                const auto& chunk = response.node_release_chunk();
+                if (!validNodeReleaseVersion(chunk.version()) || chunk.digest_sha256() != digest ||
+                    chunk.total_bytes() == 0 || chunk.total_bytes() > kMaximumNodeReleaseBytes ||
+                    chunk.offset() != offset || chunk.offset() >= chunk.total_bytes() ||
+                    chunk.data().empty() ||
+                    chunk.data().size() > kNodeReleaseChunkBytes ||
+                    static_cast<std::uint64_t>(chunk.data().size()) >
+                        chunk.total_bytes() - chunk.offset()) {
+                    throw std::runtime_error("control plane sent an invalid node release chunk");
+                }
+                if (offset == 0) {
+                    version = chunk.version();
+                    totalBytes = chunk.total_bytes();
+                    updater_.begin(version, digest, totalBytes);
+                } else if (chunk.version() != version || chunk.total_bytes() != totalBytes) {
+                    throw std::runtime_error("control plane changed the node release mid-transfer");
+                }
+                updater_.append(chunk.offset(), chunk.data());
+                offset = updater_.writtenBytes();
+                if (offset == totalBytes) {
+                    if (!updater_.complete()) {
+                        throw std::runtime_error("node release transfer did not complete");
+                    }
+                    updater_.commit();
+                    co_return;
+                }
+            }
+        } catch (...) {
+            updater_.abort();
+            throw;
+        }
     }
 
     void applyPersisted(const v2::ActiveState& active,
@@ -307,12 +363,12 @@ class ControlChannel final {
             throw std::runtime_error("control plane did not acknowledge release probe");
         }
         const auto& value = acknowledgement.release_probe_ack();
-        notifyNodeRelease(value.node_binary_sha256());
         if (differs(runtime_.appliedNodeSpecRevision(), runtime_.activeReleaseId(),
                     runtime_.activeManifestDigest(), value.desired_node_spec_revision(),
                     value.desired_release_id(), value.desired_manifest_digest())) {
             co_await receiveDesiredState(connection, nodeId, request.request_id());
         }
+        co_await updateNodeRelease(connection, nodeId, value.node_binary_sha256());
         co_return;
     }
 
@@ -328,7 +384,7 @@ class ControlChannel final {
             throw std::runtime_error("control plane did not acknowledge heartbeat");
         }
         const auto& value = acknowledgement.heartbeat_ack();
-        notifyNodeRelease(value.node_binary_sha256());
+        co_await updateNodeRelease(connection, nodeId, value.node_binary_sha256());
         const auto interval =
             std::chrono::seconds((std::max)(value.next_interval_seconds(), std::uint32_t{1}));
         co_return interval;
@@ -392,7 +448,6 @@ class ControlChannel final {
         const auto connection = client.withOptions({.stopToken = config_.stopToken});
         const auto welcome = co_await authenticate(connection);
         validateWelcome(welcome);
-        notifyNodeRelease(welcome.node_binary_sha256());
         const auto& nodeId = welcome.node_id();
         if (persistent.active.has_node_spec() &&
             persistent.active.node_spec().content().node_id() != nodeId) {
@@ -403,6 +458,7 @@ class ControlChannel final {
                     welcome.desired_release_id(), welcome.desired_manifest_digest())) {
             co_await receiveDesiredState(connection, nodeId, "authenticate");
         }
+        co_await updateNodeRelease(connection, nodeId, welcome.node_binary_sha256());
         lastError_.clear();
         co_await runControlLoop(connection, welcome);
     }
@@ -414,6 +470,7 @@ class ControlChannel final {
     RuntimeState& runtime_;
     DataPlane& dataPlane_;
     NodeLogBuffer& logs_;
+    SelfUpdater& updater_;
     std::string lastError_;
 };
 

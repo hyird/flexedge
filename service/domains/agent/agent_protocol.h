@@ -12,6 +12,7 @@
 #include <ruvia/web/WebSocket.h>
 
 #include "node/proto/artifact.h"
+#include "node/proto/control_protocol.h"
 #include "node/proto/edge_control.pb.h"
 #include "service/common/http.h"
 #include "service/domains/agent/agent.types.h"
@@ -95,6 +96,12 @@ inline bool validObjectRequest(const flexedge::node::v2::ObjectRequest& value) {
     return std::ranges::all_of(value.digest_sha256(), [](const auto& digest) {
         return flexedge::node::isSha256Digest(digest);
     });
+}
+
+inline bool validNodeReleaseRequest(const flexedge::node::v2::NodeReleaseRequest& value) {
+    return service::common::parseUuid(value.node_id()) &&
+           flexedge::node::isSha256Digest(value.digest_sha256()) &&
+           value.offset() < flexedge::node::kMaximumNodeReleaseBytes;
 }
 
 inline bool validApplyPhase(flexedge::node::v2::ApplyPhase phase) {

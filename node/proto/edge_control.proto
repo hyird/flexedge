@@ -11,6 +11,7 @@ message ClientEnvelope {
         ApplyResult apply_result = 14;
         LogDelivery log_delivery = 15;
         ReleaseProbe release_probe = 16;
+        NodeReleaseRequest node_release_request = 17;
     }
 }
 
@@ -24,6 +25,7 @@ message ServerEnvelope {
         HeartbeatAck heartbeat_ack = 15;
         LogDeliveryAck log_delivery_ack = 16;
         ReleaseProbeAck release_probe_ack = 17;
+        NodeReleaseChunk node_release_chunk = 18;
     }
 }
 
@@ -95,6 +97,23 @@ message ReleaseProbeAck {
     int64 desired_node_spec_revision = 2;
     string desired_release_id = 3;
     string desired_manifest_digest = 4;
+}
+
+// Nodes pull a verified release in bounded chunks over their authenticated control
+// WebSocket.  A request/response exchange supplies backpressure: a node asks for
+// the next offset only after it has written the preceding chunk to the candidate.
+message NodeReleaseRequest {
+    string node_id = 1;
+    string digest_sha256 = 2;
+    uint64 offset = 3;
+}
+
+message NodeReleaseChunk {
+    string version = 1;
+    string digest_sha256 = 2;
+    uint64 total_bytes = 3;
+    uint64 offset = 4;
+    bytes data = 5;
 }
 
 enum ApplyPhase {

@@ -21,7 +21,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VCPKG_ROOT})
     unset(_vcpkg_root)
 endif()
 
-project(flexedge_service VERSION 0.3.33 LANGUAGES CXX)
+project(flexedge_service VERSION 0.3.34 LANGUAGES CXX)
 
 include(CTest)
 include(FetchContent)
