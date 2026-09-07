@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <string_view>
 
@@ -16,7 +15,6 @@
 #include "service/common/http.h"
 #include "service/common/types.h"
 #include "service/domains/cluster/cluster.error.h"
-#include "service/domains/cluster/cluster_read.service.h"
 #include "service/domains/cluster/cluster.types.h"
 #include "service/features/cluster_dns/projection.h"
 #include "service/features/node_dispatch/queue.h"
@@ -24,16 +22,8 @@
 
 namespace service::cluster {
 
-class ClusterService final {
+class ClusterCommandService final {
   public:
-    ruvia::Task<ClusterPageDataDto>
-    list(ruvia::Context& c, const std::string& tenantId, std::int64_t page, std::int64_t pageSize,
-         std::int64_t skip, const std::optional<std::string>& keyword,
-         const std::optional<std::string>& dnsZoneId, const std::optional<std::string>& status) {
-        co_return co_await clusterReadService().list(c, tenantId, page, pageSize, skip, keyword,
-                                                     dnsZoneId, status);
-    }
-
     ruvia::Task<void> create(ruvia::Context& c, const std::string& tenantId,
                              const SaveClusterBody& body) {
         const auto normalized = normalize(body);
@@ -210,8 +200,8 @@ class ClusterService final {
     }
 };
 
-inline ClusterService& clusterService() {
-    static ClusterService service;
+inline ClusterCommandService& clusterCommandService() {
+    static ClusterCommandService service;
     return service;
 }
 

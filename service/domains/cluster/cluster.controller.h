@@ -12,7 +12,8 @@
 #include "service/common/http.h"
 #include "service/common/types.h"
 #include "service/domains/cluster/cluster.schema.h"
-#include "service/domains/cluster/cluster.service.h"
+#include "service/domains/cluster/cluster_command.service.h"
+#include "service/domains/cluster/cluster_read.service.h"
 #include "service/middleware/auth.h"
 
 namespace service::cluster {
@@ -56,27 +57,28 @@ class ClusterController final : public ruvia::Controller<ClusterController> {
             status.emplace(*value);
         }
         co_return c.json(service::common::ok<ClusterPageResponse>(
-            c, co_await clusterService().list(c, tenantId(c), page, pageSize, skip, keyword,
-                                              dnsZoneId, status)));
+            c, co_await clusterReadService().list(c, tenantId(c), page, pageSize, skip, keyword,
+                                                  dnsZoneId, status)));
     }
 
     ruvia::Task<ruvia::HttpResponse> create(ruvia::Context& c) {
-        co_await clusterService().create(c, tenantId(c), c.req().validated<SaveClusterBody>());
+        co_await clusterCommandService().create(c, tenantId(c),
+                                                c.req().validated<SaveClusterBody>());
         service::common::setRevisionEtag(c, 1);
         co_return c.json(service::common::operation(c, "集群已创建"));
     }
 
     ruvia::Task<ruvia::HttpResponse> update(ruvia::Context& c) {
         const auto revision = service::common::requireExpectedRevision(c);
-        co_await clusterService().update(c, tenantId(c), requireId(c), revision,
-                                         c.req().validated<SaveClusterBody>());
+        co_await clusterCommandService().update(c, tenantId(c), requireId(c), revision,
+                                                c.req().validated<SaveClusterBody>());
         service::common::setRevisionEtag(c, revision + 1);
         co_return c.json(service::common::operation(c, "集群配置已更新"));
     }
 
     ruvia::Task<ruvia::HttpResponse> remove(ruvia::Context& c) {
         const auto revision = service::common::requireExpectedRevision(c);
-        co_await clusterService().remove(c, tenantId(c), requireId(c), revision);
+        co_await clusterCommandService().remove(c, tenantId(c), requireId(c), revision);
         service::common::setRevisionEtag(c, revision + 1);
         co_return c.json(service::common::operation(c, "集群已删除"));
     }
