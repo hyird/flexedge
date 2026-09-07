@@ -376,15 +376,17 @@ int main() {
     REQUIRE(certificateInspection.contains("inline void validateCertificateDomains"));
     const auto certificateRequest = source("service/features/certificate/certificate_request.h");
     REQUIRE(certificateRequest.contains("inline CertificateRequest createCertificateRequest"));
-    const auto certificateService = source("service/domains/certificate/certificate.service.h");
-    REQUIRE(certificateService.contains("certificate_read.service.h"));
-    REQUIRE(certificateService.contains("certificateReadService().list"));
-    REQUIRE(certificateService.contains("certificateReadService().get"));
-    REQUIRE(certificateService.contains("certificateReadService().download"));
-    REQUIRE(!certificateService.contains("static void fillCertificate"));
-    REQUIRE(!certificateService.contains("certificateColumns"));
-    REQUIRE(!certificateService.contains("buildCertificateArchive"));
-    REQUIRE(!certificateService.contains("deflateForZip"));
+    REQUIRE(
+        !std::filesystem::exists(sourceRoot / "service/domains/certificate/certificate.service.h"));
+    const auto certificateCommand =
+        source("service/domains/certificate/certificate_command.service.h");
+    REQUIRE(certificateCommand.contains("class CertificateCommandService final"));
+    REQUIRE(!certificateCommand.contains("certificate_read.service.h"));
+    REQUIRE(!certificateCommand.contains("certificateReadService()"));
+    REQUIRE(!certificateCommand.contains("static void fillCertificate"));
+    REQUIRE(!certificateCommand.contains("certificateColumns"));
+    REQUIRE(!certificateCommand.contains("buildCertificateArchive"));
+    REQUIRE(!certificateCommand.contains("deflateForZip"));
     const auto certificateMapper = source("service/domains/certificate/certificate.mapper.h");
     REQUIRE(certificateMapper.contains("inline void fillCertificate"));
     const auto certificateReadService =
@@ -396,13 +398,20 @@ int main() {
     const auto certificateDownload = source("service/features/certificate_material/download.h");
     REQUIRE(certificateDownload.contains("inline std::string archiveFilename"));
     REQUIRE(certificateDownload.contains("struct CertificateDownload final"));
-    REQUIRE(certificateService.contains("certificate_material/download.h"));
-    REQUIRE(!certificateService.contains("struct CertificateDownload final"));
-    REQUIRE(!certificateService.contains("static std::string certificateFilename"));
+    REQUIRE(!certificateCommand.contains("certificate_material/download.h"));
+    REQUIRE(!certificateCommand.contains("struct CertificateDownload final"));
+    REQUIRE(!certificateCommand.contains("static std::string certificateFilename"));
     const auto certificateArchive = source("service/features/certificate_material/archive.h");
     REQUIRE(certificateArchive.contains("inline std::string buildArchive"));
     REQUIRE(certificateArchive.contains("namespace detail"));
     REQUIRE(certificateArchive.contains("deflateForZip"));
+    const auto certificateController =
+        source("service/domains/certificate/certificate.controller.h");
+    REQUIRE(certificateController.contains("certificate_command.service.h"));
+    REQUIRE(certificateController.contains("certificate_read.service.h"));
+    REQUIRE(!certificateController.contains("certificate.service.h"));
+    REQUIRE(certificateController.contains("certificateCommandService().create"));
+    REQUIRE(certificateController.contains("certificateReadService().download"));
     REQUIRE(!std::filesystem::exists(sourceRoot / "service/domains/agent/agent.service.h"));
     const auto agentCommand = source("service/domains/agent/agent_command.service.h");
     REQUIRE(agentCommand.contains("class AgentCommandService final"));
@@ -704,7 +713,7 @@ int main() {
              "service/features/dns_sync/queue.h",
              "service/features/certificate/queue.h",
              "service/domains/website/website_command.service.h",
-             "service/domains/certificate/certificate.service.h",
+             "service/domains/certificate/certificate_command.service.h",
          }) {
         const auto markerWriter = source(markerWriterPath);
         REQUIRE(markerWriter.contains("MarkerResourceType::"));
