@@ -9,6 +9,7 @@
 #include <ruvia/core/Task.h>
 #include <ruvia/web/Context.h>
 
+#include "service/common/database.h"
 #include "service/common/http.h"
 #include "service/domains/website/website_access_log.mapper.h"
 #include "service/domains/website/website.error.h"

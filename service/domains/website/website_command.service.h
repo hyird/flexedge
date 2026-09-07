@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -16,55 +17,19 @@
 #include <ruvia/web/db/DbTransaction.h>
 
 #include "service/common/database.h"
-#include "service/common/http.h"
 #include "service/common/domain_name.h"
-#include "service/domains/website/website_access_log.service.h"
+#include "service/common/http.h"
 #include "service/domains/website/website.error.h"
 #include "service/domains/website/website.types.h"
-#include "service/domains/website/website_dashboard.service.h"
-#include "service/domains/website/website_read.service.h"
-#include "service/features/log_ingest/tail.h"
-#include "service/features/website_config/model.h"
-#include "service/features/website_dns/projection.h"
 #include "service/features/node_dispatch/queue.h"
 #include "service/features/sync_runtime/state.h"
+#include "service/features/website_config/model.h"
+#include "service/features/website_dns/projection.h"
 
 namespace service::website {
 
-class WebsiteService {
+class WebsiteCommandService final {
   public:
-    ruvia::Task<WebsitePageDataDto>
-    list(ruvia::Context& c, const std::string& tenantId, std::int64_t page, std::int64_t pageSize,
-         std::int64_t skip, const std::optional<std::string>& keyword,
-         const std::optional<std::string>& clusterId, const std::optional<std::string>& status) {
-        co_return co_await websiteReadService().list(c, tenantId, page, pageSize, skip, keyword,
-                                                     clusterId, status);
-    }
-
-    ruvia::Task<WebsiteDto> detail(ruvia::Context& c, const std::string& tenantId,
-                                   const std::string& id) {
-        co_return co_await websiteReadService().detail(c, tenantId, id);
-    }
-
-    ruvia::Task<WebsiteAccessLogTailDataDto>
-    accessLogs(ruvia::Context& c, const std::string& tenantId, const std::string& id,
-               std::int64_t limit, const std::optional<service::log_ingest::TailCursor>& after) {
-        co_return co_await websiteAccessLogService().tail(c, tenantId, id, limit, after);
-    }
-
-    ruvia::Task<WebsiteAccessLogPageDataDto> accessLogHistory(
-        ruvia::Context& c, const std::string& tenantId, const std::string& id, std::int64_t page,
-        std::int64_t pageSize, std::int64_t skip, const std::optional<std::string>& keyword,
-        const std::optional<std::string>& method, const std::optional<std::string>& statusClass) {
-        co_return co_await websiteAccessLogService().history(c, tenantId, id, page, pageSize, skip,
-                                                             keyword, method, statusClass);
-    }
-
-    ruvia::Task<WebsiteDashboardDto> dashboard(ruvia::Context& c, const std::string& tenantId,
-                                               const std::string& id) {
-        co_return co_await websiteDashboardService().dashboard(c, tenantId, id);
-    }
-
     ruvia::Task<void> requestDnsProbe(ruvia::Context& c, const std::string& tenantId,
                                       const std::string& id) {
         auto transaction = co_await c.db().beginTransaction();
@@ -447,8 +412,8 @@ class WebsiteService {
     }
 };
 
-inline WebsiteService& websiteService() {
-    static WebsiteService service;
+inline WebsiteCommandService& websiteCommandService() {
+    static WebsiteCommandService service;
     return service;
 }
 

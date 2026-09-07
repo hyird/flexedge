@@ -307,27 +307,27 @@ int main() {
     const auto websiteConfigTransport = source("service/features/website_config/transport.h");
     REQUIRE(websiteConfigTransport.contains("RUVIA_REQUEST_MODEL(WebsiteDomainInput"));
     REQUIRE(websiteConfigTransport.contains("WebsiteConfigOutput, RUVIA_OPTIONAL_FIELD(name"));
-    const auto websiteService = source("service/domains/website/website.service.h");
-    REQUIRE(websiteService.contains("website_dashboard.service.h"));
-    REQUIRE(websiteService.contains("websiteDashboardService().dashboard"));
-    REQUIRE(!websiteService.contains("minute_buckets AS"));
+    REQUIRE(!std::filesystem::exists(sourceRoot / "service/domains/website/website.service.h"));
+    const auto websiteCommand = source("service/domains/website/website_command.service.h");
+    REQUIRE(websiteCommand.contains("class WebsiteCommandService final"));
+    REQUIRE(websiteCommand.contains("requestDnsProbe"));
+    REQUIRE(websiteCommand.contains("replaceRelationProjections"));
+    REQUIRE(websiteCommand.contains("website_dns::reconcileConfigChange"));
+    REQUIRE(websiteCommand.contains("node_dispatch::publishClusterRelease"));
+    REQUIRE(!websiteCommand.contains("website_read.service.h"));
+    REQUIRE(!websiteCommand.contains("website_access_log.service.h"));
+    REQUIRE(!websiteCommand.contains("website_dashboard.service.h"));
+    REQUIRE(!websiteCommand.contains("minute_buckets AS"));
     const auto websiteDashboard = source("service/domains/website/website_dashboard.service.h");
     REQUIRE(websiteDashboard.contains("class WebsiteDashboardService final"));
     REQUIRE(websiteDashboard.contains("minute_buckets AS"));
-    REQUIRE(!websiteService.contains("static void fillAccessLog"));
     const auto websiteAccessLogMapper =
         source("service/domains/website/website_access_log.mapper.h");
     REQUIRE(websiteAccessLogMapper.contains("fillWebsiteAccessLog"));
     REQUIRE(websiteAccessLogMapper.contains("clientIpLocation"));
-    REQUIRE(websiteService.contains("website_access_log.service.h"));
-    REQUIRE(!websiteService.contains("website_runtime.mapper.h"));
-    REQUIRE(websiteService.contains("website_read.service.h"));
-    REQUIRE(websiteService.contains("websiteAccessLogService().tail"));
-    REQUIRE(websiteService.contains("websiteReadService().list"));
-    REQUIRE(websiteService.contains("websiteReadService().detail"));
-    REQUIRE(!websiteService.contains("sys_website_access_log"));
-    REQUIRE(!websiteService.contains("static WebsiteRuntimeDto toRuntime"));
-    REQUIRE(!websiteService.contains("static void fillWebsite"));
+    REQUIRE(!websiteCommand.contains("sys_website_access_log"));
+    REQUIRE(!websiteCommand.contains("static WebsiteRuntimeDto toRuntime"));
+    REQUIRE(!websiteCommand.contains("static void fillWebsite"));
     const auto websiteRuntimeMapper = source("service/domains/website/website_runtime.mapper.h");
     REQUIRE(websiteRuntimeMapper.contains("inline WebsiteRuntimeDto toRuntime"));
     REQUIRE(websiteRuntimeMapper.contains("struct BoundCertificate final"));
@@ -666,7 +666,7 @@ int main() {
              "service/features/provider_verification/queue.h",
              "service/features/dns_sync/queue.h",
              "service/features/certificate/queue.h",
-             "service/domains/website/website.service.h",
+             "service/domains/website/website_command.service.h",
              "service/domains/certificate/certificate.service.h",
          }) {
         const auto markerWriter = source(markerWriterPath);
@@ -879,6 +879,13 @@ int main() {
     REQUIRE(nodeController.contains("event = \"node-state\""));
     REQUIRE(!nodeController.contains("advanceCursor("));
     const auto websiteController = source("service/domains/website/website.controller.h");
+    REQUIRE(websiteController.contains("website_command.service.h"));
+    REQUIRE(websiteController.contains("website_read.service.h"));
+    REQUIRE(websiteController.contains("website_access_log.service.h"));
+    REQUIRE(websiteController.contains("website_dashboard.service.h"));
+    REQUIRE(!websiteController.contains("website.service.h"));
+    REQUIRE(websiteController.contains("websiteCommandService().create"));
+    REQUIRE(websiteController.contains("websiteReadService().list"));
     REQUIRE(websiteController.contains("log_ingest/sse_tail.h"));
     REQUIRE(websiteController.contains("streamSseTail"));
     REQUIRE(!websiteController.contains("receiveFor("));
