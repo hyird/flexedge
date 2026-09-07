@@ -82,6 +82,9 @@ int main() {
         const auto firstInstallerPath = first->installer().path();
         REQUIRE(readFile(firstBinaryPath) == "node-release-one");
         REQUIRE(readFile(firstInstallerPath) == "installer-release-one");
+        REQUIRE(first->binary().size() == std::string_view("node-release-one").size());
+        REQUIRE(first->binary().contentsRange(0, 4) == "node");
+        REQUIRE(first->binary().contentsRange(4, 1024) == "-release-one");
 
         const auto nextBinaryPath = directory.path() / "node.next";
         writeFile(nextBinaryPath, "node-release-two");

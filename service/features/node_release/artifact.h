@@ -1,7 +1,7 @@
 #pragma once
 
-#include <algorithm>
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -101,6 +101,7 @@ class Artifact final {
             descriptor_ = -1;
             throw std::runtime_error("node release artifact is not a regular file");
         }
+        sourceSize_ = static_cast<std::uintmax_t>(metadata.st_size);
         sourceStamp_ = stamp(metadata);
         path_ = "/proc/self/fd/" + std::to_string(descriptor_);
 #endif
@@ -132,6 +133,7 @@ class Artifact final {
     [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
     [[nodiscard]] const std::string& digest() const noexcept { return digest_; }
     [[nodiscard]] const std::string& entityTag() const noexcept { return entityTag_; }
+    [[nodiscard]] std::uintmax_t size() const noexcept { return sourceSize_; }
 
     [[nodiscard]] std::string contents(std::size_t maximumBytes) const {
         std::ifstream input(path_, std::ios::binary);
@@ -150,6 +152,32 @@ class Artifact final {
         }
         if (!input.eof()) {
             throw std::runtime_error("could not read node release artifact");
+        }
+        return result;
+    }
+
+    [[nodiscard]] std::string contentsRange(std::uintmax_t offset, std::size_t maximumBytes) const {
+        if (maximumBytes == 0 || offset > sourceSize_) {
+            throw std::out_of_range("node release range is invalid");
+        }
+        const auto remaining = sourceSize_ - offset;
+        const auto count = static_cast<std::size_t>(
+            (std::min)(remaining, static_cast<std::uintmax_t>(maximumBytes)));
+        if (count == 0) {
+            return {};
+        }
+        std::ifstream input(path_, std::ios::binary);
+        if (!input) {
+            throw std::runtime_error("node release artifact is unavailable");
+        }
+        input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+        if (!input) {
+            throw std::runtime_error("could not seek node release artifact");
+        }
+        std::string result(count, '\0');
+        input.read(result.data(), static_cast<std::streamsize>(result.size()));
+        if (input.gcount() != static_cast<std::streamsize>(result.size())) {
+            throw std::runtime_error("could not read node release artifact range");
         }
         return result;
     }
@@ -197,9 +225,9 @@ class Artifact final {
     int descriptor_{-1};
     SourceStamp sourceStamp_;
 #else
-    std::uintmax_t sourceSize_{};
     std::filesystem::file_time_type sourceModified_{};
 #endif
+    std::uintmax_t sourceSize_{};
     std::filesystem::path path_;
     std::string digest_;
     std::string entityTag_;

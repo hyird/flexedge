@@ -1,19 +1,16 @@
 #pragma once
 
-#include <algorithm>
 #include <chrono>
-#include <cctype>
-#include <condition_variable>
-#include <cstdlib>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
-#include <mutex>
-#include <ranges>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
+#include <utility>
 
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -21,6 +18,7 @@
 #endif
 
 #include "node/proto/artifact.h"
+#include "node/proto/control_protocol.h"
 #include "node/runtime/binary_digest.h"
 #include "node/runtime/release_response.h"
 #include "node/runtime/upgrade_record.h"
@@ -28,100 +26,148 @@
 namespace flexedge::node {
 
 struct SelfUpdaterConfig final {
-    std::string serverOrigin;
     std::filesystem::path binaryPath;
-    std::chrono::seconds checkInterval{15};
     std::string currentVersion;
     std::filesystem::path upgradeRecordPath;
     std::function<bool(std::string_view, std::string_view, std::string_view)> nodeLog;
     std::function<void()> requestRestart;
 };
 
+// The control channel owns this object. Release bytes never leave the authenticated
+// WebSocket protocol: ControlChannel asks for one bounded chunk, writes it, then asks for
+// the next offset. A disconnected transfer is discarded and starts from offset zero after
+// the next authenticated control session.
 class SelfUpdater final {
   public:
     explicit SelfUpdater(SelfUpdaterConfig config)
-        : config_(std::move(config)), currentDigest_(binarySha256(config_.binaryPath)) {}
+        : config_(std::move(config)), currentDigest_(binarySha256(config_.binaryPath)) {
+        validateConfig();
+    }
 
     SelfUpdater(const SelfUpdater&) = delete;
     SelfUpdater& operator=(const SelfUpdater&) = delete;
 
-    ~SelfUpdater() { stop(); }
+    ~SelfUpdater() { abort(); }
 
-    void start() {
-        if (worker_.joinable()) {
-            return;
-        }
-        validateConfig();
-        // std::jthread invokes its callback with a stop_token by value.
-        // NOLINTNEXTLINE(performance-unnecessary-value-param)
-        worker_ = std::jthread([this](std::stop_token token) { run(token); });
+    [[nodiscard]] bool updateAvailable(std::string_view digest) const noexcept {
+        return validNodeReleaseDigest(digest) && digest != currentDigest_;
     }
 
-    void stop() {
-        if (!worker_.joinable()) {
-            return;
+    void begin(std::string_view version, std::string_view digest, std::uint64_t totalBytes) {
+        if (transfer_) {
+            throw std::logic_error("node release transfer is already in progress");
         }
-        worker_.request_stop();
-        releaseAvailable_.notify_all();
-        worker_.join();
+        if (!updateAvailable(digest) || !validNodeReleaseVersion(version) || totalBytes == 0 ||
+            totalBytes > kMaximumNodeReleaseBytes) {
+            throw std::runtime_error("control plane sent invalid node release metadata");
+        }
+
+        Transfer value{
+            .version = std::string(version),
+            .digest = std::string(digest),
+            .totalBytes = totalBytes,
+            .candidate = candidatePath(),
+        };
+        value.output.open(value.candidate, std::ios::binary | std::ios::out | std::ios::trunc);
+        if (!value.output) {
+            throw std::runtime_error("could not create node upgrade candidate");
+        }
+        transfer_.emplace(std::move(value));
     }
 
-    [[nodiscard]] bool notifyRelease(std::string_view digest) {
-        if (!isSha256Digest(digest) || digest == currentDigest_) {
-            return false;
+    void append(std::uint64_t offset, std::string_view bytes) {
+        if (!transfer_) {
+            throw std::logic_error("node release transfer is not in progress");
         }
-        {
-            std::lock_guard lock(releaseMutex_);
-            pendingRelease_ = true;
+        auto& value = *transfer_;
+        if (offset != value.writtenBytes || bytes.empty() ||
+            bytes.size() > kNodeReleaseChunkBytes ||
+            static_cast<std::uint64_t>(bytes.size()) > value.totalBytes - value.writtenBytes) {
+            throw std::runtime_error("control plane sent an invalid node release chunk");
         }
-        releaseAvailable_.notify_one();
-        return true;
+        value.output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        if (!value.output) {
+            throw std::runtime_error("could not write node upgrade candidate");
+        }
+        value.writtenBytes += static_cast<std::uint64_t>(bytes.size());
+    }
+
+    [[nodiscard]] bool complete() const noexcept {
+        return transfer_ && transfer_->writtenBytes == transfer_->totalBytes;
+    }
+
+    [[nodiscard]] std::uint64_t writtenBytes() const {
+        if (!transfer_) {
+            throw std::logic_error("node release transfer is not in progress");
+        }
+        return transfer_->writtenBytes;
+    }
+
+    void commit() {
+        if (!complete()) {
+            throw std::runtime_error("node release transfer is incomplete");
+        }
+        auto value = std::move(*transfer_);
+        transfer_.reset();
+        value.output.flush();
+        value.output.close();
+        if (!value.output) {
+            removeCandidate(value.candidate);
+            throw std::runtime_error("could not finalize node upgrade candidate");
+        }
+
+        try {
+            if (binarySha256(value.candidate) != value.digest) {
+                throw std::runtime_error("control plane node release digest mismatch");
+            }
+            const UpgradeRecord upgradeRecord{
+                .previousVersion = config_.currentVersion,
+                .currentVersion = value.version,
+                .targetSha256 = value.digest,
+            };
+            try {
+                writePendingUpgradeRecord(config_.upgradeRecordPath, upgradeRecord);
+            } catch (const std::exception& error) {
+                std::cerr << "flexedge node could not persist upgrade record: " << error.what()
+                          << '\n';
+            }
+            installCandidate(value.candidate);
+            std::cerr << "flexedge node " << upgradeRecord.message() << "; restarting service\n";
+            (void)log("info", upgradeRecord.message());
+            if (config_.requestRestart) {
+                config_.requestRestart();
+            }
+        } catch (...) {
+            removeCandidate(value.candidate);
+            throw;
+        }
+    }
+
+    void abort() noexcept {
+        if (!transfer_) {
+            return;
+        }
+        transfer_->output.close();
+        removeCandidate(transfer_->candidate);
+        transfer_.reset();
     }
 
   private:
+    struct Transfer final {
+        std::string version;
+        std::string digest;
+        std::uint64_t totalBytes{};
+        std::uint64_t writtenBytes{};
+        std::filesystem::path candidate;
+        std::ofstream output;
+    };
+
     bool log(std::string_view level, std::string_view message) const noexcept {
         try {
             return config_.nodeLog && config_.nodeLog(level, "upgrade", message);
         } catch (...) {
             return false;
         }
-    }
-
-    static std::string shellQuote(std::string_view value) {
-        std::string result{"'"};
-        for (const char ch : value) {
-            if (ch == '\'') {
-                result += "'\\''";
-            } else {
-                result.push_back(ch);
-            }
-        }
-        result.push_back('\'');
-        return result;
-    }
-
-    static void runCommand(const std::string& command) {
-        const auto status = std::system(command.c_str());
-        if (status != 0) {
-            throw std::runtime_error("curl download failed");
-        }
-    }
-
-    [[nodiscard]] std::string url(std::string_view path) const {
-        auto origin = config_.serverOrigin;
-        while (!origin.empty() && origin.back() == '/') {
-            origin.pop_back();
-        }
-        return origin + std::string(path);
-    }
-
-    void downloadCandidate(const std::filesystem::path& candidate,
-                           const std::filesystem::path& headers,
-                           std::string_view currentDigest) const {
-        const auto condition = "If-None-Match: " + nodeReleaseEntityTag(currentDigest);
-        runCommand("curl -fsS --connect-timeout 5 --max-time 30 --dump-header " +
-                   shellQuote(headers.string()) + " --output " + shellQuote(candidate.string()) +
-                   " --header " + shellQuote(condition) + " " + shellQuote(url("/api/agent/node")));
     }
 
     [[nodiscard]] std::filesystem::path candidatePath() const {
@@ -135,6 +181,11 @@ class SelfUpdater final {
 #endif
                      + "." + std::to_string(now);
         return candidate;
+    }
+
+    static void removeCandidate(const std::filesystem::path& path) noexcept {
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
     }
 
     void installCandidate(const std::filesystem::path& candidate) const {
@@ -154,92 +205,7 @@ class SelfUpdater final {
 #endif
     }
 
-    bool upgradeOnce() const {
-        const auto currentDigest = binarySha256(config_.binaryPath);
-        const auto candidate = candidatePath();
-        auto headers = candidate;
-        headers += ".headers";
-        try {
-            downloadCandidate(candidate, headers, currentDigest);
-            const auto response = readNodeReleaseResponse(headers);
-            if (!response) {
-                throw std::runtime_error("server returned invalid node release headers");
-            }
-            if (response->statusCode == 304) {
-                if (response->sha256 != currentDigest) {
-                    throw std::runtime_error("server returned an inconsistent 304 node release");
-                }
-                std::error_code ignored;
-                std::filesystem::remove(candidate, ignored);
-                std::filesystem::remove(headers, ignored);
-                return false;
-            }
-            const auto candidateDigest = binarySha256(candidate);
-            if (candidateDigest != response->sha256) {
-                throw std::runtime_error("downloaded node binary digest mismatch");
-            }
-            const UpgradeRecord upgradeRecord{
-                .previousVersion = config_.currentVersion,
-                .currentVersion = response->version,
-                .targetSha256 = response->sha256,
-            };
-            try {
-                writePendingUpgradeRecord(config_.upgradeRecordPath, upgradeRecord);
-            } catch (const std::exception& error) {
-                std::cerr << "flexedge node could not persist upgrade record: " << error.what()
-                          << '\n';
-            }
-            installCandidate(candidate);
-            std::error_code ignored;
-            std::filesystem::remove(headers, ignored);
-
-            std::cerr << "flexedge node " << upgradeRecord.message() << "; restarting service\n";
-        } catch (...) {
-            std::error_code ignored;
-            std::filesystem::remove(candidate, ignored);
-            std::filesystem::remove(headers, ignored);
-            throw;
-        }
-        if (config_.requestRestart) {
-            config_.requestRestart();
-        }
-        return true;
-    }
-
-    bool waitForCheck(const std::stop_token& token, std::chrono::seconds duration) {
-        std::unique_lock lock(releaseMutex_);
-        releaseAvailable_.wait_for(lock, token, duration, [this] { return pendingRelease_; });
-        pendingRelease_ = false;
-        return !token.stop_requested();
-    }
-
-    void run(const std::stop_token& token) {
-        while (!token.stop_requested()) {
-            try {
-                if (upgradeOnce()) {
-                    return;
-                }
-            } catch (const std::exception& error) {
-                std::cerr << "flexedge node upgrade check failed: " << error.what() << '\n';
-                (void)log("error", error.what());
-            } catch (...) {
-                std::cerr << "flexedge node upgrade check failed with unknown error\n";
-                (void)log("error", "upgrade check failed with unknown error");
-            }
-            if (!waitForCheck(token, config_.checkInterval)) {
-                return;
-            }
-        }
-    }
-
     void validateConfig() const {
-        if (!(config_.serverOrigin.starts_with("https://") ||
-              config_.serverOrigin.starts_with("http://"))) {
-            throw std::runtime_error("server origin is invalid");
-        }
-        if (config_.serverOrigin.find_first_of(" \t\r\n") != std::string::npos) {
-            throw std::runtime_error("server origin must not contain whitespace");
-        }
         if (config_.binaryPath.empty()) {
             throw std::runtime_error("node binary path is required");
         }
@@ -253,10 +219,7 @@ class SelfUpdater final {
 
     SelfUpdaterConfig config_;
     const std::string currentDigest_;
-    std::mutex releaseMutex_;
-    std::condition_variable_any releaseAvailable_;
-    bool pendingRelease_{};
-    std::jthread worker_;
+    std::optional<Transfer> transfer_;
 };
 
 } // namespace flexedge::node

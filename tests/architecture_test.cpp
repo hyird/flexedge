@@ -1007,6 +1007,18 @@ int main() {
     REQUIRE(nodeDispatch.contains("sys_node_release_target"));
     REQUIRE(!nodeDispatch.contains("sys_task"));
     REQUIRE(!nodeDispatch.contains("parent_task_id"));
+    const auto nodeControlChannel = source("node/control/control_channel.h");
+    REQUIRE(nodeControlChannel.contains("node_release_request"));
+    REQUIRE(nodeControlChannel.contains("node_release_chunk"));
+    REQUIRE(nodeControlChannel.contains("updateNodeRelease"));
+    const auto nodeSelfUpdater = source("node/runtime/self_updater.h");
+    REQUIRE(nodeSelfUpdater.contains("ControlChannel asks for one bounded chunk"));
+    REQUIRE(!nodeSelfUpdater.contains("curl"));
+    REQUIRE(!nodeSelfUpdater.contains("serverOrigin"));
+    const auto agentControl = source("service/domains/agent/agent.controller.h");
+    REQUIRE(agentControl.contains("handleNodeReleaseRequest"));
+    REQUIRE(agentControl.contains("NodeReleaseTransfer"));
+    REQUIRE(agentControl.contains("contentsRange"));
     REQUIRE(!std::filesystem::exists(sourceRoot / "service/domains/node/node.service.h"));
     const auto nodeCommand = source("service/domains/node/node_command.service.h");
     REQUIRE(nodeCommand.contains("class NodeCommandService final"));

@@ -83,6 +83,12 @@ class AgentController final : public ruvia::Controller<AgentController> {
         std::uint32_t heartbeatInterval{};
     };
 
+    struct NodeReleaseTransfer final {
+        service::node_release::Catalog::Snapshot release;
+        std::string digest;
+        std::uint64_t nextOffset{};
+    };
+
     ruvia::Task<ruvia::HttpResponse> installNodeScript(ruvia::Context& c) {
         const auto release = service::node_release::current();
         const auto& installer = release->installer();
@@ -255,6 +261,64 @@ class AgentController final : public ruvia::Controller<AgentController> {
         co_return true;
     }
 
+    ruvia::Task<bool>
+    handleNodeReleaseRequest(ruvia::Context& c, const AuthenticatedSession& session,
+                             std::optional<NodeReleaseTransfer>& transfer,
+                             const flexedge::node::v2::ClientEnvelope& incoming) {
+        const auto& request = incoming.node_release_request();
+        if (!validNodeReleaseRequest(request) || request.node_id() != session.principal.nodeId) {
+            co_await close(c.webSocket(), {.code = 1008, .reason = "invalid node release request"});
+            co_return false;
+        }
+
+        if (!transfer) {
+            if (request.offset() != 0) {
+                co_await close(c.webSocket(), {.code = 1008, .reason = "node release offset invalid"});
+                co_return false;
+            }
+            const auto release = service::node_release::current();
+            const auto totalBytes = release->binary().size();
+            if (release->binary().digest() != request.digest_sha256() || totalBytes == 0 ||
+                totalBytes > flexedge::node::kMaximumNodeReleaseBytes) {
+                co_await close(c.webSocket(), {.code = 1011, .reason = "node release unavailable"});
+                co_return false;
+            }
+            transfer.emplace(
+                NodeReleaseTransfer{.release = release, .digest = request.digest_sha256()});
+        }
+
+        const auto totalBytes = static_cast<std::uint64_t>(transfer->release->binary().size());
+        if (transfer->digest != request.digest_sha256() || request.offset() != transfer->nextOffset ||
+            totalBytes == 0 || totalBytes > flexedge::node::kMaximumNodeReleaseBytes) {
+            co_await close(c.webSocket(), {.code = 1008, .reason = "node release transfer invalid"});
+            co_return false;
+        }
+        const auto bytes = co_await c.runBlocking(
+            [release = transfer->release, offset = transfer->nextOffset] {
+                return release->binary().contentsRange(
+                    offset, flexedge::node::kNodeReleaseChunkBytes);
+            });
+        if (bytes.empty()) {
+            co_await close(c.webSocket(), {.code = 1011, .reason = "node release read failed"});
+            co_return false;
+        }
+
+        flexedge::node::v2::ServerEnvelope response;
+        response.set_request_id(incoming.request_id());
+        auto* chunk = response.mutable_node_release_chunk();
+        chunk->set_version(transfer->release->version());
+        chunk->set_digest_sha256(transfer->digest);
+        chunk->set_total_bytes(totalBytes);
+        chunk->set_offset(transfer->nextOffset);
+        chunk->set_data(bytes);
+        transfer->nextOffset += static_cast<std::uint64_t>(bytes.size());
+        if (transfer->nextOffset == totalBytes) {
+            transfer.reset();
+        }
+        co_await send(c, response);
+        co_return true;
+    }
+
     ruvia::Task<bool> handleApplyResult(ruvia::Context& c, const AuthenticatedSession& session,
                                         const flexedge::node::v2::ClientEnvelope& incoming) {
         const auto& result = incoming.apply_result();
@@ -289,6 +353,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
 
     ruvia::Task<void> serveControlMessages(ruvia::Context& c, const AuthenticatedSession& session) {
         auto& ws = c.webSocket();
+        std::optional<NodeReleaseTransfer> releaseTransfer;
         while (const auto message = co_await read(ws)) {
             flexedge::node::v2::ClientEnvelope incoming;
             if (!parseClientEnvelope(*message, incoming)) {
@@ -307,6 +372,12 @@ class AgentController final : public ruvia::Controller<AgentController> {
             }
             if (incoming.has_release_probe()) {
                 if (!co_await handleReleaseProbe(c, session, incoming)) {
+                    co_return;
+                }
+                continue;
+            }
+            if (incoming.has_node_release_request()) {
+                if (!co_await handleNodeReleaseRequest(c, session, releaseTransfer, incoming)) {
                     co_return;
                 }
                 continue;

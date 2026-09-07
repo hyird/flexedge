@@ -729,18 +729,76 @@ int main(int argc, char* argv[]) {
         REQUIRE(priorityDelivery->value().events(0).node_log().category() == "upgrade");
         priorityBuffer.acknowledge(std::move(*priorityDelivery));
 
-        flexedge::node::SelfUpdater notifiedUpdater({
-            .serverOrigin = "http://127.0.0.1",
-            .binaryPath = executablePath,
+        const auto updaterBinaryPath = credentialsRoot / "node";
+        {
+            std::ofstream output(updaterBinaryPath, std::ios::binary | std::ios::trunc);
+            output << "current-node";
+        }
+        const std::string nextNodeBytes{"next-node-from-control-websocket"};
+        const auto nextNodePath = credentialsRoot / "node.next";
+        {
+            std::ofstream output(nextNodePath, std::ios::binary | std::ios::trunc);
+            output.write(nextNodeBytes.data(), static_cast<std::streamsize>(nextNodeBytes.size()));
+        }
+        const auto nextNodeDigest = flexedge::node::binarySha256(nextNodePath);
+        bool restartRequested{};
+        flexedge::node::SelfUpdater wsUpdater({
+            .binaryPath = updaterBinaryPath,
             .currentVersion = "0.0.0",
             .upgradeRecordPath = credentialsRoot / "pending-upgrade",
             .nodeLog = {},
-            .requestRestart = {},
+            .requestRestart = [&] { restartRequested = true; },
         });
-        REQUIRE(!notifiedUpdater.notifyRelease("invalid"));
-        REQUIRE(!notifiedUpdater.notifyRelease(flexedge::node::binarySha256(executablePath)));
-        REQUIRE(notifiedUpdater.notifyRelease(
-            "a1408004be0e7e8736f9365f835cb1454adeeda979a0b08bc60acf753aa2e4ea"));
+        REQUIRE(!wsUpdater.updateAvailable("invalid"));
+        REQUIRE(!wsUpdater.updateAvailable(flexedge::node::binarySha256(updaterBinaryPath)));
+        REQUIRE(wsUpdater.updateAvailable(nextNodeDigest));
+        const auto rejected = [](auto&& action) {
+            try {
+                action();
+                return false;
+            } catch (const std::runtime_error&) {
+                return true;
+            }
+        };
+        const auto originalDigest = flexedge::node::binarySha256(updaterBinaryPath);
+        wsUpdater.begin("0.0.1", nextNodeDigest,
+                        static_cast<std::uint64_t>(nextNodeBytes.size()));
+        REQUIRE(rejected([&] { wsUpdater.append(1, "bad-offset"); }));
+        REQUIRE(rejected([&] { wsUpdater.append(0, ""); }));
+        REQUIRE(rejected([&] { wsUpdater.append(0, std::string(nextNodeBytes.size() + 1, 'x')); }));
+        REQUIRE(rejected([&] { wsUpdater.commit(); }));
+        REQUIRE(wsUpdater.writtenBytes() == 0);
+        wsUpdater.append(0, "partial");
+        wsUpdater.abort();
+        REQUIRE(!restartRequested);
+        REQUIRE(flexedge::node::binarySha256(updaterBinaryPath) == originalDigest);
+        wsUpdater.begin("0.0.1", nextNodeDigest,
+                        static_cast<std::uint64_t>(nextNodeBytes.size()));
+        wsUpdater.append(0, std::string(nextNodeBytes.size(), 'x'));
+        REQUIRE(rejected([&] { wsUpdater.commit(); }));
+        REQUIRE(!restartRequested);
+        REQUIRE(flexedge::node::binarySha256(updaterBinaryPath) == originalDigest);
+        for (const auto& entry : std::filesystem::directory_iterator(credentialsRoot)) {
+            REQUIRE(!entry.path().filename().string().starts_with(".node.upgrade."));
+        }
+        wsUpdater.begin("0.0.1", nextNodeDigest,
+                        static_cast<std::uint64_t>(nextNodeBytes.size()));
+        wsUpdater.append(0, std::string_view(nextNodeBytes).substr(0, 9));
+        REQUIRE(!wsUpdater.complete());
+        REQUIRE(wsUpdater.writtenBytes() == 9);
+        wsUpdater.append(9, std::string_view(nextNodeBytes).substr(9));
+        REQUIRE(wsUpdater.complete());
+#ifndef _WIN32
+        wsUpdater.commit();
+        REQUIRE(restartRequested);
+        REQUIRE(flexedge::node::binarySha256(updaterBinaryPath) == nextNodeDigest);
+        const auto wsUpgrade = flexedge::node::takePendingUpgradeRecord(
+            credentialsRoot / "pending-upgrade", nextNodeDigest);
+        REQUIRE(wsUpgrade && wsUpgrade->currentVersion == "0.0.1");
+#else
+        wsUpdater.abort();
+        REQUIRE(!restartRequested);
+#endif
 
         flexedge::node::NodeLogBuffer boundedBodyBuffer;
         boundedBodyBuffer.access({

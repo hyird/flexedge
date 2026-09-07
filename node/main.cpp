@@ -102,26 +102,6 @@ ruvia::WebSocketClientConfig webSocketConfig(std::string_view address) {
     };
 }
 
-std::string httpOrigin(const ruvia::WebSocketClientConfig& config) {
-    std::string origin = config.scheme == ruvia::WebSocketScheme::kWss ? "https://" : "http://";
-    if (config.host.contains(':')) {
-        origin += "[" + config.host + "]";
-    } else {
-        origin += config.host;
-    }
-    if (config.port) {
-        origin += ":" + std::to_string(*config.port);
-    }
-    return origin;
-}
-
-std::string updateOrigin(const ruvia::WebSocketClientConfig& config) {
-    if (const char* value = std::getenv("FLEXEDGE_SERVER_ORIGIN"); value && *value) {
-        return value;
-    }
-    return httpOrigin(config);
-}
-
 std::filesystem::path executablePath(std::string_view fallback) {
 #ifndef _WIN32
     std::error_code procError;
@@ -161,7 +141,6 @@ int main(int argc, char* argv[]) {
         }
         std::cerr << "flexedge node " << flexedge::node::kNodeVersion << " starting\n";
         auto webSocket = webSocketConfig(argv[1]);
-        auto serverOrigin = updateOrigin(webSocket);
         ruvia::EventLoopPool controlLoops({.loopCount = 1});
         ruvia::EventLoopPool workerLoops;
         const auto loop = controlLoops.loop(0);
@@ -197,7 +176,6 @@ int main(int argc, char* argv[]) {
             requestStop("shutdown requested");
         });
         flexedge::node::SelfUpdater selfUpdater({
-            .serverOrigin = std::move(serverOrigin),
             .binaryPath = binaryPath,
             .currentVersion = std::string(flexedge::node::kNodeVersion),
             .upgradeRecordPath = stateDirectory / "pending-upgrade",
@@ -217,13 +195,9 @@ int main(int argc, char* argv[]) {
             {
                 .webSocket = webSocket,
                 .stopToken = stopSource.token(),
-                .nodeReleaseAvailable =
-                    [&selfUpdater](std::string_view digest) {
-                        (void)selfUpdater.notifyRelease(digest);
-                    },
             },
             flexedge::node::StateStore{stateDirectory, credentials.secret()}, credentials, runtime,
-            dataPlane, logBuffer);
+            dataPlane, logBuffer, selfUpdater);
         flexedge::node::LogChannel logChannel(loop,
                                               {
                                                   .webSocket = std::move(webSocket),
@@ -235,7 +209,6 @@ int main(int argc, char* argv[]) {
         dataPlane.start();
         auto task = loop.start(channel.run());
         auto logTask = loop.start(logChannel.run());
-        selfUpdater.start();
         auto stopLoops = [&] {
             workerLoops.stop();
             controlLoops.stop();
