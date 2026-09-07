@@ -13,7 +13,6 @@
 #include "node/proto/edge_control.pb.h"
 #include "service/common/http.h"
 #include "service/domains/agent/agent.error.h"
-#include "service/domains/agent/agent_read.service.h"
 #include "service/domains/agent/agent_runtime.mapper.h"
 #include "service/domains/agent/agent.types.h"
 #include "service/features/cluster_dns/projection.h"
@@ -27,7 +26,7 @@
 
 namespace service::agent {
 
-class AgentService final {
+class AgentCommandService final {
   public:
     ruvia::Task<AgentPrincipal> authenticate(ruvia::Context& c, const std::string& agentId,
                                              std::string_view secret) {
@@ -97,14 +96,6 @@ class AgentService final {
         co_return result;
     }
 
-    ruvia::Task<bool> isCurrent(ruvia::Context& c, const AgentPrincipal& principal) {
-        co_return co_await agentReadService().isCurrent(c, principal);
-    }
-
-    ruvia::Task<DesiredSummary> desiredSummary(ruvia::Context& c, const AgentPrincipal& principal) {
-        co_return co_await agentReadService().desiredSummary(c, principal);
-    }
-
     ruvia::Task<flexedge::node::v2::DesiredState> desiredState(ruvia::Context& c,
                                                                const AgentPrincipal& principal) {
         const auto& nodeId = principal.nodeId;
@@ -143,12 +134,6 @@ class AgentService final {
             result.node_spec().content().revision());
         co_await transaction.commit();
         co_return result;
-    }
-
-    ruvia::Task<flexedge::node::v2::ObjectBatch>
-    objects(ruvia::Context& c, const AgentPrincipal& principal, std::string_view releaseId,
-            const google::protobuf::RepeatedPtrField<std::string>& requested) {
-        co_return co_await agentReadService().objects(c, principal, releaseId, requested);
     }
 
     ruvia::Task<void> heartbeat(ruvia::Context& c, const AgentPrincipal& principal,
@@ -258,8 +243,8 @@ class AgentService final {
     }
 };
 
-inline AgentService& agentService() {
-    static AgentService service;
+inline AgentCommandService& agentCommandService() {
+    static AgentCommandService service;
     return service;
 }
 

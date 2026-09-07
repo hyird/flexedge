@@ -22,7 +22,8 @@
 #include "node/proto/edge_control.pb.h"
 #include "service/common/http.h"
 #include "service/domains/agent/agent_protocol.h"
-#include "service/domains/agent/agent.service.h"
+#include "service/domains/agent/agent_command.service.h"
+#include "service/domains/agent/agent_read.service.h"
 #include "service/features/log_ingest/ingest.h"
 #include "service/features/node_release/artifact.h"
 #include "service/utils/sensitive_string.h"
@@ -153,7 +154,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
 
     ruvia::Task<void> pushDesiredState(ruvia::Context& c, std::string_view requestId,
                                        const AgentPrincipal& principal) {
-        auto desired = co_await agentService().desiredState(c, principal);
+        auto desired = co_await agentCommandService().desiredState(c, principal);
         flexedge::node::v2::ServerEnvelope response;
         response.set_request_id(requestId);
         *response.mutable_desired_state() = std::move(desired);
@@ -174,7 +175,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
                 co_await close(ws, {.code = 1008, .reason = "invalid log delivery"});
                 co_return;
             }
-            if (!co_await agentService().isCurrent(c, principal)) {
+            if (!co_await agentReadService().isCurrent(c, principal)) {
                 co_await close(ws, {.code = 1008, .reason = "agent credentials expired"});
                 co_return;
             }
@@ -202,7 +203,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
         auto* serializedSecret = envelope.mutable_authenticate()->mutable_secret();
         OPENSSL_cleanse(serializedSecret->data(), serializedSecret->size());
         serializedSecret->clear();
-        auto principal = co_await agentService().authenticate(c, agentId, secret.view());
+        auto principal = co_await agentCommandService().authenticate(c, agentId, secret.view());
         co_return AuthenticatedSession{
             .requestId = envelope.request_id(),
             .principal = std::move(principal),
@@ -231,8 +232,8 @@ class AgentController final : public ruvia::Controller<AgentController> {
             co_await close(c.webSocket(), {.code = 1008, .reason = "invalid object request"});
             co_return false;
         }
-        auto objects = co_await agentService().objects(c, session.principal, request.release_id(),
-                                                       request.digest_sha256());
+        auto objects = co_await agentReadService().objects(
+            c, session.principal, request.release_id(), request.digest_sha256());
         flexedge::node::v2::ServerEnvelope response;
         response.set_request_id(incoming.request_id());
         *response.mutable_object_batch() = std::move(objects);
@@ -242,7 +243,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
 
     ruvia::Task<bool> handleReleaseProbe(ruvia::Context& c, const AuthenticatedSession& session,
                                          const flexedge::node::v2::ClientEnvelope& incoming) {
-        const auto desired = co_await agentService().desiredSummary(c, session.principal);
+        const auto desired = co_await agentReadService().desiredSummary(c, session.principal);
         flexedge::node::v2::ServerEnvelope acknowledgement;
         acknowledgement.set_request_id(incoming.request_id());
         auto* ack = acknowledgement.mutable_release_probe_ack();
@@ -261,7 +262,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
             co_await close(c.webSocket(), {.code = 1008, .reason = "invalid apply result"});
             co_return false;
         }
-        co_await agentService().recordApplyResult(c, session.principal, result);
+        co_await agentCommandService().recordApplyResult(c, session.principal, result);
         co_return true;
     }
 
@@ -276,7 +277,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
             co_await close(c.webSocket(), {.code = 1008, .reason = "node mismatch"});
             co_return false;
         }
-        co_await agentService().heartbeat(c, session.principal, toHeartbeatReport(value));
+        co_await agentCommandService().heartbeat(c, session.principal, toHeartbeatReport(value));
         flexedge::node::v2::ServerEnvelope acknowledgement;
         acknowledgement.set_request_id(incoming.request_id());
         auto* ack = acknowledgement.mutable_heartbeat_ack();
@@ -323,7 +324,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
     }
 
     ruvia::Task<void> serveControlSession(ruvia::Context& c, const AuthenticatedSession& session) {
-        const auto desired = co_await agentService().desiredSummary(c, session.principal);
+        const auto desired = co_await agentReadService().desiredSummary(c, session.principal);
         flexedge::node::v2::ServerEnvelope welcome;
         welcome.set_request_id(session.requestId);
         auto* payload = welcome.mutable_welcome();
