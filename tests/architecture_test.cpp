@@ -677,14 +677,16 @@ int main() {
     }
 
     const auto dnsSyncWorker = source("service/features/dns_sync/worker.h");
-    REQUIRE(dnsSyncWorker.contains("dns_sync/reconciliation.h"));
     REQUIRE(dnsSyncWorker.contains("dns_sync/failure.h"));
     REQUIRE(dnsSyncWorker.contains("dns_sync/maintenance.h"));
+    REQUIRE(dnsSyncWorker.contains("dns_sync/sync_engine.h"));
     REQUIRE(dnsSyncWorker.contains("dns_sync/task_loader.h"));
-    REQUIRE(dnsSyncWorker.contains("dns_sync/zone_loader.h"));
-    REQUIRE(dnsSyncWorker.contains("dns_sync/zone_persistence.h"));
+    REQUIRE(!dnsSyncWorker.contains("dns_sync/reconciliation.h"));
+    REQUIRE(!dnsSyncWorker.contains("dns_sync/zone_loader.h"));
+    REQUIRE(!dnsSyncWorker.contains("dns_sync/zone_persistence.h"));
     REQUIRE(!dnsSyncWorker.contains("struct ManagedRecord final"));
     REQUIRE(!dnsSyncWorker.contains("inline RemoteMergePlan\nplanRemoteMerge"));
+    REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<bool>\nmergeRemoteRecords"));
     REQUIRE(!dnsSyncWorker.contains("struct TaskFailure final"));
     REQUIRE(!dnsSyncWorker.contains("inline TaskFailure classifyTaskFailure"));
     REQUIRE(!dnsSyncWorker.contains("struct DnsTask final"));
@@ -695,6 +697,9 @@ int main() {
     REQUIRE(!dnsSyncWorker.contains("eventRecorded"));
     REQUIRE(!dnsSyncWorker.contains("struct ZoneSyncState final"));
     REQUIRE(!dnsSyncWorker.contains("struct RemoteZoneData final"));
+    REQUIRE(!dnsSyncWorker.contains("struct DesiredRecordIds final"));
+    REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<ZoneRuntimeDto> reconcileZoneRecords"));
+    REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<std::int64_t> syncZone"));
     REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<void>\nimportInitialRemoteRecords"));
     REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<bool> persistRemoteMerge"));
     REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<void> persistSyncedZone"));
@@ -707,6 +712,12 @@ int main() {
     REQUIRE(dnsMaintenance.contains("reconcileTasks"));
     REQUIRE(dnsMaintenance.contains("pruneClusterManagedRecords"));
     REQUIRE(dnsMaintenance.contains("enqueueZoneRevision"));
+    const auto dnsSyncEngine = source("service/features/dns_sync/sync_engine.h");
+    REQUIRE(dnsSyncEngine.contains("mergeRemoteRecords"));
+    REQUIRE(dnsSyncEngine.contains("struct DesiredRecordIds final"));
+    REQUIRE(dnsSyncEngine.contains("deleteObsoleteRemoteRecords"));
+    REQUIRE(dnsSyncEngine.contains("reconcileZoneRecords"));
+    REQUIRE(dnsSyncEngine.contains("inline ruvia::Task<std::int64_t> syncZone"));
     const auto dnsZoneLoader = source("service/features/dns_sync/zone_loader.h");
     REQUIRE(!dnsZoneLoader.contains("struct DnsTask final"));
     REQUIRE(dnsZoneLoader.contains("struct ZoneSyncState final"));
