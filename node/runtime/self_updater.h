@@ -159,7 +159,7 @@ class SelfUpdater final {
         std::uint64_t totalBytes{};
         std::uint64_t writtenBytes{};
         std::filesystem::path candidate;
-        std::ofstream output;
+        std::ofstream output{};
     };
 
     bool log(std::string_view level, std::string_view message) const noexcept {
