@@ -679,6 +679,7 @@ int main() {
     const auto dnsSyncWorker = source("service/features/dns_sync/worker.h");
     REQUIRE(dnsSyncWorker.contains("dns_sync/reconciliation.h"));
     REQUIRE(dnsSyncWorker.contains("dns_sync/failure.h"));
+    REQUIRE(dnsSyncWorker.contains("dns_sync/maintenance.h"));
     REQUIRE(dnsSyncWorker.contains("dns_sync/task_loader.h"));
     REQUIRE(dnsSyncWorker.contains("dns_sync/zone_loader.h"));
     REQUIRE(dnsSyncWorker.contains("dns_sync/zone_persistence.h"));
@@ -688,6 +689,7 @@ int main() {
     REQUIRE(!dnsSyncWorker.contains("inline TaskFailure classifyTaskFailure"));
     REQUIRE(!dnsSyncWorker.contains("struct DnsTask final"));
     REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<std::optional<DnsTask>> claim"));
+    REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<void> reconcileTasks"));
     REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<void> fail("));
     REQUIRE(!dnsSyncWorker.contains("commitAndPublishResultEvent"));
     REQUIRE(!dnsSyncWorker.contains("eventRecorded"));
@@ -701,6 +703,10 @@ int main() {
     const auto dnsSyncTaskLoader = source("service/features/dns_sync/task_loader.h");
     REQUIRE(dnsSyncTaskLoader.contains("inline ruvia::Task<std::optional<DnsTask>> claim"));
     REQUIRE(dnsSyncTaskLoader.contains("FOR UPDATE OF task SKIP LOCKED"));
+    const auto dnsMaintenance = source("service/features/dns_sync/maintenance.h");
+    REQUIRE(dnsMaintenance.contains("reconcileTasks"));
+    REQUIRE(dnsMaintenance.contains("pruneClusterManagedRecords"));
+    REQUIRE(dnsMaintenance.contains("enqueueZoneRevision"));
     const auto dnsZoneLoader = source("service/features/dns_sync/zone_loader.h");
     REQUIRE(!dnsZoneLoader.contains("struct DnsTask final"));
     REQUIRE(dnsZoneLoader.contains("struct ZoneSyncState final"));
@@ -946,7 +952,7 @@ int main() {
     REQUIRE(!server.contains("node-dispatch"));
     REQUIRE(server.contains("website-dispatch"));
 
-    REQUIRE(dnsSyncWorker.contains("sys_sync_task"));
+    REQUIRE(!dnsSyncWorker.contains("sys_sync_task"));
     REQUIRE(dnsSyncWorker.contains("recoverStaleRunning"));
     REQUIRE(!dnsSyncWorker.contains("publishResultEvent"));
     REQUIRE(!dnsSyncWorker.contains("sys_task"));
