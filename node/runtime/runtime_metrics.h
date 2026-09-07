@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -15,6 +16,9 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <sys/sysctl.h>
 #else
 #include <sys/sysinfo.h>
 #endif
@@ -88,6 +92,53 @@ class RuntimeMetrics final {
             result.memoryUsage = static_cast<double>(memory.dwMemoryLoad) / 100.0;
         }
         result.load1m = result.cpuUsage * (std::max)(1U, std::thread::hardware_concurrency());
+    }
+#elif defined(__APPLE__)
+    void sampleSystem(RuntimeMetricsSnapshot& result) noexcept {
+        host_cpu_load_info_data_t cpu{};
+        mach_msg_type_number_t cpuCount = HOST_CPU_LOAD_INFO_COUNT;
+        if (::host_statistics(::mach_host_self(), HOST_CPU_LOAD_INFO,
+                              reinterpret_cast<host_info_t>(&cpu), &cpuCount) == KERN_SUCCESS) {
+            const auto idleValue = static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_IDLE]);
+            const auto totalValue = static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_USER]) +
+                                    static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_SYSTEM]) +
+                                    idleValue +
+                                    static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_NICE]);
+            if (lastCpuTotal_ != 0 && totalValue > lastCpuTotal_) {
+                const auto totalDelta = totalValue - lastCpuTotal_;
+                const auto idleDelta = idleValue - lastCpuIdle_;
+                result.cpuUsage = totalDelta > idleDelta
+                                      ? static_cast<double>(totalDelta - idleDelta) /
+                                            static_cast<double>(totalDelta)
+                                      : 0;
+            }
+            lastCpuIdle_ = idleValue;
+            lastCpuTotal_ = totalValue;
+        }
+
+        std::uint64_t totalMemory{};
+        std::size_t totalMemorySize = sizeof(totalMemory);
+        vm_statistics64_data_t memory{};
+        mach_msg_type_number_t memoryCount = HOST_VM_INFO64_COUNT;
+        vm_size_t pageSize{};
+        if (::sysctlbyname("hw.memsize", &totalMemory, &totalMemorySize, nullptr, 0) == 0 &&
+            totalMemory > 0 &&
+            ::host_statistics64(::mach_host_self(), HOST_VM_INFO64,
+                                reinterpret_cast<host_info64_t>(&memory), &memoryCount) ==
+                KERN_SUCCESS &&
+            ::host_page_size(::mach_host_self(), &pageSize) == KERN_SUCCESS) {
+            const auto usedPages = static_cast<std::uint64_t>(memory.active_count) +
+                                   static_cast<std::uint64_t>(memory.inactive_count) +
+                                   static_cast<std::uint64_t>(memory.wire_count);
+            result.memoryUsage = (std::min)(
+                1.0, static_cast<double>(usedPages) * static_cast<double>(pageSize) /
+                         static_cast<double>(totalMemory));
+        }
+
+        double load{};
+        if (::getloadavg(&load, 1) == 1 && load >= 0) {
+            result.load1m = load;
+        }
     }
 #else
     void sampleSystem(RuntimeMetricsSnapshot& result) noexcept {

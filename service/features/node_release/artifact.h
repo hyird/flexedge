@@ -251,9 +251,9 @@ class Catalog final {
                    const std::filesystem::path& manifestPath) {
         auto release = std::make_shared<const Release>(binaryPath, installerPath, manifestPath);
         Snapshot expected;
-        if (!release_.compare_exchange_strong(expected, std::move(release),
-                                              std::memory_order_release,
-                                              std::memory_order_acquire)) {
+        if (!std::atomic_compare_exchange_strong_explicit(
+                &release_, &expected, std::move(release), std::memory_order_release,
+                std::memory_order_acquire)) {
             throw std::logic_error("node release is already configured");
         }
         binaryPath_ = binaryPath;
@@ -262,12 +262,12 @@ class Catalog final {
     }
 
     [[nodiscard]] Snapshot current() {
-        auto release = release_.load(std::memory_order_acquire);
+        auto release = std::atomic_load_explicit(&release_, std::memory_order_acquire);
         if (!release) {
             throw std::logic_error("node release is not configured");
         }
         refreshIfDue(release);
-        return release_.load(std::memory_order_acquire);
+        return std::atomic_load_explicit(&release_, std::memory_order_acquire);
     }
 
   private:
@@ -314,7 +314,8 @@ class Catalog final {
             // releases through the response write timeout keeps an in-flight download stable.
             retiredReleases_.push_back(
                 {.snapshot = release, .expiresAtNs = now + retiredReleaseRetention_.count()});
-            release_.store(std::move(replacement), std::memory_order_release);
+            std::atomic_store_explicit(&release_, std::move(replacement),
+                                       std::memory_order_release);
         } catch (const IncompleteRelease&) {
             return;
         } catch (const std::exception& error) {
@@ -341,7 +342,7 @@ class Catalog final {
     std::filesystem::path binaryPath_;
     std::filesystem::path installerPath_;
     std::filesystem::path manifestPath_;
-    std::atomic<Snapshot> release_;
+    Snapshot release_;
     std::atomic<std::int64_t> nextProbeNs_{};
     std::atomic_flag refreshing_ = ATOMIC_FLAG_INIT;
     std::vector<RetiredRelease> retiredReleases_;
