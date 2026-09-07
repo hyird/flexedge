@@ -679,6 +679,7 @@ int main() {
     const auto dnsSyncWorker = source("service/features/dns_sync/worker.h");
     REQUIRE(dnsSyncWorker.contains("dns_sync/reconciliation.h"));
     REQUIRE(dnsSyncWorker.contains("dns_sync/failure.h"));
+    REQUIRE(dnsSyncWorker.contains("dns_sync/task_loader.h"));
     REQUIRE(dnsSyncWorker.contains("dns_sync/zone_loader.h"));
     REQUIRE(dnsSyncWorker.contains("dns_sync/zone_persistence.h"));
     REQUIRE(!dnsSyncWorker.contains("struct ManagedRecord final"));
@@ -686,6 +687,7 @@ int main() {
     REQUIRE(!dnsSyncWorker.contains("struct TaskFailure final"));
     REQUIRE(!dnsSyncWorker.contains("inline TaskFailure classifyTaskFailure"));
     REQUIRE(!dnsSyncWorker.contains("struct DnsTask final"));
+    REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<std::optional<DnsTask>> claim"));
     REQUIRE(!dnsSyncWorker.contains("struct ZoneSyncState final"));
     REQUIRE(!dnsSyncWorker.contains("struct RemoteZoneData final"));
     REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<void>\nimportInitialRemoteRecords"));
@@ -693,6 +695,9 @@ int main() {
     REQUIRE(!dnsSyncWorker.contains("inline ruvia::Task<void> persistSyncedZone"));
     const auto dnsSyncTask = source("service/features/dns_sync/task.h");
     REQUIRE(dnsSyncTask.contains("struct DnsTask final"));
+    const auto dnsSyncTaskLoader = source("service/features/dns_sync/task_loader.h");
+    REQUIRE(dnsSyncTaskLoader.contains("inline ruvia::Task<std::optional<DnsTask>> claim"));
+    REQUIRE(dnsSyncTaskLoader.contains("FOR UPDATE OF task SKIP LOCKED"));
     const auto dnsZoneLoader = source("service/features/dns_sync/zone_loader.h");
     REQUIRE(!dnsZoneLoader.contains("struct DnsTask final"));
     REQUIRE(dnsZoneLoader.contains("struct ZoneSyncState final"));
