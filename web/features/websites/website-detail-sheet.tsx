@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
@@ -9,7 +9,7 @@ import {
   ShieldCheck,
   type LucideIcon,
 } from 'lucide-react'
-import { apiErrorMessage, getData, sendData } from '@/lib/api'
+import { apiErrorMessage, type ApiEnvelope, getData, sendData } from '@/lib/api'
 import { formatBytes, formatBytesPerSecond } from '@/lib/format'
 import { queryKeys } from '@/lib/query-keys'
 import type {
@@ -241,24 +241,27 @@ export function WebsiteDetailSheet({
 }) {
   const websiteId = website?.id
   const queryClient = useQueryClient()
+  const [dashboardSnapshot, setDashboardSnapshot] = useState<{
+    websiteId: string
+    data: WebsiteDashboard
+  } | null>(null)
 
   useEffect(() => {
     if (!websiteId) return
 
-    // The server emits this only when a website access-log notification arrives.
-    // There is intentionally no timer-based refresh or HTTP polling fallback.
+    // The stream's first dashboard event is the initial snapshot. Later events
+    // replace it after access-log notifications; no dashboard REST read exists.
     const stream = new EventSource(`/api/websites/${websiteId}/dashboard/stream`, {
       withCredentials: true,
     })
-    const refresh = () => {
-      void queryClient.invalidateQueries({
-        queryKey: [...queryKeys.websites, websiteId, 'dashboard'],
-      })
-    }
-    stream.addEventListener('ready', refresh)
-    stream.addEventListener('dashboard', refresh)
+    stream.addEventListener('dashboard', (event) => {
+      const payload = JSON.parse(
+        (event as MessageEvent<string>).data
+      ) as ApiEnvelope<WebsiteDashboard>
+      setDashboardSnapshot({ websiteId, data: payload.data })
+    })
     return () => stream.close()
-  }, [queryClient, websiteId])
+  }, [websiteId])
 
   const detailQuery = useQuery({
     queryKey: [...queryKeys.websites, websiteId, 'detail'],
@@ -266,14 +269,6 @@ export function WebsiteDetailSheet({
     queryFn: () => {
       if (!websiteId) throw new Error('网站不存在')
       return getData<Website>(`/websites/${websiteId}`)
-    },
-  })
-  const dashboardQuery = useQuery({
-    queryKey: [...queryKeys.websites, websiteId, 'dashboard'],
-    enabled: !!websiteId,
-    queryFn: () => {
-      if (!websiteId) throw new Error('网站不存在')
-      return getData<WebsiteDashboard>(`/websites/${websiteId}/dashboard`)
     },
   })
   const dnsProbeMutation = useMutation({
@@ -293,7 +288,10 @@ export function WebsiteDetailSheet({
   if (!website) return null
 
   const detail = detailQuery.data ?? website
-  const dashboard = dashboardQuery.data
+  const dashboard =
+    dashboardSnapshot && dashboardSnapshot.websiteId === websiteId
+      ? dashboardSnapshot.data
+      : undefined
   const summary = dashboard?.summary
   const domainStates = detail.runtime.domain_states
   const originStates = detail.runtime.origin_states
@@ -354,23 +352,6 @@ export function WebsiteDetailSheet({
                 icon={ShieldCheck}
               />
             </section>
-
-            {dashboardQuery.isError && (
-              <Card className='border-destructive/40'>
-                <CardContent className='flex flex-wrap items-center justify-between gap-3'>
-                  <p className='text-sm text-muted-foreground'>
-                    统计数据加载失败，请稍后刷新重试。
-                  </p>
-                  <Button
-                    size='sm'
-                    variant='outline'
-                    onClick={() => void dashboardQuery.refetch()}
-                  >
-                    重试
-                  </Button>
-                </CardContent>
-              </Card>
-            )}
 
             <div className='grid gap-4 xl:grid-cols-2'>
               <WebsiteDashboardTrend
