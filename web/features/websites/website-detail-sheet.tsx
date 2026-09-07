@@ -1,4 +1,4 @@
-import { type ReactNode } from 'react'
+import { type ReactNode, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
@@ -241,6 +241,25 @@ export function WebsiteDetailSheet({
 }) {
   const websiteId = website?.id
   const queryClient = useQueryClient()
+
+  useEffect(() => {
+    if (!websiteId) return
+
+    // The server emits this only when a website access-log notification arrives.
+    // There is intentionally no timer-based refresh or HTTP polling fallback.
+    const stream = new EventSource(`/api/websites/${websiteId}/dashboard/stream`, {
+      withCredentials: true,
+    })
+    const refresh = () => {
+      void queryClient.invalidateQueries({
+        queryKey: [...queryKeys.websites, websiteId, 'dashboard'],
+      })
+    }
+    stream.addEventListener('ready', refresh)
+    stream.addEventListener('dashboard', refresh)
+    return () => stream.close()
+  }, [queryClient, websiteId])
+
   const detailQuery = useQuery({
     queryKey: [...queryKeys.websites, websiteId, 'detail'],
     enabled: !!websiteId,
@@ -248,7 +267,6 @@ export function WebsiteDetailSheet({
       if (!websiteId) throw new Error('网站不存在')
       return getData<Website>(`/websites/${websiteId}`)
     },
-    refetchInterval: 15_000,
   })
   const dashboardQuery = useQuery({
     queryKey: [...queryKeys.websites, websiteId, 'dashboard'],
@@ -257,7 +275,6 @@ export function WebsiteDetailSheet({
       if (!websiteId) throw new Error('网站不存在')
       return getData<WebsiteDashboard>(`/websites/${websiteId}/dashboard`)
     },
-    refetchInterval: 30_000,
   })
   const dnsProbeMutation = useMutation({
     mutationFn: async () => {

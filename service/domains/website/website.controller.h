@@ -31,6 +31,7 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
     RUVIA_GET("/", list);
     RUVIA_GET("/:id/access-logs", accessLogHistory);
     RUVIA_GET_SSE("/:id/access-logs/stream", accessLogStream);
+    RUVIA_GET_SSE("/:id/dashboard/stream", dashboardStream);
     RUVIA_GET("/:id/dashboard", dashboard);
     RUVIA_GET("/:id", detail);
     RUVIA_POST("/:id/dns-probe", requestDnsProbe);
@@ -157,6 +158,17 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
                 return service::log_ingest::tailResponseCursor(data);
             },
             writeLogEvent);
+    }
+
+    ruvia::Task<void> dashboardStream(ruvia::Context& c) {
+        const auto tenant = tenantId(c);
+        const auto id = requireId(c);
+        co_await service::log_ingest::streamSseSignals(
+            c,
+            service::log_ingest::fanout::hub().subscribe(
+                c.worker(), service::log_ingest::notifications::LogResourceType::access, tenant,
+                id),
+            "dashboard");
     }
 
     ruvia::Task<ruvia::HttpResponse> create(ruvia::Context& c) {
