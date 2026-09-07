@@ -752,7 +752,7 @@ int main(int argc, char* argv[]) {
         REQUIRE(!wsUpdater.updateAvailable("invalid"));
         REQUIRE(!wsUpdater.updateAvailable(flexedge::node::binarySha256(updaterBinaryPath)));
         REQUIRE(wsUpdater.updateAvailable(nextNodeDigest));
-        const auto rejected = [](auto&& action) {
+        const auto upgradeRejected = [](auto&& action) {
             try {
                 action();
                 return false;
@@ -763,10 +763,10 @@ int main(int argc, char* argv[]) {
         const auto originalDigest = flexedge::node::binarySha256(updaterBinaryPath);
         wsUpdater.begin("0.0.1", nextNodeDigest,
                         static_cast<std::uint64_t>(nextNodeBytes.size()));
-        REQUIRE(rejected([&] { wsUpdater.append(1, "bad-offset"); }));
-        REQUIRE(rejected([&] { wsUpdater.append(0, ""); }));
-        REQUIRE(rejected([&] { wsUpdater.append(0, std::string(nextNodeBytes.size() + 1, 'x')); }));
-        REQUIRE(rejected([&] { wsUpdater.commit(); }));
+        REQUIRE(upgradeRejected([&] { wsUpdater.append(1, "bad-offset"); }));
+        REQUIRE(upgradeRejected([&] { wsUpdater.append(0, ""); }));
+        REQUIRE(upgradeRejected([&] { wsUpdater.append(0, std::string(nextNodeBytes.size() + 1, 'x')); }));
+        REQUIRE(upgradeRejected([&] { wsUpdater.commit(); }));
         REQUIRE(wsUpdater.writtenBytes() == 0);
         wsUpdater.append(0, "partial");
         wsUpdater.abort();
@@ -775,7 +775,7 @@ int main(int argc, char* argv[]) {
         wsUpdater.begin("0.0.1", nextNodeDigest,
                         static_cast<std::uint64_t>(nextNodeBytes.size()));
         wsUpdater.append(0, std::string(nextNodeBytes.size(), 'x'));
-        REQUIRE(rejected([&] { wsUpdater.commit(); }));
+        REQUIRE(upgradeRejected([&] { wsUpdater.commit(); }));
         REQUIRE(!restartRequested);
         REQUIRE(flexedge::node::binarySha256(updaterBinaryPath) == originalDigest);
         for (const auto& entry : std::filesystem::directory_iterator(credentialsRoot)) {
