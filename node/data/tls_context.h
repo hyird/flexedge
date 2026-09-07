@@ -128,15 +128,15 @@ class TlsContextSet final {
 class TlsContextRegistry final {
   public:
     void publish(std::shared_ptr<const TlsContextSet> contexts) noexcept {
-        std::atomic_store(&contexts_, std::move(contexts));
+        contexts_.store(std::move(contexts), std::memory_order_release);
     }
 
     [[nodiscard]] std::shared_ptr<const TlsContextSet> current() const noexcept {
-        return std::atomic_load(&contexts_);
+        return contexts_.load(std::memory_order_acquire);
     }
 
   private:
-    std::shared_ptr<const TlsContextSet> contexts_;
+    std::atomic<std::shared_ptr<const TlsContextSet>> contexts_;
 };
 
 } // namespace flexedge::node

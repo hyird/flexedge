@@ -169,9 +169,9 @@ class OriginHealthRegistry final {
                               found == current->end() ? std::make_shared<State>() : found->second);
             }
             std::shared_ptr<const StateMap> desired = std::move(next);
-            if (std::atomic_compare_exchange_weak_explicit(
-                    &states_, &current, std::move(desired), std::memory_order_release,
-                    std::memory_order_acquire)) {
+            if (states_.compare_exchange_weak(current, std::move(desired),
+                                              std::memory_order_release,
+                                              std::memory_order_acquire)) {
                 return;
             }
         }
@@ -197,7 +197,7 @@ class OriginHealthRegistry final {
     using StateMap = std::unordered_map<Key, std::shared_ptr<State>, KeyHash, KeyEqual>;
 
     [[nodiscard]] std::shared_ptr<const StateMap> snapshot() const noexcept {
-        return std::atomic_load_explicit(&states_, std::memory_order_acquire);
+        return states_.load(std::memory_order_acquire);
     }
 
     [[nodiscard]] std::shared_ptr<State> stateFor(std::string_view websiteId,
@@ -212,9 +212,9 @@ class OriginHealthRegistry final {
             auto state = std::make_shared<State>();
             next->emplace(key(websiteId, originId), state);
             std::shared_ptr<const StateMap> desired = std::move(next);
-            if (std::atomic_compare_exchange_weak_explicit(
-                    &states_, &current, std::move(desired), std::memory_order_release,
-                    std::memory_order_acquire)) {
+            if (states_.compare_exchange_weak(current, std::move(desired),
+                                              std::memory_order_release,
+                                              std::memory_order_acquire)) {
                 return state;
             }
         }
@@ -249,7 +249,7 @@ class OriginHealthRegistry final {
         }
     }
 
-    std::shared_ptr<const StateMap> states_{std::make_shared<StateMap>()};
+    std::atomic<std::shared_ptr<const StateMap>> states_{std::make_shared<StateMap>()};
 };
 
 } // namespace flexedge::node

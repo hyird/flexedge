@@ -23,7 +23,7 @@ class RuntimeState final {
     }
 
     void validateNext(const CompiledConfig& config) const {
-        const auto current = std::atomic_load(&config_);
+        const auto current = config_.load(std::memory_order_acquire);
         if (!current) {
             return;
         }
@@ -46,11 +46,11 @@ class RuntimeState final {
     }
 
     void publish(std::shared_ptr<const CompiledConfig> config) noexcept {
-        std::atomic_store(&config_, std::move(config));
+        config_.store(std::move(config), std::memory_order_release);
     }
 
     [[nodiscard]] std::shared_ptr<const CompiledConfig> config() const noexcept {
-        return std::atomic_load(&config_);
+        return config_.load(std::memory_order_acquire);
     }
 
     [[nodiscard]] std::int64_t appliedNodeSpecRevision() const noexcept {
@@ -69,7 +69,7 @@ class RuntimeState final {
     }
 
   private:
-    std::shared_ptr<const CompiledConfig> config_;
+    std::atomic<std::shared_ptr<const CompiledConfig>> config_;
 };
 
 } // namespace flexedge::node
