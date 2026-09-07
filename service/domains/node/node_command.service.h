@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -16,11 +17,9 @@
 #include "service/common/http.h"
 #include "service/domains/node/node.error.h"
 #include "service/domains/node/node.mapper.h"
-#include "service/domains/node/node_read.service.h"
 #include "service/domains/node/node.types.h"
 #include "service/features/cluster_dns/projection.h"
 #include "service/features/dns_sync/snapshot.h"
-#include "service/features/log_ingest/tail.h"
 #include "service/features/node_config/model.h"
 #include "service/features/node_dispatch/queue.h"
 #include "service/utils/secret.h"
@@ -29,20 +28,8 @@
 
 namespace service::node {
 
-class NodeService final {
+class NodeCommandService final {
   public:
-    ruvia::Task<NodePageDataDto> list(ruvia::Context& c, const std::string& tenantId,
-                                      std::int64_t page, std::int64_t pageSize, std::int64_t skip,
-                                      const std::optional<std::string>& keyword,
-                                      const std::optional<std::string>& clusterId,
-                                      const std::optional<std::string>& status,
-                                      const std::optional<std::string>& registrationStatus,
-                                      const std::optional<std::string>& connectionStatus) {
-        co_return co_await nodeReadService().list(c, tenantId, page, pageSize, skip, keyword,
-                                                  clusterId, status, registrationStatus,
-                                                  connectionStatus);
-    }
-
     ruvia::Task<NodeCredentialsDto> create(ruvia::Context& c, const std::string& tenantId,
                                            const ruvia::ValidatedJson<NodeSaveInput>& config) {
         const auto normalized = normalize(config.value());
@@ -91,17 +78,6 @@ class NodeService final {
             throw;
         }
         co_return result;
-    }
-
-    ruvia::Task<NodeCredentialsDto> credentials(ruvia::Context& c, const std::string& tenantId,
-                                                const std::string& id) {
-        co_return co_await nodeReadService().credentials(c, tenantId, id);
-    }
-
-    ruvia::Task<NodeLogTailDataDto>
-    logs(ruvia::Context& c, const std::string& tenantId, const std::string& id, std::int64_t limit,
-         const std::optional<service::log_ingest::TailCursor>& after) {
-        co_return co_await nodeReadService().logs(c, tenantId, id, limit, after);
     }
 
     ruvia::Task<void> update(ruvia::Context& c, const std::string& tenantId, const std::string& id,
@@ -350,8 +326,8 @@ class NodeService final {
     }
 };
 
-inline NodeService& nodeService() {
-    static NodeService service;
+inline NodeCommandService& nodeCommandService() {
+    static NodeCommandService service;
     return service;
 }
 

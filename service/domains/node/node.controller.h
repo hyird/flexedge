@@ -17,7 +17,8 @@
 
 #include "service/common/http.h"
 #include "service/domains/node/node.schema.h"
-#include "service/domains/node/node.service.h"
+#include "service/domains/node/node_command.service.h"
+#include "service/domains/node/node_read.service.h"
 #include "service/features/log_ingest/fanout.h"
 #include "service/features/log_ingest/sse_tail.h"
 #include "service/features/log_ingest/tail.h"
@@ -103,36 +104,37 @@ class NodeController final : public ruvia::Controller<NodeController> {
         const auto connectionStatus =
             enumQuery(c, "connection_status", {"unregistered", "online", "offline"});
         co_return c.json(service::common::ok<NodePageResponse>(
-            c, co_await nodeService().list(c, tenantId(c), page, pageSize, skip, keyword, clusterId,
-                                           status, registrationStatus, connectionStatus)));
+            c, co_await nodeReadService().list(c, tenantId(c), page, pageSize, skip, keyword,
+                                               clusterId, status, registrationStatus,
+                                               connectionStatus)));
     }
 
     ruvia::Task<ruvia::HttpResponse> create(ruvia::Context& c) {
         c.header("cache-control", "no-store");
-        auto data =
-            co_await nodeService().create(c, tenantId(c), c.req().validatedJson<NodeSaveInput>());
+        auto data = co_await nodeCommandService().create(c, tenantId(c),
+                                                         c.req().validatedJson<NodeSaveInput>());
         service::common::setRevisionEtag(c, data.get<"revision">().value);
         co_return c.json(service::common::ok<NodeCredentialsResponse>(c, std::move(data)));
     }
 
     ruvia::Task<ruvia::HttpResponse> update(ruvia::Context& c) {
         const auto revision = expectedRevision(c);
-        co_await nodeService().update(c, tenantId(c), requireId(c), revision,
-                                      c.req().validatedJson<NodeSaveInput>());
+        co_await nodeCommandService().update(c, tenantId(c), requireId(c), revision,
+                                             c.req().validatedJson<NodeSaveInput>());
         service::common::setRevisionEtag(c, revision + 1);
         co_return c.json(service::common::operation(c, "节点配置已更新"));
     }
 
     ruvia::Task<ruvia::HttpResponse> remove(ruvia::Context& c) {
         const auto revision = expectedRevision(c);
-        co_await nodeService().remove(c, tenantId(c), requireId(c), revision);
+        co_await nodeCommandService().remove(c, tenantId(c), requireId(c), revision);
         service::common::setRevisionEtag(c, revision + 1);
         co_return c.json(service::common::operation(c, "节点已删除"));
     }
 
     ruvia::Task<ruvia::HttpResponse> credentials(ruvia::Context& c) {
         c.header("cache-control", "no-store");
-        auto data = co_await nodeService().credentials(c, tenantId(c), requireId(c));
+        auto data = co_await nodeReadService().credentials(c, tenantId(c), requireId(c));
         service::common::setRevisionEtag(c, data.get<"revision">().value);
         co_return c.json(service::common::ok<NodeCredentialsResponse>(c, std::move(data)));
     }
@@ -140,7 +142,8 @@ class NodeController final : public ruvia::Controller<NodeController> {
     ruvia::Task<ruvia::HttpResponse> resetCredentials(ruvia::Context& c) {
         c.header("cache-control", "no-store");
         const auto revision = expectedRevision(c);
-        auto data = co_await nodeService().resetCredentials(c, tenantId(c), requireId(c), revision);
+        auto data =
+            co_await nodeCommandService().resetCredentials(c, tenantId(c), requireId(c), revision);
         service::common::setRevisionEtag(c, data.get<"revision">().value);
         co_return c.json(service::common::ok<NodeCredentialsResponse>(c, std::move(data)));
     }
@@ -190,7 +193,7 @@ class NodeController final : public ruvia::Controller<NodeController> {
                 c.worker(), service::log_ingest::notifications::LogResourceType::node, tenant, id),
             service::log_ingest::optionalSseTailCursor(c),
             [&c, tenant, id, limit](const std::optional<service::log_ingest::TailCursor>& after) {
-                return nodeService().logs(c, tenant, id, limit, after);
+                return nodeReadService().logs(c, tenant, id, limit, after);
             },
             [](const NodeLogTailDataDto& data) {
                 return service::log_ingest::tailResponseCursor(data);
