@@ -4,6 +4,7 @@
 #include <exception>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include <ruvia/core/Task.h>
 #include <ruvia/web/Context.h>
@@ -30,6 +31,38 @@ inline void advanceTailCursor(std::optional<TailCursor>& target,
     }
     if (const auto parsed = parseTailCursor(*cursor)) {
         target = *parsed;
+    }
+}
+
+// Emits lightweight state-change signals for views that own their data fetch.
+// Unlike streamSseTail, it never queries historical log rows after a notification.
+inline ruvia::Task<void> streamSseSignals(ruvia::Context& c, fanout::Hub::Subscription subscription,
+                                          std::string_view eventName) {
+    try {
+        auto events = c.streamSse();
+        co_await events.write(
+            {.data = "{}", .event = "ready", .retry = std::chrono::milliseconds{3000}});
+
+        while (!events.aborted()) {
+            const auto signal =
+                co_await subscription.receiveFor(fanout::kSseHeartbeatInterval, c.stopToken());
+            if (events.aborted()) {
+                co_return;
+            }
+            if (!signal.hasValue()) {
+                if (signal.status() != ruvia::WorkerWaitStatus::kTimedOut) {
+                    co_return;
+                }
+                co_await events.write({.event = "heartbeat"});
+                continue;
+            }
+            co_await events.write({.data = "{}", .event = eventName});
+        }
+    } catch (const std::exception& error) {
+        if (sseClientDisconnected(error)) {
+            co_return;
+        }
+        throw;
     }
 }
 

@@ -939,8 +939,13 @@ int main() {
     REQUIRE(websiteController.contains("websiteReadService().list"));
     REQUIRE(websiteController.contains("log_ingest/sse_tail.h"));
     REQUIRE(websiteController.contains("streamSseTail"));
+    REQUIRE(websiteController.contains("RUVIA_GET_SSE(\"/:id/dashboard/stream\", dashboardStream)"));
+    REQUIRE(websiteController.contains("streamSseSignals"));
     REQUIRE(!websiteController.contains("receiveFor("));
     REQUIRE(!websiteController.contains("advanceCursor("));
+    const auto websiteDetailSheet = source("web/features/websites/website-detail-sheet.tsx");
+    REQUIRE(websiteDetailSheet.contains("/dashboard/stream"));
+    REQUIRE(!websiteDetailSheet.contains("refetchInterval"));
     const auto nodeRuntimeFanout = source("service/features/node_runtime/fanout.h");
     REQUIRE(nodeRuntimeFanout.contains("kSubscriberSignalCapacity{1}"));
     REQUIRE(nodeRuntimeFanout.contains("class Hub final"));
