@@ -972,7 +972,8 @@ int main() {
     REQUIRE(syncEventTypes.contains("has_more"));
     const auto syncEventController = source("service/domains/sync_event/sync_event.controller.h");
     REQUIRE(syncEventController.contains("/api/sync-events"));
-    REQUIRE(syncEventController.contains("after 必须是非负事件游标"));
+    REQUIRE(syncEventController.contains("RUVIA_GET_SSE(\"/stream\", stream)"));
+    REQUIRE(!syncEventController.contains("RUVIA_GET(\"/\", list)"));
     REQUIRE(!std::filesystem::exists(sourceRoot / "web/components/task-completion-monitor.tsx"));
     const auto syncEventMonitor = source("web/components/sync-event-monitor.tsx");
     REQUIRE(syncEventMonitor.contains("/sync-events/"));

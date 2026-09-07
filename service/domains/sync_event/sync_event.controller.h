@@ -25,7 +25,6 @@ class SyncEventController final : public ruvia::Controller<SyncEventController> 
   public:
     RUVIA_CONTROLLER_GROUP("/api/sync-events", service::middleware::AuthMiddleware)
     RUVIA_ROUTES_BEGIN
-    RUVIA_GET("/", list);
     RUVIA_GET_SSE("/stream", stream);
     RUVIA_ROUTES_END
 
@@ -73,19 +72,6 @@ class SyncEventController final : public ruvia::Controller<SyncEventController> 
             ruvia::toJson(service::common::ok<SyncEventPageResponse>(c, std::move(data)),
                           {.resource = c.resource()});
         co_await events.write({.data = payload, .event = "sync-events", .id = cursorId});
-    }
-
-    ruvia::Task<ruvia::HttpResponse> list(ruvia::Context& c) {
-        std::optional<std::int64_t> after;
-        if (const auto input = c.req().query("after")) {
-            after = service::common::parseInt64(input);
-            if (!after || *after < 0) {
-                service::common::throwAppError(service::common::kValidationErrorCode,
-                                               "after 必须是非负事件游标", 400);
-            }
-        }
-        co_return c.json(service::common::ok<SyncEventPageResponse>(
-            c, co_await syncEventService().list(c, tenantId(c), after)));
     }
 
     ruvia::Task<void> stream(ruvia::Context& c) {
