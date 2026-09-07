@@ -140,7 +140,7 @@ export function WebsiteOriginsTab({
                                 <X />
                               </Button>
                             </div>
-                            <div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-[110px_minmax(0,1fr)_92px_110px_96px_110px]'>
+                            <div className='grid items-start gap-4 sm:grid-cols-2 lg:grid-cols-3'>
                               <FormField
                                 control={form.control}
                                 name={`origins.${index}.protocol`}

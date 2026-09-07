@@ -315,6 +315,12 @@ message RouteRule {
     repeated HeaderMutation response_headers = 11;
     repeated string origin_ids = 12;
     string origin_group = 13;
+    string name = 14;
+    string description = 15;
+    repeated string hostnames = 16;
+    string rewrite_mode = 17;
+    string query_mode = 18;
+    string query_string = 19;
 }
 
 message HeaderMutation {

@@ -11,6 +11,7 @@
 #include <ruvia/web/ModelJson.h>
 
 #include "service/features/website_config/transport.h"
+#include "common/route_policy.h"
 
 namespace service::website_config {
 
@@ -38,6 +39,12 @@ struct WebsiteRouteHeaderData final {
 
 struct WebsiteRouteRuleData final {
     std::string id;
+    std::string name;
+    std::string description;
+    std::vector<std::string> hostnames;
+    std::string rewriteMode;
+    std::string queryMode;
+    std::string queryString;
     std::string status;
     std::string matchType;
     std::string path;
@@ -157,6 +164,12 @@ normalize(const WebsiteRouteRuleInput& input) {
         return std::nullopt;
     }
     WebsiteRouteRuleData result{.id = std::string(id->view()),
+                                .name = input.get<"name">() ? std::string(input.get<"name">()->view()) : "",
+                                .description = input.get<"description">() ? std::string(input.get<"description">()->view()) : "",
+                                .hostnames = {},
+                                .rewriteMode = input.get<"rewriteMode">() ? std::string(input.get<"rewriteMode">()->view()) : (rewritePath->empty() ? "none" : "replace_path"),
+                                .queryMode = input.get<"queryMode">() ? std::string(input.get<"queryMode">()->view()) : "preserve",
+                                .queryString = input.get<"queryString">() ? std::string(input.get<"queryString">()->view()) : "",
                                 .status = std::string(status->view()),
                                 .matchType = std::string(matchType->view()),
                                 .path = std::string(path->view()),
@@ -168,6 +181,9 @@ normalize(const WebsiteRouteRuleInput& input) {
                                 .originGroup = originGroup ? std::string(originGroup->view()) : "",
                                 .requestHeaders = {},
                                 .responseHeaders = {}};
+    if (const auto& hostnames = input.get<"hostnames">()) {
+        for (const auto& host : *hostnames) result.hostnames.push_back(flexedge::route_policy::hostname(host.view()));
+    }
     result.methods.reserve(methods->size());
     for (const auto& method : *methods) {
         result.methods.emplace_back(method.view());
@@ -454,6 +470,12 @@ parseStored(std::string_view json, ruvia::ModelParseOptions options = {}) {
     for (const auto& rule : input.routeRules) {
         auto& item = routeRules.emplace_back(options);
         item.set<"id">(rule.id);
+        item.set<"name">(rule.name);
+        item.set<"description">(rule.description);
+        copyStrings(item.ensure<"hostnames">(), rule.hostnames);
+        item.set<"rewriteMode">(rule.rewriteMode);
+        item.set<"queryMode">(rule.queryMode);
+        item.set<"queryString">(rule.queryString);
         item.set<"status">(rule.status);
         item.set<"matchType">(rule.matchType);
         item.set<"path">(rule.path);

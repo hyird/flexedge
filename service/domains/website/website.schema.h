@@ -14,6 +14,7 @@
 #include "service/common/http.h"
 #include "service/common/ip_address.h"
 #include "service/domains/website/website.types.h"
+#include "common/route_policy.h"
 
 namespace service::website {
 
@@ -266,6 +267,23 @@ struct WebsiteRouteRuleValidator final {
     template <typename ValidatorT>
     void validateNested(const service::website_config::WebsiteRouteRuleInput& value,
                         std::string_view path, ValidatorT& validator) const {
+        namespace policy = flexedge::route_policy;
+        if (const auto& name = value.get<"name">(); name && !policy::cleanText(name->view(), 100)) {
+            validator.add(std::string(path) + ".name", "format", "规则名称最多100字节且不能包含控制字符");
+        }
+        if (const auto& description = value.get<"description">(); description && description->view().size() > 1000) {
+            validator.add(std::string(path) + ".description", "format", "规则备注最多1000字节");
+        }
+        if (const auto& hostnames = value.get<"hostnames">()) {
+            std::unordered_set<std::string> seen;
+            if (hostnames->size() > 100) validator.add(std::string(path) + ".hostnames", "format", "最多100个匹配域名");
+            for (const auto& host : *hostnames) {
+                if (!policy::exactHostname(host.view()) || !seen.emplace(policy::hostname(host.view())).second) {
+                    validator.add(std::string(path) + ".hostnames", "format", "请填写不重复的精确域名，不含协议、端口或通配符");
+                    break;
+                }
+            }
+        }
         const auto& id = value.get<"id">();
         if (!id || !service::common::parseUuid(id ? std::optional<std::string_view>{id->view()}
                                                   : std::nullopt)) {
@@ -298,6 +316,31 @@ struct WebsiteRouteRuleValidator final {
         const auto& originGroup = value.get<"originGroup">();
         if (!rewritePath || !redirectUrl || !redirectStatus || !originGroup) {
             return;
+        }
+        const auto& configuredMode = value.get<"rewriteMode">();
+        const auto mode = configuredMode ? configuredMode->view() : std::string_view{};
+        const auto& configuredQuery = value.get<"queryMode">();
+        const auto queryMode = configuredQuery ? configuredQuery->view() : std::string_view{};
+        const auto& query = value.get<"queryString">();
+        const auto queryText = query ? query->view() : std::string_view{};
+        if (!policy::rewriteMode(mode)) validator.add(std::string(path) + ".rewrite_mode", "enum", "重写方式不正确");
+        if (!policy::queryMode(queryMode)) validator.add(std::string(path) + ".query_mode", "enum", "查询参数策略不正确");
+        if (!policy::queryString(queryText) || (queryMode != "replace" && !queryText.empty())) {
+            validator.add(std::string(path) + ".query_string", "format", "仅替换策略可填写参数，不含开头问号、空白或片段标记");
+        }
+        if ((mode == "none" || mode == "strip_prefix") && !rewritePath->empty()) {
+            validator.add(std::string(path) + ".rewrite_path", "format", "当前重写方式无需填写替换路径");
+        }
+        if ((mode == "replace_path" || mode == "replace_prefix") && rewritePath->empty()) {
+            validator.add(std::string(path) + ".rewrite_path", "required", "请填写替换路径");
+        }
+        if ((mode == "strip_prefix" || mode == "replace_prefix") &&
+            (!matchType || matchType->view() != "prefix" || !routePath || !policy::pathOnly(routePath->view()) ||
+             (mode == "replace_prefix" && !policy::pathOnly(rewritePath->view())))) {
+            validator.add(std::string(path) + ".rewrite_mode", "format", "前缀重写仅适用于前缀匹配，路径不能含查询参数或片段");
+        }
+        if (action->view() == "redirect" && !mode.empty() && mode != "none") {
+            validator.add(std::string(path) + ".rewrite_mode", "format", "跳转规则不能同时重写回源路径");
         }
         if (action->view() == "proxy") {
             if ((!rewritePath->empty() && !isRoutePath(rewritePath->view())) ||

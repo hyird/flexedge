@@ -103,7 +103,7 @@ class CompiledConfig final {
         const auto& releaseContent = manifest.content();
         if (!manifest.has_content() || releaseContent.cluster_id().empty() ||
             releaseContent.release_id().empty() || releaseContent.generation() <= 0 ||
-            releaseContent.schema_version() != kClusterReleaseSchemaVersion ||
+            (releaseContent.schema_version() != 2 && releaseContent.schema_version() != kClusterReleaseSchemaVersion) ||
             releaseContent.access_domain().empty() || !isSha256Digest(manifest.digest_sha256()) ||
             artifactDigest(releaseContent) != manifest.digest_sha256()) {
             throw std::runtime_error("invalid cluster release manifest");

@@ -242,11 +242,11 @@ void apply(flexedge::node::RuntimeState& runtime, TestConfig value) {
 }
 
 std::string request(std::uint16_t port, std::string_view host = "WWW.Example.COM:80",
-                    std::string_view extraHeaders = {}) {
+                    std::string_view extraHeaders = {}, std::string_view target = "/a?q=1") {
     asio::io_context context;
     asio::ip::tcp::socket socket(context);
     socket.connect({asio::ip::address_v4::loopback(), port});
-    const auto bytes = "GET /a?q=1 HTTP/1.1\r\nHost: " + std::string(host) + "\r\n" +
+    const auto bytes = "GET " + std::string(target) + " HTTP/1.1\r\nHost: " + std::string(host) + "\r\n" +
                        std::string(extraHeaders) + "Connection: close\r\n\r\n";
     asio::write(socket, asio::buffer(bytes));
     std::string response;
@@ -1259,6 +1259,7 @@ int main(int argc, char* argv[]) {
             originContext, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto unavailablePort = unavailableAcceptor.local_endpoint().port();
         unavailableAcceptor.close();
+        std::atomic<bool> sawRouteRewrite{false};
         std::jthread originServer([&](std::stop_token stopToken) {
             asio::ip::tcp::socket originSocket(originContext);
             if (!acceptUntilStopped(originAcceptor, originSocket, stopToken)) {
@@ -1266,7 +1267,8 @@ int main(int argc, char* argv[]) {
             }
             std::array<char, 4096> originRequest{};
             std::error_code ignored;
-            (void)originSocket.read_some(asio::buffer(originRequest), ignored);
+            const auto received = originSocket.read_some(asio::buffer(originRequest), ignored);
+            sawRouteRewrite.store(std::string_view(originRequest.data(), received).starts_with("GET /internal/users?route=1 HTTP/1.1\r\n"));
             constexpr std::string_view originResponse =
                 "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: Foo\r\n"
                 "Foo: remove-me\r\nX-Origin: retained\r\n\r\nOK";
@@ -1292,13 +1294,19 @@ int main(int argc, char* argv[]) {
         proxyRoute->set_path("/a");
         proxyRoute->set_action("proxy");
         proxyRoute->add_origin_ids("origin-backup");
+        proxyRoute->add_hostnames("www.example.com");
+        proxyRoute->set_rewrite_mode("replace_prefix");
+        proxyRoute->set_rewrite_path("/internal/");
+        proxyRoute->set_query_mode("replace");
+        proxyRoute->set_query_string("route=1");
         const auto candidates =
             flexedge::node::originCandidates(proxySnapshot.website(), 0, proxyRoute);
         REQUIRE(candidates.size() == 1);
         REQUIRE(candidates.front()->id() == "origin-backup");
         apply(runtime, std::move(proxySnapshot));
         const auto proxyStarted = std::chrono::steady_clock::now();
-        const auto proxyResponse = request(port);
+        const auto proxyResponse = request(port, "WWW.Example.COM:80", {}, "/a/users?q=1");
+        REQUIRE(sawRouteRewrite.load());
         const auto proxyElapsed = std::chrono::steady_clock::now() - proxyStarted;
         REQUIRE(proxyResponse.starts_with("HTTP/1.1 200 OK\r\n"));
         REQUIRE(proxyResponse.ends_with("\r\n\r\nOK"));
@@ -1433,6 +1441,24 @@ int main(int argc, char* argv[]) {
         apiDomain->set_https_enabled(true);
         apiDomain->set_certificate_digest(
             flexedge::node::artifactDigest(tlsSnapshot.objects.back().content()));
+        tlsWebsite = tlsSnapshot.mutableWebsite();
+        auto* otherHostRule = tlsWebsite->add_route_rules();
+        otherHostRule->set_id("other-host");
+        otherHostRule->set_enabled(true);
+        otherHostRule->set_match_type("exact");
+        otherHostRule->set_path("/redirect");
+        otherHostRule->set_action("redirect");
+        otherHostRule->set_redirect_url("/other");
+        otherHostRule->set_redirect_status(302);
+        otherHostRule->add_hostnames("api.example.com");
+        auto* currentHostRule = tlsWebsite->add_route_rules();
+        currentHostRule->CopyFrom(*otherHostRule);
+        currentHostRule->set_id("current-host");
+        currentHostRule->clear_hostnames();
+        currentHostRule->add_hostnames("www.example.com");
+        currentHostRule->set_redirect_status(301);
+        currentHostRule->set_query_mode("replace");
+        currentHostRule->set_query_string("v=2");
         apply(runtime, std::move(tlsSnapshot));
         flexedge::node::TlsContextRegistry tlsContexts;
         tlsContexts.publish(
@@ -1445,6 +1471,8 @@ int main(int argc, char* argv[]) {
         httpsListener->requestStart();
         REQUIRE(tlsAlpn(httpsPort, "www.example.com", true) == "h2");
         REQUIRE(tlsAlpn(httpsPort, "www.example.com", false) == "http/1.1");
+        REQUIRE(tlsHttp2Request(httpsPort, "www.example.com", "/redirect?a=1").peerCommonName == "301");
+        REQUIRE(tlsHttp2Request(httpsPort, "api.example.com", "/redirect?a=1").peerCommonName == "302");
         const auto http2Response = tlsHttp2Request(httpsPort, "www.example.com");
         REQUIRE(http2Response.peerCommonName == "200");
         REQUIRE(http2Response.bytes == "TLS");

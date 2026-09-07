@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "node/proto/edge_control.pb.h"
+#include "common/route_policy.h"
 
 namespace flexedge::node {
 
@@ -154,6 +155,26 @@ inline void validateRouteRules(const v2::Website& website) {
     }
     std::unordered_set<std::string_view> ids;
     for (const auto& rule : website.route_rules()) {
+        namespace policy = flexedge::route_policy;
+        const auto& mode = rule.rewrite_mode();
+        if (!policy::cleanText(rule.name(), 100) || rule.description().size() > 1000 ||
+            rule.hostnames_size() > 100 || !policy::rewriteMode(mode) ||
+            !policy::queryMode(rule.query_mode()) || !policy::queryString(rule.query_string()) ||
+            (rule.query_mode() != "replace" && !rule.query_string().empty()) ||
+            ((mode == "none" || mode == "strip_prefix") && !rule.rewrite_path().empty()) ||
+            ((mode == "replace_path" || mode == "replace_prefix") && rule.rewrite_path().empty()) ||
+            ((mode == "strip_prefix" || mode == "replace_prefix") &&
+             (rule.match_type() != "prefix" || !policy::pathOnly(rule.path()) ||
+              (mode == "replace_prefix" && !policy::pathOnly(rule.rewrite_path())))) ||
+            (rule.action() == "redirect" && !mode.empty() && mode != "none")) {
+            throw std::runtime_error("invalid route policy options");
+        }
+        std::unordered_set<std::string> hostnames;
+        for (const auto& host : rule.hostnames()) {
+            if (!policy::exactHostname(host) || !hostnames.emplace(policy::hostname(host)).second) {
+                throw std::runtime_error("invalid route hostname filter");
+            }
+        }
         if (rule.id().empty() || !ids.emplace(rule.id()).second ||
             (rule.match_type() != "exact" && rule.match_type() != "prefix") ||
             !routePath(rule.path()) || !routeMethods(rule.methods()) ||
@@ -184,7 +205,9 @@ inline void validateRouteRules(const v2::Website& website) {
 
 [[nodiscard]] inline const v2::RouteRule* matchedRouteRule(const v2::Website& website,
                                                            std::string_view method,
-                                                           std::string_view target) noexcept {
+                                                           std::string_view target,
+                                                           std::string_view host = {}) {
+    const auto hostname = flexedge::route_policy::hostname(host);
     const auto pathEnd = target.find('?');
     const auto path = target.substr(0, pathEnd);
     const v2::RouteRule* matched = nullptr;
@@ -192,6 +215,9 @@ inline void validateRouteRules(const v2::Website& website) {
         if (!rule.enabled() || !routeMethodMatches(rule, method)) {
             continue;
         }
+        if (!rule.hostnames().empty() && std::ranges::none_of(rule.hostnames(), [&](const auto& candidate) {
+                return flexedge::route_policy::hostname(candidate) == hostname;
+            })) continue;
         const bool pathMatches =
             rule.match_type() == "exact"
                 ? path == rule.path()
@@ -212,25 +238,17 @@ inline void validateRouteRules(const v2::Website& website) {
 }
 
 [[nodiscard]] inline std::string routeTarget(std::string_view target, const v2::RouteRule* rule) {
-    if (rule == nullptr || rule->rewrite_path().empty()) {
+    if (rule == nullptr) {
         return std::string(target);
     }
-    std::string result(rule->rewrite_path());
-    if (const auto query = target.find('?'); query != std::string_view::npos) {
-        result.append(target.substr(query));
-    }
-    return result;
+    const auto path = target.substr(0, target.find('?'));
+    const auto result = flexedge::route_policy::rewritePath(path, rule->path(), rule->rewrite_path(), rule->rewrite_mode());
+    return flexedge::route_policy::applyQuery(result, target, rule->query_mode(), rule->query_string());
 }
 
 [[nodiscard]] inline std::string routeRedirectLocation(std::string_view target,
                                                        const v2::RouteRule& rule) {
-    std::string result(rule.redirect_url());
-    if (!result.contains('?')) {
-        if (const auto query = target.find('?'); query != std::string_view::npos) {
-            result.append(target.substr(query));
-        }
-    }
-    return result;
+    return flexedge::route_policy::applyQuery(rule.redirect_url(), target, rule.query_mode(), rule.query_string());
 }
 
 template <typename HeaderRange>

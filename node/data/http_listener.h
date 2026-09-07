@@ -466,7 +466,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         }
         hstsEnabled_ = secure_ && website->hsts_enabled();
         const auto* route =
-            matchedRouteRule(*website, parsed.request().method(), parsed.request().target());
+            matchedRouteRule(*website, parsed.request().method(), parsed.request().target(), *host);
         if (route != nullptr && route->action() == "redirect") {
             std::string headers =
                 "Location: " + routeRedirectLocation(parsed.request().target(), *route) + "\r\n";

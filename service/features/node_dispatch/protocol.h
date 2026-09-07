@@ -227,6 +227,12 @@ buildWebsiteObject(const DeploymentWebsiteSource& source, const ClusterDeploymen
     for (const auto& input : config->routeRules) {
         auto* rule = website->add_route_rules();
         rule->set_id(input.id);
+        rule->set_name(input.name);
+        rule->set_description(input.description);
+        copyStringValues(input.hostnames, rule->mutable_hostnames());
+        rule->set_rewrite_mode(input.rewriteMode);
+        rule->set_query_mode(input.queryMode);
+        rule->set_query_string(input.queryString);
         rule->set_enabled(input.status == "enabled");
         rule->set_match_type(input.matchType);
         rule->set_path(input.path);

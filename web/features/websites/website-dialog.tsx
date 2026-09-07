@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { type Resolver, useFieldArray, useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -12,17 +12,16 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   Sheet,
   SheetContent,
-  SheetDescription,
-  SheetFooter,
   SheetHeader,
   SheetTitle,
+  SheetDescription,
 } from '@/components/ui/sheet'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { ConfirmDialog } from '@/components/confirm-dialog'
+import type { Website, WebsiteConfig } from './types'
 import { WebsiteBasicTab } from './website-basic-tab'
 import { WebsiteDomainsTab } from './website-domains-tab'
 import { WebsiteFeaturesTab } from './website-features-tab'
-import { WebsiteOriginsTab } from './website-origins-tab'
-import { WebsiteRoutesTab } from './website-routes-tab'
 import {
   defaultWebsiteConfig,
   parseRouteHeaders,
@@ -30,7 +29,8 @@ import {
   type WebsiteFormValues,
   websiteFormSchema,
 } from './website-form'
-import type { Website, WebsiteConfig } from './types'
+import { WebsiteOriginsTab } from './website-origins-tab'
+import { WebsiteRoutesTab } from './website-routes-tab'
 
 export function WebsiteDialog({
   website,
@@ -43,6 +43,11 @@ export function WebsiteDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
+  const [section, setSection] = useState('basic')
+  const [invalidRouteIndex, setInvalidRouteIndex] = useState<number | null>(
+    null
+  )
+  const [confirmLeave, setConfirmLeave] = useState(false)
   const queryClient = useQueryClient()
   const config = website?.config ?? defaultWebsiteConfig()
   const certificatesQuery = useQuery({
@@ -85,6 +90,8 @@ export function WebsiteDialog({
             ],
       default_origin_group: config.default_origin_group,
       origin_host_header: config.origin_host_header,
+      origin_connect_timeout_seconds: config.origin_connect_timeout_seconds,
+      origin_read_timeout_seconds: config.origin_read_timeout_seconds,
       pass_client_ip: config.pass_client_ip,
       health_check_enabled: config.health_check_enabled,
       health_check_path: config.health_check_path,
@@ -103,7 +110,9 @@ export function WebsiteDialog({
       access_log_user_agent: config.access_log_user_agent,
       access_log_status_code_ranges:
         config.access_log_status_code_ranges.filter(
-          (range): range is WebsiteFormValues['access_log_status_code_ranges'][number] =>
+          (
+            range
+          ): range is WebsiteFormValues['access_log_status_code_ranges'][number] =>
             ['1xx', '2xx', '3xx', '4xx', '5xx'].includes(range)
         ),
       access_log_client_abort: config.access_log_client_abort,
@@ -288,6 +297,8 @@ export function WebsiteDialog({
         origins: values.origins,
         default_origin_group: values.default_origin_group,
         origin_host_header: values.origin_host_header,
+        origin_connect_timeout_seconds: values.origin_connect_timeout_seconds,
+        origin_read_timeout_seconds: values.origin_read_timeout_seconds,
         pass_client_ip: values.pass_client_ip,
         health_check_enabled: values.health_check_enabled,
         health_check_path: values.health_check_path,
@@ -344,30 +355,91 @@ export function WebsiteDialog({
   })
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className='w-full overflow-hidden p-0 sm:max-w-4xl'>
-        <SheetHeader className='px-6 pt-6'>
-          <SheetTitle>{website ? '编辑网站' : '创建网站'}</SheetTitle>
+    <Sheet
+      open={open}
+      onOpenChange={(next) => {
+        if (mutation.isPending) return
+        if (!next && form.formState.isDirty) setConfirmLeave(true)
+        else onOpenChange(next)
+      }}
+    >
+      <SheetContent className='w-full overflow-hidden p-0 sm:max-w-6xl'>
+        <SheetHeader className='shrink-0 px-6 pt-6'>
+          <SheetTitle>
+            {website ? `${website.config.name} · 网站设置` : '创建网站'}
+          </SheetTitle>
           <SheetDescription>
-            配置会通过后台任务安全分发到目标集群。
+            按分类配置网站；保存时统一校验并分发到目标集群。
           </SheetDescription>
         </SheetHeader>
         <Form {...form}>
           <form
             id='website-form'
-            onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
+            className='flex min-h-0 flex-1 flex-col'
+            onSubmit={form.handleSubmit(
+              (values) => mutation.mutate(values),
+              (errors) => {
+                const field = Object.keys(errors)[0] ?? ''
+                const next = field.startsWith('route_rules')
+                  ? 'routes'
+                  : field.startsWith('domains')
+                    ? 'domains'
+                    : field.startsWith('origins')
+                      ? 'origins'
+                      : field.startsWith('access_log')
+                        ? 'logs'
+                        : field.startsWith('response_compression')
+                          ? 'compression'
+                          : [
+                                'https_enabled',
+                                'certificate_ids',
+                                'minimum_tls_version',
+                                'force_https',
+                                'http2_enabled',
+                                'hsts_enabled',
+                              ].includes(field)
+                            ? 'https'
+                            : [
+                                  'pass_client_ip',
+                                  'origin_connect_timeout_seconds',
+                                  'origin_read_timeout_seconds',
+                                  'healthy_threshold',
+                                  'unhealthy_threshold',
+                                ].includes(field) ||
+                                field.startsWith('health_check')
+                              ? 'health'
+                              : 'basic'
+                if (errors.route_rules) {
+                  const first = Object.keys(errors.route_rules).find((key) =>
+                    /^\d+$/.test(key)
+                  )
+                  setInvalidRouteIndex(
+                    first === undefined ? null : Number(first)
+                  )
+                }
+                setSection(next)
+                toast.error('请检查表单中的错误字段')
+              }
+            )}
           >
-            <Tabs defaultValue='basic' className='gap-0'>
-              <div className='overflow-x-auto border-b px-6 pb-3'>
-                <TabsList>
+            <Tabs
+              value={section}
+              onValueChange={setSection}
+              className='min-h-0 flex-1 gap-4 px-4 md:flex-row'
+            >
+              <div className='shrink-0 overflow-x-auto md:w-40 md:overflow-y-auto'>
+                <TabsList className='h-auto gap-1 md:w-full md:flex-col md:items-stretch'>
                   <TabsTrigger value='basic'>基础</TabsTrigger>
                   <TabsTrigger value='domains'>域名</TabsTrigger>
                   <TabsTrigger value='origins'>源站</TabsTrigger>
-                  <TabsTrigger value='features'>功能</TabsTrigger>
+                  <TabsTrigger value='health'>回源与健康检查</TabsTrigger>
+                  <TabsTrigger value='https'>HTTPS</TabsTrigger>
+                  <TabsTrigger value='logs'>访问日志</TabsTrigger>
+                  <TabsTrigger value='compression'>响应压缩</TabsTrigger>
                   <TabsTrigger value='routes'>路由规则</TabsTrigger>
                 </TabsList>
               </div>
-              <ScrollArea className='h-[58svh] px-6'>
+              <ScrollArea className='min-h-0 min-w-0 flex-1 rounded-lg border px-4'>
                 <WebsiteBasicTab
                   form={form}
                   clusters={clusters}
@@ -383,21 +455,37 @@ export function WebsiteDialog({
                   renameOriginGroup={renameOriginGroup}
                   removeOrigin={removeOrigin}
                 />
-                <WebsiteFeaturesTab
-                  form={form}
-                  certificates={certificatesQuery.data ?? []}
-                />
+                {(['health', 'https', 'logs', 'compression'] as const).map(
+                  (category) => (
+                    <WebsiteFeaturesTab
+                      key={category}
+                      category={category}
+                      form={form}
+                      certificates={certificatesQuery.data ?? []}
+                    />
+                  )
+                )}
                 <WebsiteRoutesTab
+                  invalidRouteIndex={invalidRouteIndex}
+                  clearInvalidRoute={() => setInvalidRouteIndex(null)}
                   form={form}
                   routeRules={routeRules}
                   selectableOriginGroups={selectableOriginGroups}
                 />
-                </ScrollArea>
+              </ScrollArea>
             </Tabs>
           </form>
         </Form>
-        <SheetFooter className='px-6 py-4'>
-          <Button variant='outline' onClick={() => onOpenChange(false)}>
+        <div className='flex shrink-0 justify-end gap-2 border-t bg-background px-6 py-4'>
+          <Button
+            variant='outline'
+            disabled={mutation.isPending}
+            onClick={() =>
+              form.formState.isDirty
+                ? setConfirmLeave(true)
+                : onOpenChange(false)
+            }
+          >
             取消
           </Button>
           <Button
@@ -407,7 +495,15 @@ export function WebsiteDialog({
           >
             {mutation.isPending ? '正在保存…' : '保存并分发'}
           </Button>
-        </SheetFooter>
+        </div>
+        <ConfirmDialog
+          open={confirmLeave}
+          onOpenChange={setConfirmLeave}
+          title='放弃未保存的配置？'
+          desc='当前修改尚未保存和分发，关闭抽屉会丢失这些修改。'
+          confirmText='放弃并关闭'
+          handleConfirm={() => onOpenChange(false)}
+        />
       </SheetContent>
     </Sheet>
   )

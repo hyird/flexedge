@@ -77,7 +77,7 @@ function FormItem({ className, ...props }: React.ComponentProps<'div'>) {
     <FormItemContext.Provider value={{ id }}>
       <div
         data-slot='form-item'
-        className={cn('grid gap-2', className)}
+        className={cn('grid min-w-0 content-start gap-2', className)}
         {...props}
       />
     </FormItemContext.Provider>
@@ -101,12 +101,14 @@ function FormLabel({
   )
 }
 
-function FormControl({ ...props }: React.ComponentProps<typeof Slot>) {
+function FormControl({ className, ...props }: React.ComponentProps<typeof Slot>) {
   const { error, formItemId, formDescriptionId, formMessageId } = useFormField()
 
   return (
     <Slot
       data-slot='form-control'
+      // Form selects fill their column; toolbar selects and switches stay compact.
+      className={cn('[&[role=combobox]]:w-full [&[role=combobox]]:min-w-0', className)}
       id={formItemId}
       aria-describedby={
         !error

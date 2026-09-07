@@ -38,6 +38,7 @@
 #include "node/data/origin_selection.h"
 #include "node/data/origin_health.h"
 #include "node/data/route_rules.h"
+#include "service/domains/website/website.schema.h"
 
 namespace {
 
@@ -594,7 +595,7 @@ int main() {
     REQUIRE(websiteDomainsTab.contains("<TabsContent value='domains'"));
     const auto websiteFeaturesTab = source("web/features/websites/website-features-tab.tsx");
     REQUIRE(websiteFeaturesTab.contains("export function WebsiteFeaturesTab"));
-    REQUIRE(websiteFeaturesTab.contains("<TabsContent value='features'"));
+    REQUIRE(websiteFeaturesTab.contains("<TabsContent value={category}"));
     const auto websiteOriginsTab = source("web/features/websites/website-origins-tab.tsx");
     REQUIRE(websiteOriginsTab.contains("export function WebsiteOriginsTab"));
     REQUIRE(websiteOriginsTab.contains("<TabsContent value='origins'"));
@@ -1126,6 +1127,85 @@ int main() {
     REQUIRE(routeHeaders.front().first == "Accept");
     REQUIRE(routeHeaders.back().first == "X-Route");
     REQUIRE(routeHeaders.back().second == "enabled");
+    // Host filtering precedes existing path specificity; it does not add a new priority tier.
+    route->add_hostnames("API.Example.com");
+    REQUIRE(flexedge::node::matchedRouteRule(routeWebsite, "GET", "/api/v1", "api.example.com:443") == route);
+    REQUIRE(flexedge::node::matchedRouteRule(routeWebsite, "GET", "/api/v1", "www.example.com") == fallbackRoute);
+    REQUIRE(flexedge::node::matchedRouteRule(routeWebsite, "GET", "/apix", "api.example.com") == fallbackRoute);
+    route->set_name("API rule");
+    route->set_description("Route API traffic");
+    route->set_rewrite_mode("replace_prefix");
+    route->set_rewrite_path("/v2/");
+    REQUIRE(flexedge::node::routeTarget("/api/users?a=1", route) == "/v2/users?a=1");
+    REQUIRE(flexedge::node::routeTarget("/api?a=1", route) == "/v2/?a=1");
+    route->set_query_mode("drop");
+    REQUIRE(flexedge::node::routeTarget("/api/users?a=1", route) == "/v2/users");
+    route->set_query_mode("replace");
+    route->set_query_string("b=2&c=%2F");
+    REQUIRE(flexedge::node::routeTarget("/api/users?a=1", route) == "/v2/users?b=2&c=%2F");
+    route->set_rewrite_mode("strip_prefix");
+    route->clear_rewrite_path();
+    REQUIRE(flexedge::node::routeTarget("/api/users?a=1", route) == "/users?b=2&c=%2F");
+    route->set_path("/api/");
+    REQUIRE(flexedge::node::routeTarget("/api/users?a=1", route) == "/users?b=2&c=%2F");
+    route->set_path("/api");
+    route->clear_query_string();
+    REQUIRE(flexedge::node::routeTarget("/api", route) == "/");
+    flexedge::node::validateRouteRules(routeWebsite);
+    route->set_query_string("bad\r\nheader=1");
+    REQUIRE(throwsRuntimeError([&] { flexedge::node::validateRouteRules(routeWebsite); }));
+    route->clear_query_string();
+    route->add_hostnames("api.example.com");
+    REQUIRE(throwsRuntimeError([&] { flexedge::node::validateRouteRules(routeWebsite); }));
+    route->clear_hostnames();
+    route->set_action("redirect");
+    route->clear_origin_group();
+    route->set_rewrite_mode("none");
+    route->set_redirect_status(302);
+    route->set_redirect_url("https://example.com/new?target=1#part");
+    route->set_query_mode("preserve");
+    REQUIRE(flexedge::node::routeRedirectLocation("/old?source=1", *route) == "https://example.com/new?target=1#part");
+    route->set_query_mode("drop");
+    REQUIRE(flexedge::node::routeRedirectLocation("/old?source=1", *route) == "https://example.com/new#part");
+    route->set_query_mode("replace");
+    route->set_query_string("replacement=1");
+    REQUIRE(flexedge::node::routeRedirectLocation("/old?source=1", *route) == "https://example.com/new?replacement=1#part");
+    flexedge::node::validateRouteRules(routeWebsite);
+
+    const auto ruleInput = ruvia::fromJson<service::website_config::WebsiteRouteRuleInput>(R"json({
+      "id":"12345678-1234-4234-8234-123456789012","status":"enabled","match_type":"prefix",
+      "path":"/api","methods":["GET"],"action":"proxy","rewrite_path":"/v2",
+      "redirect_url":"","redirect_status":0,"origin_group":"default","request_headers":[],"response_headers":[],
+      "name":"API","description":"API notes","hostnames":["API.Example.com"],
+      "rewrite_mode":"replace_prefix","query_mode":"replace","query_string":"v=2"
+    })json");
+    REQUIRE(ruleInput.has_value());
+    const auto normalizedRule = service::website_config::normalize(*ruleInput);
+    REQUIRE(normalizedRule.has_value());
+    REQUIRE(normalizedRule->hostnames.front() == "api.example.com");
+    REQUIRE(normalizedRule->name == "API");
+    REQUIRE(normalizedRule->description == "API notes");
+    REQUIRE(normalizedRule->rewriteMode == "replace_prefix");
+    REQUIRE(normalizedRule->queryMode == "replace");
+    REQUIRE(normalizedRule->queryString == "v=2");
+    service::website_config::WebsiteConfigData outputConfig{};
+    outputConfig.routeRules.push_back(*normalizedRule);
+    const auto roundTripJson = ruvia::toJson(service::website_config::toOutput(outputConfig));
+    REQUIRE(roundTripJson.contains("\"rewrite_mode\":\"replace_prefix\""));
+    REQUIRE(roundTripJson.contains("\"hostnames\":[\"api.example.com\"]"));
+    REQUIRE(roundTripJson.contains("\"query_string\":\"v=2\""));
+
+    const auto oldRuleInput = ruvia::fromJson<service::website_config::WebsiteRouteRuleInput>(R"json({
+      "id":"12345678-1234-4234-8234-123456789012","status":"enabled","match_type":"prefix",
+      "path":"/api","methods":[],"action":"proxy","rewrite_path":"/internal",
+      "redirect_url":"","redirect_status":0,"origin_group":"default","request_headers":[],"response_headers":[]
+    })json");
+    REQUIRE(oldRuleInput.has_value());
+    const auto oldRule = service::website_config::normalize(*oldRuleInput);
+    REQUIRE(oldRule.has_value());
+    REQUIRE(oldRule->hostnames.empty());
+    REQUIRE(oldRule->rewriteMode == "replace_path");
+    REQUIRE(oldRule->queryMode == "preserve");
     flexedge::node::OriginHealthRegistry originHealth;
     originHealth.recordProbe("website-1", "origin-1", false, 1, 42, "timeout");
     const auto healthReports = originHealth.reports();

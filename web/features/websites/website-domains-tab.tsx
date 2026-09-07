@@ -53,7 +53,7 @@ export function WebsiteDomainsTab({
                   {domains.fields.map((domain, index) => (
                     <div
                       key={domain.formKey}
-                      className='grid gap-2 rounded-md border p-3 sm:grid-cols-[1fr_170px_auto]'
+                      className='grid items-start gap-3 rounded-md border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'
                     >
                       <FormField
                         control={form.control}
