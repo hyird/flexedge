@@ -940,12 +940,14 @@ int main() {
     REQUIRE(websiteController.contains("log_ingest/sse_tail.h"));
     REQUIRE(websiteController.contains("streamSseTail"));
     REQUIRE(websiteController.contains("RUVIA_GET_SSE(\"/:id/dashboard/stream\", dashboardStream)"));
-    REQUIRE(websiteController.contains("streamSseSignals"));
+    REQUIRE(websiteController.contains("streamSseSnapshots"));
+    REQUIRE(!websiteController.contains("RUVIA_GET(\"/:id/dashboard\", dashboard)"));
     REQUIRE(!websiteController.contains("receiveFor("));
     REQUIRE(!websiteController.contains("advanceCursor("));
     const auto websiteDetailSheet = source("web/features/websites/website-detail-sheet.tsx");
     REQUIRE(websiteDetailSheet.contains("/dashboard/stream"));
     REQUIRE(!websiteDetailSheet.contains("refetchInterval"));
+    REQUIRE(!websiteDetailSheet.contains("getData<WebsiteDashboard>(`/websites/${websiteId}/dashboard`)"));
     const auto webMain = source("web/main.tsx");
     REQUIRE(webMain.contains("staleTime: Infinity"));
     REQUIRE(webMain.contains("refetchOnReconnect: false"));

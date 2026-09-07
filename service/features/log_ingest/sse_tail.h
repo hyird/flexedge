@@ -34,14 +34,17 @@ inline void advanceTailCursor(std::optional<TailCursor>& target,
     }
 }
 
-// Emits lightweight state-change signals for views that own their data fetch.
-// Unlike streamSseTail, it never queries historical log rows after a notification.
-inline ruvia::Task<void> streamSseSignals(ruvia::Context& c, fanout::Hub::Subscription subscription,
-                                          std::string_view eventName) {
+// Emits an initial snapshot, then a replacement snapshot for each coalesced
+// notification. The client therefore never needs a companion REST read.
+template <typename Fetch, typename WriteEvent>
+ruvia::Task<void> streamSseSnapshots(ruvia::Context& c, fanout::Hub::Subscription subscription,
+                                     Fetch fetch, WriteEvent writeEvent) {
     try {
+        auto initial = co_await fetch();
         auto events = c.streamSse();
         co_await events.write(
             {.data = "{}", .event = "ready", .retry = std::chrono::milliseconds{3000}});
+        co_await writeEvent(c, events, std::move(initial));
 
         while (!events.aborted()) {
             const auto signal =
@@ -56,7 +59,8 @@ inline ruvia::Task<void> streamSseSignals(ruvia::Context& c, fanout::Hub::Subscr
                 co_await events.write({.event = "heartbeat"});
                 continue;
             }
-            co_await events.write({.data = "{}", .event = eventName});
+            auto snapshot = co_await fetch();
+            co_await writeEvent(c, events, std::move(snapshot));
         }
     } catch (const std::exception& error) {
         if (sseClientDisconnected(error)) {

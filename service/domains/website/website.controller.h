@@ -32,7 +32,6 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
     RUVIA_GET("/:id/access-logs", accessLogHistory);
     RUVIA_GET_SSE("/:id/access-logs/stream", accessLogStream);
     RUVIA_GET_SSE("/:id/dashboard/stream", dashboardStream);
-    RUVIA_GET("/:id/dashboard", dashboard);
     RUVIA_GET("/:id", detail);
     RUVIA_POST("/:id/dns-probe", requestDnsProbe);
     RUVIA_POST("/", create, WebsiteConfigValidator);
@@ -74,6 +73,14 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
         }
     }
 
+    static ruvia::Task<void> writeDashboardEvent(ruvia::Context& c, ruvia::SseWriter& events,
+                                                  WebsiteDashboardDto data) {
+        const auto payload = ruvia::toJson(
+            service::common::ok<WebsiteDashboardResponse>(c, std::move(data)),
+            {.resource = c.resource()});
+        co_await events.write({.data = payload, .event = "dashboard"});
+    }
+
     ruvia::Task<ruvia::HttpResponse> list(ruvia::Context& c) {
         const auto [page, pageSize, skip] = service::common::requirePagination(c);
         const auto keyword = service::common::requireKeyword(c.req().query("keyword"));
@@ -102,11 +109,6 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
         auto data = co_await websiteReadService().detail(c, tenantId(c), requireId(c));
         service::common::setRevisionEtag(c, data.get<"revision">().value);
         co_return c.json(service::common::ok<WebsiteDetailResponse>(c, std::move(data)));
-    }
-
-    ruvia::Task<ruvia::HttpResponse> dashboard(ruvia::Context& c) {
-        auto data = co_await websiteDashboardService().dashboard(c, tenantId(c), requireId(c));
-        co_return c.json(service::common::ok<WebsiteDashboardResponse>(c, std::move(data)));
     }
 
     ruvia::Task<ruvia::HttpResponse> requestDnsProbe(ruvia::Context& c) {
@@ -163,12 +165,13 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
     ruvia::Task<void> dashboardStream(ruvia::Context& c) {
         const auto tenant = tenantId(c);
         const auto id = requireId(c);
-        co_await service::log_ingest::streamSseSignals(
+        co_await service::log_ingest::streamSseSnapshots(
             c,
             service::log_ingest::fanout::hub().subscribe(
                 c.worker(), service::log_ingest::notifications::LogResourceType::access, tenant,
                 id),
-            "dashboard");
+            [&c, tenant, id]() { return websiteDashboardService().dashboard(c, tenant, id); },
+            writeDashboardEvent);
     }
 
     ruvia::Task<ruvia::HttpResponse> create(ruvia::Context& c) {
