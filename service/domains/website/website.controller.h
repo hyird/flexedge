@@ -13,7 +13,10 @@
 
 #include "service/common/http.h"
 #include "service/domains/website/website.schema.h"
-#include "service/domains/website/website.service.h"
+#include "service/domains/website/website_access_log.service.h"
+#include "service/domains/website/website_command.service.h"
+#include "service/domains/website/website_dashboard.service.h"
+#include "service/domains/website/website_read.service.h"
 #include "service/features/log_ingest/fanout.h"
 #include "service/features/log_ingest/sse_tail.h"
 #include "service/features/log_ingest/tail.h"
@@ -90,23 +93,23 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
             status.emplace(*value);
         }
         co_return c.json(service::common::ok<WebsitePageResponse>(
-            c, co_await websiteService().list(c, tenantId(c), page, pageSize, skip, keyword,
-                                              clusterId, status)));
+            c, co_await websiteReadService().list(c, tenantId(c), page, pageSize, skip, keyword,
+                                                  clusterId, status)));
     }
 
     ruvia::Task<ruvia::HttpResponse> detail(ruvia::Context& c) {
-        auto data = co_await websiteService().detail(c, tenantId(c), requireId(c));
+        auto data = co_await websiteReadService().detail(c, tenantId(c), requireId(c));
         service::common::setRevisionEtag(c, data.get<"revision">().value);
         co_return c.json(service::common::ok<WebsiteDetailResponse>(c, std::move(data)));
     }
 
     ruvia::Task<ruvia::HttpResponse> dashboard(ruvia::Context& c) {
-        auto data = co_await websiteService().dashboard(c, tenantId(c), requireId(c));
+        auto data = co_await websiteDashboardService().dashboard(c, tenantId(c), requireId(c));
         co_return c.json(service::common::ok<WebsiteDashboardResponse>(c, std::move(data)));
     }
 
     ruvia::Task<ruvia::HttpResponse> requestDnsProbe(ruvia::Context& c) {
-        co_await websiteService().requestDnsProbe(c, tenantId(c), requireId(c));
+        co_await websiteCommandService().requestDnsProbe(c, tenantId(c), requireId(c));
         co_return c.json(service::common::operation(c, "域名解析检测已提交"));
     }
 
@@ -133,7 +136,7 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
         }
         co_return c.json(service::common::ok<WebsiteAccessLogPageResponse>(
             c,
-            co_await websiteService().accessLogHistory(c, tenantId(c), requireId(c), page, pageSize,
+            co_await websiteAccessLogService().history(c, tenantId(c), requireId(c), page, pageSize,
                                                        skip, keyword, method, statusClass)));
     }
 
@@ -148,7 +151,7 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
                 id),
             service::log_ingest::optionalSseTailCursor(c),
             [&c, tenant, id, limit](const std::optional<service::log_ingest::TailCursor>& after) {
-                return websiteService().accessLogs(c, tenant, id, limit, after);
+                return websiteAccessLogService().tail(c, tenant, id, limit, after);
             },
             [](const WebsiteAccessLogTailDataDto& data) {
                 return service::log_ingest::tailResponseCursor(data);
@@ -157,23 +160,24 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
     }
 
     ruvia::Task<ruvia::HttpResponse> create(ruvia::Context& c) {
-        co_await websiteService().create(c, tenantId(c), requireClusterId(c),
-                                         c.req().validatedJson<WebsiteSaveInput>());
+        co_await websiteCommandService().create(c, tenantId(c), requireClusterId(c),
+                                                c.req().validatedJson<WebsiteSaveInput>());
         service::common::setRevisionEtag(c, 1);
         co_return c.json(service::common::operation(c, "网站已创建，配置任务已提交"));
     }
 
     ruvia::Task<ruvia::HttpResponse> update(ruvia::Context& c) {
         const auto revision = expectedRevision(c);
-        co_await websiteService().update(c, tenantId(c), requireId(c), requireClusterId(c),
-                                         revision, c.req().validatedJson<WebsiteSaveInput>());
+        co_await websiteCommandService().update(c, tenantId(c), requireId(c), requireClusterId(c),
+                                                revision,
+                                                c.req().validatedJson<WebsiteSaveInput>());
         service::common::setRevisionEtag(c, revision + 1);
         co_return c.json(service::common::operation(c, "网站配置已更新，配置任务已提交"));
     }
 
     ruvia::Task<ruvia::HttpResponse> remove(ruvia::Context& c) {
         const auto revision = expectedRevision(c);
-        co_await websiteService().remove(c, tenantId(c), requireId(c), revision);
+        co_await websiteCommandService().remove(c, tenantId(c), requireId(c), revision);
         service::common::setRevisionEtag(c, revision + 1);
         co_return c.json(service::common::operation(c, "网站已删除，配置任务已提交"));
     }
