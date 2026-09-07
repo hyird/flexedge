@@ -25,8 +25,8 @@
 #include "service/features/dns_sync/task_loader.h"
 #include "service/features/dns_sync/zone_loader.h"
 #include "service/features/dns_sync/zone_persistence.h"
+#include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
-#include "service/features/logging/logger.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
 
@@ -276,32 +276,6 @@ inline ruvia::Task<std::int64_t> syncZone(service::background::WorkerContext& co
     co_return state->revision;
 }
 
-inline ruvia::Task<void> fail(service::background::WorkerContext& context, const DnsTask& task,
-                              std::string_view error, bool permanent) {
-    const auto message = service::sync_runtime::boundedError(error);
-    const auto lease = service::sync_runtime::makeRunningLease(task.tenantId, task.id, task.version,
-                                                               context.leaseOwner());
-    auto transaction = co_await context.db().beginTransaction();
-    (void)co_await transaction.query(
-        "SELECT id FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 LIMIT 1 FOR UPDATE",
-        task.tenantId, task.resourceId);
-    const auto resultTransition =
-        co_await service::sync_runtime::failRunningAndRecordEvent(transaction, lease, message);
-    if (resultTransition.markerTransitioned) {
-        (void)co_await transaction.execute(
-            "UPDATE sys_dns_zone SET sync_status = $2, last_error = $3, updated_at = NOW() WHERE "
-            "id = $1 AND desired_revision = $4 AND tenant_id = $5",
-            task.resourceId, permanent ? std::string_view{"failed"} : std::string_view{"pending"},
-            std::string_view(message), task.version, task.tenantId);
-    }
-    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
-                                                                resultTransition);
-    if (resultTransition.markerTransitioned) {
-        service::logging::error("DNS sync task " + task.id + " failed: " + message);
-    }
-    co_return;
-}
-
 inline ruvia::Task<void> processTask(service::background::WorkerContext& context,
                                      const DnsTask& task) {
     std::exception_ptr exception;
@@ -312,7 +286,7 @@ inline ruvia::Task<void> processTask(service::background::WorkerContext& context
     }
     if (exception) {
         const auto failure = classifyTaskFailure(exception);
-        co_await fail(context, task, failure.message, failure.permanent);
+        co_await failDnsTask(context, task, failure.message, failure.permanent);
     }
     co_return;
 }

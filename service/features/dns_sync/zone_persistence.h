@@ -18,6 +18,8 @@
 #include "service/features/dns_sync/reconciliation.h"
 #include "service/features/dns_sync/snapshot.h"
 #include "service/features/dns_sync/task.h"
+#include "service/features/logging/logger.h"
+#include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
 
 namespace service::dns_sync::detail {
@@ -353,6 +355,32 @@ finishDeletedZoneWithoutRemote(service::background::WorkerContext& context, cons
         (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
     }
     co_await transaction.commit();
+    co_return;
+}
+
+inline ruvia::Task<void> failDnsTask(service::background::WorkerContext& context,
+                                     const DnsTask& task, std::string_view error, bool permanent) {
+    const auto message = service::sync_runtime::boundedError(error);
+    const auto lease = service::sync_runtime::makeRunningLease(task.tenantId, task.id, task.version,
+                                                               context.leaseOwner());
+    auto transaction = co_await context.db().beginTransaction();
+    (void)co_await transaction.query(
+        "SELECT id FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 LIMIT 1 FOR UPDATE",
+        task.tenantId, task.resourceId);
+    const auto resultTransition =
+        co_await service::sync_runtime::failRunningAndRecordEvent(transaction, lease, message);
+    if (resultTransition.markerTransitioned) {
+        (void)co_await transaction.execute(
+            "UPDATE sys_dns_zone SET sync_status = $2, last_error = $3, updated_at = NOW() WHERE "
+            "id = $1 AND desired_revision = $4 AND tenant_id = $5",
+            task.resourceId, permanent ? std::string_view{"failed"} : std::string_view{"pending"},
+            std::string_view(message), task.version, task.tenantId);
+    }
+    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
+                                                                resultTransition);
+    if (resultTransition.markerTransitioned) {
+        service::logging::error("DNS sync task " + task.id + " failed: " + message);
+    }
     co_return;
 }
 
