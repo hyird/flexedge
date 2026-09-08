@@ -321,6 +321,14 @@ message RouteRule {
     string rewrite_mode = 17;
     string query_mode = 18;
     string query_string = 19;
+    repeated RouteCondition conditions = 20;
+}
+
+message RouteCondition {
+    string source = 1;
+    string name = 2;
+    string op = 3;
+    string value = 4;
 }
 
 message HeaderMutation {

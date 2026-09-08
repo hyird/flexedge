@@ -363,12 +363,19 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
             respond(streamId, 421);
             return;
         }
-        state.route = matchedRouteRule(*state.website, state.request.method, state.request.target, state.request.authority);
+        flexedge::route_policy::HeaderValues matchHeaders;
+        for (const auto& [name, value] : state.request.headers) matchHeaders.emplace_back(name, value);
+        // :authority is the HTTP/2 equivalent of the HTTP/1 Host header.
+        matchHeaders.emplace_back("host", state.request.authority);
+        state.route = matchedRouteRule(*state.website, state.request.method, state.request.target,
+                                       state.request.authority, matchHeaders, &state.config->routePatterns());
         if (state.route != nullptr && state.route->action() == "redirect") {
+            const auto location = routeRedirectLocation(state.request.target, *state.route, &state.config->routePatterns());
+            if (location.empty()) { respond(streamId, 400); return; }
             BufferedProxyResponse response;
             response.status = static_cast<std::uint16_t>(state.route->redirect_status());
             response.headers.emplace_back(
-                "Location", routeRedirectLocation(state.request.target, *state.route));
+                "Location", location);
             for (const auto& header : state.route->response_headers()) {
                 response.headers.emplace_back(header.name(), header.value());
             }
@@ -411,7 +418,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
                                               .hasBody = state.request.hasBody},
                                              *state.website, state.request.authority,
                                              endpointError ? "unknown" : clientAddress, true, false,
-                                             false, streamingResponseRequested, state.route);
+                                             false, streamingResponseRequested, state.route, &state.config->routePatterns());
         if (!prepared) {
             respond(streamId, 502);
             return;

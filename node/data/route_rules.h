@@ -9,13 +9,27 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "node/proto/edge_control.pb.h"
 #include "common/route_policy.h"
+#include "common/route_match.h"
 
 namespace flexedge::node {
+
+using RoutePatterns = std::unordered_map<const v2::RouteRule*, std::shared_ptr<const RE2>>;
+
+inline std::shared_ptr<const RE2> routePattern(const v2::RouteRule& rule, const RoutePatterns* patterns) {
+    if (rule.match_type() != "regex") return {};
+    if (patterns) {
+        const auto found = patterns->find(&rule);
+        return found == patterns->end() ? nullptr : found->second;
+    }
+    // Direct policy-unit callers may omit the compiled configuration.
+    return flexedge::route_policy::compilePattern(rule.path());
+}
 
 inline bool routeHeaderEquals(std::string_view value, std::string_view expected) noexcept {
     if (value.size() != expected.size()) {
@@ -149,13 +163,26 @@ inline bool routeOriginGroup(const v2::RouteRule& rule, const v2::Website& websi
     return false;
 }
 
-inline void validateRouteRules(const v2::Website& website) {
+inline void validateRouteRules(const v2::Website& website, RoutePatterns* patterns = nullptr) {
     if (website.route_rules_size() > 100) {
         throw std::runtime_error("too many website route rules");
     }
     std::unordered_set<std::string_view> ids;
     for (const auto& rule : website.route_rules()) {
         namespace policy = flexedge::route_policy;
+        std::shared_ptr<const RE2> pattern;
+        if (rule.match_type() == "regex") {
+            pattern = policy::compilePattern(rule.path());
+            if (!pattern || !policy::captureTemplate(rule.rewrite_path(), pattern->NumberOfCapturingGroups()) ||
+                !policy::captureTemplate(rule.redirect_url(), pattern->NumberOfCapturingGroups()))
+                throw std::runtime_error("invalid route regex or capture template");
+            if (patterns) patterns->emplace(&rule, pattern);
+        }
+        if (rule.conditions_size() > 20) throw std::runtime_error("too many route conditions");
+        for (const auto& condition : rule.conditions()) {
+            if (!policy::conditionOptions(condition.source(), condition.name(), condition.op(), condition.value()))
+                throw std::runtime_error("invalid route condition");
+        }
         const auto& mode = rule.rewrite_mode();
         if (!policy::cleanText(rule.name(), 100) || rule.description().size() > 1000 ||
             rule.hostnames_size() > 100 || !policy::rewriteMode(mode) ||
@@ -176,8 +203,10 @@ inline void validateRouteRules(const v2::Website& website) {
             }
         }
         if (rule.id().empty() || !ids.emplace(rule.id()).second ||
-            (rule.match_type() != "exact" && rule.match_type() != "prefix") ||
-            !routePath(rule.path()) || !routeMethods(rule.methods()) ||
+            policy::matchPriority(rule.match_type()) == 0 ||
+            (rule.match_type() == "suffix"
+                ? (rule.path().empty() || !policy::cleanText(rule.path(), 2048) || rule.path().find_first_of(" ?#") != std::string::npos)
+                : (rule.match_type() != "regex" && !routePath(rule.path()))) || !routeMethods(rule.methods()) ||
             (rule.action() != "proxy" && rule.action() != "redirect") ||
             !routeHeaders(rule.request_headers()) || !routeHeaders(rule.response_headers())) {
             throw std::runtime_error("invalid website route rule");
@@ -190,7 +219,7 @@ inline void validateRouteRules(const v2::Website& website) {
             }
         } else if (!rule.origin_ids().empty() || !rule.origin_group().empty() ||
                    rule.rewrite_path().empty() == false || !routeRedirectUrl(rule.redirect_url()) ||
-                   (rule.redirect_status() != 301 && rule.redirect_status() != 302)) {
+                   !policy::redirectStatus(rule.redirect_status())) {
             throw std::runtime_error("invalid redirect route rule");
         }
     }
@@ -206,11 +235,16 @@ inline void validateRouteRules(const v2::Website& website) {
 [[nodiscard]] inline const v2::RouteRule* matchedRouteRule(const v2::Website& website,
                                                            std::string_view method,
                                                            std::string_view target,
-                                                           std::string_view host = {}) {
+                                                           std::string_view host = {},
+                                                           std::span<const std::pair<std::string_view, std::string_view>> headers = {},
+                                                           const RoutePatterns* patterns = nullptr) {
+    namespace policy = flexedge::route_policy;
     const auto hostname = flexedge::route_policy::hostname(host);
     const auto pathEnd = target.find('?');
     const auto path = target.substr(0, pathEnd);
     const v2::RouteRule* matched = nullptr;
+    std::optional<policy::QueryValues> query;
+    bool queryParsed = false;
     for (const auto& rule : website.route_rules()) {
         if (!rule.enabled() || !routeMethodMatches(rule, method)) {
             continue;
@@ -218,18 +252,30 @@ inline void validateRouteRules(const v2::Website& website) {
         if (!rule.hostnames().empty() && std::ranges::none_of(rule.hostnames(), [&](const auto& candidate) {
                 return flexedge::route_policy::hostname(candidate) == hostname;
             })) continue;
-        const bool pathMatches =
-            rule.match_type() == "exact"
-                ? path == rule.path()
-                : path.starts_with(rule.path()) &&
-                      (rule.path() == "/" || rule.path().ends_with('/') ||
-                       path.size() == rule.path().size() || path[rule.path().size()] == '/');
+        bool conditionsMatch = true;
+        for (const auto& condition : rule.conditions()) {
+            if (condition.source() == "query" && !queryParsed) {
+                query = policy::queryValues(target); queryParsed = true;
+            }
+            if (!policy::conditionMatches(condition.source(), condition.name(), condition.op(), condition.value(), headers, query)) {
+                conditionsMatch = false; break;
+            }
+        }
+        if (!conditionsMatch) continue;
+        bool pathMatches = false;
+        if (rule.match_type() == "regex") {
+            const auto pattern = routePattern(rule, patterns);
+            pathMatches = pattern && RE2::PartialMatch(absl::string_view(path.data(), path.size()), *pattern);
+        } else if (rule.match_type() == "suffix") pathMatches = path.ends_with(rule.path());
+        else if (rule.match_type() == "exact") pathMatches = path == rule.path();
+        else pathMatches = path.starts_with(rule.path()) &&
+            (rule.path() == "/" || rule.path().ends_with('/') || path.size() == rule.path().size() || path[rule.path().size()] == '/');
         if (!pathMatches) {
             continue;
         }
         if (matched == nullptr ||
-            (rule.match_type() == "exact" && matched->match_type() != "exact") ||
-            (rule.match_type() == matched->match_type() &&
+            policy::matchPriority(rule.match_type()) > policy::matchPriority(matched->match_type()) ||
+            (rule.match_type() == matched->match_type() && rule.match_type() != "regex" &&
              rule.path().size() > matched->path().size())) {
             matched = &rule;
         }
@@ -237,18 +283,36 @@ inline void validateRouteRules(const v2::Website& website) {
     return matched;
 }
 
-[[nodiscard]] inline std::string routeTarget(std::string_view target, const v2::RouteRule* rule) {
+[[nodiscard]] inline std::string routeTarget(std::string_view target, const v2::RouteRule* rule,
+                                            const RoutePatterns* patterns = nullptr) {
     if (rule == nullptr) {
         return std::string(target);
     }
     const auto path = target.substr(0, target.find('?'));
-    const auto result = flexedge::route_policy::rewritePath(path, rule->path(), rule->rewrite_path(), rule->rewrite_mode());
+    auto result = flexedge::route_policy::rewritePath(path, rule->path(), rule->rewrite_path(), rule->rewrite_mode());
+    if (rule->match_type() == "regex" && (rule->rewrite_mode() == "replace_path" ||
+                                        (rule->rewrite_mode().empty() && !rule->rewrite_path().empty()))) {
+        const auto pattern = routePattern(*rule, patterns);
+        if (!pattern) return {};
+        auto expanded = flexedge::route_policy::expandCaptures(result, path, *pattern);
+        if (!expanded) return {};
+        result = std::move(*expanded);
+    }
     return flexedge::route_policy::applyQuery(result, target, rule->query_mode(), rule->query_string());
 }
 
 [[nodiscard]] inline std::string routeRedirectLocation(std::string_view target,
-                                                       const v2::RouteRule& rule) {
-    return flexedge::route_policy::applyQuery(rule.redirect_url(), target, rule.query_mode(), rule.query_string());
+                                                       const v2::RouteRule& rule,
+                                                       const RoutePatterns* patterns = nullptr) {
+    auto destination = rule.redirect_url();
+    if (rule.match_type() == "regex") {
+        const auto pattern = routePattern(rule, patterns);
+        if (!pattern) return {};
+        auto expanded = flexedge::route_policy::expandCaptures(destination, target.substr(0, target.find('?')), *pattern);
+        if (!expanded) return {};
+        destination = std::move(*expanded);
+    }
+    return flexedge::route_policy::applyQuery(destination, target, rule.query_mode(), rule.query_string());
 }
 
 template <typename HeaderRange>

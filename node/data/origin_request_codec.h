@@ -79,7 +79,8 @@ inline std::optional<PreparedOriginRequest>
 prepareOriginRequest(const OriginRequestView& incoming, const v2::Website& website,
                      std::string_view incomingHost, std::string_view clientAddress, bool secure,
                      bool upgradeRequested, bool closeAfterResponse,
-                     bool forceIdentityEncoding = false, const v2::RouteRule* route = nullptr) {
+                     bool forceIdentityEncoding = false, const v2::RouteRule* route = nullptr,
+                     const RoutePatterns* patterns = nullptr) {
     const auto authority =
         website.origin_host_header().empty() || website.origin_host_header() == "$host"
             ? normalizeHostname(incomingHost)
@@ -116,7 +117,8 @@ prepareOriginRequest(const OriginRequestView& incoming, const v2::Website& websi
 
     ruvia::HttpClientRequestView request;
     request.method = incoming.method;
-    const auto target = routeTarget(incoming.target, route);
+    const auto target = routeTarget(incoming.target, route, patterns);
+    if (target.empty()) return std::nullopt;
     request.target = target;
     request.headers = headers;
     if (incoming.hasBody) {
@@ -152,7 +154,8 @@ inline std::optional<PreparedOriginRequest>
 prepareOriginRequest(const ruvia::Http1ParsedRequest& parsed, const v2::Website& website,
                      std::string_view incomingHost, std::string_view clientAddress, bool secure,
                      bool upgradeRequested, bool closeAfterResponse, std::size_t maxRequestBytes,
-                     bool forceIdentityEncoding = false, const v2::RouteRule* route = nullptr) {
+                     bool forceIdentityEncoding = false, const v2::RouteRule* route = nullptr,
+                     const RoutePatterns* patterns = nullptr) {
     std::string decodedBody;
     std::string_view body;
     bool hasBody = false;
@@ -174,7 +177,7 @@ prepareOriginRequest(const ruvia::Http1ParsedRequest& parsed, const v2::Website&
                                  .body = body,
                                  .hasBody = hasBody},
                                 website, incomingHost, clientAddress, secure, upgradeRequested,
-                                closeAfterResponse, forceIdentityEncoding, route);
+                                closeAfterResponse, forceIdentityEncoding, route, patterns);
 }
 
 } // namespace flexedge::node

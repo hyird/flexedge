@@ -1,6 +1,16 @@
+import {
+  compileRoutePattern,
+  expandRouteCaptures,
+  queryMatchValues,
+  routeConditionMatches,
+  routeMatchPriority,
+  type RouteCondition,
+} from './route-matching'
+
 export type PreviewRule = {
   name?: string
   hostnames?: string[]
+  conditions?: RouteCondition[]
   rewrite_mode?: string
   query_mode?: string
   query_string?: string
@@ -26,7 +36,14 @@ export function rewriteRoutePath(path: string, rule: PreviewRule) {
   const mode =
     rule.rewrite_mode || (rule.rewrite_path ? 'replace_path' : 'none')
   if (mode === 'none') return path
-  if (mode === 'replace_path') return rule.rewrite_path
+  if (mode === 'replace_path')
+    return rule.match_type === 'regex'
+      ? expandRouteCaptures(
+          rule.rewrite_path,
+          path,
+          compileRoutePattern(rule.path)
+        )
+      : rule.rewrite_path
   if (!path.startsWith(rule.path)) return path
   let suffix = path.slice(rule.path.length)
   let prefix = mode === 'strip_prefix' ? '/' : rule.rewrite_path
@@ -74,20 +91,30 @@ export function conflictingRouteIndexes(rules: PreviewRule[], index: number) {
       !previousHosts.length ||
       !currentHosts.length ||
       currentHosts.some((host) => previousHosts.includes(host))
-    return overlaps && hostOverlap ? [candidate] : []
+    // Only warn when the earlier conditions are a subset of the current ones.
+    // Other condition combinations may overlap, but are not proven shadowed.
+    const conditionOverlap = (previous.conditions ?? []).every((condition) =>
+      (rule.conditions ?? []).some(
+        (current) => JSON.stringify(current) === JSON.stringify(condition)
+      )
+    )
+    return overlaps && hostOverlap && conditionOverlap ? [candidate] : []
   })
 }
 
-// Mirrors node/data/route_rules.h: exact, then longest path, then first tie.
+// Mirrors node/data/route_rules.h: exact > prefix > suffix > regex; first regex wins.
 export function previewRoute(
   rules: PreviewRule[],
   method: string,
   target: string,
-  host = ''
-) {
+  host = '',
+  headers: Array<[string, string]> = [['host', host]]
+): { index: number; target: string; error?: string } {
   const queryIndex = target.indexOf('?')
   const path = queryIndex < 0 ? target : target.slice(0, queryIndex)
   let index = -1
+  let error: string | undefined
+  const query = queryMatchValues(target)
   rules.forEach((rule, candidate) => {
     const hostnames = hosts(rule)
     if (hostnames.length && !hostnames.includes(normalizeRouteHostname(host)))
@@ -97,29 +124,64 @@ export function previewRoute(
       (rule.methods.length && !rule.methods.includes(method))
     )
       return
+    if (
+      !(rule.conditions ?? []).every((condition) =>
+        routeConditionMatches(condition, headers, query)
+      )
+    )
+      return
+    if (rule.match_type === 'regex') {
+      try {
+        compileRoutePattern(rule.path)
+      } catch {
+        error = `规则 ${candidate + 1} 的正则不正确`
+        return
+      }
+    }
     const matches =
       rule.match_type === 'exact'
         ? path === rule.path
-        : path.startsWith(rule.path) &&
-          (rule.path === '/' ||
-            rule.path.endsWith('/') ||
-            path.length === rule.path.length ||
-            path[rule.path.length] === '/')
+        : rule.match_type === 'suffix'
+          ? path.endsWith(rule.path)
+          : rule.match_type === 'regex'
+            ? compileRoutePattern(rule.path).matcher(path).find()
+            : path.startsWith(rule.path) &&
+              (rule.path === '/' ||
+                rule.path.endsWith('/') ||
+                path.length === rule.path.length ||
+                path[rule.path.length] === '/')
     if (!matches) return
     const previous = rules[index]
     if (
       !previous ||
-      (rule.match_type === 'exact' && previous.match_type !== 'exact') ||
+      routeMatchPriority[rule.match_type] >
+        routeMatchPriority[previous.match_type] ||
       (rule.match_type === previous.match_type &&
+        rule.match_type !== 'regex' &&
         rule.path.length > previous.path.length)
     )
       index = candidate
   })
   const rule = rules[index]
+  if (error) return { index: -1, target, error }
   if (!rule) return { index, target }
-  const destination =
-    rule.action === 'redirect'
-      ? rule.redirect_url
-      : rewriteRoutePath(path, rule)
-  return { index, target: applyRouteQuery(destination, target, rule) }
+  try {
+    const destination =
+      rule.action === 'redirect'
+        ? rule.match_type === 'regex'
+          ? expandRouteCaptures(
+              rule.redirect_url,
+              path,
+              compileRoutePattern(rule.path)
+            )
+          : rule.redirect_url
+        : rewriteRoutePath(path, rule)
+    return { index, target: applyRouteQuery(destination, target, rule) }
+  } catch (failure) {
+    return {
+      index: -1,
+      target,
+      error: failure instanceof Error ? failure.message : '规则替换失败',
+    }
+  }
 }

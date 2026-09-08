@@ -37,11 +37,19 @@ struct WebsiteRouteHeaderData final {
     std::string value;
 };
 
+struct WebsiteRouteConditionData final {
+    std::string source;
+    std::string name;
+    std::string op;
+    std::string value;
+};
+
 struct WebsiteRouteRuleData final {
     std::string id;
     std::string name;
     std::string description;
     std::vector<std::string> hostnames;
+    std::vector<WebsiteRouteConditionData> conditions;
     std::string rewriteMode;
     std::string queryMode;
     std::string queryString;
@@ -167,6 +175,7 @@ normalize(const WebsiteRouteRuleInput& input) {
                                 .name = input.get<"name">() ? std::string(input.get<"name">()->view()) : "",
                                 .description = input.get<"description">() ? std::string(input.get<"description">()->view()) : "",
                                 .hostnames = {},
+                                .conditions = {},
                                 .rewriteMode = input.get<"rewriteMode">() ? std::string(input.get<"rewriteMode">()->view()) : (rewritePath->empty() ? "none" : "replace_path"),
                                 .queryMode = input.get<"queryMode">() ? std::string(input.get<"queryMode">()->view()) : "preserve",
                                 .queryString = input.get<"queryString">() ? std::string(input.get<"queryString">()->view()) : "",
@@ -185,6 +194,17 @@ normalize(const WebsiteRouteRuleInput& input) {
         for (const auto& host : *hostnames) result.hostnames.push_back(flexedge::route_policy::hostname(host.view()));
     }
     result.methods.reserve(methods->size());
+    if (const auto& conditions = input.get<"conditions">()) {
+        for (const auto& condition : *conditions) {
+            const auto& source = condition.get<"source">();
+            const auto& name = condition.get<"name">();
+            const auto& op = condition.get<"op">();
+            const auto& value = condition.get<"value">();
+            if (!source || !name || !op || !value) return std::nullopt;
+            result.conditions.push_back({std::string(source->view()), std::string(name->view()),
+                                         std::string(op->view()), std::string(value->view())});
+        }
+    }
     for (const auto& method : *methods) {
         result.methods.emplace_back(method.view());
     }
@@ -473,6 +493,14 @@ parseStored(std::string_view json, ruvia::ModelParseOptions options = {}) {
         item.set<"name">(rule.name);
         item.set<"description">(rule.description);
         copyStrings(item.ensure<"hostnames">(), rule.hostnames);
+        auto& conditions = item.ensure<"conditions">();
+        for (const auto& condition : rule.conditions) {
+            auto& target = conditions.emplace_back(options);
+            target.set<"source">(condition.source);
+            target.set<"name">(condition.name);
+            target.set<"op">(condition.op);
+            target.set<"value">(condition.value);
+        }
         item.set<"rewriteMode">(rule.rewriteMode);
         item.set<"queryMode">(rule.queryMode);
         item.set<"queryString">(rule.queryString);

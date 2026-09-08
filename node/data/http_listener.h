@@ -465,15 +465,19 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
             return;
         }
         hstsEnabled_ = secure_ && website->hsts_enabled();
-        const auto* route =
-            matchedRouteRule(*website, parsed.request().method(), parsed.request().target(), *host);
+        flexedge::route_policy::HeaderValues matchHeaders;
+        for (const auto& header : parsed.request().headers()) matchHeaders.emplace_back(header.name(), header.value());
+        const auto* route = matchedRouteRule(*website, parsed.request().method(), parsed.request().target(),
+                                             *host, matchHeaders, &config->routePatterns());
         if (route != nullptr && route->action() == "redirect") {
+            const auto location = routeRedirectLocation(parsed.request().target(), *route, &config->routePatterns());
+            if (location.empty()) { send(response("400 Bad Request")); return; }
             std::string headers =
-                "Location: " + routeRedirectLocation(parsed.request().target(), *route) + "\r\n";
+                "Location: " + location + "\r\n";
             for (const auto& header : route->response_headers()) {
                 headers.append(header.name()).append(": ").append(header.value()).append("\r\n");
             }
-            send(response(route->redirect_status() == 301 ? "301 Moved Permanently" : "302 Found",
+            send(response(flexedge::route_policy::redirectStatusLine(route->redirect_status()),
                           headers));
             return;
         }
@@ -566,7 +570,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         }
         auto prepared = flexedge::node::prepareOriginRequest(
             parsed, website, incomingHost, clientAddress_, secure_, upgradeRequested_, false,
-            kMaxRequestBytes, forceIdentityEncoding, activeRoute_);
+            kMaxRequestBytes, forceIdentityEncoding, activeRoute_, &activeConfig_->routePatterns());
         if (!prepared) {
             return false;
         }
@@ -574,7 +578,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         responseCodec_ = std::make_unique<OriginResponseCodec>(
             std::move(prepared->responseExchange), hstsEnabled_, activeRoute_);
         bufferedRequest_.method = parsed.request().method();
-        bufferedRequest_.target = routeTarget(parsed.request().target(), activeRoute_);
+        bufferedRequest_.target = routeTarget(parsed.request().target(), activeRoute_, &activeConfig_->routePatterns());
         bufferedRequest_.authority =
             website.origin_host_header().empty() || website.origin_host_header() == "$host"
                 ? normalizeHostname(incomingHost)
@@ -607,12 +611,14 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
             headers.emplace_back(name, value);
         }
         return flexedge::node::prepareOriginRequest({.method = bufferedRequest_.method,
-                                                     .target = bufferedRequest_.target,
+                                                     // The codec rewrites once; bufferedRequest_
+                                                     // retains the rewritten path for compression policy.
+                                                     .target = requestTarget_,
                                                      .headers = headers,
                                                      .body = bufferedRequest_.body,
                                                      .hasBody = bufferedRequest_.hasBody},
                                                     *activeWebsite_, requestHost_, clientAddress_,
-                                                    secure_, false, false, false, activeRoute_);
+                                                    secure_, false, false, false, activeRoute_, &activeConfig_->routePatterns());
     }
 
     void proxy(const ruvia::Http1ParsedRequest& parsed, const v2::Website& website,

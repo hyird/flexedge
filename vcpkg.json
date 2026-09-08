@@ -9,6 +9,7 @@
         "libpq",
         "openssl",
         "protobuf",
+        "re2",
         "zlib",
         "zstd"
     ]

@@ -43,7 +43,7 @@ class StateStore final {
             throw std::runtime_error("stored active state is incomplete");
         }
         if (state.active.node_spec().content().schema_version() != kNodeSpecSchemaVersion ||
-            state.active.release().content().schema_version() != kClusterReleaseSchemaVersion) {
+            !supportedClusterReleaseSchema(state.active.release().content().schema_version())) {
             return {};
         }
         state.objects.reserve(

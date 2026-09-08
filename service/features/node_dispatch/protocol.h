@@ -230,6 +230,13 @@ buildWebsiteObject(const DeploymentWebsiteSource& source, const ClusterDeploymen
         rule->set_name(input.name);
         rule->set_description(input.description);
         copyStringValues(input.hostnames, rule->mutable_hostnames());
+        for (const auto& condition : input.conditions) {
+            auto* target = rule->add_conditions();
+            target->set_source(condition.source);
+            target->set_name(condition.name);
+            target->set_op(condition.op);
+            target->set_value(condition.value);
+        }
         rule->set_rewrite_mode(input.rewriteMode);
         rule->set_query_mode(input.queryMode);
         rule->set_query_string(input.queryString);

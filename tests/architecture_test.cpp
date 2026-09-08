@@ -1206,6 +1206,98 @@ int main() {
     REQUIRE(oldRule->hostnames.empty());
     REQUIRE(oldRule->rewriteMode == "replace_path");
     REQUIRE(oldRule->queryMode == "preserve");
+    REQUIRE(oldRule->conditions.empty());
+    REQUIRE(roundTripJson.contains("\"conditions\":[]"));
+    {
+        namespace policy = flexedge::route_policy;
+        auto pattern = policy::compilePattern("^/old/([^/]+)/(.*)$");
+        REQUIRE(pattern != nullptr);
+        REQUIRE(policy::expandCaptures("/new/${2}/${1}?cash=$$", "/old/books/a%2Fb", *pattern) == "/new/a%2Fb/books?cash=$");
+        REQUIRE(!policy::captureTemplate("/${3}", 2));
+        REQUIRE(!policy::captureTemplate("/${10}", 2));
+        REQUIRE(!policy::captureTemplate("/${broken}", 2));
+        REQUIRE(policy::captureTemplate("/$${1}", 0));
+        REQUIRE(!policy::compilePattern("(?<=a)b"));
+        REQUIRE(!policy::compilePattern("(a)\\1"));
+        REQUIRE(!policy::compilePattern("["));
+        REQUIRE(!policy::compilePattern(std::string(513, 'a')));
+        REQUIRE(!policy::compilePattern("(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)"));
+        auto optional = policy::compilePattern("^/a(?:/(.*))?$");
+        REQUIRE(policy::expandCaptures("/b/${1}", "/a", *optional) == "/b/");
+        auto bounded = policy::compilePattern("(a+)+$");
+        REQUIRE(bounded != nullptr);
+        REQUIRE(!RE2::PartialMatch(std::string(100000, 'a') + "!", *bounded));
+        const auto query = policy::queryValues("/?tag=one&tag=two&space=a+b&escaped=%2B&flag");
+        policy::HeaderValues headers{{"X-Channel", " beta "}, {"x-channel", "stable"}};
+        REQUIRE(policy::conditionMatches("header", "x-channel", "equals", "beta", headers, query));
+        REQUIRE(!policy::conditionMatches("header", "x-channel", "not_equals", "beta", headers, query));
+        REQUIRE(policy::conditionMatches("query", "tag", "equals", "two", headers, query));
+        REQUIRE(!policy::conditionMatches("query", "tag", "not_equals", "one", headers, query));
+        REQUIRE(policy::conditionMatches("query", "space", "equals", "a b", headers, query));
+        REQUIRE(policy::conditionMatches("query", "escaped", "equals", "+", headers, query));
+        REQUIRE(policy::conditionMatches("query", "flag", "equals", "", headers, query));
+        REQUIRE(policy::conditionMatches("query", "missing", "absent", "", headers, query));
+        REQUIRE(!policy::conditionMatches("query", "missing", "not_equals", "x", headers, query));
+        REQUIRE(!policy::queryValues("/?tag=%FF"));
+        REQUIRE(!policy::queryValues("/?tag=%G1"));
+        REQUIRE(!policy::conditionMatches("query", "missing", "absent", "", headers, policy::queryValues("/?tag=%")));
+        REQUIRE(!policy::conditionOptions("header", "X Bad", "equals", "yes"));
+        REQUIRE(!policy::conditionOptions("query", "q", "exists", "nonempty"));
+        flexedge::node::v2::Website rich;
+        const auto add = [&](std::string_view id, std::string_view type, std::string_view path) {
+            auto* item = rich.add_route_rules();
+            item->set_id(std::string(id)); item->set_enabled(true);
+            item->set_match_type(std::string(type)); item->set_path(std::string(path));
+            item->set_action("redirect"); item->set_redirect_url("/new"); item->set_redirect_status(307);
+            return item;
+        };
+        auto* regex = add("regex", "regex", "^/old/(.*)$");
+        regex->set_redirect_url("/new/${1}#section"); regex->set_query_mode("replace"); regex->set_query_string("v=2");
+        auto* condition = regex->add_conditions();
+        condition->set_source("header"); condition->set_name("X-Channel"); condition->set_op("equals"); condition->set_value("beta");
+        auto* second = regex->add_conditions();
+        second->set_source("query"); second->set_name("tag"); second->set_op("equals"); second->set_value("two");
+        auto* regexLater = add("regex-later", "regex", "^/old/([^/]+)(/.*)?$");
+        auto* suffix = add("suffix", "suffix", ".jpg");
+        auto* prefix = add("prefix", "prefix", "/old/api");
+        auto* exact = add("exact", "exact", "/old/api/a.jpg");
+        flexedge::node::RoutePatterns compiled;
+        flexedge::node::validateRouteRules(rich, &compiled);
+        REQUIRE(compiled.size() == 2);
+        REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/a?tag=two", "", headers, &compiled) == regex);
+        REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/a?tag=one", "", headers, &compiled) == regexLater);
+        REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/a?tag=two", "", {}, &compiled) == regexLater);
+        REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/a.jpg", "", {}, &compiled) == suffix);
+        REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/api/b.jpg", "", {}, &compiled) == prefix);
+        REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/api/a.jpg", "", {}, &compiled) == exact);
+        REQUIRE(flexedge::node::routeRedirectLocation("/old/a%2Fb?tag=two", *regex, &compiled) == "/new/a%2Fb?v=2#section");
+        regex->set_redirect_status(308);
+        flexedge::node::validateRouteRules(rich);
+        regex->set_redirect_status(303);
+        REQUIRE(throwsRuntimeError([&] { flexedge::node::validateRouteRules(rich); }));
+
+        auto input = ruvia::fromJson<service::website_config::WebsiteRouteRuleInput>(R"json({
+          "id":"12345678-1234-4234-8234-123456789012","status":"enabled","match_type":"regex",
+          "path":"^/old/(.*)$","methods":["POST"],"action":"redirect","rewrite_path":"",
+          "redirect_url":"/new/${1}","redirect_status":308,"origin_group":"","request_headers":[],"response_headers":[],
+          "conditions":[{"source":"query","name":"tag","op":"equals","value":"two"}]
+        })json");
+        REQUIRE(input.has_value());
+        struct ValidationErrors {
+            std::vector<std::string> fields;
+            void add(std::string field, std::string_view, std::string_view) { fields.push_back(std::move(field)); }
+        } validation;
+        service::website::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
+        REQUIRE(validation.fields.empty());
+        const auto normalized = service::website_config::normalize(*input);
+        REQUIRE(normalized && normalized->conditions.size() == 1);
+        outputConfig.routeRules = {*normalized};
+        const auto json = ruvia::toJson(service::website_config::toOutput(outputConfig));
+        REQUIRE(json.contains("\"conditions\":[{\"source\":\"query\""));
+        input->set<"redirectUrl">("/new/${2}");
+        service::website::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
+        REQUIRE(!validation.fields.empty());
+    }
     flexedge::node::OriginHealthRegistry originHealth;
     originHealth.recordProbe("website-1", "origin-1", false, 1, 42, "timeout");
     const auto healthReports = originHealth.reports();

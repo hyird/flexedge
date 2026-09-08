@@ -5,8 +5,11 @@
 namespace flexedge::node {
 
 inline constexpr std::uint32_t kNodeSpecSchemaVersion{2};
-// v3 adds hostname filters and explicit path/query processing. Old nodes must
-// reject rather than silently execute these rules with v2 semantics.
-inline constexpr std::uint32_t kClusterReleaseSchemaVersion{3};
+// v4 adds route conditions, regex/suffix matching and 307/308 redirects.
+// Old nodes must reject rather than silently ignore matching conditions.
+inline constexpr std::uint32_t kClusterReleaseSchemaVersion{4};
+inline constexpr bool supportedClusterReleaseSchema(std::uint32_t version) noexcept {
+    return version >= 2 && version <= kClusterReleaseSchemaVersion;
+}
 
 } // namespace flexedge::node

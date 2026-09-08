@@ -1,5 +1,7 @@
 #pragma once
 
+#include "common/route_match.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
@@ -294,12 +296,34 @@ struct WebsiteRouteRuleValidator final {
             validator.add(std::string(path) + ".status", "enum", "规则状态不正确");
         }
         const auto& matchType = value.get<"matchType">();
-        if (!matchType || (matchType->view() != "exact" && matchType->view() != "prefix")) {
+        if (!matchType || policy::matchPriority(matchType->view()) == 0) {
             validator.add(std::string(path) + ".match_type", "enum", "匹配方式不正确");
         }
         const auto& routePath = value.get<"path">();
-        if (!routePath || !isRoutePath(routePath->view())) {
+        std::shared_ptr<const RE2> pattern;
+        if (matchType && matchType->view() == "regex") {
+            if (routePath) pattern = policy::compilePattern(routePath->view());
+            if (!pattern) validator.add(std::string(path) + ".path", "format", "正则需符合 RE2 语法，最多512字节、9个捕获组，不支持回溯引用、前后查找或 \\C");
+        } else if (matchType && matchType->view() == "suffix") {
+            if (!routePath || routePath->empty() || !policy::cleanText(routePath->view(), 2048) ||
+                routePath->view().find_first_of(" ?#") != std::string_view::npos)
+                validator.add(std::string(path) + ".path", "format", "请填写路径后缀，不含空白、查询参数或片段");
+        } else if (!routePath || !isRoutePath(routePath->view())) {
             validator.add(std::string(path) + ".path", "format", "匹配路径必须以 / 开头");
+        }
+        if (const auto& conditions = value.get<"conditions">()) {
+            if (conditions->size() > 20) validator.add(std::string(path) + ".conditions", "format", "最多20个匹配条件");
+            std::size_t index = 0;
+            for (const auto& condition : *conditions) {
+                const auto& source = condition.get<"source">();
+                const auto& name = condition.get<"name">();
+                const auto& op = condition.get<"op">();
+                const auto& text = condition.get<"value">();
+                if (!source || !name || !op || !text ||
+                    !policy::conditionOptions(source->view(), name->view(), op->view(), text->view()))
+                    validator.add(std::string(path) + ".conditions." + std::to_string(index) + ".name", "format", "条件来源、名称、操作符或值不正确");
+                ++index;
+            }
         }
         const auto& methods = value.get<"methods">();
         if (!methods || !validRouteMethods(*methods)) {
@@ -316,6 +340,10 @@ struct WebsiteRouteRuleValidator final {
         const auto& originGroup = value.get<"originGroup">();
         if (!rewritePath || !redirectUrl || !redirectStatus || !originGroup) {
             return;
+        }
+        if (pattern && (!policy::captureTemplate(rewritePath->view(), pattern->NumberOfCapturingGroups()) ||
+                        !policy::captureTemplate(redirectUrl->view(), pattern->NumberOfCapturingGroups()))) {
+            validator.add(std::string(path) + (action->view() == "proxy" ? ".rewrite_path" : ".redirect_url"), "format", "捕获替换仅支持正则中存在的 ${0} 到 ${9}，字面美元符用 $$");
         }
         const auto& configuredMode = value.get<"rewriteMode">();
         const auto mode = configuredMode ? configuredMode->view() : std::string_view{};
@@ -349,7 +377,7 @@ struct WebsiteRouteRuleValidator final {
                 validator.add(std::string(path), "format", "代理规则配置不正确");
             }
         } else if (!isRedirectUrl(redirectUrl->view()) ||
-                   (redirectStatus->value != 301 && redirectStatus->value != 302) ||
+                   !policy::redirectStatus(redirectStatus->value) ||
                    !rewritePath->empty() || !originGroup->empty()) {
             validator.add(std::string(path), "format", "重定向规则配置不正确");
         }
