@@ -71,6 +71,49 @@ std::string source(std::string_view relativePath) {
     } while (false)
 
 int main() {
+    {
+        flexedge::node::v2::Website phased;
+        phased.set_default_origin_group("default");
+        auto add = [&](const char* action, const char* path) {
+            auto* item = phased.add_route_rules();
+            item->set_id(std::to_string(phased.route_rules_size()));
+            item->set_enabled(true);
+            item->set_action(action);
+            item->set_match_type("prefix");
+            item->set_path(path);
+            return item;
+        };
+        auto* query = add("rewrite", "/old");
+        query->set_query_mode("replace"); query->set_query_string("v=2");
+        auto* rewrite = add("rewrite", "/old");
+        rewrite->set_rewrite_mode("replace_prefix"); rewrite->set_rewrite_path("/api");
+        auto* noChain = add("rewrite", "/api");
+        noChain->set_rewrite_mode("replace_path"); noChain->set_rewrite_path("/wrong");
+        auto* first = add("proxy", "/api"); first->set_origin_group("first");
+        auto* retained = first->add_request_headers(); retained->set_name("X-Keep"); retained->set_value("yes");
+        auto* overwritten = first->add_request_headers(); overwritten->set_name("X-Value"); overwritten->set_value("old");
+        auto* last = add("proxy", "/api"); last->set_origin_group("last");
+        auto* condition = last->add_conditions(); condition->set_source("query");
+        condition->set_name("v"); condition->set_op("equals"); condition->set_value("2");
+        auto* finalHeader = last->add_request_headers(); finalHeader->set_name("x-value"); finalHeader->set_value("new");
+        auto result = flexedge::node::evaluateRouteRules(phased, "GET", "/old/item?v=1");
+        REQUIRE(result && result->origin_group() == "last");
+        REQUIRE(flexedge::node::routeTarget("/old/item?v=1", &*result) == "/api/item?v=2");
+        REQUIRE(result->request_headers_size() == 2);
+        REQUIRE(result->request_headers(0).value() == "yes");
+        REQUIRE(result->request_headers(1).value() == "new");
+        last->set_enabled(false);
+        REQUIRE(flexedge::node::evaluateRouteRules(phased, "GET", "/old/item")->origin_group() == "first");
+        auto* redirect = add("redirect", "/old"); redirect->set_redirect_url("/login#end");
+        redirect->set_redirect_status(307); redirect->set_query_mode("drop");
+        auto* later = add("redirect", "/old"); later->set_redirect_url("/wrong"); later->set_redirect_status(302);
+        result = flexedge::node::evaluateRouteRules(phased, "GET", "/old/item?v=1");
+        REQUIRE(result && result->action() == "redirect" && result->redirect_url() == "/login#end");
+        REQUIRE(result->redirect_status() == 307);
+        REQUIRE(flexedge::node::evaluateRouteRules(phased, "GET", "/missing")->origin_group() == "default");
+        result = flexedge::node::evaluateRouteRules(phased, "GET", "/missing?");
+        REQUIRE(result && flexedge::node::routeTarget("/missing?", &*result) == "/missing?");
+    }
     using service::sync_runtime::MarkerOperation;
     using service::sync_runtime::MarkerResourceType;
     REQUIRE(service::sync_runtime::resourceTypeName(MarkerResourceType::provider) == "provider");
@@ -1306,6 +1349,18 @@ int main() {
         const auto json = ruvia::toJson(service::website_config::toOutput(outputConfig));
         REQUIRE(json.contains("\"conditions\":[{\"source\":\"query\""));
         input->set<"redirectUrl">("/new/${2}");
+        service::website::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
+        REQUIRE(!validation.fields.empty());
+        validation.fields.clear();
+        input->set<"action">("rewrite");
+        input->set<"redirectUrl">("");
+        input->set<"redirectStatus">(0);
+        input->set<"rewriteMode">("replace_path");
+        input->set<"rewritePath">("/api/${1}");
+        service::website::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
+        REQUIRE(validation.fields.empty());
+        REQUIRE(service::website_config::normalize(*input)->action == "rewrite");
+        input->set<"originGroup">("default");
         service::website::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
         REQUIRE(!validation.fields.empty());
     }

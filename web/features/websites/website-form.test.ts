@@ -34,6 +34,30 @@ function values() {
 }
 
 describe('website settings validation', () => {
+  it('accepts standalone rewrites and rejects origin/header options on them', () => {
+    const rule = routeRuleToForm({
+      action: 'rewrite',
+      match_type: 'prefix',
+      path: '/old',
+      rewrite_mode: 'replace_prefix',
+      rewrite_path: '/api',
+    })
+    expect(
+      websiteFormSchema.safeParse({ ...values(), route_rules: [rule] }).success
+    ).toBe(true)
+    expect(
+      websiteFormSchema.safeParse({
+        ...values(),
+        route_rules: [{ ...rule, origin_group: 'default' }],
+      }).success
+    ).toBe(false)
+    expect(
+      websiteFormSchema.safeParse({
+        ...values(),
+        route_rules: [{ ...rule, request_headers_text: 'X-Test: value' }],
+      }).success
+    ).toBe(false)
+  })
   it('round trips suffix, regex conditions and method-preserving redirects', () => {
     const rule = routeRuleToForm({
       id: '12345678-1234-4234-8234-123456789015',

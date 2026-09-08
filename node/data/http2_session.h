@@ -66,6 +66,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
         BufferedProxyRequest request;
         std::shared_ptr<const CompiledConfig> config;
         const v2::Website* website{};
+        std::optional<v2::RouteRule> effectiveRoute;
         const v2::RouteRule* route{};
         std::vector<const v2::Origin*> origins;
         std::size_t originIndex{};
@@ -367,10 +368,12 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
         for (const auto& [name, value] : state.request.headers) matchHeaders.emplace_back(name, value);
         // :authority is the HTTP/2 equivalent of the HTTP/1 Host header.
         matchHeaders.emplace_back("host", state.request.authority);
-        state.route = matchedRouteRule(*state.website, state.request.method, state.request.target,
+        state.effectiveRoute = evaluateRouteRules(*state.website, state.request.method, state.request.target,
                                        state.request.authority, matchHeaders, &state.config->routePatterns());
+        if (!state.effectiveRoute) { respond(streamId, 400); return; }
+        state.route = &*state.effectiveRoute;
         if (state.route != nullptr && state.route->action() == "redirect") {
-            const auto location = routeRedirectLocation(state.request.target, *state.route, &state.config->routePatterns());
+            const auto location = state.route->redirect_url();
             if (location.empty()) { respond(streamId, 400); return; }
             BufferedProxyResponse response;
             response.status = static_cast<std::uint16_t>(state.route->redirect_status());

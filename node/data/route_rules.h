@@ -207,13 +207,19 @@ inline void validateRouteRules(const v2::Website& website, RoutePatterns* patter
             (rule.match_type() == "suffix"
                 ? (rule.path().empty() || !policy::cleanText(rule.path(), 2048) || rule.path().find_first_of(" ?#") != std::string::npos)
                 : (rule.match_type() != "regex" && !routePath(rule.path()))) || !routeMethods(rule.methods()) ||
-            (rule.action() != "proxy" && rule.action() != "redirect") ||
+            (rule.action() != "proxy" && rule.action() != "redirect" && rule.action() != "rewrite") ||
             !routeHeaders(rule.request_headers()) || !routeHeaders(rule.response_headers())) {
             throw std::runtime_error("invalid website route rule");
         }
-        if (rule.action() == "proxy") {
+        if (rule.action() == "rewrite") {
+            if (!rule.origin_ids().empty() || !rule.origin_group().empty() ||
+                !rule.redirect_url().empty() || rule.redirect_status() != 0 ||
+                !rule.request_headers().empty() || !rule.response_headers().empty() ||
+                (!rule.rewrite_path().empty() && !policy::pathOnly(rule.rewrite_path())))
+                throw std::runtime_error("invalid rewrite route rule");
+        } else if (rule.action() == "proxy") {
             if (!routeOriginGroup(rule, website) ||
-                (!rule.rewrite_path().empty() && !routePath(rule.rewrite_path())) ||
+                (!rule.rewrite_path().empty() && !policy::pathOnly(rule.rewrite_path())) ||
                 !rule.redirect_url().empty() || rule.redirect_status() != 0) {
                 throw std::runtime_error("invalid proxy route rule");
             }
@@ -232,48 +238,52 @@ inline void validateRouteRules(const v2::Website& website, RoutePatterns* patter
                                [&](const auto& candidate) { return candidate == method; });
 }
 
-[[nodiscard]] inline const v2::RouteRule* matchedRouteRule(const v2::Website& website,
-                                                           std::string_view method,
-                                                           std::string_view target,
-                                                           std::string_view host = {},
-                                                           std::span<const std::pair<std::string_view, std::string_view>> headers = {},
-                                                           const RoutePatterns* patterns = nullptr) {
+[[nodiscard]] inline bool routeMatches(const v2::RouteRule& rule, std::string_view method,
+    std::string_view target, std::string_view host = {},
+    std::span<const std::pair<std::string_view, std::string_view>> headers = {},
+    const RoutePatterns* patterns = nullptr) {
     namespace policy = flexedge::route_policy;
     const auto hostname = flexedge::route_policy::hostname(host);
     const auto pathEnd = target.find('?');
     const auto path = target.substr(0, pathEnd);
     std::optional<policy::QueryValues> query;
     bool queryParsed = false;
-    for (const auto& rule : website.route_rules()) {
-        if (!rule.enabled() || !routeMethodMatches(rule, method)) {
-            continue;
-        }
-        if (!rule.hostnames().empty() && std::ranges::none_of(rule.hostnames(), [&](const auto& candidate) {
-                return flexedge::route_policy::hostname(candidate) == hostname;
-            })) continue;
-        bool conditionsMatch = true;
-        for (const auto& condition : rule.conditions()) {
-            if (condition.source() == "query" && !queryParsed) {
-                query = policy::queryValues(target); queryParsed = true;
-            }
-            if (!policy::conditionMatches(condition.source(), condition.name(), condition.op(), condition.value(), headers, query)) {
-                conditionsMatch = false; break;
-            }
-        }
-        if (!conditionsMatch) continue;
-        bool pathMatches = false;
-        if (rule.match_type() == "regex") {
-            const auto pattern = routePattern(rule, patterns);
-            pathMatches = pattern && RE2::PartialMatch(absl::string_view(path.data(), path.size()), *pattern);
-        } else if (rule.match_type() == "suffix") pathMatches = path.ends_with(rule.path());
-        else if (rule.match_type() == "exact") pathMatches = path == rule.path();
-        else pathMatches = path.starts_with(rule.path()) &&
-            (rule.path() == "/" || rule.path().ends_with('/') || path.size() == rule.path().size() || path[rule.path().size()] == '/');
-        if (!pathMatches) {
-            continue;
-        }
-        return &rule;
+    if (!rule.enabled() || !routeMethodMatches(rule, method)) {
+        return false;
     }
+    if (!rule.hostnames().empty() && std::ranges::none_of(rule.hostnames(), [&](const auto& candidate) {
+            return flexedge::route_policy::hostname(candidate) == hostname;
+        })) return false;
+    bool conditionsMatch = true;
+    for (const auto& condition : rule.conditions()) {
+        if (condition.source() == "query" && !queryParsed) {
+            query = policy::queryValues(target); queryParsed = true;
+        }
+        if (!policy::conditionMatches(condition.source(), condition.name(), condition.op(), condition.value(), headers, query)) {
+            conditionsMatch = false; break;
+        }
+    }
+    if (!conditionsMatch) return false;
+    bool pathMatches = false;
+    if (rule.match_type() == "regex") {
+        const auto pattern = routePattern(rule, patterns);
+        pathMatches = pattern && RE2::PartialMatch(absl::string_view(path.data(), path.size()), *pattern);
+    } else if (rule.match_type() == "suffix") pathMatches = path.ends_with(rule.path());
+    else if (rule.match_type() == "exact") pathMatches = path == rule.path();
+    else pathMatches = path.starts_with(rule.path()) &&
+        (rule.path() == "/" || rule.path().ends_with('/') || path.size() == rule.path().size() || path[rule.path().size()] == '/');
+    if (!pathMatches) {
+        return false;
+    }
+    return true;
+}
+
+[[nodiscard]] inline const v2::RouteRule* matchedRouteRule(const v2::Website& website,
+    std::string_view method, std::string_view target, std::string_view host = {},
+    std::span<const std::pair<std::string_view, std::string_view>> headers = {},
+    const RoutePatterns* patterns = nullptr) {
+    for (const auto& rule : website.route_rules())
+        if (routeMatches(rule, method, target, host, headers, patterns)) return &rule;
     return nullptr;
 }
 
@@ -307,6 +317,71 @@ inline void validateRouteRules(const v2::Website& website, RoutePatterns* patter
         destination = std::move(*expanded);
     }
     return flexedge::route_policy::applyQuery(destination, target, rule.query_mode(), rule.query_string());
+}
+
+// Each phase matches immutable input. Own the resolved policy through origin retries.
+[[nodiscard]] inline std::optional<v2::RouteRule> evaluateRouteRules(
+    const v2::Website& website, std::string_view method, std::string_view target,
+    std::string_view host = {},
+    std::span<const std::pair<std::string_view, std::string_view>> headers = {},
+    const RoutePatterns* patterns = nullptr) {
+    for (const auto& rule : website.route_rules()) {
+        if (rule.action() != "redirect" || !routeMatches(rule, method, target, host, headers, patterns)) continue;
+        const auto location = routeRedirectLocation(target, rule, patterns);
+        if (location.empty()) return std::nullopt;
+        auto result = rule;
+        result.set_match_type("exact");
+        result.set_redirect_url(location);
+        // Location is final; callers must not apply the incoming query again.
+        result.set_query_mode("preserve");
+        result.clear_query_string();
+        return result;
+    }
+    std::string rewritten(target);
+    for (const auto& rule : website.route_rules()) {
+        if (rule.action() == "redirect" || !routeMatches(rule, method, target, host, headers, patterns)) continue;
+        const auto mode = rule.rewrite_mode().empty() ? (rule.rewrite_path().empty() ? "none" : "replace_path") : rule.rewrite_mode();
+        if (mode != "none") {
+            const auto candidate = routeTarget(target, &rule, patterns);
+            if (candidate.empty()) return std::nullopt;
+            // Path-only changes retain the query selected by an earlier rule.
+            rewritten = candidate.substr(0, candidate.find('?')) +
+                (rewritten.find('?') == std::string::npos ? "" : rewritten.substr(rewritten.find('?')));
+        }
+        if (rule.query_mode() == "drop" || rule.query_mode() == "replace")
+            rewritten = flexedge::route_policy::applyQuery(rewritten, target, rule.query_mode(), rule.query_string());
+    }
+    v2::RouteRule result;
+    result.set_action("proxy");
+    result.set_origin_group(website.default_origin_group());
+    auto mergeHeaders = [](auto* destination, const auto& changes) {
+        for (const auto& change : changes) {
+            bool replaced = false;
+            for (auto& existing : *destination) {
+                if (routeHeaderEquals(existing.name(), change.name())) {
+                    existing = change;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) *destination->Add() = change;
+        }
+    };
+    for (const auto& rule : website.route_rules()) {
+        if (rule.action() != "proxy" || !routeMatches(rule, method, rewritten, host, headers, patterns)) continue;
+        result.set_id(rule.id());
+        result.set_origin_group(rule.origin_group());
+        *result.mutable_origin_ids() = rule.origin_ids();
+        mergeHeaders(result.mutable_request_headers(), rule.request_headers());
+        mergeHeaders(result.mutable_response_headers(), rule.response_headers());
+    }
+    // Existing codecs apply this literal result exactly once, including on retries.
+    const auto queryAt = rewritten.find('?');
+    result.set_match_type("exact");
+    result.set_rewrite_mode("replace_path");
+    result.set_rewrite_path(rewritten);
+    result.set_query_mode(queryAt == std::string::npos ? "drop" : "preserve");
+    return result;
 }
 
 template <typename HeaderRange>

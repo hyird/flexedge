@@ -467,10 +467,12 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         hstsEnabled_ = secure_ && website->hsts_enabled();
         flexedge::route_policy::HeaderValues matchHeaders;
         for (const auto& header : parsed.request().headers()) matchHeaders.emplace_back(header.name(), header.value());
-        const auto* route = matchedRouteRule(*website, parsed.request().method(), parsed.request().target(),
+        effectiveRoute_ = evaluateRouteRules(*website, parsed.request().method(), parsed.request().target(),
                                              *host, matchHeaders, &config->routePatterns());
+        if (!effectiveRoute_) { send(response("400 Bad Request")); return; }
+        const auto* route = &*effectiveRoute_;
         if (route != nullptr && route->action() == "redirect") {
-            const auto location = routeRedirectLocation(parsed.request().target(), *route, &config->routePatterns());
+            const auto location = route->redirect_url();
             if (location.empty()) { send(response("400 Bad Request")); return; }
             std::string headers =
                 "Location: " + location + "\r\n";
@@ -1164,6 +1166,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
     std::string clientUpgradeRemainder_;
     std::shared_ptr<const CompiledConfig> activeConfig_;
     const v2::Website* activeWebsite_{};
+    std::optional<v2::RouteRule> effectiveRoute_;
     const v2::RouteRule* activeRoute_{};
     std::vector<const v2::Origin*> origins_;
     std::size_t originIndex_{};

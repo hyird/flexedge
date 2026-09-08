@@ -71,10 +71,12 @@ export function applyRouteQuery(
 
 export function conflictingRouteIndexes(rules: PreviewRule[], index: number) {
   const rule = rules[index]
-  if (!rule || rule.status !== 'enabled') return []
+  if (!rule || rule.status !== 'enabled' || rule.action !== 'redirect')
+    return []
   return rules.flatMap((previous, candidate) => {
     if (
       candidate >= index ||
+      previous.action !== 'redirect' ||
       previous.status !== 'enabled' ||
       previous.match_type !== rule.match_type ||
       previous.path !== rule.path
@@ -101,8 +103,8 @@ export function conflictingRouteIndexes(rules: PreviewRule[], index: number) {
   })
 }
 
-// Mirrors node/data/route_rules.h: first matching rule in user-defined order wins.
-export function previewRoute(
+// Match and evaluate one terminating rule against a phase snapshot.
+function previewSingleRoute(
   rules: PreviewRule[],
   method: string,
   target: string,
@@ -175,4 +177,88 @@ export function previewRoute(
       error: failure instanceof Error ? failure.message : '规则替换失败',
     }
   }
+}
+
+// Each phase uses immutable input; later settings override independently by field.
+export function previewRoute(
+  rules: PreviewRule[],
+  method: string,
+  target: string,
+  host = '',
+  headers: Array<[string, string]> = [['host', host]]
+): {
+  index: number
+  target: string
+  error?: string
+  rewrites?: number[]
+  origins?: number[]
+} {
+  const rewrites: number[] = []
+  const origins: number[] = []
+  for (const [index, rule] of rules.entries()) {
+    if (rule.action !== 'redirect') continue
+    const result = previewSingleRoute([rule], method, target, host, headers)
+    if (result.error)
+      return {
+        ...result,
+        index: -1,
+        error: result.error.replace('规则 1 ', `规则 ${index + 1} `),
+      }
+    if (result.index === 0)
+      return { index, target: result.target, rewrites, origins }
+  }
+  let rewritten = target
+  for (const [index, rule] of rules.entries()) {
+    if (rule.action === 'redirect') continue
+    const result = previewSingleRoute([rule], method, target, host, headers)
+    if (result.error)
+      return {
+        ...result,
+        index: -1,
+        error: result.error.replace('规则 1 ', `规则 ${index + 1} `),
+      }
+    if (result.index < 0) continue
+    const mode =
+      rule.rewrite_mode || (rule.rewrite_path ? 'replace_path' : 'none')
+    if (mode !== 'none') {
+      const queryAt = rewritten.indexOf('?')
+      rewritten =
+        result.target.split('?')[0] +
+        (queryAt < 0 ? '' : rewritten.slice(queryAt))
+    }
+    if (rule.query_mode === 'drop' || rule.query_mode === 'replace')
+      rewritten = applyRouteQuery(rewritten, target, rule)
+    if (
+      mode !== 'none' ||
+      rule.query_mode === 'drop' ||
+      rule.query_mode === 'replace'
+    )
+      rewrites.push(index)
+  }
+  for (const [index, rule] of rules.entries()) {
+    if (rule.action !== 'proxy') continue
+    const result = previewSingleRoute(
+      [
+        {
+          ...rule,
+          rewrite_mode: 'none',
+          rewrite_path: '',
+          query_mode: 'preserve',
+          query_string: '',
+        },
+      ],
+      method,
+      rewritten,
+      host,
+      headers
+    )
+    if (result.error)
+      return {
+        ...result,
+        index: -1,
+        error: result.error.replace('规则 1 ', `规则 ${index + 1} `),
+      }
+    if (result.index === 0) origins.push(index)
+  }
+  return { index: origins.at(-1) ?? -1, target: rewritten, rewrites, origins }
 }

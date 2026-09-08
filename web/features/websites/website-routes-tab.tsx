@@ -70,11 +70,13 @@ export function WebsiteRoutesTab({
   const matched = rules[preview.index]
   return (
     <TabsContent value='routes' className='space-y-3 py-4'>
-      <div className='flex items-center justify-between gap-4'>
+      <div className='flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center'>
         <div>
           <h3 className='font-medium'>路由规则</h3>
           <p className='text-sm text-muted-foreground'>
-            从上到下匹配，首个命中即生效，不再检查后续规则。可调整顺序改变优先级，兜底规则请放在最后。前缀按路径段边界匹配。
+            按 URL 跳转 → URL 重写 →
+            路由选源执行，各阶段内沿用列表顺序。跳转首条命中即结束；重写和选源的同项设置由后面的规则覆盖。重写匹配原始
+            URL，选源匹配重写后的 URL。
           </p>
         </div>
         <Button
@@ -229,7 +231,9 @@ export function WebsiteRoutesTab({
                   {rules[index]?.methods.join(', ') || '全部方法'} →{' '}
                   {action === 'redirect'
                     ? `跳转 ${rules[index]?.redirect_status} ${rules[index]?.redirect_url}`
-                    : `源站组 ${originGroupLabel(rules[index]?.origin_group ?? '')}`}
+                    : action === 'rewrite'
+                      ? `URL 重写 ${rules[index]?.rewrite_path || '查询参数策略'}`
+                      : `源站组 ${originGroupLabel(rules[index]?.origin_group ?? '')}`}
                 </p>
                 {(rules[index]?.conditions.length ?? 0) > 0 && (
                   <p>{rules[index].conditions.length} 个请求条件（全部满足）</p>
@@ -330,34 +334,35 @@ export function WebsiteRoutesTab({
                             value={field.value}
                             onValueChange={(next) => {
                               field.onChange(next)
-                              if (next === 'proxy') {
+                              form.setValue(
+                                `route_rules.${index}.origin_group`,
+                                next === 'proxy'
+                                  ? form.getValues('default_origin_group')
+                                  : ''
+                              )
+                              form.setValue(
+                                `route_rules.${index}.redirect_url`,
+                                ''
+                              )
+                              form.setValue(
+                                `route_rules.${index}.redirect_status`,
+                                next === 'redirect' ? 302 : 0
+                              )
+                              form.setValue(
+                                `route_rules.${index}.rewrite_mode`,
+                                'none'
+                              )
+                              form.setValue(
+                                `route_rules.${index}.rewrite_path`,
+                                ''
+                              )
+                              if (next === 'rewrite') {
                                 form.setValue(
-                                  `route_rules.${index}.origin_group`,
-                                  form.getValues('default_origin_group')
-                                )
-                                form.setValue(
-                                  `route_rules.${index}.redirect_url`,
+                                  `route_rules.${index}.request_headers_text`,
                                   ''
                                 )
                                 form.setValue(
-                                  `route_rules.${index}.redirect_status`,
-                                  0
-                                )
-                              } else {
-                                form.setValue(
-                                  `route_rules.${index}.rewrite_mode`,
-                                  'none'
-                                )
-                                form.setValue(
-                                  `route_rules.${index}.redirect_status`,
-                                  302
-                                )
-                                form.setValue(
-                                  `route_rules.${index}.origin_group`,
-                                  ''
-                                )
-                                form.setValue(
-                                  `route_rules.${index}.rewrite_path`,
+                                  `route_rules.${index}.response_headers_text`,
                                   ''
                                 )
                               }
@@ -369,8 +374,13 @@ export function WebsiteRoutesTab({
                               </SelectTrigger>
                             </FormControl>
                             <SelectContent>
-                              <SelectItem value='proxy'>代理回源</SelectItem>
-                              <SelectItem value='redirect'>跳转</SelectItem>
+                              <SelectItem value='redirect'>
+                                ① URL 跳转
+                              </SelectItem>
+                              <SelectItem value='rewrite'>
+                                ② URL 重写
+                              </SelectItem>
+                              <SelectItem value='proxy'>③ 路由选源</SelectItem>
                             </SelectContent>
                           </Select>
                         </FormItem>
@@ -427,38 +437,42 @@ export function WebsiteRoutesTab({
                       表示字面美元符。未匹配的可选组为空；不支持前后查找和回溯引用。
                     </p>
                   )}
-                  {action === 'proxy' ? (
+                  {action !== 'redirect' ? (
                     <div className='grid items-start gap-4 sm:grid-cols-3'>
-                      <FormField
-                        control={form.control}
-                        name={`route_rules.${index}.origin_group`}
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>目标源站组</FormLabel>
-                            <Select
-                              value={field.value}
-                              onValueChange={field.onChange}
-                            >
-                              <FormControl>
-                                <SelectTrigger>
-                                  <SelectValue placeholder='选择源站组' />
-                                </SelectTrigger>
-                              </FormControl>
-                              <SelectContent>
-                                {selectableOriginGroups.map((group) => (
-                                  <SelectItem
-                                    key={group.name}
-                                    value={group.name}
-                                  >
-                                    {originGroupLabel(group.name)}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
+                      {action === 'proxy' && (
+                        <FormField
+                          control={form.control}
+                          name={`route_rules.${index}.origin_group`}
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>
+                                目标源站组（匹配重写后的 URL）
+                              </FormLabel>
+                              <Select
+                                value={field.value}
+                                onValueChange={field.onChange}
+                              >
+                                <FormControl>
+                                  <SelectTrigger>
+                                    <SelectValue placeholder='选择源站组' />
+                                  </SelectTrigger>
+                                </FormControl>
+                                <SelectContent>
+                                  {selectableOriginGroups.map((group) => (
+                                    <SelectItem
+                                      key={group.name}
+                                      value={group.name}
+                                    >
+                                      {originGroupLabel(group.name)}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                      )}
                       <FormField
                         control={form.control}
                         name={`route_rules.${index}.rewrite_mode`}
@@ -634,7 +648,9 @@ export function WebsiteRoutesTab({
                             </SelectContent>
                           </Select>
                           <FormDescription>
-                            保留：目标已有参数时使用目标参数，否则携带原请求参数。丢弃：移除全部参数。
+                            {action === 'redirect'
+                              ? '保留：目标已有参数时使用目标参数，否则携带原请求参数。丢弃：移除全部参数。'
+                              : '保留：不覆盖前面规则的参数设置。丢弃或替换：覆盖前面匹配规则的参数设置。'}
                           </FormDescription>
                           <FormMessage />
                         </FormItem>
@@ -661,55 +677,57 @@ export function WebsiteRoutesTab({
                       )}
                     />
                   </div>
-                  <Collapsible>
-                    <CollapsibleTrigger asChild>
-                      <Button type='button' variant='ghost' size='sm'>
-                        高级请求/响应头
-                      </Button>
-                    </CollapsibleTrigger>
-                    <CollapsibleContent className='grid items-start gap-4 pt-3 sm:grid-cols-2'>
-                      <FormField
-                        control={form.control}
-                        name={`route_rules.${index}.request_headers_text`}
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>回源请求头</FormLabel>
-                            <FormControl>
-                              <Textarea
-                                className='[field-sizing:fixed] h-40 min-h-40 resize-none overflow-y-auto font-mono text-xs'
-                                placeholder='X-Region: cn'
-                                {...field}
-                              />
-                            </FormControl>
-                            <FormDescription>
-                              每行一个，例如 X-Region: cn。
-                            </FormDescription>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-                      <FormField
-                        control={form.control}
-                        name={`route_rules.${index}.response_headers_text`}
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>响应头</FormLabel>
-                            <FormControl>
-                              <Textarea
-                                className='[field-sizing:fixed] h-40 min-h-40 resize-none overflow-y-auto font-mono text-xs'
-                                placeholder='X-Cache: HIT'
-                                {...field}
-                              />
-                            </FormControl>
-                            <FormDescription>
-                              每行一个，例如 X-Cache: HIT。
-                            </FormDescription>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-                    </CollapsibleContent>
-                  </Collapsible>
+                  {action !== 'rewrite' && (
+                    <Collapsible>
+                      <CollapsibleTrigger asChild>
+                        <Button type='button' variant='ghost' size='sm'>
+                          高级请求/响应头
+                        </Button>
+                      </CollapsibleTrigger>
+                      <CollapsibleContent className='grid items-start gap-4 pt-3 sm:grid-cols-2'>
+                        <FormField
+                          control={form.control}
+                          name={`route_rules.${index}.request_headers_text`}
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>回源请求头</FormLabel>
+                              <FormControl>
+                                <Textarea
+                                  className='[field-sizing:fixed] h-40 min-h-40 resize-none overflow-y-auto font-mono text-xs'
+                                  placeholder='X-Region: cn'
+                                  {...field}
+                                />
+                              </FormControl>
+                              <FormDescription>
+                                每行一个，例如 X-Region: cn。
+                              </FormDescription>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                        <FormField
+                          control={form.control}
+                          name={`route_rules.${index}.response_headers_text`}
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>响应头</FormLabel>
+                              <FormControl>
+                                <Textarea
+                                  className='[field-sizing:fixed] h-40 min-h-40 resize-none overflow-y-auto font-mono text-xs'
+                                  placeholder='X-Cache: HIT'
+                                  {...field}
+                                />
+                              </FormControl>
+                              <FormDescription>
+                                每行一个，例如 X-Cache: HIT。
+                              </FormDescription>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                      </CollapsibleContent>
+                    </Collapsible>
+                  )}
                 </div>
                 <Collapsible
                   className='border-t p-3'
@@ -738,7 +756,7 @@ export function WebsiteRoutesTab({
                 >
                   <CollapsibleTrigger asChild>
                     <Button type='button' variant='ghost' size='sm'>
-                      测试此规则
+                      测试执行阶段
                     </Button>
                   </CollapsibleTrigger>
                   <CollapsibleContent className='space-y-3 pt-3'>
@@ -831,8 +849,21 @@ export function WebsiteRoutesTab({
                           ? '请输入以 / 开头的请求路径。'
                           : matched
                             ? `命中规则 ${preview.index + 1} · ${matched.action === 'redirect' ? `跳转 ${matched.redirect_status}` : `源站组 ${originGroupLabel(matched.origin_group)}`} → ${preview.target}`
-                            : `使用默认源站组 ${originGroupLabel(form.watch('default_origin_group'))} → ${previewTarget}`)}
+                            : `使用默认源站组 ${originGroupLabel(form.watch('default_origin_group'))} → ${preview.target}`)}
                     </p>
+                    {!preview.error && !headerError && (
+                      <p className='text-sm text-muted-foreground'>
+                        重写阶段：
+                        {preview.rewrites
+                          ?.map((item) => item + 1)
+                          .join(' → ') || '无'}
+                        ； 选源阶段：
+                        {preview.origins?.map((item) => item + 1).join(' → ') ||
+                          '默认源站组'}
+                        。
+                        数字为规则编号，同项设置以后面的为准；预览不会发送真实请求。
+                      </p>
+                    )}
                   </CollapsibleContent>
                 </Collapsible>
               </CollapsibleContent>

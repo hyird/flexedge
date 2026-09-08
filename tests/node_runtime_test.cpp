@@ -1335,8 +1335,19 @@ int main(int argc, char* argv[]) {
         proxyRoute->set_rewrite_path("/internal/${1}");
         proxyRoute->set_query_mode("replace");
         proxyRoute->set_query_string("route=1");
+        auto* sourceRoute = proxySnapshot.mutableWebsite()->add_route_rules();
+        *sourceRoute = *proxyRoute;
+        sourceRoute->set_id("select-rewritten-path");
+        sourceRoute->set_match_type("prefix");
+        sourceRoute->set_path("/internal");
+        sourceRoute->set_rewrite_mode("none");
+        sourceRoute->clear_rewrite_path();
+        sourceRoute->set_query_mode("preserve");
+        sourceRoute->clear_query_string();
+        proxyRoute->set_action("rewrite");
+        proxyRoute->clear_origin_ids();
         const auto candidates =
-            flexedge::node::originCandidates(proxySnapshot.website(), 0, proxyRoute);
+            flexedge::node::originCandidates(proxySnapshot.website(), 0, sourceRoute);
         REQUIRE(candidates.size() == 1);
         REQUIRE(candidates.front()->id() == "origin-backup");
         apply(runtime, std::move(proxySnapshot));
