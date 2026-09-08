@@ -1070,7 +1070,7 @@ int main(int argc, char* argv[]) {
         const auto discardedRelease = stateStore.load();
         REQUIRE(!discardedRelease.active.has_release());
         REQUIRE(discardedRelease.objects.empty());
-        for (const auto version : {2u, 3u}) {
+        for (const auto version : {2u, 3u, 4u}) {
             auto compatible = snapshot();
             compatible.active.mutable_release()->mutable_content()->set_schema_version(version);
             compatible.finalize();
@@ -1276,8 +1276,9 @@ int main(int argc, char* argv[]) {
             auto* query = matched->add_conditions();
             query->set_source("query"); query->set_name("q"); query->set_op("equals"); query->set_value("a b");
             auto* fallback = advanced.mutableWebsite()->add_route_rules();
-            fallback->set_id("fallback-regex"); fallback->set_enabled(true); fallback->set_match_type("regex");
-            fallback->set_path("^/old/"); fallback->set_action("redirect"); fallback->set_redirect_status(302); fallback->set_redirect_url("/fallback");
+            // A later prefix must not outrank the earlier matching regex.
+            fallback->set_id("fallback-prefix"); fallback->set_enabled(true); fallback->set_match_type("prefix");
+            fallback->set_path("/old"); fallback->set_action("redirect"); fallback->set_redirect_status(302); fallback->set_redirect_url("/fallback");
             apply(runtime, std::move(advanced));
             const auto answer = request(port, "www.example.com", "x-channel: beta\r\n", "/old/a%2Fb?q=a+b", "POST", "payload");
             REQUIRE(answer.starts_with("HTTP/1.1 " + std::string(flexedge::route_policy::redirectStatusLine(status)) + "\r\n"));
@@ -1509,6 +1510,11 @@ int main(int argc, char* argv[]) {
         queryCondition->set_source("query"); queryCondition->set_name("a"); queryCondition->set_op("equals"); queryCondition->set_value("1");
         currentHostRule->set_query_mode("replace");
         currentHostRule->set_query_string("v=2");
+        // HTTP/2 must also retain the earlier regex rather than choosing this exact rule.
+        auto* laterExact = tlsWebsite->add_route_rules();
+        laterExact->CopyFrom(*otherHostRule);
+        laterExact->set_id("later-exact");
+        laterExact->clear_hostnames();
         apply(runtime, std::move(tlsSnapshot));
         flexedge::node::TlsContextRegistry tlsContexts;
         tlsContexts.publish(

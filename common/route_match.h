@@ -27,12 +27,8 @@ inline std::string_view redirectStatusLine(std::int64_t status) {
     }
 }
 
-inline int matchPriority(std::string_view type) {
-    if (type == "exact") return 4;
-    if (type == "prefix") return 3;
-    if (type == "suffix") return 2;
-    if (type == "regex") return 1;
-    return 0;
+inline bool validMatchType(std::string_view type) {
+    return type == "exact" || type == "prefix" || type == "suffix" || type == "regex";
 }
 
 inline std::shared_ptr<const RE2> compilePattern(std::string_view pattern) {

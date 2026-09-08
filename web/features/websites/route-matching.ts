@@ -13,12 +13,6 @@ export const routeMatchLabels = {
   suffix: '后缀',
   regex: '正则',
 }
-export const routeMatchPriority: Record<string, number> = {
-  exact: 4,
-  prefix: 3,
-  suffix: 2,
-  regex: 1,
-}
 const patterns = new Map<string, RE2JS>()
 const byteLength = (value: string) => new TextEncoder().encode(value).length
 const hasControl = (value: string) =>

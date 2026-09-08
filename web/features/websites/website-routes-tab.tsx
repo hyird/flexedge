@@ -74,8 +74,7 @@ export function WebsiteRoutesTab({
         <div>
           <h3 className='font-medium'>路由规则</h3>
           <p className='text-sm text-muted-foreground'>
-            优先级：精确 → 前缀 → 后缀 →
-            正则。同类取最长路径，正则按顺序取首个；同等条件取靠前规则。前缀按路径段边界匹配。
+            从上到下匹配，首个命中即生效，不再检查后续规则。可调整顺序改变优先级，兜底规则请放在最后。前缀按路径段边界匹配。
           </p>
         </div>
         <Button

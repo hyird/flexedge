@@ -595,7 +595,8 @@ int main() {
     REQUIRE(websiteDomainsTab.contains("<TabsContent value='domains'"));
     const auto websiteFeaturesTab = source("web/features/websites/website-features-tab.tsx");
     REQUIRE(websiteFeaturesTab.contains("export function WebsiteFeaturesTab"));
-    REQUIRE(websiteFeaturesTab.contains("<TabsContent value={category}"));
+    REQUIRE(websiteFeaturesTab.contains("value={category}"));
+    REQUIRE(websiteFeaturesTab.contains("min-h-[100cqh]"));
     const auto websiteOriginsTab = source("web/features/websites/website-origins-tab.tsx");
     REQUIRE(websiteOriginsTab.contains("export function WebsiteOriginsTab"));
     REQUIRE(websiteOriginsTab.contains("<TabsContent value='origins'"));
@@ -1109,6 +1110,10 @@ int main() {
     responseHeader->set_name("X-Edge-Route");
     responseHeader->set_value("api");
     flexedge::node::validateRouteRules(routeWebsite);
+    // An earlier catch-all wins even over a longer path. Moving it below the
+    // specific rule changes selection without changing any match fields.
+    REQUIRE(flexedge::node::matchedRouteRule(routeWebsite, "GET", "/api/v1?q=1") == fallbackRoute);
+    routeWebsite.mutable_route_rules()->SwapElements(0, 1);
     const auto* matched = flexedge::node::matchedRouteRule(routeWebsite, "GET", "/api/v1?q=1");
     REQUIRE(matched == route);
     REQUIRE(flexedge::node::matchedRouteRule(routeWebsite, "GET", "/apix") == fallbackRoute);
@@ -1127,7 +1132,7 @@ int main() {
     REQUIRE(routeHeaders.front().first == "Accept");
     REQUIRE(routeHeaders.back().first == "X-Route");
     REQUIRE(routeHeaders.back().second == "enabled");
-    // Host filtering precedes existing path specificity; it does not add a new priority tier.
+    // A hostname mismatch skips the earlier rule and continues down the list.
     route->add_hostnames("API.Example.com");
     REQUIRE(flexedge::node::matchedRouteRule(routeWebsite, "GET", "/api/v1", "api.example.com:443") == route);
     REQUIRE(flexedge::node::matchedRouteRule(routeWebsite, "GET", "/api/v1", "www.example.com") == fallbackRoute);
@@ -1267,8 +1272,14 @@ int main() {
         REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/a?tag=two", "", headers, &compiled) == regex);
         REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/a?tag=one", "", headers, &compiled) == regexLater);
         REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/a?tag=two", "", {}, &compiled) == regexLater);
-        REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/a.jpg", "", {}, &compiled) == suffix);
-        REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/api/b.jpg", "", {}, &compiled) == prefix);
+        REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/a.jpg", "", {}, &compiled) == regexLater);
+        REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/api/b.jpg", "", {}, &compiled) == regexLater);
+        REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/api/a.jpg", "", {}, &compiled) == regexLater);
+        regexLater->set_enabled(false);
+        REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/api/a.jpg", "", {}, &compiled) == suffix);
+        suffix->set_enabled(false);
+        REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/api/a.jpg", "", {}, &compiled) == prefix);
+        rich.mutable_route_rules()->SwapElements(3, 4);
         REQUIRE(flexedge::node::matchedRouteRule(rich, "GET", "/old/api/a.jpg", "", {}, &compiled) == exact);
         REQUIRE(flexedge::node::routeRedirectLocation("/old/a%2Fb?tag=two", *regex, &compiled) == "/new/a%2Fb?v=2#section");
         regex->set_redirect_status(308);

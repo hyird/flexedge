@@ -1,6 +1,6 @@
 # Website route rules
 
-The v0.3.36 release includes both groups of route controls. These are persisted in
+The v0.3.37 release uses user-defined ordering for all route controls. These are persisted in
 the existing website configuration JSON; no database table migration is required.
 
 ## Match and priority
@@ -10,12 +10,11 @@ the existing website configuration JSON; no database table migration is required
   this website. Incoming Host / HTTP/2 authority is compared without port or final
   dot, case-insensitively. This does not bind a domain or bypass website selection.
 - Status, hostname and HTTP method filters are applied before path matching.
-- Precedence is exact, prefix, suffix, then regex. Within exact/prefix/suffix,
-  the longest path wins, followed by the first rule on ties. Regex rules use
-  the first matching rule regardless of pattern length. Hostname and request
-  conditions do not confer additional priority. An existing catch-all prefix
-  `/` therefore outranks regex rules; use the default origin group for fallback
-  if regex rules must remain reachable.
+- Rules are evaluated from top to bottom. The first enabled rule matching the
+  hostname, HTTP method, all request conditions and path wins; later rules are
+  not evaluated. Match type and path length do not grant extra priority.
+  Reordering rules changes precedence. Put catch-all prefix `/` rules last,
+  or use the default origin group when no rule matches.
 - Prefix matches respect path-segment boundaries, so `/api` does not match `/apix`.
 
 ## Path processing (proxy action only)
@@ -97,13 +96,18 @@ becomes `/v2/users?b=2`.
 
 Stored rules without the added fields normalize to empty metadata and hostname
 filters, the original whole-path rewrite when a rewrite path exists, and query
-preservation and no conditions. New cluster manifests use schema v4. Older nodes
-reject v4 instead of silently ignoring new semantics. New nodes can load existing
-v2 and v3 manifests.
+preservation and no conditions. New cluster manifests use schema v5. Older nodes
+reject v5 instead of applying type/length priority. New nodes can load existing
+v2, v3 and v4 manifests, but apply the new first-match semantics to their stored
+order as soon as the node binary upgrades. Existing overlapping rules may therefore
+select a different destination; no automatic reordering or configuration rewrite
+is performed. Review catch-all placement before upgrading.
 
 Deploy upgraded node binaries before exposing the new editor; verify every node
 has converged after the server upgrade. Keep binary and configuration backups.
-Do not roll the server back after saving new rule options without also restoring
+To restore the former type/length priority, restore both node and server binaries
+and the pre-upgrade configuration; a server-only rollback does not restore matching
+semantics. Do not roll the server back after saving new rule options without also restoring
 the corresponding pre-upgrade website configuration, since old software does not
 understand the added fields. Preview is local form simulation, not a node health
 or release acknowledgement check.

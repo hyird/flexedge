@@ -1,5 +1,6 @@
 import type { UseFormReturn } from 'react-hook-form'
 import type { Certificate } from '@/lib/types'
+import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -48,7 +49,14 @@ export function WebsiteFeaturesTab({
   const compressionEnabled = form.watch('response_compression_enabled')
 
   return (
-    <TabsContent value={category} className='space-y-3 py-4'>
+    <TabsContent
+      value={category}
+      className={cn(
+        'space-y-3 py-4',
+        category === 'compression' &&
+          'flex min-h-[100cqh] flex-col space-y-0 data-[state=inactive]:hidden'
+      )}
+    >
       {category === 'health' && (
         <section className='rounded-lg border'>
           <div className='flex items-center justify-between gap-4 p-4'>
@@ -478,7 +486,7 @@ export function WebsiteFeaturesTab({
       )}
 
       {category === 'compression' && (
-        <section className='rounded-lg border'>
+        <section className='flex flex-1 flex-col rounded-lg border'>
           <div className='flex items-center justify-between gap-4 p-4'>
             <div>
               <h3 className='font-medium'>响应压缩</h3>
@@ -503,7 +511,7 @@ export function WebsiteFeaturesTab({
             />
           </div>
           {compressionEnabled && (
-            <div className='space-y-4 border-t p-4'>
+            <div className='flex flex-1 flex-col gap-4 border-t p-4'>
               <div className='grid gap-3 sm:grid-cols-2'>
                 <FormField
                   control={form.control}
@@ -563,7 +571,7 @@ export function WebsiteFeaturesTab({
                   </FormItem>
                 )}
               />
-              <div className='grid gap-3 sm:grid-cols-3'>
+              <div className='grid flex-1 gap-3 sm:grid-cols-3'>
                 {[
                   [
                     'response_compression_mime_types',
@@ -586,11 +594,11 @@ export function WebsiteFeaturesTab({
                     control={form.control}
                     name={name as keyof WebsiteFormValues}
                     render={({ field }) => (
-                      <FormItem>
+                      <FormItem className='flex flex-col'>
                         <FormLabel>{label}</FormLabel>
                         <FormControl>
                           <Textarea
-                            className='[field-sizing:fixed] h-40 min-h-40 resize-none overflow-y-auto font-mono text-xs'
+                            className='[field-sizing:fixed] min-h-40 flex-1 resize-none overflow-y-auto font-mono text-xs'
                             placeholder={placeholder}
                             value={valuesToLines(field.value as string[])}
                             onChange={(event) =>
