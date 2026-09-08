@@ -1,12 +1,12 @@
 import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import type { ApiEnvelope } from '@/lib/api'
-import {
-  queryKeysForSyncEvents,
-  syncEventCompletionMessage,
-} from '@/lib/sync-events'
+import { apiErrorMessage, type ApiEnvelope } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
+import {
+  refreshSyncEventQueries,
+  syncEventFailureMessage,
+} from '@/lib/sync-events'
 import type { SyncEventPage } from '@/lib/types'
 
 export function SyncEventMonitor() {
@@ -39,17 +39,19 @@ export function SyncEventMonitor() {
       ) as ApiEnvelope<SyncEventPage>
       const events = payload.data
       if (!events.list.length) return
+      for (const result of events.list) {
+        if (result.outcome === 'failed') {
+          toast.error(syncEventFailureMessage(result), {
+            id: `sync-failed-${result.resource_type}-${result.resource_id}`,
+          })
+        }
+      }
 
       void (async () => {
-        await Promise.all(
-          queryKeysForSyncEvents(events.list).map((queryKey) =>
-            queryClient.invalidateQueries({ queryKey })
-          )
-        )
-        for (const event of events.list) {
-          if (event.outcome === 'completed') {
-            toast.success(syncEventCompletionMessage(event))
-          }
+        try {
+          await refreshSyncEventQueries(queryClient, events.list)
+        } catch (error) {
+          toast.error(`收到同步结果，但数据刷新失败：${apiErrorMessage(error)}`)
         }
       })()
     })

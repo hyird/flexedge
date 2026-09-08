@@ -1,8 +1,10 @@
+import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { expect, test } from 'vitest'
 import {
   queryKeysForSyncEvents,
   syncEventRefreshKeys,
-  syncEventCompletionMessage,
+  syncEventFailureMessage,
+  refreshSyncEventQueries,
 } from '@/lib/sync-events'
 import type { SyncEvent } from '@/lib/types'
 
@@ -15,6 +17,63 @@ const event = (overrides: Partial<SyncEvent> = {}): SyncEvent => ({
   outcome: 'completed',
   emitted_at: '2026-09-06T20:00:00+08:00',
   ...overrides,
+})
+
+test('completion waits for the website list response to replace stale data', async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  })
+  let respond!: (value: string[]) => void
+  const observer = new QueryObserver(client, {
+    queryKey: ['websites', 1],
+    initialData: ['old'],
+    queryFn: () =>
+      new Promise<string[]>((resolve) => {
+        respond = resolve
+      }),
+  })
+  const unsubscribe = observer.subscribe(() => {})
+  try {
+    let completed = false
+    const refresh = refreshSyncEventQueries(client, [
+      event({ resource_type: 'website' }),
+    ]).then(() => {
+      completed = true
+    })
+    await Promise.resolve()
+    expect(completed).toBe(false)
+    expect(observer.getCurrentResult().data).toEqual(['old'])
+    respond(['new'])
+    await refresh
+    expect(observer.getCurrentResult().data).toEqual(['new'])
+    expect(completed).toBe(true)
+  } finally {
+    unsubscribe()
+    client.clear()
+  }
+})
+
+test('failed list refresh cannot be reported as a successful refresh', async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  })
+  const observer = new QueryObserver(client, {
+    queryKey: ['websites', 1],
+    initialData: ['old'],
+    queryFn: async () => {
+      throw new Error('network failure')
+    },
+  })
+  const unsubscribe = observer.subscribe(() => {})
+  try {
+    await expect(
+      refreshSyncEventQueries(client, [event({ resource_type: 'website' })])
+    ).rejects.toThrow('network failure')
+    expect(observer.getCurrentResult().data).toEqual(['old'])
+  } finally {
+    unsubscribe()
+    client.clear()
+  }
 })
 
 test('every worker-backed resource type has an explicit refresh contract', () => {
@@ -44,8 +103,10 @@ test('a batched result refreshes each query family once', () => {
   ).toEqual([['overview'], ['certificates'], ['websites']])
 })
 
-test('completion wording names the resource category after its refresh', () => {
-  expect(syncEventCompletionMessage(event({ resource_type: 'website' }))).toBe(
-    '网站发布已完成，相关数据已刷新'
-  )
+test('failure wording names the actual website background operation', () => {
+  expect(
+    syncEventFailureMessage(
+      event({ resource_type: 'website', outcome: 'failed' })
+    )
+  ).toBe('网站域名检查失败，请查看资源详情')
 })

@@ -1,5 +1,6 @@
-import type { SyncEvent, SyncResourceType } from '@/lib/types'
+import type { QueryClient } from '@tanstack/react-query'
 import { queryKeys } from '@/lib/query-keys'
+import type { SyncEvent, SyncResourceType } from '@/lib/types'
 
 type QueryKey = readonly string[]
 
@@ -14,10 +15,12 @@ const resourceLabels = {
   provider: '供应商检测',
   dns_zone: 'DNS 同步',
   certificate: '证书签发',
-  website: '网站发布',
+  website: '网站域名检查',
 } satisfies Record<SyncResourceType, string>
 
-export function queryKeysForSyncEvents(events: readonly SyncEvent[]): QueryKey[] {
+export function queryKeysForSyncEvents(
+  events: readonly SyncEvent[]
+): QueryKey[] {
   const keys = new Map<string, QueryKey>()
   for (const key of [queryKeys.overview] satisfies QueryKey[]) {
     keys.set(key.join('\u0000'), key)
@@ -30,6 +33,17 @@ export function queryKeysForSyncEvents(events: readonly SyncEvent[]): QueryKey[]
   return [...keys.values()]
 }
 
-export function syncEventCompletionMessage(event: SyncEvent) {
-  return `${resourceLabels[event.resource_type]}已完成，相关数据已刷新`
+export function syncEventFailureMessage(event: SyncEvent) {
+  return `${resourceLabels[event.resource_type]}失败，请查看资源详情`
+}
+
+export async function refreshSyncEventQueries(
+  client: QueryClient,
+  events: readonly SyncEvent[]
+) {
+  await Promise.all(
+    queryKeysForSyncEvents(events).map((queryKey) =>
+      client.invalidateQueries({ queryKey }, { throwOnError: true })
+    )
+  )
 }
