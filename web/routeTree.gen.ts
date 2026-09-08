@@ -17,6 +17,7 @@ import { Route as AuthenticatedClustersRouteImport } from './routes/_authenticat
 import { Route as AuthenticatedDnsZonesRouteImport } from './routes/_authenticated/dns-zones'
 import { Route as AuthenticatedNodesRouteImport } from './routes/_authenticated/nodes'
 import { Route as AuthenticatedProvidersRouteImport } from './routes/_authenticated/providers'
+import { Route as AuthenticatedTasksRouteImport } from './routes/_authenticated/tasks'
 import { Route as AuthenticatedWebsitesRouteImport } from './routes/_authenticated/websites'
 
 const AuthenticatedRouteRoute = AuthenticatedRouteRouteImport.update({
@@ -59,6 +60,11 @@ const AuthenticatedProvidersRoute = AuthenticatedProvidersRouteImport.update({
   path: '/providers',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedTasksRoute = AuthenticatedTasksRouteImport.update({
+  id: '/tasks',
+  path: '/tasks',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 const AuthenticatedWebsitesRoute = AuthenticatedWebsitesRouteImport.update({
   id: '/websites',
   path: '/websites',
@@ -73,6 +79,7 @@ export interface FileRoutesByFullPath {
   '/dns-zones': typeof AuthenticatedDnsZonesRoute
   '/nodes': typeof AuthenticatedNodesRoute
   '/providers': typeof AuthenticatedProvidersRoute
+  '/tasks': typeof AuthenticatedTasksRoute
   '/websites': typeof AuthenticatedWebsitesRoute
 }
 export interface FileRoutesByTo {
@@ -82,6 +89,7 @@ export interface FileRoutesByTo {
   '/dns-zones': typeof AuthenticatedDnsZonesRoute
   '/nodes': typeof AuthenticatedNodesRoute
   '/providers': typeof AuthenticatedProvidersRoute
+  '/tasks': typeof AuthenticatedTasksRoute
   '/websites': typeof AuthenticatedWebsitesRoute
   '/': typeof AuthenticatedIndexRoute
 }
@@ -94,6 +102,7 @@ export interface FileRoutesById {
   '/_authenticated/dns-zones': typeof AuthenticatedDnsZonesRoute
   '/_authenticated/nodes': typeof AuthenticatedNodesRoute
   '/_authenticated/providers': typeof AuthenticatedProvidersRoute
+  '/_authenticated/tasks': typeof AuthenticatedTasksRoute
   '/_authenticated/websites': typeof AuthenticatedWebsitesRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
 }
@@ -107,6 +116,7 @@ export interface FileRouteTypes {
     | '/dns-zones'
     | '/nodes'
     | '/providers'
+    | '/tasks'
     | '/websites'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -116,6 +126,7 @@ export interface FileRouteTypes {
     | '/dns-zones'
     | '/nodes'
     | '/providers'
+    | '/tasks'
     | '/websites'
     | '/'
   id:
@@ -127,6 +138,7 @@ export interface FileRouteTypes {
     | '/_authenticated/dns-zones'
     | '/_authenticated/nodes'
     | '/_authenticated/providers'
+    | '/_authenticated/tasks'
     | '/_authenticated/websites'
     | '/_authenticated/'
   fileRoutesById: FileRoutesById
@@ -194,6 +206,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedProvidersRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/tasks': {
+      id: '/_authenticated/tasks'
+      path: '/tasks'
+      fullPath: '/tasks'
+      preLoaderRoute: typeof AuthenticatedTasksRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/websites': {
       id: '/_authenticated/websites'
       path: '/websites'
@@ -210,6 +229,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedDnsZonesRoute: typeof AuthenticatedDnsZonesRoute
   AuthenticatedNodesRoute: typeof AuthenticatedNodesRoute
   AuthenticatedProvidersRoute: typeof AuthenticatedProvidersRoute
+  AuthenticatedTasksRoute: typeof AuthenticatedTasksRoute
   AuthenticatedWebsitesRoute: typeof AuthenticatedWebsitesRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
 }
@@ -220,6 +240,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedDnsZonesRoute: AuthenticatedDnsZonesRoute,
   AuthenticatedNodesRoute: AuthenticatedNodesRoute,
   AuthenticatedProvidersRoute: AuthenticatedProvidersRoute,
+  AuthenticatedTasksRoute: AuthenticatedTasksRoute,
   AuthenticatedWebsitesRoute: AuthenticatedWebsitesRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
 }

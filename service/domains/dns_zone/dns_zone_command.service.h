@@ -1,5 +1,7 @@
 #pragma once
 
+#include "service/features/sync_event/fanout.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -68,6 +70,7 @@ class DnsZoneCommandService final {
                 transaction, tenantId, std::string(inserted.front()[0].value().value_or("")),
                 inserted.front()[1].as<std::int64_t>().value_or(1));
             co_await transaction.commit();
+            service::sync_event::fanout::hub().publish(tenantId);
         } catch (const ruvia::DbError& error) {
             if (service::common::isUniqueConstraintViolation(error, "uk_dns_zone_domain")) {
                 service::common::throwAppError(DnsZoneError::EXISTS);
@@ -120,6 +123,7 @@ class DnsZoneCommandService final {
         const auto desiredRevision = rows.front()[1].as<std::int64_t>().value_or(1);
         co_await service::dns_sync::enqueueZoneRevision(transaction, tenantId, id, desiredRevision);
         co_await transaction.commit();
+        service::sync_event::fanout::hub().publish(tenantId);
         co_return;
     }
 
@@ -140,6 +144,7 @@ class DnsZoneCommandService final {
             : conflictPolicy == "local" ? service::sync_runtime::MarkerOperation::syncLocal
                                         : service::sync_runtime::MarkerOperation::sync);
         co_await transaction.commit();
+        service::sync_event::fanout::hub().publish(tenantId);
         co_return;
     }
 
@@ -177,6 +182,7 @@ class DnsZoneCommandService final {
         (void)co_await service::dns_sync::enqueueZoneDeletion(transaction, tenantId, id,
                                                               desiredRevision);
         co_await transaction.commit();
+        service::sync_event::fanout::hub().publish(tenantId);
         co_return;
     }
 

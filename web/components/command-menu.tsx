@@ -30,6 +30,15 @@ export function CommandMenu() {
       <CommandList>
         <ScrollArea type='hover' className='h-72 pe-1'>
           <CommandEmpty>没有匹配结果。</CommandEmpty>
+          <CommandGroup heading='后台任务'>
+            <CommandItem
+              value='任务中心'
+              onSelect={() => run(() => navigate({ to: '/tasks' }))}
+            >
+              <ArrowRight className='size-3 text-muted-foreground' />
+              任务中心
+            </CommandItem>
+          </CommandGroup>
           {sidebarData.navGroups.map((group) => (
             <CommandGroup key={group.title} heading={group.title}>
               {group.items.flatMap((item) =>

@@ -176,7 +176,7 @@ class NodeController final : public ruvia::Controller<NodeController> {
                 if (signal.status() != ruvia::WorkerWaitStatus::kTimedOut) {
                     co_return;
                 }
-                co_await events.write({.event = "heartbeat"});
+                co_await events.write({.data = "{}", .event = "heartbeat"});
                 continue;
             }
             co_await events.write({.data = "{}", .event = "node-state"});

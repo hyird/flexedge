@@ -1,5 +1,7 @@
 #pragma once
 
+#include "service/features/sync_event/fanout.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -64,6 +66,7 @@ class DnsProviderService final {
                 tenantId, std::string_view(provider), std::string_view(name),
                 std::string_view(accountId), std::string_view(config));
             co_await transaction.commit();
+            service::sync_event::fanout::hub().publish(tenantId);
         } catch (const ruvia::DbError& error) {
             if (service::common::isUniqueConstraintViolation(error, "uk_provider_name")) {
                 service::common::throwAppError(DnsProviderError::NAME_EXISTS);
@@ -134,6 +137,7 @@ class DnsProviderService final {
                 co_await service::provider_verification::remove(transaction, tenantId, id);
             }
             co_await transaction.commit();
+            service::sync_event::fanout::hub().publish(tenantId);
         } catch (const ruvia::DbError& error) {
             if (service::common::isUniqueConstraintViolation(error, "uk_provider_name")) {
                 service::common::throwAppError(DnsProviderError::NAME_EXISTS);
@@ -158,6 +162,7 @@ class DnsProviderService final {
             service::common::throwAppError(DnsProviderError::REVISION_CONFLICT);
         }
         co_await transaction.commit();
+        service::sync_event::fanout::hub().publish(tenantId);
         co_return;
     }
 
@@ -189,6 +194,7 @@ class DnsProviderService final {
             id, tenantId, expectedRevision);
         co_await service::provider_verification::remove(transaction, tenantId, id);
         co_await transaction.commit();
+        service::sync_event::fanout::hub().publish(tenantId);
         co_return;
     }
 

@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { reconnectingEventSource } from '@/lib/event-stream'
 import { queryKeys } from '@/lib/query-keys'
 
 /**
@@ -11,11 +12,10 @@ export function NodeRuntimeMonitor() {
   const queryClient = useQueryClient()
 
   useEffect(() => {
-    const stream = new EventSource('/api/nodes/stream', {
-      withCredentials: true,
-    })
+    const stream = reconnectingEventSource('/api/nodes/stream')
     const refresh = () => {
       void Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.tasks }),
         queryClient.invalidateQueries({ queryKey: queryKeys.nodes }),
         queryClient.invalidateQueries({ queryKey: queryKeys.clusters }),
         queryClient.invalidateQueries({ queryKey: queryKeys.websites }),

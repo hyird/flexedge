@@ -8,4 +8,5 @@ export const queryKeys = {
   nodes: ['nodes'],
   websites: ['websites'],
   syncEvents: ['sync-event-monitor'],
+  tasks: ['tasks'],
 } as const

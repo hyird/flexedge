@@ -1,5 +1,7 @@
 #pragma once
 
+#include "service/features/sync_event/fanout.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -140,6 +142,7 @@ class CertificateProviderService final {
             co_await service::provider_verification::remove(transaction, tenantId, id);
         }
         co_await transaction.commit();
+        service::sync_event::fanout::hub().publish(tenantId);
         co_return;
     }
 
@@ -158,6 +161,7 @@ class CertificateProviderService final {
             service::common::throwAppError(CertificateProviderError::REVISION_CONFLICT);
         }
         co_await transaction.commit();
+        service::sync_event::fanout::hub().publish(tenantId);
         co_return;
     }
 
@@ -188,6 +192,7 @@ class CertificateProviderService final {
             id, tenantId, expectedRevision);
         co_await service::provider_verification::remove(transaction, tenantId, id);
         co_await transaction.commit();
+        service::sync_event::fanout::hub().publish(tenantId);
         co_return;
     }
 

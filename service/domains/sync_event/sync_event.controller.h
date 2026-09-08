@@ -109,9 +109,11 @@ class SyncEventController final : public ruvia::Controller<SyncEventController> 
                 if (signal.status() != ruvia::WorkerWaitStatus::kTimedOut) {
                     co_return;
                 }
-                co_await events.write({.event = "heartbeat"});
+                co_await events.write({.data = "{}", .event = "heartbeat"});
                 continue;
             }
+
+            co_await events.write({.data = "{}", .event = "task-state"});
 
             while (!events.aborted()) {
                 auto update = co_await syncEventService().list(c, tenant, cursor);
