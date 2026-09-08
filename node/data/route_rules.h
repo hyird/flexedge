@@ -203,7 +203,7 @@ inline void validateRouteRules(const v2::Website& website, RoutePatterns* patter
             }
         }
         if (rule.id().empty() || !ids.emplace(rule.id()).second ||
-            policy::matchPriority(rule.match_type()) == 0 ||
+            !policy::validMatchType(rule.match_type()) ||
             (rule.match_type() == "suffix"
                 ? (rule.path().empty() || !policy::cleanText(rule.path(), 2048) || rule.path().find_first_of(" ?#") != std::string::npos)
                 : (rule.match_type() != "regex" && !routePath(rule.path()))) || !routeMethods(rule.methods()) ||
@@ -242,7 +242,6 @@ inline void validateRouteRules(const v2::Website& website, RoutePatterns* patter
     const auto hostname = flexedge::route_policy::hostname(host);
     const auto pathEnd = target.find('?');
     const auto path = target.substr(0, pathEnd);
-    const v2::RouteRule* matched = nullptr;
     std::optional<policy::QueryValues> query;
     bool queryParsed = false;
     for (const auto& rule : website.route_rules()) {
@@ -273,14 +272,9 @@ inline void validateRouteRules(const v2::Website& website, RoutePatterns* patter
         if (!pathMatches) {
             continue;
         }
-        if (matched == nullptr ||
-            policy::matchPriority(rule.match_type()) > policy::matchPriority(matched->match_type()) ||
-            (rule.match_type() == matched->match_type() && rule.match_type() != "regex" &&
-             rule.path().size() > matched->path().size())) {
-            matched = &rule;
-        }
+        return &rule;
     }
-    return matched;
+    return nullptr;
 }
 
 [[nodiscard]] inline std::string routeTarget(std::string_view target, const v2::RouteRule* rule,

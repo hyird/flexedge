@@ -18,7 +18,7 @@ const rule = (patch: Partial<PreviewRule> = {}): PreviewRule => ({
 })
 
 describe('route preview matches node semantics', () => {
-  it('filters by hostname without changing path precedence', () => {
+  it('filters by hostname while preserving rule order', () => {
     const rules = [
       rule({ path: '/api', hostnames: ['API.Example.com'] }),
       rule(),
@@ -103,16 +103,27 @@ describe('route preview matches node semantics', () => {
       conflictingRouteIndexes([rule(), rule({ match_type: 'exact' })], 1)
     ).toEqual([])
   })
-  it('prioritizes exact and longest matches, preserving first ties', () => {
+  it('uses the first match regardless of type or path length and respects reordering', () => {
     const rules = [
       rule(),
       rule({ path: '/api' }),
       rule({ path: '/api', match_type: 'exact' }),
       rule({ path: '/api', match_type: 'exact' }),
     ]
-    expect(previewRoute(rules, 'GET', '/api?q=1').index).toBe(2)
-    expect(previewRoute(rules, 'GET', '/api/users').index).toBe(1)
+    expect(previewRoute(rules, 'GET', '/api?q=1').index).toBe(0)
+    expect(previewRoute(rules, 'GET', '/api/users').index).toBe(0)
     expect(previewRoute(rules, 'GET', '/apix').index).toBe(0)
+    expect(previewRoute([rules[2], rules[0]], 'GET', '/api').index).toBe(0)
+    expect(previewRoute([rules[2], rules[0]], 'GET', '/api/users').index).toBe(
+      1
+    )
+    expect(
+      previewRoute(
+        [rules[0], rule({ match_type: 'regex', path: '[' })],
+        'GET',
+        '/api'
+      ).error
+    ).toBeUndefined()
   })
   it('skips disabled and method mismatches', () => {
     expect(

@@ -145,7 +145,7 @@ describe('second-batch route policies', () => {
       ).toBe(false)
     }
   })
-  it('applies AND conditions before precedence and keeps the first regex', () => {
+  it('uses the first rule satisfying all conditions across matching types', () => {
     const rules = [
       rule({
         conditions: [
@@ -170,9 +170,18 @@ describe('second-batch route policies', () => {
       previewRoute(rules, 'GET', '/old/a?tag=one', '', headers).index
     ).toBe(1)
     expect(previewRoute(rules, 'GET', '/old/a?tag=two').index).toBe(1)
-    expect(previewRoute(rules, 'GET', '/old/a.jpg').index).toBe(2)
-    expect(previewRoute(rules, 'GET', '/old/api/b.jpg').index).toBe(3)
-    expect(previewRoute(rules, 'GET', '/old/api/a.jpg').index).toBe(4)
+    expect(previewRoute(rules, 'GET', '/old/a.jpg').index).toBe(1)
+    expect(previewRoute(rules, 'GET', '/old/api/b.jpg').index).toBe(1)
+    expect(previewRoute(rules, 'GET', '/old/api/a.jpg').index).toBe(1)
+    expect(previewRoute(rules.slice(2), 'GET', '/old/api/a.jpg').target).toBe(
+      '/image'
+    )
+    expect(previewRoute(rules.slice(3), 'GET', '/old/api/a.jpg').target).toBe(
+      '/api'
+    )
+    expect(
+      previewRoute([...rules].reverse(), 'GET', '/old/api/a.jpg').target
+    ).toBe('/exact')
   })
   it('rewrites capture paths and redirect queries without losing fragments', () => {
     expect(

@@ -296,7 +296,7 @@ struct WebsiteRouteRuleValidator final {
             validator.add(std::string(path) + ".status", "enum", "规则状态不正确");
         }
         const auto& matchType = value.get<"matchType">();
-        if (!matchType || policy::matchPriority(matchType->view()) == 0) {
+        if (!matchType || !policy::validMatchType(matchType->view())) {
             validator.add(std::string(path) + ".match_type", "enum", "匹配方式不正确");
         }
         const auto& routePath = value.get<"path">();

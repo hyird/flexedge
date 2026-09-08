@@ -439,7 +439,15 @@ export function WebsiteDialog({
                   <TabsTrigger value='routes'>路由规则</TabsTrigger>
                 </TabsList>
               </div>
-              <ScrollArea className='min-h-0 min-w-0 flex-1 overflow-hidden rounded-lg border px-4'>
+              <ScrollArea
+                className='min-h-0 min-w-0 flex-1 overflow-hidden rounded-lg border px-4'
+                // Size the compression editor against the viewport, without depending on Radix's internal content wrapper.
+                viewportClassName={
+                  section === 'compression'
+                    ? '[container-type:size]'
+                    : undefined
+                }
+              >
                 <WebsiteBasicTab
                   form={form}
                   clusters={clusters}

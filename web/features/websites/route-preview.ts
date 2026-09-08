@@ -3,7 +3,6 @@ import {
   expandRouteCaptures,
   queryMatchValues,
   routeConditionMatches,
-  routeMatchPriority,
   type RouteCondition,
 } from './route-matching'
 
@@ -102,7 +101,7 @@ export function conflictingRouteIndexes(rules: PreviewRule[], index: number) {
   })
 }
 
-// Mirrors node/data/route_rules.h: exact > prefix > suffix > regex; first regex wins.
+// Mirrors node/data/route_rules.h: first matching rule in user-defined order wins.
 export function previewRoute(
   rules: PreviewRule[],
   method: string,
@@ -116,6 +115,7 @@ export function previewRoute(
   let error: string | undefined
   const query = queryMatchValues(target)
   rules.forEach((rule, candidate) => {
+    if (index !== -1 || error) return
     const hostnames = hosts(rule)
     if (hostnames.length && !hostnames.includes(normalizeRouteHostname(host)))
       return
@@ -151,16 +151,7 @@ export function previewRoute(
                 path.length === rule.path.length ||
                 path[rule.path.length] === '/')
     if (!matches) return
-    const previous = rules[index]
-    if (
-      !previous ||
-      routeMatchPriority[rule.match_type] >
-        routeMatchPriority[previous.match_type] ||
-      (rule.match_type === previous.match_type &&
-        rule.match_type !== 'regex' &&
-        rule.path.length > previous.path.length)
-    )
-      index = candidate
+    index = candidate
   })
   const rule = rules[index]
   if (error) return { index: -1, target, error }
