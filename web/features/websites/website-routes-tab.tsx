@@ -27,6 +27,8 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { TabsContent } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
+import { RouteConditionFields } from './route-condition-fields'
+import { previewHeaderValues, routeMatchLabels } from './route-matching'
 import { RouteMetadataFields } from './route-metadata-fields'
 import { conflictingRouteIndexes, previewRoute } from './route-preview'
 import { originGroupLabel } from './website-display'
@@ -48,9 +50,23 @@ export function WebsiteRoutesTab({
   const [previewTarget, setPreviewTarget] = useState('/api/users?a=1')
   const [previewMethod, setPreviewMethod] = useState('GET')
   const [previewHost, setPreviewHost] = useState('')
+  const [previewHeaders, setPreviewHeaders] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
   const rules = form.watch('route_rules')
-  const preview = previewRoute(rules, previewMethod, previewTarget, previewHost)
+  let headerError = ''
+  let headers: Array<[string, string]> = []
+  try {
+    headers = previewHeaderValues(previewHeaders, previewHost)
+  } catch (error) {
+    headerError = error instanceof Error ? error.message : '请求头不正确'
+  }
+  const preview = previewRoute(
+    rules,
+    previewMethod,
+    previewTarget,
+    previewHost,
+    headers
+  )
   const matched = rules[preview.index]
   return (
     <TabsContent value='routes' className='space-y-3 py-4'>
@@ -58,7 +74,8 @@ export function WebsiteRoutesTab({
         <div>
           <h3 className='font-medium'>路由规则</h3>
           <p className='text-sm text-muted-foreground'>
-            精确匹配优先，其次选择最长匹配路径；同等条件取靠前规则。前缀按路径段边界匹配。
+            优先级：精确 → 前缀 → 后缀 →
+            正则。同类取最长路径，正则按顺序取首个；同等条件取靠前规则。前缀按路径段边界匹配。
           </p>
         </div>
         <Button
@@ -72,6 +89,7 @@ export function WebsiteRoutesTab({
               name: '',
               description: '',
               hostnames: [],
+              conditions: [],
               rewrite_mode: 'none',
               query_mode: 'preserve',
               query_string: '',
@@ -102,6 +120,7 @@ export function WebsiteRoutesTab({
           const action = form.watch(`route_rules.${index}.action`)
           const rewriteMode = form.watch(`route_rules.${index}.rewrite_mode`)
           const queryMode = form.watch(`route_rules.${index}.query_mode`)
+          const matchType = form.watch(`route_rules.${index}.match_type`)
           const conflicts = conflictingRouteIndexes(rules, index)
           return (
             <Collapsible
@@ -206,13 +225,16 @@ export function WebsiteRoutesTab({
                       : '保留'}
                 </p>
                 <p className='break-all'>
-                  {rules[index]?.match_type === 'exact' ? '精确' : '前缀'} ·{' '}
+                  {routeMatchLabels[matchType]} ·{' '}
                   {rules[index]?.path || '未填写路径'} ·{' '}
                   {rules[index]?.methods.join(', ') || '全部方法'} →{' '}
                   {action === 'redirect'
                     ? `跳转 ${rules[index]?.redirect_status} ${rules[index]?.redirect_url}`
                     : `源站组 ${originGroupLabel(rules[index]?.origin_group ?? '')}`}
                 </p>
+                {(rules[index]?.conditions.length ?? 0) > 0 && (
+                  <p>{rules[index].conditions.length} 个请求条件（全部满足）</p>
+                )}
                 {conflicts.length > 0 && (
                   <p className='text-destructive'>
                     与规则 {conflicts.map((item) => item + 1).join('、')}{' '}
@@ -227,7 +249,7 @@ export function WebsiteRoutesTab({
                     <p role='status' className='text-sm text-destructive'>
                       与靠前规则{' '}
                       {conflicts.map((candidate) => candidate + 1).join('、')}{' '}
-                      的路径、匹配方式及请求方法重叠；重叠请求会命中靠前规则。
+                      存在匹配重叠；重叠请求会命中靠前规则。
                     </p>
                   )}
                   <div className='grid items-start gap-4 sm:grid-cols-3'>
@@ -238,7 +260,16 @@ export function WebsiteRoutesTab({
                         <FormItem>
                           <FormLabel>匹配路径</FormLabel>
                           <FormControl>
-                            <Input placeholder='/api/' {...field} />
+                            <Input
+                              placeholder={
+                                matchType === 'regex'
+                                  ? '^/old/(.*)$'
+                                  : matchType === 'suffix'
+                                    ? '.jpg'
+                                    : '/api/'
+                              }
+                              {...field}
+                            />
                           </FormControl>
                           <FormMessage />
                         </FormItem>
@@ -252,7 +283,25 @@ export function WebsiteRoutesTab({
                           <FormLabel>匹配方式</FormLabel>
                           <Select
                             value={field.value}
-                            onValueChange={field.onChange}
+                            onValueChange={(next) => {
+                              field.onChange(next)
+                              if (
+                                next !== 'prefix' &&
+                                (rewriteMode === 'strip_prefix' ||
+                                  rewriteMode === 'replace_prefix')
+                              ) {
+                                form.setValue(
+                                  `route_rules.${index}.rewrite_mode`,
+                                  'none',
+                                  { shouldDirty: true }
+                                )
+                                form.setValue(
+                                  `route_rules.${index}.rewrite_path`,
+                                  '',
+                                  { shouldDirty: true }
+                                )
+                              }
+                            }}
                           >
                             <FormControl>
                               <SelectTrigger>
@@ -262,8 +311,13 @@ export function WebsiteRoutesTab({
                             <SelectContent>
                               <SelectItem value='prefix'>前缀匹配</SelectItem>
                               <SelectItem value='exact'>精确匹配</SelectItem>
+                              <SelectItem value='suffix'>后缀匹配</SelectItem>
+                              <SelectItem value='regex'>
+                                正则匹配（RE2）
+                              </SelectItem>
                             </SelectContent>
                           </Select>
+                          <FormMessage />
                         </FormItem>
                       )}
                     />
@@ -361,6 +415,19 @@ export function WebsiteRoutesTab({
                       </FormItem>
                     )}
                   />
+                  <RouteConditionFields
+                    key={`${rule.formKey}-${index}`}
+                    form={form}
+                    index={index}
+                  />
+                  {matchType === 'regex' && (
+                    <p className='text-sm text-muted-foreground'>
+                      正则仅匹配原始编码路径，不含查询参数；不加 ^ / $
+                      时允许部分匹配。最多9个捕获组，替换路径或跳转地址可使用{' '}
+                      {'${1}'}…{'${9}'}，{'${0}'} 为整个匹配，$$
+                      表示字面美元符。未匹配的可选组为空；不支持前后查找和回溯引用。
+                    </p>
+                  )}
                   {action === 'proxy' ? (
                     <div className='grid items-start gap-4 sm:grid-cols-3'>
                       <FormField
@@ -428,10 +495,22 @@ export function WebsiteRoutesTab({
                                 <SelectItem value='replace_path'>
                                   替换整个路径
                                 </SelectItem>
-                                <SelectItem value='strip_prefix'>
+                                <SelectItem
+                                  value='strip_prefix'
+                                  disabled={
+                                    matchType === 'regex' ||
+                                    matchType === 'suffix'
+                                  }
+                                >
                                   去除匹配前缀
                                 </SelectItem>
-                                <SelectItem value='replace_prefix'>
+                                <SelectItem
+                                  value='replace_prefix'
+                                  disabled={
+                                    matchType === 'regex' ||
+                                    matchType === 'suffix'
+                                  }
+                                >
                                   替换匹配前缀
                                 </SelectItem>
                               </SelectContent>
@@ -512,6 +591,12 @@ export function WebsiteRoutesTab({
                               <SelectContent>
                                 <SelectItem value='301'>301 永久</SelectItem>
                                 <SelectItem value='302'>302 临时</SelectItem>
+                                <SelectItem value='307'>
+                                  307 临时（保留方法/请求体）
+                                </SelectItem>
+                                <SelectItem value='308'>
+                                  308 永久（保留方法/请求体）
+                                </SelectItem>
                               </SelectContent>
                             </Select>
                             <FormMessage />
@@ -639,7 +724,11 @@ export function WebsiteRoutesTab({
                           ''
                       )
                       setPreviewTarget(
-                        form.getValues(`route_rules.${index}.path`)
+                        matchType === 'regex'
+                          ? '/old/example'
+                          : matchType === 'suffix'
+                            ? `/example${form.getValues(`route_rules.${index}.path`)}`
+                            : form.getValues(`route_rules.${index}.path`)
                       )
                       setPreviewMethod(
                         form.getValues(`route_rules.${index}.methods`)[0] ??
@@ -716,12 +805,34 @@ export function WebsiteRoutesTab({
                         />
                       </div>
                     </div>
+                    <div className='space-y-2'>
+                      <label
+                        htmlFor={`route-preview-headers-${index}`}
+                        className='text-sm font-medium'
+                      >
+                        预览请求头
+                      </label>
+                      <Textarea
+                        id={`route-preview-headers-${index}`}
+                        value={previewHeaders}
+                        onChange={(event) =>
+                          setPreviewHeaders(event.target.value)
+                        }
+                        placeholder='X-Channel: beta'
+                        className='h-20 font-mono text-xs'
+                      />
+                      <p className='text-xs text-muted-foreground'>
+                        每行 Header: value；Host 自动使用上方请求域名。
+                      </p>
+                    </div>
                     <p role='status' className='text-sm break-all'>
-                      {!previewTarget.startsWith('/')
-                        ? '请输入以 / 开头的请求路径。'
-                        : matched
-                          ? `命中规则 ${preview.index + 1} · ${matched.action === 'redirect' ? `跳转 ${matched.redirect_status}` : `源站组 ${originGroupLabel(matched.origin_group)}`} → ${preview.target}`
-                          : `使用默认源站组 ${originGroupLabel(form.watch('default_origin_group'))} → ${previewTarget}`}
+                      {headerError ||
+                        preview.error ||
+                        (!previewTarget.startsWith('/')
+                          ? '请输入以 / 开头的请求路径。'
+                          : matched
+                            ? `命中规则 ${preview.index + 1} · ${matched.action === 'redirect' ? `跳转 ${matched.redirect_status}` : `源站组 ${originGroupLabel(matched.origin_group)}`} → ${preview.target}`
+                            : `使用默认源站组 ${originGroupLabel(form.watch('default_origin_group'))} → ${previewTarget}`)}
                     </p>
                   </CollapsibleContent>
                 </Collapsible>

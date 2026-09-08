@@ -1,5 +1,9 @@
 # Third-party notices
 
+The route preview uses RE2JS (MIT). Its complete license and the native RE2
+license are included in `docs/route-engine-notices.md` and distributed under
+`licenses/route-engine-notices.md` in the Server package.
+
 The FlexEdge console layout, theme foundation, and shared UI components are
 adapted from [satnaing/shadcn-admin](https://github.com/satnaing/shadcn-admin),
 revision `e16c87f213a5ba5e45964e9b67c792105ec74d26`.

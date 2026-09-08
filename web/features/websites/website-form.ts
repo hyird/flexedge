@@ -1,5 +1,27 @@
 import { z } from 'zod'
+import {
+  compileRoutePattern,
+  validCaptureTemplate,
+  validRouteCondition,
+  type RouteCondition,
+} from './route-matching'
 import type { WebsiteConfig } from './types'
+
+const routeConditionSchema = z
+  .object({
+    source: z.enum(['header', 'query']),
+    name: z.string().trim().min(1, '请输入条件名称'),
+    op: z.enum(['equals', 'not_equals', 'exists', 'absent']),
+    value: z.string(),
+  })
+  .superRefine((condition, context) => {
+    if (!validRouteCondition(condition))
+      context.addIssue({
+        code: 'custom',
+        path: ['name'],
+        message: '条件名称或值不正确；存在/不存在操作无需填写值',
+      })
+  })
 
 const domainSchema = z.object({
   id: z.string().uuid(),
@@ -148,13 +170,17 @@ const routeRuleSchema = z
       )
       .default(''),
     status: z.enum(['enabled', 'disabled']),
-    match_type: z.enum(['exact', 'prefix']),
+    conditions: z
+      .array(routeConditionSchema)
+      .max(20, '最多20个条件')
+      .default([]),
+    match_type: z.enum(['exact', 'prefix', 'suffix', 'regex']),
     path: z.string().trim().min(1, '请输入匹配路径').max(2048),
     methods: z.array(z.enum(routeMethods)).max(routeMethods.length),
     action: z.enum(['proxy', 'redirect']),
     rewrite_path: z.string().trim().max(2048),
     redirect_url: z.string().trim().max(2048),
-    redirect_status: z.number().int().min(0).max(302),
+    redirect_status: z.number().int().min(0).max(308),
     origin_group: z.string().trim().max(100),
     request_headers_text: z
       .string()
@@ -164,6 +190,34 @@ const routeRuleSchema = z
       .refine(hasValidRouteHeaderText, '每行请填写为 Header: value'),
   })
   .superRefine((rule, context) => {
+    if (rule.match_type === 'regex') {
+      try {
+        const pattern = compileRoutePattern(rule.path)
+        const destination =
+          rule.action === 'redirect' ? rule.redirect_url : rule.rewrite_path
+        if (!validCaptureTemplate(destination, pattern.groupCount()))
+          context.addIssue({
+            code: 'custom',
+            path: [
+              rule.action === 'redirect' ? 'redirect_url' : 'rewrite_path',
+            ],
+            message: '仅支持存在的 ${0} 到 ${9} 捕获组，字面美元符用 $$',
+          })
+      } catch {
+        context.addIssue({
+          code: 'custom',
+          path: ['path'],
+          message:
+            '正则需符合 RE2 语法，最多512字节、9个捕获组；不支持前后查找或回溯引用',
+        })
+      }
+    } else if (rule.match_type === 'suffix' && /[\s?#]/.test(rule.path)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['path'],
+        message: '后缀不能含空白、查询参数或片段',
+      })
+    }
     if (rule.query_mode !== 'replace' && rule.query_string)
       context.addIssue({
         code: 'custom',
@@ -215,7 +269,10 @@ const routeRuleSchema = z
         path: ['rewrite_mode'],
         message: '跳转规则不能同时重写回源路径',
       })
-    if (!rule.path.startsWith('/')) {
+    if (
+      ['exact', 'prefix'].includes(rule.match_type) &&
+      !rule.path.startsWith('/')
+    ) {
       context.addIssue({
         code: 'custom',
         path: ['path'],
@@ -246,11 +303,11 @@ const routeRuleSchema = z
         message: '跳转地址需以 /、http:// 或 https:// 开头',
       })
     }
-    if (rule.redirect_status !== 301 && rule.redirect_status !== 302) {
+    if (![301, 302, 307, 308].includes(rule.redirect_status)) {
       context.addIssue({
         code: 'custom',
         path: ['redirect_status'],
-        message: '请选择 301 或 302',
+        message: '请选择 301、302、307 或 308',
       })
     }
   })
@@ -370,7 +427,21 @@ export function routeRuleToForm(
     query_string:
       typeof rule.query_string === 'string' ? rule.query_string : '',
     status: rule.status === 'disabled' ? 'disabled' : 'enabled',
-    match_type: rule.match_type === 'exact' ? 'exact' : 'prefix',
+    conditions: Array.isArray(rule.conditions)
+      ? rule.conditions.map((condition: Record<string, unknown>) => ({
+          source: String(
+            condition.source ?? 'header'
+          ) as RouteCondition['source'],
+          name: String(condition.name ?? ''),
+          op: String(condition.op ?? 'equals') as RouteCondition['op'],
+          value: String(condition.value ?? ''),
+        }))
+      : [],
+    match_type: ['exact', 'prefix', 'suffix', 'regex'].includes(
+      String(rule.match_type)
+    )
+      ? (rule.match_type as WebsiteRouteRuleForm['match_type'])
+      : 'prefix',
     path: typeof rule.path === 'string' ? rule.path : '/',
     methods,
     action,

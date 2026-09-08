@@ -17,10 +17,15 @@ RUVIA_REQUEST_MODEL(WebsiteOriginInput, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(status, ruvia::String));
 RUVIA_REQUEST_MODEL(WebsiteRouteHeaderInput, RUVIA_OPTIONAL_FIELD(name, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(value, ruvia::String));
+RUVIA_REQUEST_MODEL(WebsiteRouteConditionInput, RUVIA_OPTIONAL_FIELD(source, ruvia::String),
+                    RUVIA_OPTIONAL_FIELD(name, ruvia::String),
+                    RUVIA_OPTIONAL_FIELD(op, ruvia::String),
+                    RUVIA_OPTIONAL_FIELD(value, ruvia::String));
 RUVIA_REQUEST_MODEL(WebsiteRouteRuleInput, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(name, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(description, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(hostnames, ruvia::Array<ruvia::String>),
+                    RUVIA_OPTIONAL_FIELD(conditions, ruvia::Array<WebsiteRouteConditionInput>),
                     RUVIA_OPTIONAL_FIELD_NAME("rewrite_mode", rewriteMode, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("query_mode", queryMode, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("query_string", queryString, ruvia::String),
@@ -104,10 +109,15 @@ RUVIA_RESPONSE_MODEL(WebsiteOriginOutput, RUVIA_REQUIRED_FIELD(id, ruvia::String
                      RUVIA_REQUIRED_FIELD(status, ruvia::String));
 RUVIA_RESPONSE_MODEL(WebsiteRouteHeaderOutput, RUVIA_REQUIRED_FIELD(name, ruvia::String),
                      RUVIA_REQUIRED_FIELD(value, ruvia::String));
+RUVIA_RESPONSE_MODEL(WebsiteRouteConditionOutput, RUVIA_REQUIRED_FIELD(source, ruvia::String),
+                     RUVIA_REQUIRED_FIELD(name, ruvia::String),
+                     RUVIA_REQUIRED_FIELD(op, ruvia::String),
+                     RUVIA_REQUIRED_FIELD(value, ruvia::String));
 RUVIA_RESPONSE_MODEL(WebsiteRouteRuleOutput, RUVIA_REQUIRED_FIELD(id, ruvia::String),
                      RUVIA_REQUIRED_FIELD(name, ruvia::String),
                      RUVIA_REQUIRED_FIELD(description, ruvia::String),
                      RUVIA_REQUIRED_FIELD(hostnames, ruvia::Array<ruvia::String>),
+                     RUVIA_REQUIRED_FIELD(conditions, ruvia::Array<WebsiteRouteConditionOutput>),
                      RUVIA_REQUIRED_FIELD_NAME("rewrite_mode", rewriteMode, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("query_mode", queryMode, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("query_string", queryString, ruvia::String),

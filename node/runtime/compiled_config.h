@@ -86,6 +86,8 @@ class CompiledConfig final {
         return found == routes_.end() ? nullptr : found->second.domain;
     }
 
+    [[nodiscard]] const RoutePatterns& routePatterns() const noexcept { return routePatterns_; }
+
   private:
     void validateState() const {
         if (!state_ || !state_->has_node_spec() || !state_->has_release()) {
@@ -103,7 +105,7 @@ class CompiledConfig final {
         const auto& releaseContent = manifest.content();
         if (!manifest.has_content() || releaseContent.cluster_id().empty() ||
             releaseContent.release_id().empty() || releaseContent.generation() <= 0 ||
-            (releaseContent.schema_version() != 2 && releaseContent.schema_version() != kClusterReleaseSchemaVersion) ||
+            !supportedClusterReleaseSchema(releaseContent.schema_version()) ||
             releaseContent.access_domain().empty() || !isSha256Digest(manifest.digest_sha256()) ||
             artifactDigest(releaseContent) != manifest.digest_sha256()) {
             throw std::runtime_error("invalid cluster release manifest");
@@ -192,7 +194,6 @@ class CompiledConfig final {
         }
         validateAccessLog(website);
         validateCompression(website);
-        validateRouteRules(website);
     }
 
     static void validateWebsiteOrigins(const v2::Website& website) {
@@ -253,6 +254,7 @@ class CompiledConfig final {
                 continue;
             }
             validateWebsiteBasics(*website);
+            validateRouteRules(*website, &routePatterns_);
             validateWebsiteOrigins(*website);
             validateWebsiteDomains(*website);
         }
@@ -341,6 +343,7 @@ class CompiledConfig final {
     std::vector<const v2::Website*> websites_;
     std::unordered_map<std::string, const v2::Certificate*> certificates_;
     std::unordered_map<std::string, CompiledRoute> routes_;
+    RoutePatterns routePatterns_;
 };
 
 } // namespace flexedge::node

@@ -21,7 +21,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VCPKG_ROOT})
     unset(_vcpkg_root)
 endif()
 
-project(flexedge_service VERSION 0.3.35 LANGUAGES CXX)
+project(flexedge_service VERSION 0.3.36 LANGUAGES CXX)
 
 include(CTest)
 include(FetchContent)
@@ -61,6 +61,7 @@ FetchContent_MakeAvailable(ruvia)
 find_package(asio CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
 find_package(Protobuf CONFIG REQUIRED)
+find_package(re2 CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
 
 set(FLEXEDGE_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -74,7 +75,7 @@ protobuf_generate(
     PROTOC_OUT_DIR "${FLEXEDGE_GENERATED_DIR}"
 )
 target_include_directories(flexedge_node_protocol PUBLIC "${FLEXEDGE_GENERATED_DIR}")
-target_link_libraries(flexedge_node_protocol PUBLIC protobuf::libprotobuf)
+target_link_libraries(flexedge_node_protocol PUBLIC protobuf::libprotobuf re2::re2)
 
 set(FLEXEDGE_LOG_INGEST_PROTO
     "${CMAKE_CURRENT_SOURCE_DIR}/service/features/log_ingest/log_envelope.proto")
@@ -299,6 +300,10 @@ install(TARGETS flexedge_service flexedge_node xdb_lookup
 )
 install(FILES "${FLEXEDGE_NODE_RELEASE_MANIFEST}"
     DESTINATION .
+    COMPONENT Server
+)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/docs/route-engine-notices.md"
+    DESTINATION licenses
     COMPONENT Server
 )
 if(FLEXEDGE_BUILD_WEB)

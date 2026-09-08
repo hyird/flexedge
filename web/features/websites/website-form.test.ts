@@ -34,6 +34,61 @@ function values() {
 }
 
 describe('website settings validation', () => {
+  it('round trips suffix, regex conditions and method-preserving redirects', () => {
+    const rule = routeRuleToForm({
+      id: '12345678-1234-4234-8234-123456789015',
+      match_type: 'regex',
+      path: '^/old/(.*)$',
+      action: 'redirect',
+      redirect_status: 308,
+      redirect_url: '/new/${1}',
+      conditions: [
+        { source: 'query', name: 'tag', op: 'equals', value: 'two' },
+      ],
+    })
+    const parsed = websiteFormSchema.parse({ ...values(), route_rules: [rule] })
+      .route_rules[0]
+    expect(parsed.match_type).toBe('regex')
+    expect(parsed.redirect_status).toBe(308)
+    expect(parsed.conditions).toEqual([
+      { source: 'query', name: 'tag', op: 'equals', value: 'two' },
+    ])
+    expect(
+      websiteFormSchema.safeParse({
+        ...values(),
+        route_rules: [{ ...rule, redirect_status: 307 }],
+      }).success
+    ).toBe(true)
+    expect(
+      websiteFormSchema.safeParse({
+        ...values(),
+        route_rules: [
+          {
+            ...rule,
+            match_type: 'suffix',
+            path: '.jpg',
+            redirect_url: '/image',
+          },
+        ],
+      }).success
+    ).toBe(true)
+    for (const patch of [
+      { path: '(?<=a)b' },
+      { redirect_url: '/${2}' },
+      { redirect_status: 303 },
+      {
+        conditions: [
+          { source: 'header', name: 'X Bad', op: 'equals', value: 'x' },
+        ],
+      },
+    ])
+      expect(
+        websiteFormSchema.safeParse({
+          ...values(),
+          route_rules: [{ ...rule, ...patch }],
+        }).success
+      ).toBe(false)
+  })
   it('round trips rule metadata and normalizes domain filters', () => {
     const rule = routeRuleToForm({
       id: '12345678-1234-4234-8234-123456789015',

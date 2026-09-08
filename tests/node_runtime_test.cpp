@@ -242,12 +242,14 @@ void apply(flexedge::node::RuntimeState& runtime, TestConfig value) {
 }
 
 std::string request(std::uint16_t port, std::string_view host = "WWW.Example.COM:80",
-                    std::string_view extraHeaders = {}, std::string_view target = "/a?q=1") {
+                    std::string_view extraHeaders = {}, std::string_view target = "/a?q=1",
+                    std::string_view method = "GET", std::string_view body = {}) {
     asio::io_context context;
     asio::ip::tcp::socket socket(context);
     socket.connect({asio::ip::address_v4::loopback(), port});
-    const auto bytes = "GET " + std::string(target) + " HTTP/1.1\r\nHost: " + std::string(host) + "\r\n" +
-                       std::string(extraHeaders) + "Connection: close\r\n\r\n";
+    const auto bytes = std::string(method) + " " + std::string(target) + " HTTP/1.1\r\nHost: " + std::string(host) + "\r\n" +
+                       std::string(extraHeaders) + (body.empty() ? "" : "Content-Length: " + std::to_string(body.size()) + "\r\n") +
+                       "Connection: close\r\n\r\n" + std::string(body);
     asio::write(socket, asio::buffer(bytes));
     std::string response;
     std::array<char, 1024> buffer{};
@@ -344,6 +346,7 @@ PemIdentity makeIdentity(std::string_view commonName, std::int64_t serial) {
 struct TlsResponse final {
     std::string bytes{};
     std::string peerCommonName;
+    std::string location{};
 };
 
 TlsResponse tlsRequest(std::uint16_t port, std::string_view serverName) {
@@ -438,6 +441,9 @@ TlsResponse tlsHttp2Request(std::uint16_t port, std::string_view serverName,
         while (auto event = connection.nextEvent()) {
             if (const auto* head = event->responseHead()) {
                 response.peerCommonName = std::to_string(head->head().status().value());
+                for (const auto& header : head->head().headers()) {
+                    if (flexedge::route_policy::asciiEqual(header.name(), "location")) response.location = header.value();
+                }
             } else if (auto* body = event->messageBodyChunk()) {
                 response.bytes.append(body->bytes());
                 (void)connection.acknowledge(body->takeCredit());
@@ -1064,6 +1070,14 @@ int main(int argc, char* argv[]) {
         const auto discardedRelease = stateStore.load();
         REQUIRE(!discardedRelease.active.has_release());
         REQUIRE(discardedRelease.objects.empty());
+        for (const auto version : {2u, 3u}) {
+            auto compatible = snapshot();
+            compatible.active.mutable_release()->mutable_content()->set_schema_version(version);
+            compatible.finalize();
+            stateStore.stage(compatible.active, compatible.objects);
+            stateStore.activateStaged();
+            REQUIRE(stateStore.load().active.has_release());
+        }
 
         flexedge::node::OriginHealthRegistry healthState;
         REQUIRE(healthState.healthy("website", "origin"));
@@ -1250,6 +1264,27 @@ int main(int argc, char* argv[]) {
         REQUIRE(routeResponse.starts_with("HTTP/1.1 302 Found\r\n"));
         REQUIRE(routeResponse.contains("Location: /moved?q=1\r\n"));
         REQUIRE(routeResponse.contains("X-Edge-Route: matched\r\n"));
+        for (const auto status : {307u, 308u}) {
+            auto advanced = snapshot(false);
+            advanced.setGeneration(nextGeneration++);
+            auto* matched = advanced.mutableWebsite()->add_route_rules();
+            matched->set_id("regex-post"); matched->set_enabled(true); matched->set_match_type("regex");
+            matched->set_path("^/old/(.*)$"); matched->add_methods("POST");
+            matched->set_action("redirect"); matched->set_redirect_status(status); matched->set_redirect_url("/new/${1}#end");
+            auto* header = matched->add_conditions();
+            header->set_source("header"); header->set_name("X-Channel"); header->set_op("equals"); header->set_value("beta");
+            auto* query = matched->add_conditions();
+            query->set_source("query"); query->set_name("q"); query->set_op("equals"); query->set_value("a b");
+            auto* fallback = advanced.mutableWebsite()->add_route_rules();
+            fallback->set_id("fallback-regex"); fallback->set_enabled(true); fallback->set_match_type("regex");
+            fallback->set_path("^/old/"); fallback->set_action("redirect"); fallback->set_redirect_status(302); fallback->set_redirect_url("/fallback");
+            apply(runtime, std::move(advanced));
+            const auto answer = request(port, "www.example.com", "x-channel: beta\r\n", "/old/a%2Fb?q=a+b", "POST", "payload");
+            REQUIRE(answer.starts_with("HTTP/1.1 " + std::string(flexedge::route_policy::redirectStatusLine(status)) + "\r\n"));
+            REQUIRE(answer.contains("Location: /new/a%2Fb?q=a+b#end\r\n"));
+            REQUIRE(request(port, "www.example.com", "X-Channel: stable\r\n", "/old/a?q=a+b", "POST", "payload").starts_with("HTTP/1.1 302 Found"));
+            REQUIRE(request(port, "www.example.com", "X-Channel: beta\r\n", "/old/a?q=other", "POST", "payload").starts_with("HTTP/1.1 302 Found"));
+        }
 
         asio::io_context originContext;
         asio::ip::tcp::acceptor originAcceptor(
@@ -1290,13 +1325,13 @@ int main(int argc, char* argv[]) {
         auto* proxyRoute = proxySnapshot.mutableWebsite()->add_route_rules();
         proxyRoute->set_id("route-backup");
         proxyRoute->set_enabled(true);
-        proxyRoute->set_match_type("prefix");
-        proxyRoute->set_path("/a");
+        proxyRoute->set_match_type("regex");
+        proxyRoute->set_path("^/a/(.*)$");
         proxyRoute->set_action("proxy");
         proxyRoute->add_origin_ids("origin-backup");
         proxyRoute->add_hostnames("www.example.com");
-        proxyRoute->set_rewrite_mode("replace_prefix");
-        proxyRoute->set_rewrite_path("/internal/");
+        proxyRoute->set_rewrite_mode("replace_path");
+        proxyRoute->set_rewrite_path("/internal/${1}");
         proxyRoute->set_query_mode("replace");
         proxyRoute->set_query_string("route=1");
         const auto candidates =
@@ -1318,6 +1353,7 @@ int main(int argc, char* argv[]) {
         asio::ip::tcp::acceptor compressionAcceptor(
             originContext, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto compressionPort = compressionAcceptor.local_endpoint().port();
+        std::atomic<bool> sawSingleRewrite{false};
         std::jthread compressionServer([&](std::stop_token stopToken) {
             asio::ip::tcp::socket socket(originContext);
             if (!acceptUntilStopped(compressionAcceptor, socket, stopToken)) {
@@ -1325,7 +1361,8 @@ int main(int argc, char* argv[]) {
             }
             std::array<char, 4096> originRequest{};
             std::error_code ignored;
-            (void)socket.read_some(asio::buffer(originRequest), ignored);
+            const auto received = socket.read_some(asio::buffer(originRequest), ignored);
+            sawSingleRewrite.store(std::string_view(originRequest.data(), received).starts_with("GET /a/once?q=1 HTTP/1.1\r\n"));
             const std::string body(4096, 'a');
             const auto response =
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4096\r\n"
@@ -1338,10 +1375,16 @@ int main(int argc, char* argv[]) {
         auto* compressionOrigin = compressionSnapshot.mutableWebsite()->mutable_origins(0);
         compressionOrigin->set_host("127.0.0.1");
         compressionOrigin->set_port(compressionPort);
+        auto* compressionRoute = compressionSnapshot.mutableWebsite()->add_route_rules();
+        compressionRoute->set_id("rewrite-once"); compressionRoute->set_enabled(true);
+        compressionRoute->set_match_type("prefix"); compressionRoute->set_path("/a");
+        compressionRoute->set_action("proxy"); compressionRoute->set_origin_group("default");
+        compressionRoute->set_rewrite_mode("replace_prefix"); compressionRoute->set_rewrite_path("/a/once");
         apply(runtime, std::move(compressionSnapshot));
         const auto compressedProxyResponse =
             request(port, "www.example.com", "Accept-Encoding: gzip\r\n");
         REQUIRE(compressedProxyResponse.contains("Content-Encoding: gzip\r\n"));
+        REQUIRE(sawSingleRewrite.load());
         REQUIRE(compressedProxyResponse.contains("Vary: Accept-Encoding\r\n"));
         const auto compressedBodyOffset = compressedProxyResponse.find("\r\n\r\n");
         REQUIRE(compressedBodyOffset != std::string::npos);
@@ -1449,14 +1492,21 @@ int main(int argc, char* argv[]) {
         otherHostRule->set_path("/redirect");
         otherHostRule->set_action("redirect");
         otherHostRule->set_redirect_url("/other");
-        otherHostRule->set_redirect_status(302);
+        otherHostRule->set_redirect_status(307);
         otherHostRule->add_hostnames("api.example.com");
         auto* currentHostRule = tlsWebsite->add_route_rules();
         currentHostRule->CopyFrom(*otherHostRule);
         currentHostRule->set_id("current-host");
         currentHostRule->clear_hostnames();
         currentHostRule->add_hostnames("www.example.com");
-        currentHostRule->set_redirect_status(301);
+        currentHostRule->set_match_type("regex");
+        currentHostRule->set_path("^/redirect(.*)$");
+        currentHostRule->set_redirect_url("/new${1}");
+        currentHostRule->set_redirect_status(308);
+        auto* hostCondition = currentHostRule->add_conditions();
+        hostCondition->set_source("header"); hostCondition->set_name("Host"); hostCondition->set_op("equals"); hostCondition->set_value("www.example.com");
+        auto* queryCondition = currentHostRule->add_conditions();
+        queryCondition->set_source("query"); queryCondition->set_name("a"); queryCondition->set_op("equals"); queryCondition->set_value("1");
         currentHostRule->set_query_mode("replace");
         currentHostRule->set_query_string("v=2");
         apply(runtime, std::move(tlsSnapshot));
@@ -1471,8 +1521,10 @@ int main(int argc, char* argv[]) {
         httpsListener->requestStart();
         REQUIRE(tlsAlpn(httpsPort, "www.example.com", true) == "h2");
         REQUIRE(tlsAlpn(httpsPort, "www.example.com", false) == "http/1.1");
-        REQUIRE(tlsHttp2Request(httpsPort, "www.example.com", "/redirect?a=1").peerCommonName == "301");
-        REQUIRE(tlsHttp2Request(httpsPort, "api.example.com", "/redirect?a=1").peerCommonName == "302");
+        const auto capturedHttp2 = tlsHttp2Request(httpsPort, "www.example.com", "/redirect/foo?a=1");
+        REQUIRE(capturedHttp2.peerCommonName == "308");
+        REQUIRE(capturedHttp2.location == "/new/foo?v=2");
+        REQUIRE(tlsHttp2Request(httpsPort, "api.example.com", "/redirect?a=1").peerCommonName == "307");
         const auto http2Response = tlsHttp2Request(httpsPort, "www.example.com");
         REQUIRE(http2Response.peerCommonName == "200");
         REQUIRE(http2Response.bytes == "TLS");
