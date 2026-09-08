@@ -19,6 +19,7 @@
 
 #include "node/proto/artifact.h"
 #include "node/proto/control_protocol.h"
+#include "node/proto/control_reply.h"
 #include "node/proto/edge_control.pb.h"
 #include "service/common/http.h"
 #include "service/domains/agent/agent_protocol.h"
@@ -26,6 +27,7 @@
 #include "service/domains/agent/agent_read.service.h"
 #include "service/features/log_ingest/ingest.h"
 #include "service/features/node_release/artifact.h"
+#include "service/features/node_dispatch/notifications.h"
 #include "service/utils/sensitive_string.h"
 
 namespace service::agent {
@@ -60,7 +62,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
                 .heartbeat =
                     {
                         .pingInterval = std::chrono::seconds(30),
-                        .pongTimeout = std::chrono::seconds(10),
+                        .pongTimeout = std::chrono::seconds(15),
                     },
                 .closeHandshakeTimeout = std::chrono::seconds(5),
             },
@@ -81,6 +83,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
         std::string activeReleaseId;
         std::string activeManifestDigest;
         std::uint32_t heartbeatInterval{};
+        bool requireApplyAck{};
     };
 
     struct NodeReleaseTransfer final {
@@ -218,6 +221,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
             .activeReleaseId = activeReleaseId,
             .activeManifestDigest = activeManifestDigest,
             .heartbeatInterval = kHeartbeatIntervalSeconds,
+            .requireApplyAck = authentication.require_apply_ack(),
         };
     }
 
@@ -249,22 +253,51 @@ class AgentController final : public ruvia::Controller<AgentController> {
 
     ruvia::Task<bool> handleReleaseProbe(ruvia::Context& c, const AuthenticatedSession& session,
                                          const flexedge::node::v2::ClientEnvelope& incoming) {
-        const auto desired = co_await agentReadService().desiredSummary(c, session.principal);
-        flexedge::node::v2::ServerEnvelope acknowledgement;
-        acknowledgement.set_request_id(incoming.request_id());
-        auto* ack = acknowledgement.mutable_release_probe_ack();
-        ack->set_node_binary_sha256(service::node_release::current()->binary().digest());
-        ack->set_desired_node_spec_revision(desired.nodeSpecRevision);
-        ack->set_desired_release_id(desired.releaseId);
-        ack->set_desired_manifest_digest(desired.manifestDigest);
-        co_await send(c, acknowledgement);
+        const auto& probe = incoming.release_probe();
+        if (probe.wait_seconds() > flexedge::node::kReleaseWatchMaximumSeconds) {
+            co_await close(c.webSocket(), {.code = 1008, .reason = "invalid watch deadline"});
+            co_return false;
+        }
+        // Subscribe before reading: a commit between the query and wait remains queued.
+        auto subscription = service::node_dispatch::notifications::hub().subscribe(
+            c.worker(), session.principal.tenantId);
+        auto desired = co_await agentReadService().desiredSummary(c, session.principal);
+        const auto knownRevision = probe.applied_node_spec_revision() > 0
+                                       ? probe.applied_node_spec_revision()
+                                       : session.appliedNodeSpecRevision;
+        const auto& knownRelease = probe.applied_node_spec_revision() > 0
+                                       ? probe.active_release_id()
+                                       : session.activeReleaseId;
+        const auto& knownDigest = probe.applied_node_spec_revision() > 0
+                                      ? probe.active_manifest_digest()
+                                      : session.activeManifestDigest;
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(probe.wait_seconds());
+        while (!differs(knownRevision, knownRelease, knownDigest, desired)) {
+            const auto remaining = deadline - std::chrono::steady_clock::now();
+            if (remaining <= std::chrono::steady_clock::duration::zero())
+                break;
+            const auto signal = co_await subscription.receiveFor(remaining, c.stopToken());
+            if (!signal.hasValue() && signal.status() != ruvia::WorkerWaitStatus::kTimedOut)
+                co_return false;
+            desired = co_await agentReadService().desiredSummary(c, session.principal);
+        }
+        std::optional<flexedge::node::v2::DesiredState> state;
+        if (differs(knownRevision, knownRelease, knownDigest, desired)) {
+            state = co_await agentCommandService().desiredState(c, session.principal);
+        }
+        const auto replies = flexedge::node::releaseProbeReplies(
+            incoming.request_id(), service::node_release::current()->binary().digest(),
+            desired.nodeSpecRevision, desired.releaseId, desired.manifestDigest, std::move(state));
+        for (const auto& reply : replies)
+            co_await send(c, reply);
         co_return true;
     }
 
-    ruvia::Task<bool>
-    handleNodeReleaseRequest(ruvia::Context& c, const AuthenticatedSession& session,
-                             std::optional<NodeReleaseTransfer>& transfer,
-                             const flexedge::node::v2::ClientEnvelope& incoming) {
+    ruvia::Task<bool> handleNodeReleaseRequest(ruvia::Context& c,
+                                               const AuthenticatedSession& session,
+                                               std::optional<NodeReleaseTransfer>& transfer,
+                                               const flexedge::node::v2::ClientEnvelope& incoming) {
         const auto& request = incoming.node_release_request();
         if (!validNodeReleaseRequest(request) || request.node_id() != session.principal.nodeId) {
             co_await close(c.webSocket(), {.code = 1008, .reason = "invalid node release request"});
@@ -273,7 +306,8 @@ class AgentController final : public ruvia::Controller<AgentController> {
 
         if (!transfer) {
             if (request.offset() != 0) {
-                co_await close(c.webSocket(), {.code = 1008, .reason = "node release offset invalid"});
+                co_await close(c.webSocket(),
+                               {.code = 1008, .reason = "node release offset invalid"});
                 co_return false;
             }
             const auto release = service::node_release::current();
@@ -288,16 +322,17 @@ class AgentController final : public ruvia::Controller<AgentController> {
         }
 
         const auto totalBytes = static_cast<std::uint64_t>(transfer->release->binary().size());
-        if (transfer->digest != request.digest_sha256() || request.offset() != transfer->nextOffset ||
-            totalBytes == 0 || totalBytes > flexedge::node::kMaximumNodeReleaseBytes) {
-            co_await close(c.webSocket(), {.code = 1008, .reason = "node release transfer invalid"});
+        if (transfer->digest != request.digest_sha256() ||
+            request.offset() != transfer->nextOffset || totalBytes == 0 ||
+            totalBytes > flexedge::node::kMaximumNodeReleaseBytes) {
+            co_await close(c.webSocket(),
+                           {.code = 1008, .reason = "node release transfer invalid"});
             co_return false;
         }
-        const auto bytes = co_await c.runBlocking(
-            [release = transfer->release, offset = transfer->nextOffset] {
-                return release->binary().contentsRange(
-                    offset, flexedge::node::kNodeReleaseChunkBytes);
-            });
+        const auto bytes = co_await c.runBlocking([release = transfer->release,
+                                                   offset = transfer->nextOffset] {
+            return release->binary().contentsRange(offset, flexedge::node::kNodeReleaseChunkBytes);
+        });
         if (bytes.empty()) {
             co_await close(c.webSocket(), {.code = 1011, .reason = "node release read failed"});
             co_return false;
@@ -319,7 +354,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
         co_return true;
     }
 
-    ruvia::Task<bool> handleApplyResult(ruvia::Context& c, const AuthenticatedSession& session,
+    ruvia::Task<bool> handleApplyResult(ruvia::Context& c, AuthenticatedSession& session,
                                         const flexedge::node::v2::ClientEnvelope& incoming) {
         const auto& result = incoming.apply_result();
         if (!validApplyResult(result) || result.node_id() != session.principal.nodeId) {
@@ -327,6 +362,22 @@ class AgentController final : public ruvia::Controller<AgentController> {
             co_return false;
         }
         co_await agentCommandService().recordApplyResult(c, session.principal, result);
+        if (result.applied()) {
+            session.appliedNodeSpecRevision = result.node_spec_revision();
+            session.activeReleaseId = result.release_id();
+            session.activeManifestDigest = result.manifest_digest();
+        }
+        if (session.requireApplyAck) {
+            flexedge::node::v2::ServerEnvelope reply;
+            reply.set_request_id(incoming.request_id());
+            auto* ack = reply.mutable_apply_result_ack();
+            ack->set_node_id(result.node_id());
+            ack->set_node_spec_revision(result.node_spec_revision());
+            ack->set_release_id(result.release_id());
+            ack->set_manifest_digest(result.manifest_digest());
+            ack->set_applied(result.applied());
+            co_await send(c, reply);
+        }
         co_return true;
     }
 
@@ -351,7 +402,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
         co_return true;
     }
 
-    ruvia::Task<void> serveControlMessages(ruvia::Context& c, const AuthenticatedSession& session) {
+    ruvia::Task<void> serveControlMessages(ruvia::Context& c, AuthenticatedSession& session) {
         auto& ws = c.webSocket();
         std::optional<NodeReleaseTransfer> releaseTransfer;
         while (const auto message = co_await read(ws)) {
@@ -394,7 +445,7 @@ class AgentController final : public ruvia::Controller<AgentController> {
         }
     }
 
-    ruvia::Task<void> serveControlSession(ruvia::Context& c, const AuthenticatedSession& session) {
+    ruvia::Task<void> serveControlSession(ruvia::Context& c, AuthenticatedSession session) {
         const auto desired = co_await agentReadService().desiredSummary(c, session.principal);
         flexedge::node::v2::ServerEnvelope welcome;
         welcome.set_request_id(session.requestId);

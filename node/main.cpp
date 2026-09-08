@@ -190,10 +190,13 @@ int main(int argc, char* argv[]) {
                     reexecNode(binaryPath, argv);
                 },
         });
+        auto controlWebSocket = webSocket;
+        controlWebSocket.readTimeout =
+            std::chrono::seconds(flexedge::node::kReleaseWatchMaximumSeconds + 5);
         flexedge::node::ControlChannel channel(
             loop,
             {
-                .webSocket = webSocket,
+                .webSocket = std::move(controlWebSocket),
                 .stopToken = stopSource.token(),
             },
             flexedge::node::StateStore{stateDirectory, credentials.secret()}, credentials, runtime,

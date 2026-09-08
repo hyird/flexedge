@@ -26,6 +26,7 @@ message ServerEnvelope {
         LogDeliveryAck log_delivery_ack = 16;
         ReleaseProbeAck release_probe_ack = 17;
         NodeReleaseChunk node_release_chunk = 18;
+        ApplyResultAck apply_result_ack = 19;
     }
 }
 
@@ -37,6 +38,7 @@ message Authenticate {
     string active_manifest_digest = 7;
     string agent_version = 8;
     AgentSessionPurpose session_purpose = 10;
+    bool require_apply_ack = 11;
     reserved 9;
 }
 
@@ -90,7 +92,12 @@ message HeartbeatAck {
     string node_binary_sha256 = 5;
 }
 
-message ReleaseProbe {}
+message ReleaseProbe {
+    uint32 wait_seconds = 1;
+    int64 applied_node_spec_revision = 2;
+    string active_release_id = 3;
+    string active_manifest_digest = 4;
+}
 
 message ReleaseProbeAck {
     string node_binary_sha256 = 1;
@@ -368,4 +375,13 @@ message Error {
 message ActiveState {
     NodeSpec node_spec = 1;
     ClusterReleaseManifest release = 2;
+}
+
+// Confirms that the matching result was committed by the controller.
+message ApplyResultAck {
+    string node_id = 1;
+    int64 node_spec_revision = 2;
+    string release_id = 3;
+    string manifest_digest = 4;
+    bool applied = 5;
 }

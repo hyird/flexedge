@@ -1,5 +1,7 @@
 #pragma once
 
+#include "service/features/node_dispatch/notifications.h"
+
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -92,7 +94,7 @@ class AgentCommandService final {
             .agentId = agentId,
         };
         co_await transaction.commit();
-        service::node_runtime::fanout::hub().publish(result.tenantId);
+        service::node_dispatch::notifications::published(result.tenantId);
         co_return result;
     }
 
@@ -205,27 +207,39 @@ class AgentCommandService final {
         auto transaction = co_await c.db().beginTransaction();
         const auto nodeUpdated = co_await transaction.query(
             "UPDATE sys_node node SET last_apply_phase = CASE WHEN "
-            "node.applied_node_spec_revision < $8 THEN $4 ELSE node.last_apply_phase END, "
-            "last_apply_error_code = CASE WHEN node.applied_node_spec_revision < $8 THEN $5 "
+            "(node.applied_node_spec_revision < $8 OR node.active_release_id IS DISTINCT FROM $2 "
+            "OR node.active_manifest_digest IS DISTINCT FROM $10) THEN $4 ELSE "
+            "node.last_apply_phase END, "
+            "last_apply_error_code = CASE WHEN (node.applied_node_spec_revision < $8 OR "
+            "node.active_release_id IS DISTINCT FROM $2 OR node.active_manifest_digest IS DISTINCT "
+            "FROM $10) THEN $5 "
             "ELSE node.last_apply_error_code END, last_apply_error = CASE WHEN "
-            "node.applied_node_spec_revision < $8 THEN $6 ELSE node.last_apply_error END, "
-            "last_apply_retryable = CASE WHEN node.applied_node_spec_revision < $8 THEN $7 ELSE "
+            "(node.applied_node_spec_revision < $8 OR node.active_release_id IS DISTINCT FROM $2 "
+            "OR node.active_manifest_digest IS DISTINCT FROM $10) THEN $6 ELSE "
+            "node.last_apply_error END, "
+            "last_apply_retryable = CASE WHEN (node.applied_node_spec_revision < $8 OR "
+            "node.active_release_id IS DISTINCT FROM $2 OR node.active_manifest_digest IS DISTINCT "
+            "FROM $10) THEN $7 ELSE "
             "node.last_apply_retryable END, updated_at = CASE WHEN "
-            "node.applied_node_spec_revision < $8 THEN NOW() ELSE node.updated_at END WHERE "
+            "(node.applied_node_spec_revision < $8 OR node.active_release_id IS DISTINCT FROM $2 "
+            "OR node.active_manifest_digest IS DISTINCT FROM $10) THEN NOW() ELSE node.updated_at "
+            "END WHERE "
             "node.tenant_id = $1 AND node.id = $3 AND node.desired_release_id = $2 AND "
             "node.node_spec_revision = $8 AND node.applied_node_spec_revision <= $8 AND "
             "node.agent_id = $9 AND "
             "node.registration_status = 'registered' "
             "AND EXISTS (SELECT 1 FROM sys_cluster_release release WHERE release.tenant_id = "
             "node.tenant_id AND release.id = $2 AND release.cluster_id = node.cluster_id AND "
-            "release.manifest_digest = $10) RETURNING node.applied_node_spec_revision",
+            "release.manifest_digest = $10) RETURNING (node.applied_node_spec_revision < $8 OR "
+            "node.active_release_id IS DISTINCT FROM $2 OR node.active_manifest_digest IS DISTINCT "
+            "FROM $10)",
             principal.tenantId, result.release_id(), nodeId, phase, result.error_code(),
             result.error().substr(0, 1000), result.retryable(), result.node_spec_revision(),
             principal.agentId, result.manifest_digest());
         if (nodeUpdated.empty()) {
             service::common::throwAppError(REVISION_INVALID);
         }
-        if (nodeUpdated.front()[0].as<std::int64_t>().value_or(0) < result.node_spec_revision()) {
+        if (nodeUpdated.front()[0].as<bool>().value_or(false)) {
             (void)co_await transaction.execute(
                 "UPDATE sys_node_release_target target SET status = 'failed', failed_phase = $4, "
                 "error_code = $5, last_error = $6, retryable = $7, updated_at = NOW() FROM "

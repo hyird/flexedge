@@ -645,7 +645,7 @@ int main() {
     REQUIRE(websiteOriginsTab.contains("<TabsContent value='origins'"));
     const auto websiteRoutesTab = source("web/features/websites/website-routes-tab.tsx");
     REQUIRE(websiteRoutesTab.contains("export function WebsiteRoutesTab"));
-    REQUIRE(websiteRoutesTab.contains("<TabsContent value='routes'"));
+    REQUIRE(websiteRoutesTab.contains("<TabsContent value={phase}"));
 
     const auto dnsZonesPage = source("web/features/dns-zones/index.tsx");
     REQUIRE(dnsZonesPage.contains("import { CreateZoneDialog } from './create-zone-dialog'"));
@@ -1024,7 +1024,7 @@ int main() {
     REQUIRE(!std::filesystem::exists(sourceRoot / "web/components/task-completion-monitor.tsx"));
     const auto syncEventMonitor = source("web/components/sync-event-monitor.tsx");
     REQUIRE(syncEventMonitor.contains("/sync-events/"));
-    REQUIRE(syncEventMonitor.contains("queryKeysForSyncEvents"));
+    REQUIRE(syncEventMonitor.contains("refreshSyncEventQueries"));
     REQUIRE(syncEventMonitor.contains("stream.addEventListener('ready'"));
     REQUIRE(syncEventMonitor.contains("const refreshAll"));
     const auto syncEvents = source("web/lib/sync-events.ts");

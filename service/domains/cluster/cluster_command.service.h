@@ -1,5 +1,7 @@
 #pragma once
 
+#include "service/features/node_dispatch/notifications.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -52,6 +54,7 @@ class ClusterCommandService final {
             co_await service::node_dispatch::publishClusterRelease(
                 transaction, tenantId, rows.front()[0].value().value_or(""));
             co_await transaction.commit();
+            service::node_dispatch::notifications::published(tenantId);
         } catch (const ruvia::DbError& error) {
             if (isIdentityConflict(error)) {
                 service::common::throwAppError(ClusterError::EXISTS);
@@ -106,6 +109,7 @@ class ClusterCommandService final {
             co_await service::website_dns::reconcileClusterConsumers(transaction, tenantId, id);
             co_await service::node_dispatch::publishClusterRelease(transaction, tenantId, id);
             co_await transaction.commit();
+            service::node_dispatch::notifications::published(tenantId);
         } catch (const ruvia::DbError& error) {
             if (isIdentityConflict(error)) {
                 service::common::throwAppError(ClusterError::EXISTS);
@@ -158,6 +162,7 @@ class ClusterCommandService final {
         }
         co_await service::cluster_dns::reconcileCluster(transaction, tenantId, id);
         co_await transaction.commit();
+        service::node_dispatch::notifications::published(tenantId);
         co_return;
     }
 

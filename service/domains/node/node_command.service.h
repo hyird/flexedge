@@ -1,5 +1,7 @@
 #pragma once
 
+#include "service/features/node_dispatch/notifications.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <optional>
@@ -67,6 +69,7 @@ class NodeCommandService final {
             co_await replaceEndpointClaims(transaction, tenantId, nodeId, storedConfig);
             co_await service::cluster_dns::reconcileCluster(transaction, tenantId, clusterId);
             co_await transaction.commit();
+            service::node_dispatch::notifications::published(tenantId);
             result.set<"nodeId">(agentId);
             result.set<"secret">(secret.view());
             result.set<"revision">(1);
@@ -147,6 +150,7 @@ class NodeCommandService final {
                     tenantId, id);
             }
             co_await transaction.commit();
+            service::node_dispatch::notifications::published(tenantId);
         } catch (const ruvia::DbError& error) {
             if (service::common::isUniqueConstraintViolation(error, "uk_node_name") ||
                 service::common::isUniqueConstraintViolation(error, "uq_node_endpoint_claim")) {
@@ -187,6 +191,7 @@ class NodeCommandService final {
             tenantId, id);
         co_await service::cluster_dns::reconcileCluster(transaction, tenantId, clusterId);
         co_await transaction.commit();
+        service::node_dispatch::notifications::published(tenantId);
         co_return;
     }
 
@@ -247,6 +252,7 @@ class NodeCommandService final {
             tenantId, id);
         co_await service::cluster_dns::reconcileCluster(transaction, tenantId, clusterId);
         co_await transaction.commit();
+        service::node_dispatch::notifications::published(tenantId);
         NodeCredentialsDto result(c);
         result.set<"nodeId">(agentId);
         result.set<"secret">(secret.view());
