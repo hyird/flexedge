@@ -31,16 +31,19 @@ import { RouteConditionFields } from './route-condition-fields'
 import { previewHeaderValues, routeMatchLabels } from './route-matching'
 import { RouteMetadataFields } from './route-metadata-fields'
 import { conflictingRouteIndexes, previewRoute } from './route-preview'
+import { routeTabs } from './route-tabs'
 import { originGroupLabel } from './website-display'
 import { routeMethods, type WebsiteFormValues } from './website-form'
 
 export function WebsiteRoutesTab({
+  phase,
   form,
   routeRules,
   selectableOriginGroups,
   invalidRouteIndex,
   clearInvalidRoute,
 }: {
+  phase: keyof typeof routeTabs
   form: UseFormReturn<WebsiteFormValues>
   routeRules: UseFieldArrayReturn<WebsiteFormValues, 'route_rules', 'formKey'>
   selectableOriginGroups: Array<{ name: string }>
@@ -53,6 +56,10 @@ export function WebsiteRoutesTab({
   const [previewHeaders, setPreviewHeaders] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
   const rules = form.watch('route_rules')
+  const category = routeTabs[phase]
+  const visibleRules = routeRules.fields
+    .map((rule, index) => ({ rule, index }))
+    .filter(({ index }) => rules[index]?.action === phase)
   let headerError = ''
   let headers: Array<[string, string]> = []
   try {
@@ -69,14 +76,12 @@ export function WebsiteRoutesTab({
   )
   const matched = rules[preview.index]
   return (
-    <TabsContent value='routes' className='space-y-3 py-4'>
+    <TabsContent value={phase} className='space-y-3 py-4'>
       <div className='flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center'>
         <div>
-          <h3 className='font-medium'>路由规则</h3>
+          <h3 className='font-medium'>{category.title}</h3>
           <p className='text-sm text-muted-foreground'>
-            按 URL 跳转 → URL 重写 →
-            路由选源执行，各阶段内沿用列表顺序。跳转首条命中即结束；重写和选源的同项设置由后面的规则覆盖。重写匹配原始
-            URL，选源匹配重写后的 URL。
+            {category.description}
           </p>
         </div>
         <Button
@@ -98,11 +103,12 @@ export function WebsiteRoutesTab({
               match_type: 'prefix',
               path: '/',
               methods: [],
-              action: 'proxy',
+              action: phase,
               rewrite_path: '',
               redirect_url: '',
-              redirect_status: 0,
-              origin_group: form.getValues('default_origin_group'),
+              redirect_status: phase === 'redirect' ? 302 : 0,
+              origin_group:
+                phase === 'proxy' ? form.getValues('default_origin_group') : '',
               request_headers_text: '',
               response_headers_text: '',
             })
@@ -112,12 +118,12 @@ export function WebsiteRoutesTab({
         </Button>
       </div>
 
-      {routeRules.fields.length === 0 ? (
+      {visibleRules.length === 0 ? (
         <div className='rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground'>
-          暂无路由规则，将使用默认源站组处理全部请求。
+          {category.empty}
         </div>
       ) : (
-        routeRules.fields.map((rule, index) => {
+        visibleRules.map(({ rule, index }, position) => {
           const action = form.watch(`route_rules.${index}.action`)
           const rewriteMode = form.watch(`route_rules.${index}.rewrite_mode`)
           const queryMode = form.watch(`route_rules.${index}.query_mode`)
@@ -171,8 +177,10 @@ export function WebsiteRoutesTab({
                     variant='ghost'
                     size='icon'
                     aria-label={`上移规则 ${index + 1}`}
-                    disabled={index === 0}
-                    onClick={() => routeRules.move(index, index - 1)}
+                    disabled={position === 0}
+                    onClick={() =>
+                      routeRules.move(index, visibleRules[position - 1].index)
+                    }
                   >
                     <ArrowUp />
                   </Button>
@@ -181,8 +189,10 @@ export function WebsiteRoutesTab({
                     variant='ghost'
                     size='icon'
                     aria-label={`下移规则 ${index + 1}`}
-                    disabled={index === rules.length - 1}
-                    onClick={() => routeRules.move(index, index + 1)}
+                    disabled={position === visibleRules.length - 1}
+                    onClick={() =>
+                      routeRules.move(index, visibleRules[position + 1].index)
+                    }
                   >
                     <ArrowDown />
                   </Button>
@@ -321,68 +331,6 @@ export function WebsiteRoutesTab({
                             </SelectContent>
                           </Select>
                           <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-                    <FormField
-                      control={form.control}
-                      name={`route_rules.${index}.action`}
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>处理动作</FormLabel>
-                          <Select
-                            value={field.value}
-                            onValueChange={(next) => {
-                              field.onChange(next)
-                              form.setValue(
-                                `route_rules.${index}.origin_group`,
-                                next === 'proxy'
-                                  ? form.getValues('default_origin_group')
-                                  : ''
-                              )
-                              form.setValue(
-                                `route_rules.${index}.redirect_url`,
-                                ''
-                              )
-                              form.setValue(
-                                `route_rules.${index}.redirect_status`,
-                                next === 'redirect' ? 302 : 0
-                              )
-                              form.setValue(
-                                `route_rules.${index}.rewrite_mode`,
-                                'none'
-                              )
-                              form.setValue(
-                                `route_rules.${index}.rewrite_path`,
-                                ''
-                              )
-                              if (next === 'rewrite') {
-                                form.setValue(
-                                  `route_rules.${index}.request_headers_text`,
-                                  ''
-                                )
-                                form.setValue(
-                                  `route_rules.${index}.response_headers_text`,
-                                  ''
-                                )
-                              }
-                            }}
-                          >
-                            <FormControl>
-                              <SelectTrigger>
-                                <SelectValue />
-                              </SelectTrigger>
-                            </FormControl>
-                            <SelectContent>
-                              <SelectItem value='redirect'>
-                                ① URL 跳转
-                              </SelectItem>
-                              <SelectItem value='rewrite'>
-                                ② URL 重写
-                              </SelectItem>
-                              <SelectItem value='proxy'>③ 路由选源</SelectItem>
-                            </SelectContent>
-                          </Select>
                         </FormItem>
                       )}
                     />

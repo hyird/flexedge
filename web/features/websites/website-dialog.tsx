@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/sheet'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { routeTabs } from './route-tabs'
 import type { Website, WebsiteConfig } from './types'
 import { WebsiteBasicTab } from './website-basic-tab'
 import { WebsiteDomainsTab } from './website-domains-tab'
@@ -380,8 +381,13 @@ export function WebsiteDialog({
               (values) => mutation.mutate(values),
               (errors) => {
                 const field = Object.keys(errors)[0] ?? ''
+                const firstRouteError = Object.keys(
+                  errors.route_rules ?? {}
+                ).find((key) => /^\d+$/.test(key))
                 const next = field.startsWith('route_rules')
-                  ? 'routes'
+                  ? (form.getValues(
+                      `route_rules.${Number(firstRouteError ?? 0)}.action`
+                    ) ?? 'proxy')
                   : field.startsWith('domains')
                     ? 'domains'
                     : field.startsWith('origins')
@@ -436,7 +442,11 @@ export function WebsiteDialog({
                   <TabsTrigger value='https'>HTTPS</TabsTrigger>
                   <TabsTrigger value='logs'>访问日志</TabsTrigger>
                   <TabsTrigger value='compression'>响应压缩</TabsTrigger>
-                  <TabsTrigger value='routes'>路由规则</TabsTrigger>
+                  {Object.entries(routeTabs).map(([phase, category]) => (
+                    <TabsTrigger key={phase} value={phase}>
+                      {category.title}
+                    </TabsTrigger>
+                  ))}
                 </TabsList>
               </div>
               <ScrollArea
@@ -473,13 +483,17 @@ export function WebsiteDialog({
                     />
                   )
                 )}
-                <WebsiteRoutesTab
-                  invalidRouteIndex={invalidRouteIndex}
-                  clearInvalidRoute={() => setInvalidRouteIndex(null)}
-                  form={form}
-                  routeRules={routeRules}
-                  selectableOriginGroups={selectableOriginGroups}
-                />
+                {(['redirect', 'rewrite', 'proxy'] as const).map((phase) => (
+                  <WebsiteRoutesTab
+                    key={phase}
+                    phase={phase}
+                    invalidRouteIndex={invalidRouteIndex}
+                    clearInvalidRoute={() => setInvalidRouteIndex(null)}
+                    form={form}
+                    routeRules={routeRules}
+                    selectableOriginGroups={selectableOriginGroups}
+                  />
+                ))}
               </ScrollArea>
             </Tabs>
           </form>
