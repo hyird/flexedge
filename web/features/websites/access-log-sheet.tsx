@@ -325,7 +325,7 @@ function AccessLogList({
                 <div key={label} className='min-w-0 space-y-1'>
                   <h4 className='font-sans font-medium'>{label}</h4>
                   <pre className='max-h-64 overflow-auto rounded-md border bg-background p-2 break-all whitespace-pre-wrap'>
-                    {value || '未采集或为空'}
+                    {value ?? ''}
                   </pre>
                 </div>
               ))}

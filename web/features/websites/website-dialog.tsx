@@ -409,12 +409,15 @@ export function WebsiteDialog({
                                   'pass_client_ip',
                                   'origin_connect_timeout_seconds',
                                   'origin_read_timeout_seconds',
-                                  'healthy_threshold',
-                                  'unhealthy_threshold',
-                                ].includes(field) ||
-                                field.startsWith('health_check')
-                              ? 'health'
-                              : 'basic'
+                                ].includes(field)
+                              ? 'origin-settings'
+                              : [
+                                    'healthy_threshold',
+                                    'unhealthy_threshold',
+                                  ].includes(field) ||
+                                  field.startsWith('health_check')
+                                ? 'health'
+                                : 'basic'
                 if (errors.route_rules) {
                   const first = Object.keys(errors.route_rules).find((key) =>
                     /^\d+$/.test(key)
@@ -438,7 +441,8 @@ export function WebsiteDialog({
                   <TabsTrigger value='basic'>基础</TabsTrigger>
                   <TabsTrigger value='domains'>域名</TabsTrigger>
                   <TabsTrigger value='origins'>源站</TabsTrigger>
-                  <TabsTrigger value='health'>回源与健康检查</TabsTrigger>
+                  <TabsTrigger value='origin-settings'>回源设置</TabsTrigger>
+                  <TabsTrigger value='health'>健康检查</TabsTrigger>
                   <TabsTrigger value='https'>HTTPS</TabsTrigger>
                   <TabsTrigger value='logs'>访问日志</TabsTrigger>
                   <TabsTrigger value='compression'>响应压缩</TabsTrigger>
@@ -473,16 +477,22 @@ export function WebsiteDialog({
                   renameOriginGroup={renameOriginGroup}
                   removeOrigin={removeOrigin}
                 />
-                {(['health', 'https', 'logs', 'compression'] as const).map(
-                  (category) => (
-                    <WebsiteFeaturesTab
-                      key={category}
-                      category={category}
-                      form={form}
-                      certificates={certificatesQuery.data ?? []}
-                    />
-                  )
-                )}
+                {(
+                  [
+                    'origin-settings',
+                    'health',
+                    'https',
+                    'logs',
+                    'compression',
+                  ] as const
+                ).map((category) => (
+                  <WebsiteFeaturesTab
+                    key={category}
+                    category={category}
+                    form={form}
+                    certificates={certificatesQuery.data ?? []}
+                  />
+                ))}
                 {(['redirect', 'rewrite', 'proxy'] as const).map((phase) => (
                   <WebsiteRoutesTab
                     key={phase}
