@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { type Resolver, useFieldArray, useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { getData, sendData } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
@@ -49,7 +49,6 @@ export function WebsiteDialog({
     null
   )
   const [confirmLeave, setConfirmLeave] = useState(false)
-  const queryClient = useQueryClient()
   const config = website?.config ?? defaultWebsiteConfig()
   const certificatesQuery = useQuery({
     queryKey: [...queryKeys.certificates, 'usable-options'],
@@ -348,10 +347,9 @@ export function WebsiteDialog({
         ? sendData('put', url, body, website.revision)
         : sendData('post', url, body)
     },
-    onSuccess: async (response) => {
-      toast.success(response.message)
+    onSuccess: () => {
       onOpenChange(false)
-      await queryClient.invalidateQueries({ queryKey: queryKeys.websites })
+      toast.success('配置已保存，正在同步')
     },
   })
 
