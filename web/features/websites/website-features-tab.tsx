@@ -40,7 +40,7 @@ export function WebsiteFeaturesTab({
   category,
 }: {
   form: UseFormReturn<WebsiteFormValues>
-  category: 'health' | 'logs' | 'https' | 'compression'
+  category: 'origin-settings' | 'health' | 'logs' | 'https' | 'compression'
   certificates: Certificate[]
 }) {
   const httpsEnabled = form.watch('https_enabled')
@@ -57,30 +57,13 @@ export function WebsiteFeaturesTab({
           'flex min-h-[100cqh] flex-col space-y-0 data-[state=inactive]:hidden'
       )}
     >
-      {category === 'health' && (
+      {category === 'origin-settings' && (
         <section className='rounded-lg border'>
-          <div className='flex items-center justify-between gap-4 p-4'>
-            <div>
-              <h3 className='font-medium'>回源与健康检查</h3>
-              <p className='text-sm text-muted-foreground'>
-                设置源站探测，以及是否将访客真实 IP 传给源站。
-              </p>
-            </div>
-            <FormField
-              control={form.control}
-              name='health_check_enabled'
-              render={({ field }) => (
-                <FormItem className='flex items-center gap-3 space-y-0'>
-                  <FormLabel>启用检查</FormLabel>
-                  <FormControl>
-                    <Switch
-                      checked={field.value}
-                      onCheckedChange={field.onChange}
-                    />
-                  </FormControl>
-                </FormItem>
-              )}
-            />
+          <div className='p-4'>
+            <h3 className='font-medium'>回源设置</h3>
+            <p className='text-sm text-muted-foreground'>
+              设置回源超时，以及是否将访客真实 IP 传给源站。
+            </p>
           </div>
           <div className='space-y-4 border-t p-4'>
             <div className='grid items-start gap-4 sm:grid-cols-2'>
@@ -135,6 +118,35 @@ export function WebsiteFeaturesTab({
                 </FormItem>
               )}
             />
+          </div>
+        </section>
+      )}
+      {category === 'health' && (
+        <section className='rounded-lg border'>
+          <div className='flex items-center justify-between gap-4 p-4'>
+            <div>
+              <h3 className='font-medium'>健康检查</h3>
+              <p className='text-sm text-muted-foreground'>
+                设置源站探测路径、检查间隔和健康状态判定。
+              </p>
+            </div>
+            <FormField
+              control={form.control}
+              name='health_check_enabled'
+              render={({ field }) => (
+                <FormItem className='flex items-center gap-3 space-y-0'>
+                  <FormLabel>启用检查</FormLabel>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+          </div>
+          <div className='space-y-4 border-t p-4'>
             {healthCheckEnabled && (
               <div className='mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3'>
                 <FormField
