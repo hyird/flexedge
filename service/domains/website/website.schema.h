@@ -330,7 +330,7 @@ struct WebsiteRouteRuleValidator final {
             validator.add(std::string(path) + ".methods", "format", "请求方法不正确或重复");
         }
         const auto& action = value.get<"action">();
-        if (!action || (action->view() != "proxy" && action->view() != "redirect")) {
+        if (!action || (action->view() != "proxy" && action->view() != "redirect" && action->view() != "rewrite")) {
             validator.add(std::string(path) + ".action", "enum", "规则动作不正确");
             return;
         }
@@ -370,8 +370,15 @@ struct WebsiteRouteRuleValidator final {
         if (action->view() == "redirect" && !mode.empty() && mode != "none") {
             validator.add(std::string(path) + ".rewrite_mode", "format", "跳转规则不能同时重写回源路径");
         }
-        if (action->view() == "proxy") {
-            if ((!rewritePath->empty() && !isRoutePath(rewritePath->view())) ||
+        if (action->view() == "rewrite") {
+            const auto& requestHeaders = value.get<"requestHeaders">();
+            const auto& responseHeaders = value.get<"responseHeaders">();
+            if ((!rewritePath->empty() && !policy::pathOnly(rewritePath->view())) ||
+                !redirectUrl->empty() || redirectStatus->value != 0 || !originGroup->empty() ||
+                (requestHeaders && !requestHeaders->empty()) || (responseHeaders && !responseHeaders->empty()))
+                validator.add(std::string(path), "format", "重写规则不能配置源站、跳转或请求头，重写路径必须以 / 开头");
+        } else if (action->view() == "proxy") {
+            if ((!rewritePath->empty() && !policy::pathOnly(rewritePath->view())) ||
                 !redirectUrl->empty() || redirectStatus->value != 0 ||
                 !isOriginGroup(originGroup->view())) {
                 validator.add(std::string(path), "format", "代理规则配置不正确");

@@ -1,23 +1,38 @@
 # Website route rules
 
-The v0.3.37 release uses user-defined ordering for all route controls. These are persisted in
-the existing website configuration JSON; no database table migration is required.
+Version 0.3.38 uses Cloudflare-style phases: **Single Redirects -> URL Rewrite -> Origin Rules**.
+The configuration remains in `route_rules`; `action` is `redirect`, `rewrite`, or `proxy`.
+Rules retain their list order within each phase, regardless of interleaving between actions.
 
-## Match and priority
+## Match and execution order
 
-- `name` (up to 100 UTF-8 bytes) and `description` (1000 bytes) are management metadata.
-- `hostnames` is an optional list of exact DNS names. Empty means all domains of
-  this website. Incoming Host / HTTP/2 authority is compared without port or final
-  dot, case-insensitively. This does not bind a domain or bypass website selection.
-- Status, hostname and HTTP method filters are applied before path matching.
-- Rules are evaluated from top to bottom. The first enabled rule matching the
-  hostname, HTTP method, all request conditions and path wins; later rules are
-  not evaluated. Match type and path length do not grant extra priority.
-  Reordering rules changes precedence. Put catch-all prefix `/` rules last,
-  or use the default origin group when no rule matches.
-- Prefix matches respect path-segment boundaries, so `/api` does not match `/apix`.
+- Redirects match the incoming URL. The first matching redirect ends the request.
+- Rewrites all match the URL and headers at phase entry. They do not match previous
+  rewrites. Path and query changes accumulate independently; the last matching change
+  to each field wins. `none` and `preserve` leave that field unchanged, including changes
+  selected by earlier rules. No rewrite loop or redirect re-evaluation occurs.
+- Origin (`proxy`) rules match the final rewritten URL, including its query, and the
+  original headers. All matching rules apply: the last source-group selection wins;
+  request and response headers merge case-insensitively by name, with the last value
+  winning. Unrelated headers from earlier rules remain. No match uses the default group.
+- Existing proxy rules with rewrite fields contribute to both phases independently:
+  their rewrite matches the incoming URL, while their origin settings match the final
+  URL. To route `/old` rewritten to `/api`, use a rewrite on `/old` and an origin rule
+  on `/api`. A combined rule on `/old` will not select its source if the final URL no
+  longer matches `/old`.
+- Place general origin defaults before specific overrides. Redirect fallback rules
+  belong last. Match type and path length do not grant extra priority.
+- Enabled status, exact hostname, HTTP method and all request conditions must match.
+  Hostnames ignore case, port and a trailing dot; they do not bind domains or change
+  website selection. Prefixes respect path boundaries (`/api` does not match `/apix`).
+- Website-level force HTTPS still runs before this pipeline for plain HTTP requests.
+  This implements the three named phases, not Cloudflare's full security/cache pipeline
+  or its separate Bulk Redirects feature.
 
-## Path processing (proxy action only)
+Reference: https://developers.cloudflare.com/rules/origin-rules/#execution-order
+and https://developers.cloudflare.com/rules/transform/url-rewrite/ .
+
+## Path processing (rewrite action and existing proxy rewrite fields)
 
 | rewrite_mode | /api/users with matched path /api | rewrite_path |
 | --- | --- | --- |
@@ -29,6 +44,8 @@ the existing website configuration JSON; no database table migration is required
 Prefix modes require prefix matching. Boundary slashes are joined once; removing
 the complete path yields `/`. Matching and rewriting operate on the encoded path,
 without decoding `%2F`. Regex capture templates are described below.
+Replacement paths cannot contain whitespace, `?` or `#`; configure query changes
+through the independent query policy instead of embedding them in the path.
 
 ## Request conditions
 
@@ -94,20 +111,17 @@ becomes `/v2/users?b=2`.
 
 ## Upgrade and rollback
 
-Stored rules without the added fields normalize to empty metadata and hostname
-filters, the original whole-path rewrite when a rewrite path exists, and query
-preservation and no conditions. New cluster manifests use schema v5. Older nodes
-reject v5 instead of applying type/length priority. New nodes can load existing
-v2, v3 and v4 manifests, but apply the new first-match semantics to their stored
-order as soon as the node binary upgrades. Existing overlapping rules may therefore
-select a different destination; no automatic reordering or configuration rewrite
-is performed. Review catch-all placement before upgrading.
+Cluster manifests use schema v6. Older nodes reject v6 instead of silently applying
+v5 first-match behavior. Upgraded nodes can read v2-v5 snapshots but immediately use
+phase semantics for their stored order. This is a behavior change even before a new
+configuration is saved; review overlapping rules and combined proxy/rewrite rules first.
 
-Deploy upgraded node binaries before exposing the new editor; verify every node
-has converged after the server upgrade. Keep binary and configuration backups.
-To restore the former type/length priority, restore both node and server binaries
-and the pre-upgrade configuration; a server-only rollback does not restore matching
-semantics. Do not roll the server back after saving new rule options without also restoring
-the corresponding pre-upgrade website configuration, since old software does not
-understand the added fields. Preview is local form simulation, not a node health
-or release acknowledgement check.
+No database migration or automatic rule reordering is performed. The editor supports
+standalone URL rewrites without a source group. Saving new actions requires the updated
+server and nodes. Back up website configurations and binaries, upgrade nodes before
+publishing the updated server/editor, and verify every node has converged. Rollback
+requires the previous server/node binaries and the corresponding configuration backup.
+Do not deploy or roll back only the editor to change execution semantics.
+
+Local preview reports the matching rewrite and origin rule numbers. It is a form
+simulation, not a live origin request or confirmation that nodes applied the configuration.

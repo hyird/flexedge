@@ -24,8 +24,8 @@ describe('route preview matches node semantics', () => {
       rule(),
     ]
     expect(
-      previewRoute(rules, 'GET', '/api/users', 'api.example.com:443').index
-    ).toBe(0)
+      previewRoute(rules, 'GET', '/api/users', 'api.example.com:443').origins
+    ).toEqual([0, 1])
     expect(
       previewRoute(rules, 'GET', '/api/users', 'www.example.com').index
     ).toBe(1)
@@ -90,9 +90,9 @@ describe('route preview matches node semantics', () => {
   })
   it('warns only about earlier enabled equal-path method overlaps', () => {
     const rules = [
-      rule({ methods: ['GET'] }),
-      rule({ methods: ['POST'] }),
-      rule(),
+      rule({ action: 'redirect', methods: ['GET'] }),
+      rule({ action: 'redirect', methods: ['POST'] }),
+      rule({ action: 'redirect' }),
     ]
     expect(conflictingRouteIndexes(rules, 1)).toEqual([])
     expect(conflictingRouteIndexes(rules, 2)).toEqual([0, 1])
@@ -103,17 +103,17 @@ describe('route preview matches node semantics', () => {
       conflictingRouteIndexes([rule(), rule({ match_type: 'exact' })], 1)
     ).toEqual([])
   })
-  it('uses the first match regardless of type or path length and respects reordering', () => {
+  it('uses the last origin match regardless of type and respects reordering', () => {
     const rules = [
       rule(),
       rule({ path: '/api' }),
       rule({ path: '/api', match_type: 'exact' }),
       rule({ path: '/api', match_type: 'exact' }),
     ]
-    expect(previewRoute(rules, 'GET', '/api?q=1').index).toBe(0)
-    expect(previewRoute(rules, 'GET', '/api/users').index).toBe(0)
+    expect(previewRoute(rules, 'GET', '/api?q=1').index).toBe(3)
+    expect(previewRoute(rules, 'GET', '/api/users').index).toBe(1)
     expect(previewRoute(rules, 'GET', '/apix').index).toBe(0)
-    expect(previewRoute([rules[2], rules[0]], 'GET', '/api').index).toBe(0)
+    expect(previewRoute([rules[2], rules[0]], 'GET', '/api').index).toBe(1)
     expect(previewRoute([rules[2], rules[0]], 'GET', '/api/users').index).toBe(
       1
     )
@@ -123,7 +123,7 @@ describe('route preview matches node semantics', () => {
         'GET',
         '/api'
       ).error
-    ).toBeUndefined()
+    ).toBeDefined()
   })
   it('skips disabled and method mismatches', () => {
     expect(
@@ -153,5 +153,73 @@ describe('route preview matches node semantics', () => {
         '/old?a=1'
       ).target
     ).toBe('/new?b=2')
+  })
+})
+
+describe('phase composition', () => {
+  it('executes redirects before earlier proxy and rewrite entries', () => {
+    const result = previewRoute(
+      [
+        rule(),
+        rule({ action: 'rewrite', rewrite_path: '/api' }),
+        rule({
+          action: 'redirect',
+          redirect_url: '/login',
+          query_mode: 'drop',
+        }),
+        rule({ action: 'redirect', redirect_url: '/later' }),
+      ],
+      'GET',
+      '/old?q=1'
+    )
+    expect(result.index).toBe(2)
+    expect(result.target).toBe('/login')
+  })
+  it('matches immutable rewrite input and routes on the final path and query', () => {
+    const rules = [
+      rule({
+        action: 'rewrite',
+        path: '/old',
+        query_mode: 'replace',
+        query_string: 'v=2',
+      }),
+      rule({
+        action: 'rewrite',
+        path: '/old',
+        rewrite_mode: 'replace_prefix',
+        rewrite_path: '/api',
+      }),
+      rule({ action: 'rewrite', path: '/api', rewrite_path: '/wrong' }),
+      rule({
+        action: 'rewrite',
+        path: '/old',
+        rewrite_mode: 'replace_prefix',
+        rewrite_path: '/final',
+      }),
+      rule({
+        path: '/final',
+        conditions: [{ source: 'query', name: 'v', op: 'equals', value: '2' }],
+      }),
+    ]
+    const result = previewRoute(rules, 'GET', '/old/item?v=1')
+    expect(result.target).toBe('/final/item?v=2')
+    expect(result.rewrites).toEqual([0, 1, 3])
+    expect(result.origins).toEqual([4])
+    expect(previewRoute(rules.slice(0, 4), 'GET', '/old/item?v=1').index).toBe(
+      -1
+    )
+  })
+  it('does not run redirects again after rewriting and skips disabled rules', () => {
+    const result = previewRoute(
+      [
+        rule({ action: 'rewrite', path: '/old', rewrite_path: '/api' }),
+        rule({ action: 'redirect', path: '/api', redirect_url: '/wrong' }),
+        rule({ action: 'rewrite', status: 'disabled', rewrite_path: '/wrong' }),
+      ],
+      'GET',
+      '/old'
+    )
+    expect(result.target).toBe('/api')
+    expect(result.index).toBe(-1)
   })
 })

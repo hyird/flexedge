@@ -24,7 +24,7 @@ class OriginResponseCodec final {
     explicit OriginResponseCodec(ruvia::Http1ClientExchangeState responseExchange, bool hstsEnabled,
                                  const v2::RouteRule* route = nullptr)
         : parser_(std::make_unique<ruvia::Http1ClientResponseParser>(std::move(responseExchange))),
-          hstsEnabled_(hstsEnabled), route_(route) {}
+          hstsEnabled_(hstsEnabled), route_(route ? std::optional<v2::RouteRule>{*route} : std::nullopt) {}
 
     [[nodiscard]] OriginResponseHeadStatus consumeHead(std::string_view bytes) {
         headBytes_.append(bytes);
@@ -152,7 +152,7 @@ class OriginResponseCodec final {
                 });
             if ((!preserveUpgrade && (responseHopByHop(header.name()) || namedByConnection)) ||
                 (hstsEnabled_ && httpHeaderName(header.name(), "Strict-Transport-Security")) ||
-                (route_ != nullptr &&
+                (route_.has_value() &&
                  std::ranges::any_of(route_->response_headers(), [&](const auto& mutation) {
                      return httpHeaderName(header.name(), mutation.name());
                  }))) {
@@ -163,7 +163,7 @@ class OriginResponseCodec final {
             output_.append(header.value());
             output_.append("\r\n");
         }
-        if (route_ != nullptr) {
+        if (route_) {
             for (const auto& mutation : route_->response_headers()) {
                 output_.append(mutation.name());
                 output_.append(": ");
@@ -260,7 +260,9 @@ class OriginResponseCodec final {
     ChunkedWireTracker chunked_;
     std::optional<std::uint16_t> statusCode_;
     bool hstsEnabled_{};
-    const v2::RouteRule* route_{};
+    // A resolved phase policy belongs to a request, not the configuration snapshot.
+    // Retain it while asynchronous origin response parsing is still in progress.
+    std::optional<v2::RouteRule> route_;
     bool tunnel_{};
     bool complete_{};
     bool originReusable_{};

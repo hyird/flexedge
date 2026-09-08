@@ -177,7 +177,7 @@ const routeRuleSchema = z
     match_type: z.enum(['exact', 'prefix', 'suffix', 'regex']),
     path: z.string().trim().min(1, '请输入匹配路径').max(2048),
     methods: z.array(z.enum(routeMethods)).max(routeMethods.length),
-    action: z.enum(['proxy', 'redirect']),
+    action: z.enum(['proxy', 'redirect', 'rewrite']),
     rewrite_path: z.string().trim().max(2048),
     redirect_url: z.string().trim().max(2048),
     redirect_status: z.number().int().min(0).max(308),
@@ -190,6 +190,20 @@ const routeRuleSchema = z
       .refine(hasValidRouteHeaderText, '每行请填写为 Header: value'),
   })
   .superRefine((rule, context) => {
+    if (
+      rule.action === 'rewrite' &&
+      (rule.origin_group ||
+        rule.redirect_url ||
+        rule.redirect_status ||
+        rule.request_headers_text ||
+        rule.response_headers_text)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['action'],
+        message: '重写规则只处理路径和查询参数，不能设置源站、跳转或请求头',
+      })
+    }
     if (rule.match_type === 'regex') {
       try {
         const pattern = compileRoutePattern(rule.path)
@@ -279,19 +293,23 @@ const routeRuleSchema = z
         message: '匹配路径必须以 / 开头',
       })
     }
-    if (rule.action === 'proxy') {
-      if (!rule.origin_group) {
+    if (rule.action !== 'redirect') {
+      if (rule.action === 'proxy' && !rule.origin_group) {
         context.addIssue({
           code: 'custom',
           path: ['origin_group'],
           message: '请选择源站组',
         })
       }
-      if (rule.rewrite_path && !rule.rewrite_path.startsWith('/')) {
+      if (
+        rule.rewrite_path &&
+        (!rule.rewrite_path.startsWith('/') || /[\s?#]/.test(rule.rewrite_path))
+      ) {
         context.addIssue({
           code: 'custom',
           path: ['rewrite_path'],
-          message: '重写路径必须以 / 开头',
+          message:
+            '重写路径必须以 / 开头，不能含空白、参数或片段；参数请使用查询参数策略',
         })
       }
       return
@@ -398,7 +416,12 @@ export function routeRuleToForm(
         routeMethods.includes(method as (typeof routeMethods)[number])
       )
     : []
-  const action = rule.action === 'redirect' ? 'redirect' : 'proxy'
+  const action =
+    rule.action === 'redirect'
+      ? 'redirect'
+      : rule.action === 'rewrite'
+        ? 'rewrite'
+        : 'proxy'
 
   return {
     id: typeof rule.id === 'string' ? rule.id : crypto.randomUUID(),
