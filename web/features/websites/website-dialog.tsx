@@ -434,7 +434,7 @@ export function WebsiteDialog({
               onValueChange={setSection}
               className='min-h-0 flex-1 gap-4 px-4 md:flex-row'
             >
-              <div className='shrink-0 overflow-x-auto md:w-40 md:overflow-y-auto'>
+              <div className='shrink-0 overflow-x-auto md:w-28 md:overflow-y-auto'>
                 <TabsList className='h-auto gap-1 md:w-full md:flex-col md:items-stretch'>
                   <TabsTrigger value='basic'>基础</TabsTrigger>
                   <TabsTrigger value='domains'>域名</TabsTrigger>
