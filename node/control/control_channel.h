@@ -1,5 +1,7 @@
 #pragma once
 
+#include "node/proto/control_reply.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -96,6 +98,7 @@ class ControlChannel final {
         v2::ClientEnvelope envelope;
         envelope.set_request_id(std::move(requestId));
         auto* value = envelope.mutable_authenticate();
+        value->set_require_apply_ack(true);
         value->set_node_id(credentials_.nodeId());
         value->set_secret(credentials_.secret());
         value->set_applied_node_spec_revision(runtime_.appliedNodeSpecRevision());
@@ -152,15 +155,18 @@ class ControlChannel final {
         return envelope;
     }
 
-    static v2::ClientEnvelope releaseProbe(std::uint64_t sequence) {
+    v2::ClientEnvelope releaseProbe(std::uint64_t sequence, std::uint32_t waitSeconds) {
         v2::ClientEnvelope envelope;
         envelope.set_request_id("release-probe-" + std::to_string(sequence));
-        envelope.mutable_release_probe();
+        auto* probe = envelope.mutable_release_probe();
+        probe->set_wait_seconds(waitSeconds);
+        probe->set_applied_node_spec_revision(runtime_.appliedNodeSpecRevision());
+        probe->set_active_release_id(runtime_.activeReleaseId());
+        probe->set_active_manifest_digest(runtime_.activeManifestDigest());
         return envelope;
     }
 
-    static v2::ClientEnvelope nodeReleaseRequest(std::string_view nodeId,
-                                                 std::string_view digest,
+    static v2::ClientEnvelope nodeReleaseRequest(std::string_view nodeId, std::string_view digest,
                                                  std::uint64_t offset) {
         v2::ClientEnvelope envelope;
         envelope.set_request_id("node-release-" + std::to_string(offset));
@@ -192,8 +198,7 @@ class ControlChannel final {
                 if (!validNodeReleaseVersion(chunk.version()) || chunk.digest_sha256() != digest ||
                     chunk.total_bytes() == 0 || chunk.total_bytes() > kMaximumNodeReleaseBytes ||
                     chunk.offset() != offset || chunk.offset() >= chunk.total_bytes() ||
-                    chunk.data().empty() ||
-                    chunk.data().size() > kNodeReleaseChunkBytes ||
+                    chunk.data().empty() || chunk.data().size() > kNodeReleaseChunkBytes ||
                     static_cast<std::uint64_t>(chunk.data().size()) >
                         chunk.total_bytes() - chunk.offset()) {
                     throw std::runtime_error("control plane sent an invalid node release chunk");
@@ -335,6 +340,10 @@ class ControlChannel final {
             failure = std::current_exception();
         }
         co_await client.binary(serialize(acknowledgement));
+        const auto committed = co_await readServerEnvelope(client);
+        if (!matchesApplyResultAck(committed, acknowledgement.request_id(), *result)) {
+            throw std::runtime_error("control plane did not confirm committed apply result");
+        }
         if (failure) {
             std::rethrow_exception(failure);
         }
@@ -350,8 +359,9 @@ class ControlChannel final {
     }
 
     ruvia::Task<void> processReleaseProbe(const ruvia::WebSocketClientHandle& connection,
-                                          std::string_view nodeId, std::uint64_t& sequence) {
-        const auto request = releaseProbe(++sequence);
+                                          std::string_view nodeId, std::uint64_t& sequence,
+                                          std::uint32_t waitSeconds) {
+        const auto request = releaseProbe(++sequence, waitSeconds);
         co_await connection.binary(serialize(request));
         const auto acknowledgement = co_await readServerEnvelope(connection);
         if (acknowledgement.request_id() != request.request_id() ||
@@ -392,41 +402,33 @@ class ControlChannel final {
 
     ruvia::Task<void> runControlLoop(const ruvia::WebSocketClientHandle& connection,
                                      const v2::Welcome& welcome) {
-        const auto worker = loop_.handle();
         const auto& nodeId = welcome.node_id();
         auto interval = std::chrono::seconds(
             (std::max)(welcome.heartbeat_interval_seconds(), std::uint32_t{1}));
         std::uint64_t heartbeatSequence{};
         std::uint64_t releaseProbeSequence{};
-        auto nextHeartbeat = std::chrono::steady_clock::now() + interval;
-        auto nextReleaseProbe =
-            std::chrono::steady_clock::now() + std::chrono::seconds(kReleaseProbeIntervalSeconds);
+        auto nextHeartbeat = std::chrono::steady_clock::now();
         for (;;) {
-            if (config_.stopToken.stopRequested()) {
+            if (config_.stopToken.stopRequested())
                 co_return;
-            }
-            auto now = std::chrono::steady_clock::now();
-            if (now >= nextReleaseProbe) {
-                co_await processReleaseProbe(connection, nodeId, releaseProbeSequence);
-                nextReleaseProbe = std::chrono::steady_clock::now() +
-                                   std::chrono::seconds(kReleaseProbeIntervalSeconds);
-            }
-
-            // Release checks and configuration control must stay independent from log ingestion.
-            now = std::chrono::steady_clock::now();
-            if (now >= nextHeartbeat) {
+            if (std::chrono::steady_clock::now() >= nextHeartbeat) {
                 interval = co_await processHeartbeat(connection, nodeId, heartbeatSequence);
                 nextHeartbeat = std::chrono::steady_clock::now() + interval;
             }
-            now = std::chrono::steady_clock::now();
-            const auto nextControlMessage = (std::min)(nextHeartbeat, nextReleaseProbe);
-            const auto remaining =
-                std::chrono::duration_cast<std::chrono::milliseconds>(nextControlMessage - now);
-            const auto delay = (std::min)(remaining, std::chrono::milliseconds(10));
-            const auto slept = co_await ruvia::sleepFor(worker, delay, config_.stopToken);
-            if (slept == ruvia::TimerSleepResult::kStopRequested) {
-                co_return;
+            const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
+                                       nextHeartbeat - std::chrono::steady_clock::now())
+                                       .count();
+            if (remaining <= 0) {
+                interval = co_await processHeartbeat(connection, nodeId, heartbeatSequence);
+                nextHeartbeat = std::chrono::steady_clock::now() + interval;
+                continue;
             }
+            // One outstanding watch owns the read path. A committed change wakes it;
+            // the deadline leaves room for heartbeats without interleaving object replies.
+            co_await processReleaseProbe(
+                connection, nodeId, releaseProbeSequence,
+                static_cast<std::uint32_t>(
+                    (std::min<std::int64_t>)(remaining, kReleaseWatchMaximumSeconds)));
         }
     }
 

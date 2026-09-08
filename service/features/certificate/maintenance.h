@@ -8,6 +8,7 @@
 #include "service/features/certificate/model.h"
 #include "service/features/certificate/queue.h"
 #include "service/features/node_dispatch/queue.h"
+#include "service/features/node_dispatch/notifications.h"
 #include "service/features/sync_runtime/state.h"
 
 namespace service::certificate_issuance::worker_detail {
@@ -28,6 +29,9 @@ inline ruvia::Task<void> expireCertificates(service::background::WorkerContext& 
                 transaction, row[0].value().value_or(""), updated.front()[0].value().value_or(""));
         }
         co_await transaction.commit();
+        if (!updated.empty()) {
+            service::node_dispatch::notifications::published(row[0].value().value_or(""));
+        }
     }
     co_return;
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "service/features/node_dispatch/notifications.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
@@ -45,6 +47,7 @@ class WebsiteCommandService final {
             transaction, tenantId, service::sync_runtime::MarkerResourceType::website, id,
             service::sync_runtime::MarkerOperation::apply, revision);
         co_await transaction.commit();
+        service::node_dispatch::notifications::published(tenantId);
         co_return;
     }
 
@@ -83,6 +86,7 @@ class WebsiteCommandService final {
             co_await service::website_dns::reconcileConfigChange(transaction, tenantId,
                                                                  std::nullopt, configJson);
             co_await transaction.commit();
+            service::node_dispatch::notifications::published(tenantId);
         } catch (const ruvia::DbError& error) {
             if (isDomainClaimConflict(error)) {
                 service::common::throwAppError(WebsiteError::DOMAIN_EXISTS);
@@ -150,6 +154,7 @@ class WebsiteCommandService final {
             co_await service::website_dns::reconcileConfigChange(transaction, tenantId,
                                                                  previousConfig, configJson);
             co_await transaction.commit();
+            service::node_dispatch::notifications::published(tenantId);
         } catch (const ruvia::DbError& error) {
             if (isDomainClaimConflict(error)) {
                 service::common::throwAppError(WebsiteError::DOMAIN_EXISTS);
@@ -192,6 +197,7 @@ class WebsiteCommandService final {
         co_await service::website_dns::reconcileConfigChange(transaction, tenantId, previousConfig,
                                                              std::nullopt);
         co_await transaction.commit();
+        service::node_dispatch::notifications::published(tenantId);
         co_return;
     }
 

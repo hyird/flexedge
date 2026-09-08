@@ -1,5 +1,7 @@
 #pragma once
 
+#include "service/features/node_dispatch/notifications.h"
+
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -79,6 +81,7 @@ persistIssuedCertificate(service::background::WorkerContext& context, const Cert
     }
     co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
                                                                 resultTransition);
+    service::node_dispatch::notifications::published(task.tenantId);
     co_return;
 }
 
@@ -109,6 +112,7 @@ inline ruvia::Task<void> failCertificateTask(service::background::WorkerContext&
     }
     co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
                                                                 resultTransition);
+    service::node_dispatch::notifications::published(task.tenantId);
     if (!resultTransition.markerTransitioned) {
         co_return;
     }

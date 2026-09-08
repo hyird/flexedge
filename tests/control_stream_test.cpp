@@ -19,6 +19,8 @@
 #include <ruvia/web/WebSocketClient.h>
 
 #include "node/control/control_stream.h"
+#include "node/proto/control_reply.h"
+#include "service/features/node_dispatch/notifications.h"
 #include "node/proto/control_protocol.h"
 
 namespace {
@@ -146,9 +148,94 @@ int runCase(std::uint8_t opcode, std::string payload, ExpectedResult expected) {
 
 } // namespace
 
+void verifyDeliveryProtocol() {
+    using namespace flexedge::node;
+    const auto require = [](bool value) {
+        if (!value)
+            throw std::runtime_error("delivery protocol regression");
+    };
+    v2::DesiredState state;
+    state.mutable_node_spec()->mutable_content()->set_revision(8);
+    state.mutable_release()->mutable_content()->set_release_id("new-release");
+    state.mutable_release()->set_digest_sha256("new-digest");
+    const auto changed = releaseProbeReplies("watch-1", "binary", 7, "older", "older", state);
+    require(changed.size() == 2);
+    require(changed[0].has_release_probe_ack() && changed[1].has_desired_state());
+    require(changed[0].request_id() == changed[1].request_id());
+    require(changed[0].release_probe_ack().desired_release_id() ==
+            changed[1].desired_state().release().content().release_id());
+    require(changed[0].release_probe_ack().desired_node_spec_revision() == 8);
+    require(releaseProbeReplies("watch-2", "binary", 8, "new-release", "new-digest", {}).size() ==
+            1);
+
+    v2::ApplyResult result;
+    result.set_node_id("node-1");
+    result.set_node_spec_revision(8);
+    result.set_release_id("new-release");
+    result.set_manifest_digest("new-digest");
+    result.set_applied(true);
+    v2::ServerEnvelope reply;
+    reply.set_request_id("watch-1");
+    auto* ack = reply.mutable_apply_result_ack();
+    ack->set_node_id("node-1");
+    ack->set_node_spec_revision(8);
+    ack->set_release_id("new-release");
+    ack->set_manifest_digest("new-digest");
+    ack->set_applied(true);
+    require(matchesApplyResultAck(reply, "watch-1", result));
+    require(!matchesApplyResultAck(reply, "watch-2", result));
+    ack->set_release_id("old-release");
+    require(!matchesApplyResultAck(reply, "watch-1", result));
+    ack->set_release_id("new-release");
+    ack->set_node_id("other-node");
+    require(!matchesApplyResultAck(reply, "watch-1", result));
+    ack->set_node_id("node-1");
+    ack->set_node_spec_revision(7);
+    require(!matchesApplyResultAck(reply, "watch-1", result));
+    ack->set_node_spec_revision(8);
+    ack->set_manifest_digest("wrong");
+    require(!matchesApplyResultAck(reply, "watch-1", result));
+    ack->set_manifest_digest("new-digest");
+    ack->set_applied(false);
+    require(!matchesApplyResultAck(reply, "watch-1", result));
+    result.set_applied(false);
+    require(matchesApplyResultAck(reply, "watch-1", result));
+}
+
+ruvia::Task<bool> watchSignal(service::node_runtime::fanout::Hub::Subscription& subscription,
+                              std::chrono::milliseconds timeout) {
+    co_return (co_await subscription.receiveFor(timeout, {})).hasValue();
+}
+
+void verifyWatchNotifications() {
+    ruvia::EventLoopPool loops({.loopCount = 1});
+    const auto loop = loops.loop(0);
+    auto watch =
+        service::node_dispatch::notifications::hub().subscribe(loop.handle(), "delivery-test");
+    loops.start();
+    service::node_runtime::fanout::hub().publish("delivery-test");
+    if (loop.start(watchSignal(watch, std::chrono::milliseconds(20))).get())
+        throw std::runtime_error("heartbeats must not wake configuration watches");
+    service::node_dispatch::notifications::published("other-tenant");
+    if (loop.start(watchSignal(watch, std::chrono::milliseconds(20))).get())
+        throw std::runtime_error("cross-tenant wakeup");
+    // Covers commit after subscribe but before awaiting the channel.
+    service::node_dispatch::notifications::published("delivery-test");
+    if (!loop.start(watchSignal(watch, std::chrono::seconds(1))).get())
+        throw std::runtime_error("queued commit lost");
+    auto pending = loop.start(watchSignal(watch, std::chrono::seconds(1)));
+    service::node_dispatch::notifications::published("delivery-test");
+    if (!pending.get())
+        throw std::runtime_error("waiting watch not woken");
+    loops.stop();
+    loops.join();
+}
+
 int main() {
     try {
-        if constexpr (flexedge::node::kReleaseProbeIntervalSeconds != 1) {
+        verifyDeliveryProtocol();
+        verifyWatchNotifications();
+        if constexpr (flexedge::node::kReleaseWatchMaximumSeconds != 10) {
             return 8;
         }
         flexedge::node::v2::ServerEnvelope envelope;
