@@ -2,22 +2,19 @@ import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { apiErrorMessage, type ApiEnvelope } from '@/lib/api'
+import { reconnectingEventSource } from '@/lib/event-stream'
 import { queryKeys } from '@/lib/query-keys'
-import {
-  refreshSyncEventQueries,
-  syncEventFailureMessage,
-} from '@/lib/sync-events'
+import { refreshSyncEventQueries } from '@/lib/sync-events'
 import type { SyncEventPage } from '@/lib/types'
 
 export function SyncEventMonitor() {
   const queryClient = useQueryClient()
 
   useEffect(() => {
-    const stream = new EventSource('/api/sync-events/stream', {
-      withCredentials: true,
-    })
+    const stream = reconnectingEventSource('/api/sync-events/stream')
     const refreshAll = () =>
       Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.tasks }),
         queryClient.invalidateQueries({ queryKey: queryKeys.overview }),
         queryClient.invalidateQueries({ queryKey: queryKeys.providers }),
         queryClient.invalidateQueries({ queryKey: queryKeys.dnsZones }),
@@ -33,19 +30,15 @@ export function SyncEventMonitor() {
     stream.addEventListener('ready', () => {
       void refreshAll()
     })
+    stream.addEventListener('task-state', () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.tasks })
+    })
     stream.addEventListener('sync-events', (event) => {
       const payload = JSON.parse(
         (event as MessageEvent<string>).data
       ) as ApiEnvelope<SyncEventPage>
       const events = payload.data
       if (!events.list.length) return
-      for (const result of events.list) {
-        if (result.outcome === 'failed') {
-          toast.error(syncEventFailureMessage(result), {
-            id: `sync-failed-${result.resource_type}-${result.resource_id}`,
-          })
-        }
-      }
 
       void (async () => {
         try {

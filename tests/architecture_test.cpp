@@ -323,8 +323,8 @@ int main() {
     const auto& schemaMigrations = service::config::kSchemaMigrations;
     REQUIRE(schemaMigrations.size() >= 20);
     REQUIRE(schemaMigrations.front().id() == "0001");
-    REQUIRE(schemaMigrations.back().id() == "0020_sync_result_events");
-    const auto& syncEventMigration = schemaMigrations.back().sql();
+    REQUIRE(schemaMigrations.back().id() == "0021_task_history_error");
+    const auto& syncEventMigration = schemaMigrations[19].sql();
     REQUIRE(syncEventMigration.starts_with("DO $flexedge_sync_result_events$"));
     REQUIRE(syncEventMigration.contains("CREATE TABLE public.sys_sync_event"));
     const auto& schemaBaseline = schemaMigrations.front().sql();
@@ -1003,11 +1003,13 @@ int main() {
     REQUIRE(nodeRuntimeFanout.contains("subscribe"));
     REQUIRE(nodeRuntimeFanout.contains("publish"));
 
-    REQUIRE(!std::filesystem::exists(sourceRoot / "service/domains/task/task.controller.h"));
-    REQUIRE(!std::filesystem::exists(sourceRoot / "service/domains/task/task.service.h"));
-    REQUIRE(!std::filesystem::exists(sourceRoot / "service/domains/task/task.types.h"));
-    REQUIRE(!std::filesystem::exists(sourceRoot / "web/features/tasks/index.tsx"));
-    REQUIRE(!std::filesystem::exists(sourceRoot / "web/routes/_authenticated/tasks.tsx"));
+    // The task center is a read model over markers and release targets, not a
+    // resurrection of the removed historical workflow scheduler.
+    const auto taskController = source("service/domains/task/task.controller.h");
+    REQUIRE(!taskController.contains("RUVIA_POST"));
+    const auto taskService = source("service/domains/task/task.service.h");
+    REQUIRE(!taskService.contains("INSERT INTO"));
+    REQUIRE(!taskService.contains("UPDATE sys_"));
     const auto syncEventService = source("service/domains/sync_event/sync_event.service.h");
     REQUIRE(syncEventService.contains("SyncEventPageDataDto"));
     REQUIRE(syncEventService.contains("FROM sys_sync_event"));

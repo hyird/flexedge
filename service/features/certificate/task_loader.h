@@ -1,5 +1,7 @@
 #pragma once
 
+#include "service/features/sync_event/fanout.h"
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -31,6 +33,7 @@ claim(service::background::WorkerContext& context) {
         co_return std::nullopt;
     }
     const auto& row = rows.front();
+    service::sync_event::fanout::hub().publish(row[1].value().value_or(""));
     co_return CertificateTask{
         .id = std::string(row[0].value().value_or("")),
         .tenantId = std::string(row[1].value().value_or("")),

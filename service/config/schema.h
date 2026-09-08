@@ -1062,6 +1062,16 @@ $flexedge_sync_result_events$
 )sql"},
     }},
 
+    ruvia::DbMigration{{
+        .id = "0021_task_history_error",
+        .sql = std::string{R"sql(DO $flexedge_task_history_error$
+BEGIN
+ALTER TABLE public.sys_sync_event ADD COLUMN error varchar(1000) NOT NULL DEFAULT '';
+CREATE INDEX idx_sync_event_task_version ON public.sys_sync_event (tenant_id, task_id, version, id);
+END;
+$flexedge_task_history_error$
+)sql"},
+    }},
 };
 
 } // namespace service::config

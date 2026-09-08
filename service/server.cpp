@@ -56,6 +56,7 @@
 #include "service/domains/overview/overview.controller.h"
 #include "service/domains/provider/provider.controller.h"
 #include "service/domains/sync_event/sync_event.controller.h"
+#include "service/domains/task/task.controller.h"
 #include "service/features/background/worker_pool.h"
 #include "service/features/certificate/worker.h"
 #include "service/features/dns_sync/worker.h"

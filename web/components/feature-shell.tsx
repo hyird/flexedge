@@ -3,6 +3,7 @@ import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { ProfileDropdown } from '@/components/profile-dropdown'
 import { Search } from '@/components/search'
+import { TaskCenter } from '@/features/tasks/task-center'
 
 type Props = {
   title: string
@@ -23,6 +24,7 @@ export function FeatureShell({
     <>
       <Header fixed>
         <Search className='me-auto' placeholder='搜索页面…' />
+        <TaskCenter />
         <ProfileDropdown />
       </Header>
       <Main fixed={fixed} className='flex flex-1 flex-col gap-4 sm:gap-5'>

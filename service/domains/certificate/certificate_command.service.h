@@ -1,5 +1,7 @@
 #pragma once
 
+#include "service/features/sync_event/fanout.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -98,6 +100,7 @@ class CertificateCommandService final {
         (void)co_await service::certificate_issuance::enqueueCertificateRevision(
             transaction, tenantId, certificateId, 1, service::sync_runtime::MarkerOperation::issue);
         co_await transaction.commit();
+        service::sync_event::fanout::hub().publish(tenantId);
         co_return;
     }
 
@@ -130,6 +133,7 @@ class CertificateCommandService final {
             service::common::throwAppError(CertificateError::REVISION_CONFLICT);
         }
         co_await transaction.commit();
+        service::sync_event::fanout::hub().publish(tenantId);
         co_return;
     }
 
@@ -162,6 +166,7 @@ class CertificateCommandService final {
             transaction, tenantId, id, issuanceRevision,
             service::sync_runtime::MarkerOperation::renew);
         co_await transaction.commit();
+        service::sync_event::fanout::hub().publish(tenantId);
         co_return;
     }
 
@@ -200,6 +205,7 @@ class CertificateCommandService final {
         co_await service::sync_runtime::removeMarker(
             transaction, tenantId, service::sync_runtime::MarkerResourceType::certificate, id);
         co_await transaction.commit();
+        service::sync_event::fanout::hub().publish(tenantId);
         co_return;
     }
 
