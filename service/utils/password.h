@@ -14,19 +14,9 @@
 #include <openssl/rand.h>
 
 #include "service/utils/sensitive_string.h"
+#include "common/hex.h"
 
 namespace service::password_detail {
-
-inline std::string hexEncode(const unsigned char* data, std::size_t size) {
-    constexpr char hex[] = "0123456789abcdef";
-    std::string out;
-    out.reserve(size * 2);
-    for (std::size_t i = 0; i < size; ++i) {
-        out.push_back(hex[data[i] >> 4]);
-        out.push_back(hex[data[i] & 0x0F]);
-    }
-    return out;
-}
 
 inline int hexValue(char ch) {
     if (ch >= '0' && ch <= '9') {
@@ -92,8 +82,8 @@ inline std::string hashPassword(std::string_view plain) {
     }
 
     return "pbkdf2_sha256$" + std::to_string(kIterations) + "$" +
-           password_detail::hexEncode(salt.data(), salt.size()) + "$" +
-           password_detail::hexEncode(key.data(), key.size());
+           flexedge::crypto::hexEncode(salt) + "$" +
+           flexedge::crypto::hexEncode(key);
 }
 
 inline bool comparePassword(std::string_view plain, std::string_view hash) {

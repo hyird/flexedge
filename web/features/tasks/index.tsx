@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { ColumnDef } from '@tanstack/react-table'
 import { RefreshCw } from 'lucide-react'
 import { formatDate } from '@/lib/format'
+import { DEFAULT_PAGE_SIZE } from '@/lib/page-size'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -13,20 +14,15 @@ import {
 import { FeatureShell } from '@/components/feature-shell'
 import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
-import {
-  taskKey,
-  taskStatuses,
-  taskTitle,
-  taskTypes,
-  useTasks,
-  type Task,
-} from './data'
+import { useTasks } from './data'
 import { TaskDetail } from './task-detail'
+import { taskKey, taskStatuses, taskTitle, taskTypes } from './task-display'
 import { TaskStatus } from './task-status'
+import { type Task } from './types'
 
 export function Tasks() {
   const [page, setPage] = useState(1)
-  const [size, setSize] = useState(10)
+  const [size, setSize] = useState(DEFAULT_PAGE_SIZE)
   const [keyword, setKeyword] = useState('')
   const [search, setSearch] = useState('')
   const [type, setType] = useState('all')

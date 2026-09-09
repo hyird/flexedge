@@ -69,6 +69,22 @@ class OriginHealthRegistry final {
 
     using KeySet = std::unordered_set<Key, KeyHash, KeyEqual>;
 
+  private:
+    struct State;
+    using StateMap = std::unordered_map<Key, std::shared_ptr<State>, KeyHash, KeyEqual>;
+  public:
+    class PreparedStates final {
+      public:
+        PreparedStates(const PreparedStates&) = default;
+        PreparedStates& operator=(const PreparedStates&) = default;
+
+      private:
+        friend class OriginHealthRegistry;
+        explicit PreparedStates(std::shared_ptr<const StateMap> states)
+            : states_(std::move(states)) {}
+        std::shared_ptr<const StateMap> states_;
+    };
+
     [[nodiscard]] static Key key(std::string_view websiteId, std::string_view originId) {
         return {.websiteId = std::string(websiteId), .originId = std::string(originId)};
     }
@@ -90,28 +106,38 @@ class OriginHealthRegistry final {
         return true;
     }
 
-    void success(std::string_view websiteId, std::string_view originId, std::uint32_t threshold) {
-        const auto state = stateFor(websiteId, originId);
-        updateStatus(state->status, true, threshold);
-    }
+    class Target final {
+      public:
+        Target() = default;
+        void success(std::uint32_t threshold) const noexcept {
+            if (state_) updateStatus(state_->status, true, threshold);
+        }
+        void failure(std::uint32_t threshold) const noexcept {
+            if (state_) updateStatus(state_->status, false, threshold);
+        }
+        void recordProbe(bool healthy, std::uint32_t threshold,
+                         std::uint32_t latencyMillis, std::string_view error = {}) {
+            const auto& state = state_;
+            if (!state) return;
+            updateStatus(state->status, healthy, threshold);
+            state->checkedAtUnixMillis.store(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count(),
+                std::memory_order_relaxed);
+            state->latencyMillis.store(latencyMillis, std::memory_order_relaxed);
+            std::scoped_lock lock(state->detailMutex);
+            state->lastError.assign(error);
+        }
 
-    void failure(std::string_view websiteId, std::string_view originId, std::uint32_t threshold) {
-        const auto state = stateFor(websiteId, originId);
-        updateStatus(state->status, false, threshold);
-    }
+      private:
+        friend class OriginHealthRegistry;
+        explicit Target(std::shared_ptr<State> state) : state_(std::move(state)) {}
+        std::shared_ptr<State> state_;
+    };
 
-    void recordProbe(std::string_view websiteId, std::string_view originId, bool healthy,
-                     std::uint32_t threshold, std::uint32_t latencyMillis,
-                     std::string_view error = {}) {
-        const auto state = stateFor(websiteId, originId);
-        updateStatus(state->status, healthy, threshold);
-        state->checkedAtUnixMillis.store(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                             std::chrono::system_clock::now().time_since_epoch())
-                                             .count(),
-                                         std::memory_order_relaxed);
-        state->latencyMillis.store(latencyMillis, std::memory_order_relaxed);
-        std::scoped_lock lock(state->detailMutex);
-        state->lastError.assign(error);
+    [[nodiscard]] Target target(std::string_view websiteId,
+                                           std::string_view originId) const {
+        return Target(stateFor(websiteId, originId));
     }
 
     [[nodiscard]] std::vector<Snapshot> reports() const {
@@ -141,6 +167,7 @@ class OriginHealthRegistry final {
     [[nodiscard]] bool claimDue(std::string_view websiteId, std::string_view originId,
                                 std::chrono::seconds interval) {
         const auto state = stateFor(websiteId, originId);
+        if (!state) return false;
         const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              std::chrono::steady_clock::now().time_since_epoch())
                              .count();
@@ -158,23 +185,22 @@ class OriginHealthRegistry final {
         }
     }
 
-    void retain(const KeySet& keys) {
-        auto current = snapshot();
-        for (;;) {
-            auto next = std::make_shared<StateMap>();
-            next->reserve(keys.size());
-            for (const auto& value : keys) {
-                const auto found = current->find(value);
-                next->emplace(value,
-                              found == current->end() ? std::make_shared<State>() : found->second);
-            }
-            std::shared_ptr<const StateMap> desired = std::move(next);
-            if (states_.compare_exchange_weak(current, std::move(desired),
-                                              std::memory_order_release,
-                                              std::memory_order_acquire)) {
-                return;
-            }
+    // Prepare without changing the active registry. Shared state objects preserve
+    // probe results received while the configuration transaction is pending.
+    [[nodiscard]] PreparedStates prepare(const KeySet& keys) const {
+        const auto current = snapshot();
+        auto next = std::make_shared<StateMap>();
+        next->reserve(keys.size());
+        for (const auto& value : keys) {
+            const auto found = current->find(value);
+            next->emplace(value,
+                          found == current->end() ? std::make_shared<State>() : found->second);
         }
+        return PreparedStates(std::move(next));
+    }
+
+    void publish(const PreparedStates& states) noexcept {
+        states_.store(states.states_, std::memory_order_release);
     }
 
   private:
@@ -194,30 +220,17 @@ class OriginHealthRegistry final {
 #pragma warning(pop)
 #endif
 
-    using StateMap = std::unordered_map<Key, std::shared_ptr<State>, KeyHash, KeyEqual>;
-
     [[nodiscard]] std::shared_ptr<const StateMap> snapshot() const noexcept {
         return states_.load(std::memory_order_acquire);
     }
 
+    // Membership belongs to configuration publication. Late request/probe
+    // results must never resurrect a retired origin.
     [[nodiscard]] std::shared_ptr<State> stateFor(std::string_view websiteId,
-                                                  std::string_view originId) {
-        auto current = snapshot();
-        for (;;) {
-            const auto found = current->find(KeyView{websiteId, originId});
-            if (found != current->end()) {
-                return found->second;
-            }
-            auto next = std::make_shared<StateMap>(*current);
-            auto state = std::make_shared<State>();
-            next->emplace(key(websiteId, originId), state);
-            std::shared_ptr<const StateMap> desired = std::move(next);
-            if (states_.compare_exchange_weak(current, std::move(desired),
-                                              std::memory_order_release,
-                                              std::memory_order_acquire)) {
-                return state;
-            }
-        }
+                                                 std::string_view originId) const {
+        const auto current = snapshot();
+        const auto found = current->find(KeyView{websiteId, originId});
+        return found == current->end() ? nullptr : found->second;
     }
 
     static constexpr std::uint64_t kHealthyBit{std::uint64_t{1} << 63U};

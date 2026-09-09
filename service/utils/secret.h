@@ -1,5 +1,7 @@
 #pragma once
 
+#include "common/hex.h"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -48,16 +50,6 @@ inline std::vector<unsigned char> decodeHex(std::string_view value) {
     return result;
 }
 
-inline std::string encodeHex(const unsigned char* value, std::size_t size) {
-    static constexpr char digits[] = "0123456789abcdef";
-    std::string result(size * 2, '\0');
-    for (std::size_t index = 0; index < size; ++index) {
-        result[index * 2] = digits[value[index] >> 4];
-        result[index * 2 + 1] = digits[value[index] & 0x0f];
-    }
-    return result;
-}
-
 inline int checkedSize(std::size_t size) {
     if (size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         throw std::runtime_error("secret value is too large");
@@ -97,8 +89,8 @@ inline std::string sealWithKey(std::string_view plaintext,
     }
     ciphertext.resize(static_cast<std::size_t>(written) + static_cast<std::size_t>(finalSize));
 
-    return "v1." + encodeHex(nonce.data(), nonce.size()) + "." + encodeHex(tag.data(), tag.size()) +
-           "." + encodeHex(ciphertext.data(), ciphertext.size());
+    return "v1." + flexedge::crypto::hexEncode(nonce) + "." + flexedge::crypto::hexEncode(tag) +
+           "." + flexedge::crypto::hexEncode(ciphertext);
 }
 
 inline std::string openWithKey(std::string_view envelope,

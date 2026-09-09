@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -25,18 +26,19 @@
 #include "service/features/dns_sync/worker.h"
 #include "service/features/log_ingest/tail.h"
 #include "service/features/node_dispatch/protocol.h"
+#include "service/features/node_config/mapper.h"
+#include "service/features/node_runtime/mapper.h"
 #include "service/features/provider_verification/worker.h"
 #include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/website_dispatch/worker.h"
 #include "service/features/website_dns/model.h"
+#include "service/features/website_dns/mapper.h"
 #include "service/features/website_dns/runtime.h"
-#include "service/features/node_release/artifact.h"
+#include "service/features/node_release/catalog.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
-#include "service/utils/token.h"
 #include "node/data/origin_selection.h"
-#include "node/data/origin_health.h"
 #include "node/data/route_rules.h"
 #include "service/domains/website/website.schema.h"
 
@@ -70,7 +72,80 @@ std::string source(std::string_view relativePath) {
         }                                                                                          \
     } while (false)
 
-int main() {
+int runArchitectureTests() {
+
+    {
+        const auto empty = service::website_dns::parseStored("{}");
+        REQUIRE(empty.has_value() && empty->domainStates.empty());
+        const auto runtime = service::website_dns::parseStored(R"json({"domain_states":[
+            {}, {"id":"domain", "resolution_status":"verified", "last_error":""}
+        ]})json");
+        REQUIRE(runtime.has_value() && runtime->domainStates.size() == 2);
+        REQUIRE(!runtime->domainStates[0].id.has_value());
+        REQUIRE(!runtime->domainStates[0].resolutionStatus.has_value());
+        REQUIRE(runtime->domainStates[1].id == "domain");
+        REQUIRE(runtime->domainStates[1].resolutionStatus == "verified");
+        REQUIRE(runtime->domainStates[1].lastError.has_value());
+        REQUIRE(runtime->domainStates[1].lastError->empty());
+        REQUIRE(!service::website_dns::parseStored(R"({"domain_states":"invalid"})"));
+        REQUIRE(ruvia::toJson(service::website_dns::toOutput(*empty)) ==
+                R"({"domain_states":[]})");
+        REQUIRE(throwsRuntimeError([&] { (void)service::website_dns::toOutput(*runtime); }));
+        service::website_dns::WebsiteRuntimeData complete;
+        complete.domainStates.push_back(runtime->domainStates[1]);
+        complete.domainStates.push_back({.id = "invalid-domain",
+                                         .resolutionStatus = "invalid",
+                                         .lastVerifiedAt = "2026-09-08T00:00:00Z",
+                                         .lastError = "CNAME mismatch"});
+        const auto serialized = ruvia::toJson(service::website_dns::toOutput(complete));
+        const auto restored = service::website_dns::parseStored(serialized);
+        REQUIRE(restored && restored->domainStates.size() == 2);
+        REQUIRE(restored->domainStates[0].resolutionStatus == "verified");
+        REQUIRE(restored->domainStates[1].resolutionStatus == "invalid");
+        REQUIRE(restored->domainStates[1].lastError == "CNAME mismatch");
+        REQUIRE(restored->domainStates[1].lastVerifiedAt == "2026-09-08T00:00:00Z");
+    }
+    {
+        const auto empty = service::node_runtime::parseStored("{}");
+        REQUIRE(empty.has_value());
+        REQUIRE(!empty->cpuUsage.has_value());
+        REQUIRE(!empty->connectionCount.has_value());
+        REQUIRE(empty->originHealth.empty());
+        const auto runtime = service::node_runtime::parseStored(R"json({
+            "cpu_usage": 0, "connection_count": 0, "health": "healthy",
+            "origin_health": [
+                {"website_id":"web", "origin_id":"origin", "status":"healthy",
+                 "checked_at_unix_millis":123, "latency_millis":0, "last_error":""},
+                {"website_id":"incomplete"}
+            ]
+        })json");
+        REQUIRE(runtime.has_value());
+        REQUIRE(runtime->cpuUsage.has_value() && *runtime->cpuUsage == 0);
+        REQUIRE(runtime->connectionCount.has_value() && *runtime->connectionCount == 0);
+        REQUIRE(runtime->originHealth.size() == 1);
+        REQUIRE(runtime->originHealth[0].websiteId == "web");
+        REQUIRE(runtime->originHealth[0].checkedAtUnixMillis == 123);
+        REQUIRE(runtime->originHealth[0].lastError.has_value());
+        REQUIRE(runtime->originHealth[0].lastError->empty());
+        REQUIRE(!service::node_runtime::parseStored(R"({"cpu_usage":"invalid"})"));
+        REQUIRE(!service::node_runtime::parseStored("{"));
+    }
+    {
+        REQUIRE(!service::node_config::parseStored("{}"));
+        const auto empty = service::node_config::parseStored(R"({"endpoints":[]})");
+        REQUIRE(empty.has_value() && empty->endpoints.empty());
+        REQUIRE(!service::node_config::parseStored(
+            R"({"endpoints":[{"id":"one","ip_address":"192.0.2.1"}]})"));
+        const auto config = service::node_config::parseStored(
+            R"({"endpoints":[{"id":"one","ip_address":"192.0.2.1","line_code":"default"}]})");
+        REQUIRE(config.has_value() && config->endpoints.size() == 1);
+        const auto roundTrip = service::node_config::parseStored(
+            ruvia::toJson(service::node_config::toOutput(*config)));
+        REQUIRE(roundTrip.has_value() && roundTrip->endpoints.size() == 1);
+        REQUIRE(roundTrip->endpoints[0].id == "one");
+        REQUIRE(roundTrip->endpoints[0].ipAddress == "192.0.2.1");
+        REQUIRE(roundTrip->endpoints[0].lineCode == "default");
+    }
     {
         flexedge::node::v2::Website phased;
         phased.set_default_origin_group("default");
@@ -249,10 +324,6 @@ int main() {
     REQUIRE(!clusterController.contains("cluster.service.h"));
     REQUIRE(clusterController.contains("clusterCommandService().create"));
     REQUIRE(clusterController.contains("clusterReadService().list"));
-    static_assert(service::node_dispatch::canReportAppliedNodeSpecRevision(2, 2, 3));
-    static_assert(service::node_dispatch::canReportAppliedNodeSpecRevision(2, 3, 3));
-    static_assert(!service::node_dispatch::canReportAppliedNodeSpecRevision(3, 2, 4));
-    static_assert(!service::node_dispatch::canReportAppliedNodeSpecRevision(2, 4, 3));
 
     const auto configuredOrigins = service::config::makeOutboundOrigins(std::string{});
     REQUIRE(&service::config::outboundOriginConfig(configuredOrigins,
@@ -269,11 +340,46 @@ int main() {
             "1787776027394526:b2d6e77d-4a0c-4796-93d5-755d3c6d3837");
     REQUIRE(!service::log_ingest::parseTailCursor("0:not-a-uuid"));
     REQUIRE(service::common::certificateCoversHostname("*.example.com", "www.example.com"));
+    REQUIRE(!service::common::certificateCoversHostname("*.example.com", "example.com"));
+    REQUIRE(service::common::certificateCoversHostname("example.com", "example.com"));
+    {
+        service::node_dispatch::DeploymentWebsiteSource source{};
+        source.id = "website";
+        service::website_config::WebsiteConfigData config{};
+        config.httpsEnabled = true;
+        for (const auto hostname : {"example.com", "www.example.com", "a.b.example.com"}) {
+            service::website_config::WebsiteDomainData domain{};
+            domain.hostname = hostname;
+            config.domains.push_back(std::move(domain));
+        }
+        service::node_dispatch::ClusterDeploymentSource deployment{};
+        service::node_dispatch::AvailableCertificate certificate{};
+        certificate.id = "certificate";
+        certificate.domains = {"*.example.com"};
+        deployment.certificatesByWebsite[source.id].push_back(certificate);
+        // The artifact already exists; this test exercises name selection, not key decryption.
+        std::unordered_map<std::string, std::string> digests{{certificate.id, std::string(64, 'a')}};
+        flexedge::node::v2::ClusterReleaseContent manifest;
+        service::node_dispatch::ClusterReleaseArtifact artifacts;
+        flexedge::node::v2::Website website;
+        REQUIRE(service::node_dispatch::appendWebsiteDomains(
+            source, config, deployment, digests, manifest, artifacts, website));
+        REQUIRE(!website.domains(0).https_enabled());
+        REQUIRE(website.domains(1).https_enabled());
+        REQUIRE(!website.domains(2).https_enabled());
+        deployment.certificatesByWebsite[source.id][0].domains.push_back("example.com");
+        website.Clear();
+        REQUIRE(service::node_dispatch::appendWebsiteDomains(
+            source, config, deployment, digests, manifest, artifacts, website));
+        REQUIRE(website.domains(0).https_enabled());
+        REQUIRE(website.domains(0).certificate_digest() == std::string(64, 'a'));
+        REQUIRE(!website.domains(2).https_enabled());
+    }
     REQUIRE(!service::common::certificateCoversHostname("*.example.com", "a.b.example.com"));
     REQUIRE(service::common::domainBelongsToZone("www.example.com", "example.com"));
     REQUIRE(service::common::isHostname("*.example.com"));
     REQUIRE(!service::common::isHostname("-invalid.example.com"));
-    REQUIRE(service::common::isIpAddress("2001:db8::1"));
+    REQUIRE(service::common::parseIpAddress("2001:db8::1"));
     REQUIRE(!service::common::isIpv4Address("2001:db8::1"));
 
     service::utils::SensitiveString secret(std::string("first-secret"));
@@ -287,12 +393,6 @@ int main() {
     auto tampered = sealed;
     tampered.back() = tampered.back() == 'a' ? 'b' : 'a';
     REQUIRE(throwsRuntimeError([&] { (void)service::utils::openSecret(tampered); }));
-
-    const auto firstToken = service::utils::randomToken();
-    const auto secondToken = service::utils::randomToken();
-    REQUIRE(firstToken.size() == 64);
-    REQUIRE(std::ranges::all_of(firstToken, [](unsigned char ch) { return std::isxdigit(ch); }));
-    REQUIRE(firstToken != secondToken);
 
     service::overview::OverviewResourceCountsDto resources;
     resources.set<"websiteCount">(2);
@@ -355,7 +455,10 @@ int main() {
     REQUIRE(schemaSql.contains("idx_website_access_log_website_ingested"));
     REQUIRE(schemaSql.contains("idx_node_log_node_ingested"));
 
-    const auto websiteConfig = source("service/features/website_config/model.h");
+    const auto websiteConfigModel = source("service/features/website_config/model.h");
+    REQUIRE(!websiteConfigModel.contains("ruvia"));
+    REQUIRE(!websiteConfigModel.contains("transport.h"));
+    const auto websiteConfig = source("service/features/website_config/mapper.h");
     REQUIRE(websiteConfig.contains("!defaultOriginGroup"));
     REQUIRE(websiteConfig.contains("!healthCheckPath"));
     REQUIRE(websiteConfig.contains("!healthyThreshold"));
@@ -468,13 +571,14 @@ int main() {
     REQUIRE(agentTypes.contains("struct HeartbeatReport final"));
     const auto agentReadService = source("service/domains/agent/agent_read.service.h");
     REQUIRE(agentReadService.contains("class AgentReadService final"));
-    REQUIRE(agentReadService.contains("sys_cluster_release_object mapping"));
+    REQUIRE(!agentReadService.contains("sys_cluster_release_object mapping"));
+    REQUIRE(source("service/domains/agent/release_objects.store.h").contains("sys_cluster_release_object mapping"));
     REQUIRE(agentReadService.contains("artifactDigest"));
     REQUIRE(agentCommand.contains("agent_runtime.mapper.h"));
     REQUIRE(!agentCommand.contains("NodeRuntimeOutput runtime"));
     const auto agentRuntimeMapper = source("service/domains/agent/agent_runtime.mapper.h");
     REQUIRE(agentRuntimeMapper.contains("inline std::string heartbeatRuntimeJson"));
-    const auto nodeReleaseArtifact = source("service/features/node_release/artifact.h");
+    const auto nodeReleaseArtifact = source("service/features/node_release/catalog.h");
     REQUIRE(nodeReleaseArtifact.contains("std::atomic<Snapshot> release_"));
     REQUIRE(!nodeReleaseArtifact.contains("atomic_load_explicit"));
     REQUIRE(!nodeReleaseArtifact.contains("atomic_store_explicit"));
@@ -502,16 +606,34 @@ int main() {
     REQUIRE(!agentController.contains("static bool parseEnvelope"));
     REQUIRE(!agentController.contains("static HeartbeatReport report"));
     const auto agentProtocol = source("service/domains/agent/agent_protocol.h");
-    REQUIRE(agentProtocol.contains("inline bool parseClientEnvelope"));
+    REQUIRE(!agentProtocol.contains("WebSocket"));
+    REQUIRE(!agentProtocol.contains("service/common/http.h"));
+    REQUIRE(source("service/domains/agent/agent_transport.h").contains("inline bool parseClientEnvelope"));
     REQUIRE(agentProtocol.contains("inline bool validHeartbeat"));
-    REQUIRE(agentProtocol.contains("inline HeartbeatReport toHeartbeatReport"));
+    REQUIRE(!agentProtocol.contains("HeartbeatReport"));
+    REQUIRE(source("service/domains/agent/agent_report.mapper.h").contains("inline HeartbeatReport toHeartbeatReport"));
     const auto authServiceSource = source("service/domains/auth/auth.service.h");
     REQUIRE(authServiceSource.contains("auth_session.service.h"));
     REQUIRE(!authServiceSource.contains("sys_auth_session"));
+    REQUIRE(!authServiceSource.contains("sys_admin"));
+    REQUIRE(!authServiceSource.contains("sys_auth_login_throttle"));
+    REQUIRE(!authServiceSource.contains("comparePassword"));
+    const auto authenticateService = source("service/domains/auth/authenticate.service.h");
+    REQUIRE(!authenticateService.contains("ruvia::Context"));
+    REQUIRE(!authenticateService.contains("service/common/http.h"));
+    REQUIRE(!authenticateService.contains("AuthSessionDto"));
+    const auto authUserStore = source("service/domains/auth/auth_user.store.h");
+    REQUIRE(!authUserStore.contains("ruvia::Context"));
+    REQUIRE(!authUserStore.contains("service/common/http.h"));
     REQUIRE(!authServiceSource.contains("createSession"));
     const auto authSessionService = source("service/domains/auth/auth_session.service.h");
     REQUIRE(authSessionService.contains("class AuthSessionService final"));
-    REQUIRE(authSessionService.contains("sys_auth_session"));
+    REQUIRE(!authSessionService.contains("sys_auth_session"));
+    const auto authSessionStore = source("service/domains/auth/auth_session.store.h");
+    REQUIRE(authSessionStore.contains("sys_auth_session"));
+    REQUIRE(!authSessionStore.contains("ruvia::Context"));
+    REQUIRE(!authSessionStore.contains("service/common/http.h"));
+    REQUIRE(!authSessionStore.contains("service/domains/auth/session_cookie.h"));
     REQUIRE(authSessionService.contains("readSessionCookie"));
     const auto authController = source("service/domains/auth/auth.controller.h");
     REQUIRE(authController.contains("authSessionService().refresh"));
@@ -541,7 +663,7 @@ int main() {
     REQUIRE(acmeTypes.contains("struct AcmeSettings final"));
     REQUIRE(acmeTypes.contains("class AcmeError final"));
     REQUIRE(acmeTypes.contains("struct EabCredentials final"));
-    const auto certificateProviderConfig = source("service/features/certificate/provider_config.h");
+    const auto certificateProviderConfig = source("service/features/certificate/provider_runtime_credentials.h");
     REQUIRE(certificateProviderConfig.contains("certificate/acme_types.h"));
     REQUIRE(!certificateProviderConfig.contains("struct EabCredentials final"));
     const auto certificateProvider = source("service/features/certificate/provider.h");
@@ -602,10 +724,8 @@ int main() {
     REQUIRE(!websitePage.contains("useFieldArray"));
     const auto websiteTypes = source("web/features/websites/types.ts");
     REQUIRE(websiteTypes.contains("export type WebsiteConfig"));
-    REQUIRE(websiteTypes.contains("export type WebsiteDashboard"));
-    const auto frontendSharedTypes = source("web/lib/types.ts");
-    REQUIRE(!frontendSharedTypes.contains("export type WebsiteConfig"));
-    REQUIRE(!frontendSharedTypes.contains("export type WebsiteDashboard"));
+    REQUIRE(source("web/features/websites/dashboard-schema.ts").contains("export type WebsiteDashboard"));
+    REQUIRE(!std::filesystem::exists(sourceRoot / "web/lib/types.ts"));
     const auto websiteDialog = source("web/features/websites/website-dialog.tsx");
     REQUIRE(websiteDialog.contains("export function WebsiteDialog"));
     REQUIRE(websiteDialog.contains("useFieldArray"));
@@ -677,17 +797,17 @@ int main() {
     REQUIRE(!providersPage.contains("function providerLabel"));
     const auto dnsProviderDialog = source("web/features/providers/dns-provider-dialog.tsx");
     REQUIRE(dnsProviderDialog.contains("export function DnsProviderDialog"));
-    REQUIRE(dnsProviderDialog.contains("dnsSchema"));
+    REQUIRE(dnsProviderDialog.contains("from './dns-provider-form'"));
     const auto certificateProviderDialog =
         source("web/features/providers/certificate-provider-dialog.tsx");
     REQUIRE(certificateProviderDialog.contains("export function CertificateProviderDialog"));
-    REQUIRE(certificateProviderDialog.contains("certificateSchema"));
+    REQUIRE(certificateProviderDialog.contains("from './certificate-provider-form'"));
     const auto providerDisplay = source("web/features/providers/provider-display.ts");
     REQUIRE(providerDisplay.contains("export function providerLabel"));
 
     const auto nodesPage = source("web/features/nodes/index.tsx");
     REQUIRE(nodesPage.contains("import { CredentialsDialog } from './credentials-dialog'"));
-    REQUIRE(nodesPage.contains("import { NodeDialog, type NodeCredentials } from './node-dialog'"));
+    REQUIRE(nodesPage.contains("import { NodeDialog } from './node-dialog'"));
     REQUIRE(nodesPage.contains("import { NodeLogSheet } from './node-log-sheet'"));
     REQUIRE(!nodesPage.contains("function NodeDialog"));
     REQUIRE(!nodesPage.contains("function CredentialsDialog"));
@@ -695,13 +815,15 @@ int main() {
     REQUIRE(!nodesPage.contains("useFieldArray"));
     const auto nodeDialog = source("web/features/nodes/node-dialog.tsx");
     REQUIRE(nodeDialog.contains("export function NodeDialog"));
-    REQUIRE(nodeDialog.contains("export type NodeCredentials"));
+    REQUIRE(source("web/features/nodes/data.ts").contains("export type NodeCredentials"));
+    REQUIRE(!nodeDialog.contains("export type"));
     REQUIRE(nodeDialog.contains("useFieldArray"));
     const auto credentialsDialog = source("web/features/nodes/credentials-dialog.tsx");
     REQUIRE(credentialsDialog.contains("export function CredentialsDialog"));
     const auto nodeLogSheet = source("web/features/nodes/node-log-sheet.tsx");
     REQUIRE(nodeLogSheet.contains("export function NodeLogSheet"));
-    REQUIRE(nodeLogSheet.contains("new EventSource"));
+    REQUIRE(nodeLogSheet.contains("useLiveLogs"));
+    REQUIRE(!nodeLogSheet.contains("new EventSource"));
 
     const auto certificatesPage = source("web/features/certificates/index.tsx");
     REQUIRE(certificatesPage.contains("import { CertificateDialog } from './certificate-dialog'"));
@@ -711,7 +833,7 @@ int main() {
     REQUIRE(!certificatesPage.contains("function CertificateDetailSheet"));
     const auto certificateDialog = source("web/features/certificates/certificate-dialog.tsx");
     REQUIRE(certificateDialog.contains("export function CertificateDialog"));
-    REQUIRE(certificateDialog.contains("createSchema"));
+    REQUIRE(certificateDialog.contains("from './certificate-form'"));
     const auto certificateDetailSheet =
         source("web/features/certificates/certificate-detail-sheet.tsx");
     REQUIRE(certificateDetailSheet.contains("export function CertificateDetailSheet"));
@@ -928,6 +1050,28 @@ int main() {
     REQUIRE(markerWorkerLoop.contains("nextLeaseRecovery"));
     REQUIRE(markerWorkerLoop.contains("nextReconciliation"));
     REQUIRE(markerWorkerLoop.contains("nextEventPrune"));
+    // Shutdown closes clients and the database; interrupted work must not start failure writes.
+    REQUIRE(websiteDispatchWorker.contains(
+        "if (!context.stopToken().stopRequested() && !markerError.empty())"));
+    REQUIRE(providerVerificationWorker.contains(
+        "if (!context.stopToken().stopRequested() && exception)"));
+    for (const auto& worker : {websiteDispatchWorker, providerVerificationWorker}) {
+        const auto batch = worker.substr(worker.find("inline ruvia::Task<void> processMarkers"));
+        REQUIRE(batch.contains("if (context.stopToken().stopRequested() || !marker)"));
+        REQUIRE(batch.find("context.stopToken().stopRequested()") <
+                batch.find("co_await claim(context)"));
+    }
+    const auto afterMaintenance = markerWorkerLoop.substr(
+        markerWorkerLoop.find("co_await maintenance(context"));
+    REQUIRE(afterMaintenance.find("context.stopToken().stopRequested()") <
+            afterMaintenance.find("pruneResultEvents"));
+    const auto afterPrune = markerWorkerLoop.substr(
+        markerWorkerLoop.find("co_await service::sync_runtime::pruneResultEvents"));
+    REQUIRE(afterPrune.find("context.stopToken().stopRequested()") <
+            afterPrune.find("co_await processAvailable"));
+    const auto afterCatch = markerWorkerLoop.substr(markerWorkerLoop.find("catch (...)"));
+    REQUIRE(afterCatch.find("context.stopToken().stopRequested()") <
+            afterCatch.find("service::logging::error"));
     for (const auto workerPath : {
              "service/features/provider_verification/worker.h",
              "service/features/dns_sync/worker.h",
@@ -963,11 +1107,11 @@ int main() {
     const auto nodeController = source("service/domains/node/node.controller.h");
     REQUIRE(nodeController.contains("log_ingest/sse_tail.h"));
     REQUIRE(nodeController.contains("streamSseTail"));
-    REQUIRE(nodeController.contains("node_runtime/fanout.h"));
-    REQUIRE(nodeController.contains("runtimeStreamBody"));
-    REQUIRE(nodeController.contains("node_runtime::fanout::hub().subscribe"));
-    REQUIRE(nodeController.contains("subscription.receiveFor("));
-    REQUIRE(nodeController.contains("event = \"node-state\""));
+    REQUIRE(nodeController.contains("live_resource/sse.h"));
+    REQUIRE(nodeController.contains("live_resource::hub().subscribe"));
+    REQUIRE(nodeController.contains("streamSnapshot"));
+    REQUIRE(!nodeController.contains("node-state"));
+    REQUIRE(!nodeController.contains("RUVIA_GET("));
     REQUIRE(nodeController.contains("node_command.service.h"));
     REQUIRE(nodeController.contains("node_read.service.h"));
     REQUIRE(!nodeController.contains("node.service.h"));
@@ -985,18 +1129,20 @@ int main() {
     REQUIRE(websiteController.contains("log_ingest/sse_tail.h"));
     REQUIRE(websiteController.contains("streamSseTail"));
     REQUIRE(websiteController.contains("RUVIA_GET_SSE(\"/:id/dashboard/stream\", dashboardStream)"));
-    REQUIRE(websiteController.contains("streamSseSnapshots"));
+    REQUIRE(websiteController.contains("streamSnapshot"));
+    REQUIRE(!websiteController.contains("streamSseSnapshots"));
     REQUIRE(!websiteController.contains("RUVIA_GET(\"/:id/dashboard\", dashboard)"));
     REQUIRE(!websiteController.contains("receiveFor("));
     REQUIRE(!websiteController.contains("advanceCursor("));
     const auto websiteDetailSheet = source("web/features/websites/website-detail-sheet.tsx");
-    REQUIRE(websiteDetailSheet.contains("/dashboard/stream"));
+    REQUIRE(websiteDetailSheet.contains("useWebsiteDashboard"));
+    REQUIRE(source("web/features/websites/use-website-dashboard.ts").contains("/dashboard/stream"));
     REQUIRE(!websiteDetailSheet.contains("refetchInterval"));
     REQUIRE(!websiteDetailSheet.contains("getData<WebsiteDashboard>(`/websites/${websiteId}/dashboard`)"));
-    const auto webMain = source("web/main.tsx");
+    const auto webMain = source("web/lib/query-client.ts");
     REQUIRE(webMain.contains("staleTime: Infinity"));
     REQUIRE(webMain.contains("refetchOnReconnect: false"));
-    const auto nodeRuntimeFanout = source("service/features/node_runtime/fanout.h");
+    const auto nodeRuntimeFanout = source("service/features/node_dispatch/fanout.h");
     REQUIRE(nodeRuntimeFanout.contains("kSubscriberSignalCapacity{1}"));
     REQUIRE(nodeRuntimeFanout.contains("class Hub final"));
     REQUIRE(nodeRuntimeFanout.contains("Subscription"));
@@ -1010,48 +1156,26 @@ int main() {
     const auto taskService = source("service/domains/task/task.service.h");
     REQUIRE(!taskService.contains("INSERT INTO"));
     REQUIRE(!taskService.contains("UPDATE sys_"));
-    const auto syncEventService = source("service/domains/sync_event/sync_event.service.h");
-    REQUIRE(syncEventService.contains("SyncEventPageDataDto"));
-    REQUIRE(syncEventService.contains("FROM sys_sync_event"));
-    REQUIRE(syncEventService.contains("ORDER BY id ASC"));
     const auto syncRuntimeState = source("service/features/sync_runtime/state.h");
     REQUIRE(syncRuntimeState.contains("$4::varchar(16)"));
-    const auto syncEventTypes = source("service/domains/sync_event/sync_event.types.h");
-    REQUIRE(syncEventTypes.contains("SyncEventDto"));
-    REQUIRE(syncEventTypes.contains("has_more"));
-    const auto syncEventController = source("service/domains/sync_event/sync_event.controller.h");
-    REQUIRE(syncEventController.contains("/api/sync-events"));
-    REQUIRE(syncEventController.contains("RUVIA_GET_SSE(\"/stream\", stream)"));
-    REQUIRE(!syncEventController.contains("RUVIA_GET(\"/\", list)"));
     REQUIRE(!std::filesystem::exists(sourceRoot / "web/components/task-completion-monitor.tsx"));
-    const auto syncEventMonitor = source("web/components/sync-event-monitor.tsx");
-    REQUIRE(syncEventMonitor.contains("/sync-events/"));
-    REQUIRE(syncEventMonitor.contains("refreshSyncEventQueries"));
-    REQUIRE(syncEventMonitor.contains("stream.addEventListener('ready'"));
-    REQUIRE(syncEventMonitor.contains("const refreshAll"));
-    const auto syncEvents = source("web/lib/sync-events.ts");
-    REQUIRE(syncEvents.contains("syncEventRefreshKeys"));
-    REQUIRE(syncEvents.contains("queryKeys.providers"));
-    REQUIRE(syncEvents.contains("queryKeys.dnsZones"));
-    REQUIRE(syncEvents.contains("queryKeys.certificates"));
-    REQUIRE(syncEvents.contains("queryKeys.websites"));
-    REQUIRE(!syncEvents.contains("[['tasks']"));
-    REQUIRE(syncEvents.contains("provider:"));
-    REQUIRE(syncEvents.contains("dns_zone:"));
-    REQUIRE(syncEvents.contains("certificate:"));
-    REQUIRE(syncEvents.contains("website:"));
-    const auto queryKeys = source("web/lib/query-keys.ts");
-    REQUIRE(queryKeys.contains("syncEvents: ['sync-event-monitor']"));
-    for (const auto* featurePath :
-         {"web/features/certificates/index.tsx", "web/features/clusters/index.tsx",
-          "web/features/dns-zones/index.tsx", "web/features/nodes/index.tsx",
-          "web/features/providers/index.tsx", "web/features/websites/index.tsx"}) {
-        REQUIRE(source(featurePath).contains("queryKeys"));
+    REQUIRE(!std::filesystem::exists(sourceRoot / "web/features/sync/resource-event-monitor.tsx"));
+    REQUIRE(!std::filesystem::exists(sourceRoot / "web/lib/query-refresh.ts"));
+    REQUIRE(!std::filesystem::exists(sourceRoot / "service/domains/sync_event/sync_event.controller.h"));
+    for (const auto* controllerPath : {
+        "service/domains/cluster/cluster.controller.h", "service/domains/dns_zone/dns_zone.controller.h",
+        "service/domains/provider/provider.controller.h", "service/domains/task/task.controller.h",
+        "service/domains/website/website.controller.h", "service/domains/overview/overview.controller.h"}) {
+        const auto controller = source(controllerPath);
+        REQUIRE(controller.contains("RUVIA_GET_SSE"));
+        REQUIRE(!controller.contains("RUVIA_GET("));
     }
 
     const auto nodeDispatch = source("service/features/node_dispatch/queue.h");
     REQUIRE(nodeDispatch.contains("publishClusterRelease"));
-    REQUIRE(nodeDispatch.contains("sys_node_release_target"));
+    REQUIRE(!nodeDispatch.contains("transaction.query("));
+    REQUIRE(!nodeDispatch.contains("transaction.execute("));
+    REQUIRE(source("service/features/node_dispatch/release.store.h").contains("sys_node_release_target"));
     REQUIRE(!nodeDispatch.contains("sys_task"));
     REQUIRE(!nodeDispatch.contains("parent_task_id"));
     const auto nodeControlChannel = source("node/control/control_channel.h");
@@ -1100,7 +1224,7 @@ int main() {
     REQUIRE(!dnsSyncWorker.contains("task_runtime"));
     REQUIRE(!dnsSyncWorker.contains("spec_snapshot"));
     REQUIRE(!dnsSyncWorker.contains("RunningMarkerLease lease"));
-    const auto dnsSnapshot = source("service/features/dns_sync/snapshot.h");
+    const auto dnsSnapshot = source("service/features/dns_sync/transport.h");
     REQUIRE(dnsSnapshot.contains("challenge_records"));
     const auto dnsChallenge = source("service/features/certificate/dns_challenge.h");
     REQUIRE(dnsChallenge.contains("RunningMarkerLease"));
@@ -1366,13 +1490,6 @@ int main() {
         service::website::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
         REQUIRE(!validation.fields.empty());
     }
-    flexedge::node::OriginHealthRegistry originHealth;
-    originHealth.recordProbe("website-1", "origin-1", false, 1, 42, "timeout");
-    const auto healthReports = originHealth.reports();
-    REQUIRE(healthReports.size() == 1);
-    REQUIRE(healthReports.front().status == "unhealthy");
-    REQUIRE(healthReports.front().latencyMillis == 42);
-    REQUIRE(healthReports.front().lastError == "timeout");
     auto* invalidRoute = routeWebsite.add_route_rules();
     invalidRoute->set_id("route-2");
     invalidRoute->set_match_type("exact");
@@ -1396,4 +1513,13 @@ int main() {
         REQUIRE(!content.contains("spec_snapshot"));
     }
     return 0;
+}
+
+int main() {
+    try {
+        return runArchitectureTests();
+    } catch (const std::exception& error) {
+        std::cerr << "architecture test failed: " << error.what() << '\n';
+        return 1;
+    }
 }

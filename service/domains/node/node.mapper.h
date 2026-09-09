@@ -8,8 +8,8 @@
 
 #include "service/common/http.h"
 #include "service/domains/node/node.types.h"
-#include "service/features/node_config/model.h"
-#include "service/features/node_runtime/model.h"
+#include "service/features/node_config/mapper.h"
+#include "service/features/node_runtime/mapper.h"
 
 namespace service::node {
 
@@ -17,7 +17,7 @@ namespace service::node {
     service::common::throwAppError(service::common::kServerErrorCode, "聚合配置损坏", 500);
 }
 
-inline std::string serializeNodeConfig(ruvia::Context& c,
+inline std::string serializeNodeConfig(auto& c,
                                        const service::node_config::NodeConfigData& input) {
     const auto output = service::node_config::toOutput(input, {.resource = c.resource()});
     const auto json = ruvia::toJson(output, {.resource = c.resource()});
@@ -25,7 +25,7 @@ inline std::string serializeNodeConfig(ruvia::Context& c,
 }
 
 template <typename Row>
-inline NodeRuntimeDto nodeRuntimeDto(ruvia::Context& c,
+inline NodeRuntimeDto nodeRuntimeDto(auto& c,
                                      const service::node_runtime::NodeRuntimeData& input,
                                      const Row& row) {
     NodeRuntimeDto output(c);
@@ -74,7 +74,7 @@ inline NodeRuntimeDto nodeRuntimeDto(ruvia::Context& c,
     return output;
 }
 
-template <typename Row> inline void fillNode(ruvia::Context& c, NodeDto& item, const Row& row) {
+template <typename Row> inline void fillNode(auto& c, NodeDto& item, const Row& row) {
     const auto config = service::node_config::parseStored(row[5].value().value_or("{}"),
                                                           {.resource = c.resource()});
     const auto runtime = service::node_runtime::parseStored(row[6].value().value_or("{}"),

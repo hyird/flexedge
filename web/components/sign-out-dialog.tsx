@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { logout, sessionQueryOptions } from '@/lib/auth'
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { logout } from '@/features/auth/data'
 
 type Props = {
   open: boolean
@@ -12,9 +12,8 @@ export function SignOutDialog({ open, onOpenChange }: Props) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const mutation = useMutation({
-    mutationFn: logout,
+    mutationFn: () => logout(queryClient),
     onSuccess: async () => {
-      queryClient.removeQueries({ queryKey: sessionQueryOptions.queryKey })
       onOpenChange(false)
       await navigate({
         to: '/sign-in',

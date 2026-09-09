@@ -1,4 +1,4 @@
-import type { DnsZone } from '@/lib/types'
+import type { DnsZone } from '@/features/dns-zones/types'
 
 export function hasMeaningfulConflicts(zone: DnsZone) {
   return zone.runtime.conflicts.length > 0

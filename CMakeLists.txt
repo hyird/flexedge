@@ -55,7 +55,7 @@ set(RUVIA_ENABLE_REDIS ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
     ruvia
     GIT_REPOSITORY https://github.com/hyird/Ruvia.git
-    GIT_TAG 0ca74f8597f32ce9a260c1d669758e1f7721589b # main, 2026-09-07
+    GIT_TAG d7fa8d6dd14be4de204172de9bca0b76f7a3643f # main, 2026-09-09
 )
 FetchContent_MakeAvailable(ruvia)
 find_package(asio CONFIG REQUIRED)
@@ -75,7 +75,16 @@ protobuf_generate(
     PROTOC_OUT_DIR "${FLEXEDGE_GENERATED_DIR}"
 )
 target_include_directories(flexedge_node_protocol PUBLIC "${FLEXEDGE_GENERATED_DIR}")
-target_link_libraries(flexedge_node_protocol PUBLIC protobuf::libprotobuf re2::re2)
+target_link_libraries(flexedge_node_protocol PUBLIC protobuf::libprotobuf)
+
+add_library(flexedge_route_policy INTERFACE)
+target_include_directories(flexedge_route_policy INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(flexedge_route_policy INTERFACE re2::re2)
+
+add_library(flexedge_node_version INTERFACE)
+target_compile_definitions(flexedge_node_version INTERFACE
+    FLEXEDGE_NODE_VERSION="${PROJECT_VERSION}"
+)
 
 set(FLEXEDGE_LOG_INGEST_PROTO
     "${CMAKE_CURRENT_SOURCE_DIR}/service/features/log_ingest/log_envelope.proto")
@@ -122,12 +131,12 @@ add_executable(flexedge_service
 )
 
 target_include_directories(flexedge_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(flexedge_service PRIVATE FLEXEDGE_NODE_VERSION="${PROJECT_VERSION}")
 
 target_link_libraries(flexedge_service
     PRIVATE
         flexedge_node_protocol
         flexedge_log_ingest_protocol
+        flexedge_route_policy
         ruvia::web
         asio::asio
         OpenSSL::Crypto
@@ -148,11 +157,10 @@ add_executable(flexedge_node
 )
 target_include_directories(flexedge_node PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(flexedge_node PRIVATE
-    FLEXEDGE_NODE_VERSION="${PROJECT_VERSION}"
     $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
 )
 target_link_libraries(flexedge_node
-    PRIVATE flexedge_node_protocol ruvia::web OpenSSL::SSL OpenSSL::Crypto
+    PRIVATE flexedge_node_protocol flexedge_node_version flexedge_route_policy ruvia::web OpenSSL::SSL OpenSSL::Crypto
 )
 set(FLEXEDGE_NODE_RELEASE_MANIFEST "${CMAKE_BINARY_DIR}/node-release.manifest")
 add_custom_command(TARGET flexedge_node POST_BUILD
@@ -185,89 +193,176 @@ else()
 endif()
 
 if(BUILD_TESTING)
-    add_executable(flexedge_architecture_test
-        tests/architecture_test.cpp
-        service/features/background/worker_pool.cpp
+    # Compile-only boundary check: no Ruvia, database, or protocol dependency
+    # may be needed to consume the plain domain data structures.
+    add_library(flexedge_domain_models_compile_test OBJECT
+        tests/domain_models_compile_test.cpp
     )
-    target_include_directories(flexedge_architecture_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_compile_definitions(flexedge_architecture_test
-        PRIVATE FLEXEDGE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-    )
-    target_link_libraries(flexedge_architecture_test
-        PRIVATE flexedge_node_protocol ruvia::web asio::asio OpenSSL::Crypto
+    target_include_directories(flexedge_domain_models_compile_test
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
     )
     if(MSVC)
-        target_compile_options(flexedge_architecture_test PRIVATE /W4 /permissive- /utf-8 /wd4819)
-    else()
-        target_compile_options(flexedge_architecture_test PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(flexedge_domain_models_compile_test PRIVATE /utf-8)
     endif()
-    add_test(NAME flexedge_architecture COMMAND flexedge_architecture_test)
 
-    add_executable(flexedge_node_runtime_test tests/node_runtime_test.cpp)
-    target_include_directories(flexedge_node_runtime_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(flexedge_node_runtime_test
-        PRIVATE flexedge_node_protocol ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto
+    # Each test owns its dependencies; compilation policy is shared.
+    function(flexedge_add_test name)
+        cmake_parse_arguments(TEST "BIG_OBJECT" "" "SOURCES;LIBRARIES;DEFINITIONS" ${ARGN})
+        set(target "flexedge_${name}_test")
+        add_executable(${target} ${TEST_SOURCES})
+        target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(${target} PRIVATE ${TEST_LIBRARIES})
+        target_compile_definitions(${target} PRIVATE ${TEST_DEFINITIONS})
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8 /wd4819)
+            if(TEST_BIG_OBJECT)
+                target_compile_options(${target} PRIVATE /bigobj)
+            endif()
+        else()
+            target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+        add_test(NAME flexedge_${name} COMMAND ${target})
+    endfunction()
+
+    flexedge_add_test(dns_reconciliation
+        SOURCES tests/dns_reconciliation_test.cpp
     )
-    if(MSVC)
-        target_compile_options(flexedge_node_runtime_test PRIVATE /W4 /bigobj /permissive- /utf-8 /wd4819)
-    else()
-        target_compile_options(flexedge_node_runtime_test PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME flexedge_node_runtime COMMAND flexedge_node_runtime_test)
-
-    add_executable(flexedge_node_release_test tests/node_release_test.cpp)
-    target_include_directories(flexedge_node_release_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(flexedge_node_release_test PRIVATE OpenSSL::Crypto)
-    if(MSVC)
-        target_compile_options(flexedge_node_release_test PRIVATE /W4 /permissive- /utf-8 /wd4819)
-    else()
-        target_compile_options(flexedge_node_release_test PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME flexedge_node_release COMMAND flexedge_node_release_test)
-
-    add_executable(flexedge_control_stream_test tests/control_stream_test.cpp)
-    target_include_directories(flexedge_control_stream_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(flexedge_control_stream_test
-        PRIVATE flexedge_node_protocol ruvia::web
+    flexedge_add_test(credential_crypto
+        SOURCES tests/credential_crypto_test.cpp
+        LIBRARIES OpenSSL::Crypto
     )
-    if(MSVC)
-        target_compile_options(flexedge_control_stream_test PRIVATE /W4 /permissive- /utf-8 /wd4819)
-    else()
-        target_compile_options(flexedge_control_stream_test PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME flexedge_control_stream COMMAND flexedge_control_stream_test)
-
-    add_executable(flexedge_log_ingest_test tests/log_ingest_test.cpp)
-    target_include_directories(flexedge_log_ingest_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(flexedge_log_ingest_test
-        PRIVATE flexedge_log_ingest_protocol ruvia::web
+    flexedge_add_test(duration
+        SOURCES tests/duration_test.cpp
     )
-    if(MSVC)
-        target_compile_options(flexedge_log_ingest_test PRIVATE /W4 /permissive- /utf-8 /wd4819)
-    else()
-        target_compile_options(flexedge_log_ingest_test PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME flexedge_log_ingest COMMAND flexedge_log_ingest_test)
-
-    add_executable(flexedge_log_fanout_test tests/log_fanout_test.cpp)
-    target_include_directories(flexedge_log_fanout_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(flexedge_log_fanout_test PRIVATE ruvia::web)
-    if(MSVC)
-        target_compile_options(flexedge_log_fanout_test PRIVATE /W4 /permissive- /utf-8 /wd4819)
-    else()
-        target_compile_options(flexedge_log_fanout_test PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME flexedge_log_fanout COMMAND flexedge_log_fanout_test)
-
-    add_executable(flexedge_logging_test tests/logging_test.cpp)
-    target_include_directories(flexedge_logging_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(flexedge_logging_test PRIVATE Threads::Threads ruvia::web)
-    if(MSVC)
-        target_compile_options(flexedge_logging_test PRIVATE /W4 /permissive- /utf-8 /wd4819)
-    else()
-        target_compile_options(flexedge_logging_test PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME flexedge_logging COMMAND flexedge_logging_test)
+    flexedge_add_test(geoip_location
+        SOURCES tests/geoip_location_test.cpp
+    )
+    flexedge_add_test(uuid_collection_validation
+        SOURCES tests/uuid_collection_validation_test.cpp
+        LIBRARIES ruvia::web
+    )
+    flexedge_add_test(node_endpoint_validation
+        SOURCES tests/node_endpoint_validation_test.cpp
+        LIBRARIES ruvia::web
+    )
+    flexedge_add_test(endpoint_claim
+        SOURCES tests/endpoint_claim_test.cpp
+        LIBRARIES ruvia::web
+    )
+    set_tests_properties(flexedge_endpoint_claim PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    flexedge_add_test(website_relations
+        SOURCES tests/website_relations_test.cpp
+        LIBRARIES ruvia::web
+    )
+    flexedge_add_test(website_domain_claim
+        SOURCES tests/website_domain_claim_test.cpp
+    )
+    set_tests_properties(flexedge_website_relations PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    flexedge_add_test(website_reference_lock
+        SOURCES tests/website_reference_lock_test.cpp
+        LIBRARIES ruvia::web
+    )
+    set_tests_properties(flexedge_website_reference_lock PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    flexedge_add_test(website_aggregate
+        SOURCES tests/website_aggregate_test.cpp
+        LIBRARIES ruvia::web
+    )
+    set_tests_properties(flexedge_website_aggregate PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    flexedge_add_test(deployment_source
+        SOURCES tests/deployment_source_test.cpp
+        LIBRARIES ruvia::web
+    )
+    set_tests_properties(flexedge_deployment_source PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    flexedge_add_test(delivery_object
+        SOURCES tests/delivery_object_test.cpp
+        LIBRARIES flexedge_node_protocol ruvia::web OpenSSL::Crypto
+    )
+    set_tests_properties(flexedge_delivery_object PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    flexedge_add_test(cluster_release_store
+        SOURCES tests/cluster_release_store_test.cpp
+        LIBRARIES ruvia::web
+    )
+    set_tests_properties(flexedge_cluster_release_store PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    flexedge_add_test(cluster_release_lock
+        SOURCES tests/cluster_release_lock_test.cpp
+        LIBRARIES ruvia::web
+    )
+    set_tests_properties(flexedge_cluster_release_lock PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    flexedge_add_test(node_target_store
+        SOURCES tests/node_target_store_test.cpp
+        LIBRARIES ruvia::web
+    )
+    set_tests_properties(flexedge_node_target_store PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    flexedge_add_test(heartbeat_store
+        SOURCES tests/heartbeat_store_test.cpp
+        LIBRARIES ruvia::web
+    )
+    set_tests_properties(flexedge_heartbeat_store PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    flexedge_add_test(auth_configuration
+        SOURCES tests/auth_configuration_test.cpp
+        LIBRARIES ruvia::web
+    )
+    flexedge_add_test(runtime_secrets
+        SOURCES tests/runtime_secrets_test.cpp
+        LIBRARIES ruvia::web OpenSSL::Crypto
+    )
+    flexedge_add_test(secure_file
+        SOURCES tests/secure_file_test.cpp
+        LIBRARIES Threads::Threads
+    )
+    flexedge_add_test(loop_shutdown
+        SOURCES tests/loop_shutdown_test.cpp
+        LIBRARIES ruvia::core
+    )
+    flexedge_add_test(log_notification
+        SOURCES tests/log_notification_test.cpp
+        LIBRARIES flexedge_node_protocol ruvia::core OpenSSL::Crypto
+    )
+    flexedge_add_test(architecture
+        SOURCES tests/architecture_test.cpp service/features/background/worker_pool.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web asio::asio OpenSSL::Crypto
+        DEFINITIONS FLEXEDGE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    flexedge_add_test(origin_health
+        SOURCES tests/origin_health_test.cpp
+        LIBRARIES Threads::Threads
+    )
+    flexedge_add_test(node_runtime BIG_OBJECT
+        SOURCES tests/node_runtime_test.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto
+    )
+    flexedge_add_test(config_activation BIG_OBJECT
+        SOURCES tests/config_activation_test.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto
+    )
+    flexedge_add_test(node_release
+        SOURCES tests/node_release_test.cpp
+        LIBRARIES OpenSSL::Crypto Threads::Threads
+    )
+    flexedge_add_test(control_stream
+        SOURCES tests/control_stream_test.cpp
+        LIBRARIES flexedge_node_protocol flexedge_node_version ruvia::web
+    )
+    flexedge_add_test(agent_protocol
+        SOURCES tests/agent_protocol_test.cpp
+        LIBRARIES flexedge_node_protocol OpenSSL::Crypto
+    )
+    flexedge_add_test(log_ingest
+        SOURCES tests/log_ingest_test.cpp
+        LIBRARIES flexedge_log_ingest_protocol
+    )
+    flexedge_add_test(log_fanout
+        SOURCES tests/log_fanout_test.cpp
+        LIBRARIES ruvia::web
+    )
+    flexedge_add_test(live_resource
+        SOURCES tests/live_resource_test.cpp
+        LIBRARIES ruvia::web
+    )
+    flexedge_add_test(logging
+        SOURCES tests/logging_test.cpp
+        LIBRARIES Threads::Threads ruvia::web
+    )
 endif()
 
 set(FLEXEDGE_RUNTIME_OUTPUT_DIR "${CMAKE_BINARY_DIR}")
@@ -350,9 +445,30 @@ if(BUILD_TESTING)
             "-DCONFIG=$<CONFIG>"
             "-DEXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
             "-DEXPECT_WEB=${FLEXEDGE_BUILD_WEB}"
+            "-DEXPECT_XDB_V4=$<BOOL:${FLEXEDGE_XDB_V4_FILE}>"
+            "-DEXPECT_XDB_V6=$<BOOL:${FLEXEDGE_XDB_V6_FILE}>"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/install_layout_test.cmake"
     )
     if(UNIX)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME flexedge_xdb_lookup
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/xdb_lookup_test.py"
+                "$<TARGET_FILE:xdb_lookup>"
+        )
+        set_tests_properties(flexedge_xdb_lookup PROPERTIES TIMEOUT 30)
+        add_test(NAME flexedge_node_shutdown
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/node_shutdown_smoke.py"
+                "$<TARGET_FILE:flexedge_node>"
+        )
+        set_tests_properties(flexedge_node_shutdown PROPERTIES TIMEOUT 60)
+        add_test(NAME flexedge_node_installer_validation
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/node_installer_validation_test.py"
+                "${CMAKE_CURRENT_SOURCE_DIR}/node/install_node.sh"
+        )
+        set_tests_properties(flexedge_node_installer_validation PROPERTIES TIMEOUT 30)
         find_program(BASH_EXECUTABLE bash REQUIRED)
         add_test(NAME flexedge_node_installer_syntax
             COMMAND "${BASH_EXECUTABLE}" -n

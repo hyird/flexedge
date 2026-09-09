@@ -438,7 +438,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
             std::chrono::seconds(state.website->origin_connect_timeout_seconds() +
                                  state.website->origin_read_timeout_seconds()),
             responseBuffers_,
-            [self, streamId, originId = origin->id(), originHost = origin->host(),
+            [self, streamId, healthTarget = health_.target(state.website->id(), origin->id()), originHost = origin->host(),
              originPort = origin->port()](std::error_code error,
                                           BufferedProxyResponse response) mutable {
                 const auto current = self->requests_.find(streamId);
@@ -454,13 +454,11 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
                     }
                     self->log(std::string("origin exchange failed for ") + originHost + ":" +
                               std::to_string(originPort) + ": " + error.message());
-                    self->health_.failure(request.website->id(), originId,
-                                          request.website->unhealthy_threshold());
+                    healthTarget.failure(request.website->unhealthy_threshold());
                     self->tryOrigin(streamId);
                     return;
                 }
-                self->health_.success(request.website->id(), originId,
-                                      request.website->healthy_threshold());
+                healthTarget.success(request.website->healthy_threshold());
                 self->respond(streamId, std::move(response));
             });
         state.exchange->start();
@@ -473,7 +471,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
             return;
         }
         auto& state = found->second;
-        const auto originId = origin->id();
+        const auto healthTarget = health_.target(state.website->id(), origin->id());
         const auto originHost = origin->host();
         const auto originPort = origin->port();
         const auto self = shared_from_this();
@@ -483,7 +481,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
             static_cast<std::uint16_t>(originPort), origin->protocol() == "https",
             std::chrono::seconds(state.website->origin_connect_timeout_seconds()),
             std::chrono::seconds(state.website->origin_read_timeout_seconds()), state.route,
-            [self, streamId, originId](BufferedProxyResponse source) mutable {
+            [self, streamId, healthTarget](BufferedProxyResponse source) mutable {
                 const auto current = self->requests_.find(streamId);
                 if (current == self->requests_.end()) {
                     return false;
@@ -502,8 +500,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
                     return false;
                 }
                 request.streamingHead = true;
-                self->health_.success(request.website->id(), originId,
-                                      request.website->healthy_threshold());
+                healthTarget.success(request.website->healthy_threshold());
                 self->flush();
                 return true;
             },
@@ -530,7 +527,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
                 self->close();
                 return StreamingOriginWriteStatus::kRejected;
             },
-            [self, streamId, originId, originHost, originPort](std::error_code error) mutable {
+            [self, streamId, healthTarget, originHost, originPort](std::error_code error) mutable {
                 const auto current = self->requests_.find(streamId);
                 if (current == self->requests_.end()) {
                     return;
@@ -539,8 +536,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
                 request.streamingExchange.reset();
                 request.streamingPaused = false;
                 if (error) {
-                    self->health_.failure(request.website->id(), originId,
-                                          request.website->unhealthy_threshold());
+                    healthTarget.failure(request.website->unhealthy_threshold());
                     if (!request.streamingHead) {
                         self->log(std::string("streaming origin exchange failed for ") + originHost +
                                   ":" + std::to_string(originPort) + ": " + error.message());

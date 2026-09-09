@@ -36,6 +36,7 @@
 
 #include "service/common/http.h"
 #include "service/config/database.h"
+#include "service/config/auth.h"
 #include "service/config/http_server.h"
 #include "service/config/outbound.h"
 #include "service/config/redis.h"
@@ -55,7 +56,7 @@
 #include "service/domains/node/node.controller.h"
 #include "service/domains/overview/overview.controller.h"
 #include "service/domains/provider/provider.controller.h"
-#include "service/domains/sync_event/sync_event.controller.h"
+#include "service/features/live_resource/node_runtime.h"
 #include "service/domains/task/task.controller.h"
 #include "service/features/background/worker_pool.h"
 #include "service/features/certificate/worker.h"
@@ -63,10 +64,9 @@
 #include "service/features/initial_admin/bootstrap.h"
 #include "service/features/log_ingest/fanout.h"
 #include "service/features/log_ingest/ingest.h"
-#include "service/features/node_release/artifact.h"
+#include "service/features/node_release/catalog.h"
 #include "service/features/website_dispatch/worker.h"
 #include "service/features/provider_verification/worker.h"
-#include "service/utils/auth_session.h"
 #include "service/utils/secret.h"
 #include "service/utils/token.h"
 
@@ -316,7 +316,7 @@ int main(int argc, char* argv[]) {
             app.loadDotenv(envPath);
         }
         service::utils::configureSecretKey(app.env().get("SECRET_MASTER_KEY").value_or(""));
-        service::auth::validateAuthSessionConfiguration();
+        (void)service::config::authConfiguration(app.env());
         auto initialAdmin = service::initial_admin::initialAdminConfig(app.env());
         configureDocumentRoot(app, runtimeDir);
         auto database = configureDatabase(app);
@@ -370,6 +370,13 @@ int main(int argc, char* argv[]) {
                auto logWorkers = ruvia::app().workers();
                if (logWorkers.empty()) {
                    throw std::runtime_error("log fanout requires a web worker");
+               }
+               const auto deadlinesPosted = logWorkers.front().post(
+                   [](ruvia::WebWorkerContext& context) -> ruvia::Task<void> {
+                       co_await service::live_resource::seedNodeDeadlines(context);
+                   });
+               if (!deadlinesPosted.accepted()) {
+                   throw std::runtime_error("node deadline initialization could not start");
                }
                const auto fanoutPosted = logWorkers.front().post(
                    [](ruvia::WebWorkerContext& context) -> ruvia::Task<void> {

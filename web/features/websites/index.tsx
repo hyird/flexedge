@@ -3,14 +3,11 @@ import {
   keepPreviousData,
   useMutation,
   useQuery,
-  useQueryClient,
 } from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
 import { FilePenLine, FileText, Plus, Trash2, Eye } from 'lucide-react'
 import { toast } from 'sonner'
-import { getData, sendData } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
-import type { Cluster, PageData } from '@/lib/types'
+import { DEFAULT_PAGE_SIZE } from '@/lib/page-size'
 import { useResourceFilters } from '@/hooks/use-resource-filters'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -33,16 +30,17 @@ import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
 import { RowActions } from '@/components/row-actions'
 import { StatusBadge } from '@/components/status-badge'
+import { clusterOptionsQuery } from '@/features/clusters/data'
 import { AccessLogSheet } from './access-log-sheet'
+import { websitesQuery, removeWebsite } from './data'
 import type { Website } from './types'
 import { WebsiteDetailSheet } from './website-detail-sheet'
 import { WebsiteDialog } from './website-dialog'
 import { originGroupLabel } from './website-display'
 
 export function Websites() {
-  const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const filter = useResourceFilters({
     keyword: '',
     clusterId: 'all',
@@ -54,37 +52,22 @@ export function Websites() {
   const [logTarget, setLogTarget] = useState<Website | null>(null)
   const [removeTarget, setRemoveTarget] = useState<Website | null>(null)
 
-  const clustersQuery = useQuery({
-    queryKey: [...queryKeys.clusters, 'options'],
-    queryFn: () =>
-      getData<PageData<Cluster>>('/clusters/').then((data) => data.list),
-  })
+  const clustersQuery = useQuery(clusterOptionsQuery)
   const query = useQuery({
-    queryKey: [
-      ...queryKeys.websites,
+    ...websitesQuery({
       page,
-      pageSize,
-      keyword,
-      clusterId,
-      status,
-    ],
+      page_size: pageSize,
+      keyword: keyword || undefined,
+      cluster_id: clusterId === 'all' ? undefined : clusterId,
+      status: status === 'all' ? undefined : status,
+    }),
     placeholderData: keepPreviousData,
-    queryFn: () =>
-      getData<PageData<Website>>('/websites/', {
-        page,
-        page_size: pageSize,
-        keyword: keyword || undefined,
-        cluster_id: clusterId === 'all' ? undefined : clusterId,
-        status: status === 'all' ? undefined : status,
-      }),
   })
   const remove = useMutation({
-    mutationFn: (item: Website) =>
-      sendData('delete', `/websites/${item.id}`, undefined, item.revision),
-    onSuccess: async (response) => {
+    mutationFn: removeWebsite,
+    onSuccess: (response) => {
       toast.success(response.message)
       setRemoveTarget(null)
-      await queryClient.invalidateQueries({ queryKey: queryKeys.websites })
     },
   })
 

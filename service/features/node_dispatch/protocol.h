@@ -9,46 +9,17 @@
 #include <utility>
 #include <vector>
 
+#include "service/features/node_dispatch/deployment_source.h"
 #include "node/proto/artifact.h"
 #include "node/proto/edge_control.pb.h"
 #include "node/proto/schema_version.h"
 #include "service/common/domain_name.h"
-#include "service/features/node_config/model.h"
-#include "service/features/website_config/model.h"
+#include "service/features/node_config/mapper.h"
+#include "service/features/website_config/mapper.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
 
 namespace service::node_dispatch {
-
-constexpr bool canReportAppliedNodeSpecRevision(std::int64_t storedAppliedRevision,
-                                                std::int64_t reportedAppliedRevision,
-                                                std::int64_t desiredRevision) noexcept {
-    return storedAppliedRevision <= reportedAppliedRevision &&
-           reportedAppliedRevision <= desiredRevision;
-}
-
-struct AvailableCertificate final {
-    std::string id;
-    std::string domain;
-    std::string certificateChainPem;
-    std::string privateKeyEnvelope;
-};
-
-struct DeploymentWebsiteSource final {
-    std::string id;
-    std::int64_t revision;
-    bool enabled;
-    std::string configJson;
-};
-
-struct ClusterDeploymentSource final {
-    std::string clusterId;
-    std::string tenantId;
-    std::string accessDomain;
-    bool enabled;
-    std::vector<DeploymentWebsiteSource> websites;
-    std::unordered_map<std::string, std::vector<AvailableCertificate>> certificatesByWebsite;
-};
 
 struct ClusterReleaseArtifact final {
     flexedge::node::v2::ClusterReleaseManifest manifest;
@@ -138,7 +109,9 @@ inline bool appendWebsiteDomains(const DeploymentWebsiteSource& source,
         domain->set_hostname(hostname);
         if (configuredHttps && available != deployment.certificatesByWebsite.end()) {
             for (const auto& certificate : available->second) {
-                if (!service::common::certificateCoversHostname(certificate.domain, hostname)) {
+                if (!std::ranges::any_of(certificate.domains, [&](const auto& name) {
+                        return service::common::certificateCoversHostname(name, hostname);
+                    })) {
                     continue;
                 }
                 domain->set_https_enabled(true);

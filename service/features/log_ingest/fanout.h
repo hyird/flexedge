@@ -21,6 +21,7 @@
 #include <ruvia/web/WebWorker.h>
 
 #include "service/features/log_ingest/notifications.h"
+#include "service/features/live_resource/fanout.h"
 #include "service/features/logging/logger.h"
 
 namespace service::log_ingest::fanout {
@@ -95,6 +96,10 @@ class Hub final {
     }
 
     void publish(const notifications::Notification& notification) {
+        if (notification.resourceType == notifications::LogResourceType::access) {
+            service::live_resource::hub().publish(notification.tenantId,
+                service::live_resource::Resource::accessHistory, notification.resourceId);
+        }
         const auto topic = topicFor(notification);
         if (!topic) {
             return;

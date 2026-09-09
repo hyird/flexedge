@@ -1,6 +1,7 @@
 #pragma once
 
 #include "service/features/node_dispatch/notifications.h"
+#include "service/features/live_resource/fanout.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -18,12 +19,15 @@
 #include "service/common/database.h"
 #include "service/common/http.h"
 #include "service/domains/node/node.error.h"
+#include "service/domains/node/endpoint_claim.store.h"
 #include "service/domains/node/node.mapper.h"
 #include "service/domains/node/node.types.h"
 #include "service/features/cluster_dns/projection.h"
-#include "service/features/dns_sync/snapshot.h"
+#include "service/features/dns_sync/mapper.h"
+#include "service/features/dns_sync/line.h"
 #include "service/features/node_config/model.h"
 #include "service/features/node_dispatch/queue.h"
+#include "service/features/node_dispatch/target.store.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
 #include "service/utils/token.h"
@@ -66,10 +70,13 @@ class NodeCommandService final {
                     ruvia::DbValue{status}, ruvia::DbValue{agentId}, ruvia::DbValue{secretHash},
                     ruvia::DbValue{secretEnvelope}, ruvia::DbValue{std::string_view(configJson)}));
             const auto nodeId = std::string(rows.front()[0].value().value_or(""));
-            co_await replaceEndpointClaims(transaction, tenantId, nodeId, storedConfig);
+            co_await replaceEndpointClaims(transaction, tenantId, nodeId, storedConfig.endpoints);
             co_await service::cluster_dns::reconcileCluster(transaction, tenantId, clusterId);
             co_await transaction.commit();
             service::node_dispatch::notifications::published(tenantId);
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::nodes, nodeId);
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::clusters, clusterId);
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
             result.set<"nodeId">(agentId);
             result.set<"secret">(secret.view());
             result.set<"revision">(1);
@@ -130,27 +137,23 @@ class NodeCommandService final {
                 }
                 service::common::throwAppError(NodeError::REVISION_CONFLICT);
             }
-            co_await replaceEndpointClaims(transaction, tenantId, id, storedConfig);
+            co_await replaceEndpointClaims(transaction, tenantId, id, storedConfig.endpoints);
             co_await service::cluster_dns::reconcileCluster(transaction, tenantId, clusterId);
             if (previousClusterId != clusterId) {
-                (void)co_await transaction.execute(
-                    "UPDATE sys_node_release_target target SET status = 'excluded', updated_at = "
-                    "NOW() FROM sys_cluster_release release WHERE target.tenant_id = $1 AND "
-                    "target.node_id = $2 AND target.status IN ('pending', 'failed') AND "
-                    "release.tenant_id = target.tenant_id AND release.id = target.release_id AND "
-                    "release.cluster_id = $3",
-                    tenantId, id, previousClusterId);
+                co_await service::node_dispatch::excludePendingNodeClusterTargets(transaction, tenantId, id, previousClusterId);
                 co_await service::cluster_dns::reconcileCluster(transaction, tenantId,
                                                                 previousClusterId);
             }
             if (status == "disabled") {
-                (void)co_await transaction.execute(
-                    "UPDATE sys_node_release_target SET status = 'excluded', updated_at = NOW() "
-                    "WHERE tenant_id = $1 AND node_id = $2 AND status IN ('pending', 'failed')",
-                    tenantId, id);
+                co_await service::node_dispatch::excludePendingNodeTargets(transaction, tenantId, id);
             }
             co_await transaction.commit();
             service::node_dispatch::notifications::published(tenantId);
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::nodes, id);
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::clusters, clusterId);
+            if (previousClusterId != clusterId)
+                service::live_resource::hub().publish(tenantId, service::live_resource::Resource::clusters, previousClusterId);
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         } catch (const ruvia::DbError& error) {
             if (service::common::isUniqueConstraintViolation(error, "uk_node_name") ||
                 service::common::isUniqueConstraintViolation(error, "uq_node_endpoint_claim")) {
@@ -182,16 +185,14 @@ class NodeCommandService final {
             service::common::throwAppError(NodeError::REVISION_CONFLICT);
         }
         const auto clusterId = std::string(rows.front()[0].value().value_or(""));
-        (void)co_await transaction.execute(
-            "DELETE FROM sys_node_endpoint_claim WHERE tenant_id = $1 AND node_id = $2", tenantId,
-            id);
-        (void)co_await transaction.execute(
-            "UPDATE sys_node_release_target SET status = 'excluded', updated_at = NOW() WHERE "
-            "tenant_id = $1 AND node_id = $2 AND status IN ('pending', 'failed')",
-            tenantId, id);
+        co_await clearEndpointClaims(transaction, tenantId, id);
+        co_await service::node_dispatch::excludePendingNodeTargets(transaction, tenantId, id);
         co_await service::cluster_dns::reconcileCluster(transaction, tenantId, clusterId);
         co_await transaction.commit();
         service::node_dispatch::notifications::published(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::nodes, id);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::clusters, clusterId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         co_return;
     }
 
@@ -242,17 +243,13 @@ class NodeCommandService final {
             service::common::throwAppError(NodeError::REVISION_CONFLICT);
         }
         const auto clusterId = std::string(rows.front()[1].value().value_or(""));
-        (void)co_await transaction.execute(
-            "UPDATE sys_node SET desired_release_id = (SELECT current_release_id FROM sys_cluster "
-            "WHERE tenant_id = $1 AND id = $3) WHERE tenant_id = $1 AND id = $2",
-            tenantId, id, clusterId);
-        (void)co_await transaction.execute(
-            "UPDATE sys_node_release_target SET status = 'excluded', updated_at = NOW() WHERE "
-            "tenant_id = $1 AND node_id = $2 AND status IN ('pending', 'failed')",
-            tenantId, id);
+        co_await service::node_dispatch::excludePendingNodeTargets(transaction, tenantId, id);
         co_await service::cluster_dns::reconcileCluster(transaction, tenantId, clusterId);
         co_await transaction.commit();
         service::node_dispatch::notifications::published(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::nodes, id);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::clusters, clusterId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         NodeCredentialsDto result(c);
         result.set<"nodeId">(agentId);
         result.set<"secret">(secret.view());
@@ -284,8 +281,7 @@ class NodeCommandService final {
             const auto& lineCode = endpoint.lineCode;
             const auto line = std::ranges::find_if(
                 runtime->lines, [&](const service::dns_sync::ZoneLineRuntimeData& item) {
-                    return item.code && item.status && *item.code == lineCode &&
-                           *item.status == "enabled";
+                    return service::dns_sync::isEnabledLine(item) && *item.code == lineCode;
                 });
             if (line == runtime->lines.end()) {
                 service::common::throwAppError(NodeError::DNS_LINE_INVALID);
@@ -294,42 +290,7 @@ class NodeCommandService final {
         co_return;
     }
 
-    static ruvia::Task<void>
-    replaceEndpointClaims(ruvia::DbTransaction& transaction, const std::string& tenantId,
-                          const std::string& nodeId,
-                          const service::node_config::NodeConfigData& config) {
-        (void)co_await transaction.execute(
-            "DELETE FROM sys_node_endpoint_claim WHERE tenant_id = $1 AND node_id = $2", tenantId,
-            nodeId);
-        if (config.endpoints.empty()) {
-            co_return;
-        }
-        std::vector<ruvia::DbValue> endpointInsertParams;
-        endpointInsertParams.reserve(config.endpoints.size() * 4);
-        std::string endpointInsertSql =
-            "INSERT INTO sys_node_endpoint_claim (tenant_id, node_id, endpoint_id, "
-            "ip_address) VALUES ";
-        const auto appendParam = [&](ruvia::DbValue value) {
-            endpointInsertSql += "$" + std::to_string(endpointInsertParams.size() + 1);
-            endpointInsertParams.push_back(std::move(value));
-        };
-        for (const auto& endpoint : config.endpoints) {
-            if (!endpointInsertParams.empty()) {
-                endpointInsertSql += ", ";
-            }
-            endpointInsertSql += "(";
-            appendParam(ruvia::DbValue{tenantId});
-            endpointInsertSql += ", ";
-            appendParam(ruvia::DbValue{nodeId});
-            endpointInsertSql += ", ";
-            appendParam(ruvia::DbValue{endpoint.id});
-            endpointInsertSql += ", ";
-            appendParam(ruvia::DbValue{endpoint.ipAddress});
-            endpointInsertSql += "::inet)";
-        }
-        (void)co_await transaction.execute(endpointInsertSql, endpointInsertParams);
-        co_return;
-    }
+
 };
 
 inline NodeCommandService& nodeCommandService() {

@@ -8,26 +8,15 @@
 #include <ruvia/web/ServerConfig.h>
 
 #include "service/features/logging/logger.h"
+#include "service/common/connection_error.h"
 
 namespace service::logging {
-
-inline bool peerDisconnected(const std::exception& error) noexcept {
-    if (const auto* systemError = dynamic_cast<const std::system_error*>(&error)) {
-        const auto code = systemError->code();
-        if (code == std::errc::broken_pipe || code == std::errc::connection_reset ||
-            code == std::errc::connection_aborted) {
-            return true;
-        }
-    }
-    const std::string_view message{error.what()};
-    return message.contains("Broken pipe") || message.contains("Connection reset by peer");
-}
 
 inline void connectionFailure(const ruvia::ConnectionFailureRecord& record) noexcept {
     try {
         std::rethrow_exception(record.exception());
     } catch (const std::exception& error) {
-        if (peerDisconnected(error)) {
+        if (service::common::peerDisconnected(error)) {
             return;
         }
         std::string message{"web connection failed"};

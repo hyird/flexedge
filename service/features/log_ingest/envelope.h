@@ -1,7 +1,7 @@
 #pragma once
 
 #include <algorithm>
-#include <cctype>
+#include <ranges>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -11,7 +11,8 @@
 
 #include "node/proto/edge_control.pb.h"
 #include "node/proto/log_contract.h"
-#include "service/common/http.h"
+#include "service/common/uuid.h"
+#include "node/proto/credential_validation.h"
 #include "service/features/log_ingest/log_envelope.pb.h"
 
 namespace service::log_ingest {
@@ -19,12 +20,6 @@ namespace service::log_ingest {
 inline bool bounded(std::string_view value, std::size_t maximum) { return value.size() <= maximum; }
 
 inline bool uuid(std::string_view value) { return service::common::parseUuid(value).has_value(); }
-
-inline bool agentId(std::string_view value) {
-    return value.size() == 32 && std::ranges::all_of(value, [](unsigned char ch) {
-               return std::isdigit(ch) != 0 || (ch >= 'a' && ch <= 'f');
-           });
-}
 
 inline bool validLogLevel(std::string_view value) {
     return value == "info" || value == "warning" || value == "error";
@@ -84,7 +79,8 @@ inline bool validDelivery(const flexedge::node::v2::LogDelivery& value, std::str
 }
 
 inline bool validEnvelope(const v2::QueuedLogDelivery& value) {
-    return uuid(value.tenant_id()) && agentId(value.agent_id()) && value.has_delivery() &&
+    return uuid(value.tenant_id()) && flexedge::node::validCredentialNodeId(value.agent_id()) &&
+           value.has_delivery() &&
            validDelivery(value.delivery(), value.delivery().node_id());
 }
 

@@ -28,15 +28,24 @@ ruvia::Task<void> runMarkerWorkerLoop(WorkerContext& context, std::chrono::secon
         std::size_t processed = 0;
         try {
             co_await maintenance(context, nextLeaseRecovery, nextReconciliation);
+            if (context.stopToken().stopRequested()) {
+                break;
+            }
             if (std::chrono::steady_clock::now() >= nextEventPrune) {
                 co_await service::sync_runtime::pruneResultEvents(context.db());
                 nextEventPrune = std::chrono::steady_clock::now() + std::chrono::hours{1};
+            }
+            if (context.stopToken().stopRequested()) {
+                break;
             }
             co_await processAvailable(context, processed);
         } catch (const std::exception& error) {
             workerError = formatError(error.what());
         } catch (...) {
             workerError = std::string(unknownFailure);
+        }
+        if (context.stopToken().stopRequested()) {
+            break;
         }
         if (!workerError.empty()) {
             service::logging::error(std::string(failureLogPrefix) + workerError);

@@ -9,7 +9,7 @@
 #include <ruvia/core/Task.h>
 
 #include "service/features/certificate/acme.h"
-#include "service/features/certificate/provider_config.h"
+#include "service/features/certificate/provider_config_mapper.h"
 #include "service/utils/secret.h"
 
 namespace service::certificate_issuance {

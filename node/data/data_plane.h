@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <ranges>
 #include <stdexcept>
 #include <string>
@@ -40,7 +41,7 @@ class PreparedDataPlaneReload final {
     std::vector<std::pair<std::string, std::shared_ptr<HttpsListener>>> httpsAdditions;
     std::vector<std::shared_ptr<HttpListener>> retired;
     std::vector<std::shared_ptr<HttpsListener>> httpsRetired;
-    OriginHealthRegistry::KeySet originKeys;
+    std::optional<OriginHealthRegistry::PreparedStates> healthStates;
     std::shared_ptr<const TlsContextSet> tlsContexts;
     std::shared_ptr<ListenerActivationGate> activationGate;
     std::shared_ptr<const CompiledConfig> config;
@@ -52,7 +53,7 @@ class DataPlane final {
     DataPlane(ruvia::EventLoopPool& loops, ruvia::EventLoop owner, RuntimeState& runtime,
               NodeLogBuffer& logs)
         : loops_(loops), owner_(std::move(owner)), runtime_(runtime), logs_(logs),
-          healthSupervisor_(owner_, runtime_, health_, healthProbeTls_),
+          healthSupervisor_(OriginHealthSupervisor::create(owner_, runtime_, health_, healthProbeTls_)),
           stopRegistration_(owner_.onStop([this] { stopOnOwner(); })) {
         workers_.reserve(loops_.loopCount());
         for (std::size_t index = 0; index < loops_.loopCount(); ++index) {
@@ -63,7 +64,7 @@ class DataPlane final {
 
     ~DataPlane() { stopOnOwner(); }
 
-    void start() { healthSupervisor_.requestStart(); }
+    void start() { healthSupervisor_->requestStart(); }
 
     [[nodiscard]] bool healthy() const { return health_.allHealthy(); }
 
@@ -99,9 +100,10 @@ class DataPlane final {
             stopOnOwner();
             return;
         }
-        if (!owner_.post([this] { stopOnOwner(); }).accepted()) {
-            stopOnOwner();
-        }
+        // The process owner joins both loop pools before destroying DataPlane
+        // (LoopShutdown in main). Never mutate listener maps from the caller
+        // thread when the bounded mailbox rejects a shutdown request.
+        asio::post(owner_.executor(), [this] { stopOnOwner(); });
     }
 
     [[nodiscard]] PreparedDataPlaneReload prepare(std::shared_ptr<const CompiledConfig> config) {
@@ -111,6 +113,7 @@ class DataPlane final {
         if (!config) {
             throw std::invalid_argument("data plane config cannot be empty");
         }
+        runtime_.validateNext(*config);
         PreparedDataPlaneReload reload;
         reload.config = std::move(config);
         reload.tlsContexts = std::make_shared<const TlsContextSet>(*reload.config);
@@ -130,7 +133,7 @@ class DataPlane final {
                     reload.listeners.emplace(std::move(key), existing->second);
                 } else {
                     reload.additions.emplace_back(
-                        key, std::make_shared<HttpListener>(
+                        key, HttpListener::create(
                                  loops_.loop(workerIndex), runtime_, health_,
                                  workers_[workerIndex]->metrics, workers_[workerIndex]->logs,
                                  workers_[workerIndex]->originConnections, requestBuffers_,
@@ -153,7 +156,7 @@ class DataPlane final {
                     reload.httpsListeners.emplace(std::move(httpsKey), existingHttps->second);
                 } else {
                     reload.httpsAdditions.emplace_back(
-                        httpsKey, std::make_shared<HttpsListener>(
+                        httpsKey, HttpsListener::create(
                                       loops_.loop(workerIndex), runtime_, health_, tlsContexts_,
                                       workers_[workerIndex]->metrics, workers_[workerIndex]->logs,
                                       workers_[workerIndex]->originConnections, requestBuffers_,
@@ -182,7 +185,6 @@ class DataPlane final {
             for (const auto& [_, listener] : reload.httpsAdditions) {
                 listener->requestStart(reload.activationGate);
             }
-            health_.retain(reload.originKeys);
             reload.primed = true;
         } catch (...) {
             abort(reload);
@@ -191,6 +193,7 @@ class DataPlane final {
     }
 
     void activate(PreparedDataPlaneReload reload) noexcept {
+        health_.publish(*reload.healthStates);
         tlsContexts_.publish(std::move(reload.tlsContexts));
         runtime_.publish(std::move(reload.config));
         listeners_.swap(reload.listeners);
@@ -236,11 +239,13 @@ class DataPlane final {
                 reload.httpsRetired.push_back(listener);
             }
         }
+        OriginHealthRegistry::KeySet originKeys;
         for (const auto* website : reload.config->websites()) {
             for (const auto& origin : website->origins()) {
-                reload.originKeys.emplace(OriginHealthRegistry::key(website->id(), origin.id()));
+                originKeys.emplace(OriginHealthRegistry::key(website->id(), origin.id()));
             }
         }
+        reload.healthStates = health_.prepare(originKeys);
         return reload;
     }
 
@@ -279,7 +284,7 @@ class DataPlane final {
     OriginHealthRegistry health_;
     OriginTlsContext healthProbeTls_;
     TlsContextRegistry tlsContexts_;
-    OriginHealthSupervisor healthSupervisor_;
+    std::shared_ptr<OriginHealthSupervisor> healthSupervisor_;
     BufferedBytesBudget requestBuffers_{kMaximumRequestBufferBytes};
     BufferedBytesBudget responseBuffers_{kMaximumResponseBufferBytes};
     ruvia::EventLoopStopRegistration stopRegistration_;

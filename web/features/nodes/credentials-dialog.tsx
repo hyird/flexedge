@@ -9,7 +9,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-import type { NodeCredentials } from './node-dialog'
+import type { NodeCredentials } from './data'
 
 export function CredentialsDialog({
   credentials,

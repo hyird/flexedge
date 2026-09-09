@@ -1,9 +1,11 @@
 import { Toaster as Sonner, ToasterProps } from 'sonner'
+import { useTheme } from '@/context/theme-context'
 
 export function Toaster({ ...props }: ToasterProps) {
+  const { resolvedTheme } = useTheme()
   return (
     <Sonner
-      theme='light'
+      theme={resolvedTheme}
       className='toaster group [&_div[data-content]]:w-full'
       style={
         {

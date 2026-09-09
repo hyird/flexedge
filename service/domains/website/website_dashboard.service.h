@@ -14,13 +14,13 @@
 #include "service/common/http.h"
 #include "service/domains/website/website.error.h"
 #include "service/domains/website/website.types.h"
-#include "service/features/geoip/xdb_database.h"
+#include "service/features/geoip/runtime_database.h"
 
 namespace service::website {
 
 class WebsiteDashboardService final {
   public:
-    ruvia::Task<WebsiteDashboardDto> dashboard(ruvia::Context& c, const std::string& tenantId,
+    ruvia::Task<WebsiteDashboardDto> dashboard(auto& c, const std::string& tenantId,
                                                const std::string& id) const {
         const auto website = co_await c.db().query(
             "SELECT 1 FROM sys_website WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL "
@@ -57,14 +57,14 @@ class WebsiteDashboardService final {
             tenantId, id);
 
         WebsiteDashboardDto result(c);
-        auto& summary = result.ensure<"summary">();
+        auto& summary = result.template ensure<"summary">();
         const auto& summaryRow = summaryRows.front();
-        summary.set<"previousMonthPeakBps">(summaryRow[0].as<std::int64_t>().value_or(0));
-        summary.set<"currentMonthPeakBps">(summaryRow[1].as<std::int64_t>().value_or(0));
-        summary.set<"todayPeakBps">(summaryRow[2].as<std::int64_t>().value_or(0));
-        summary.set<"currentBandwidthBps">(summaryRow[3].as<std::int64_t>().value_or(0));
-        summary.set<"todayUniqueIps">(summaryRow[4].as<std::int64_t>().value_or(0));
-        summary.set<"todayResponseBytes">(summaryRow[5].as<std::int64_t>().value_or(0));
+        summary.template set<"previousMonthPeakBps">(summaryRow[0].template as<std::int64_t>().value_or(0));
+        summary.template set<"currentMonthPeakBps">(summaryRow[1].template as<std::int64_t>().value_or(0));
+        summary.template set<"todayPeakBps">(summaryRow[2].template as<std::int64_t>().value_or(0));
+        summary.template set<"currentBandwidthBps">(summaryRow[3].template as<std::int64_t>().value_or(0));
+        summary.template set<"todayUniqueIps">(summaryRow[4].template as<std::int64_t>().value_or(0));
+        summary.template set<"todayResponseBytes">(summaryRow[5].template as<std::int64_t>().value_or(0));
 
         const auto hourlyRows = co_await c.db().query(
             "WITH buckets AS (SELECT generate_series(date_trunc('hour', NOW()) - INTERVAL "
@@ -76,7 +76,7 @@ class WebsiteDashboardService final {
             "buckets.bucket AND access.occurred_at < buckets.bucket + INTERVAL '1 hour' GROUP "
             "BY buckets.bucket ORDER BY buckets.bucket",
             tenantId, id);
-        auto& hourly = result.ensure<"hourly">();
+        auto& hourly = result.template ensure<"hourly">();
         appendBuckets(c, hourly, hourlyRows);
 
         const auto dailyRows = co_await c.db().query(
@@ -89,7 +89,7 @@ class WebsiteDashboardService final {
             "buckets.bucket AND access.occurred_at < buckets.bucket + INTERVAL '1 day' GROUP "
             "BY buckets.bucket ORDER BY buckets.bucket",
             tenantId, id);
-        auto& daily = result.ensure<"daily">();
+        auto& daily = result.template ensure<"daily">();
         appendBuckets(c, daily, dailyRows);
 
         const auto& geoDatabase = service::geoip::xdbDatabase();
@@ -101,10 +101,10 @@ class WebsiteDashboardService final {
                 "access.occurred_at >= NOW() - INTERVAL '24 hours' AND access.client_ip IS NOT "
                 "NULL GROUP BY access.client_ip",
                 tenantId, id);
-            appendCountries(c, result.ensure<"countries">(), countryIpRows, geoDatabase);
+            appendCountries(c, result.template ensure<"countries">(), countryIpRows, geoDatabase);
         }
         co_await appendRanking(
-            c, result.ensure<"statusCodes">(),
+            c, result.template ensure<"statusCodes">(),
             "SELECT access.status_code::text, COUNT(*)::bigint, "
             "COALESCE(SUM(access.response_bytes), "
             "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
@@ -112,28 +112,28 @@ class WebsiteDashboardService final {
             "BY access.status_code ORDER BY COUNT(*) DESC, access.status_code ASC LIMIT 10",
             tenantId, id);
         co_await appendRanking(
-            c, result.ensure<"methods">(),
+            c, result.template ensure<"methods">(),
             "SELECT access.method, COUNT(*)::bigint, COALESCE(SUM(access.response_bytes), "
             "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
             "access.website_id = $2 AND access.occurred_at >= NOW() - INTERVAL '24 hours' GROUP "
             "BY access.method ORDER BY COUNT(*) DESC, access.method ASC LIMIT 10",
             tenantId, id);
         co_await appendRanking(
-            c, result.ensure<"hosts">(),
+            c, result.template ensure<"hosts">(),
             "SELECT access.host, COUNT(*)::bigint, COALESCE(SUM(access.response_bytes), "
             "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
             "access.website_id = $2 AND access.occurred_at >= NOW() - INTERVAL '24 hours' GROUP "
             "BY access.host ORDER BY COUNT(*) DESC, access.host ASC LIMIT 10",
             tenantId, id);
         co_await appendRanking(
-            c, result.ensure<"referers">(),
-            "SELECT COALESCE(NULLIF(access.referer, ''), '直接访问'), COUNT(*)::bigint, "
+            c, result.template ensure<"referers">(),
+            "SELECT COALESCE(NULLIF(access.referer, ''), '/'), COUNT(*)::bigint, "
             "COALESCE(SUM(access.response_bytes), 0)::bigint FROM sys_website_access_log access "
             "WHERE access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= "
             "NOW() - INTERVAL '24 hours' GROUP BY 1 ORDER BY COUNT(*) DESC, 1 ASC LIMIT 10",
             tenantId, id);
         co_await appendRanking(
-            c, result.ensure<"paths">(),
+            c, result.template ensure<"paths">(),
             "SELECT split_part(access.target, '?', 1), COUNT(*)::bigint, "
             "COALESCE(SUM(access.response_bytes), "
             "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
@@ -141,14 +141,14 @@ class WebsiteDashboardService final {
             "BY 1 ORDER BY COUNT(*) DESC, 1 ASC LIMIT 10",
             tenantId, id);
         co_await appendClientIpRanking(
-            c, result.ensure<"clientIpsByBytes">(), geoDatabase,
+            c, result.template ensure<"clientIpsByBytes">(), geoDatabase,
             "SELECT COALESCE(access.client_ip::text, '未知 IP'), COUNT(*)::bigint, "
             "COALESCE(SUM(access.response_bytes), 0)::bigint FROM sys_website_access_log access "
             "WHERE access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= "
             "NOW() - INTERVAL '24 hours' GROUP BY 1 ORDER BY 3 DESC, 2 DESC, 1 ASC LIMIT 10",
             tenantId, id);
         co_await appendClientIpRanking(
-            c, result.ensure<"clientIpsByRequests">(), geoDatabase,
+            c, result.template ensure<"clientIpsByRequests">(), geoDatabase,
             "SELECT COALESCE(access.client_ip::text, '未知 IP'), COUNT(*)::bigint, "
             "COALESCE(SUM(access.response_bytes), 0)::bigint FROM sys_website_access_log access "
             "WHERE access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= "
@@ -159,7 +159,7 @@ class WebsiteDashboardService final {
 
   private:
     template <typename Output, typename Rows>
-    static void appendBuckets(ruvia::Context& c, Output& output, const Rows& rows) {
+    static void appendBuckets(auto& c, Output& output, const Rows& rows) {
         for (const auto& row : rows) {
             auto& item = output.emplace_back(c);
             item.template set<"timestamp">(row[0].value().value_or(""));
@@ -170,7 +170,7 @@ class WebsiteDashboardService final {
     }
 
     template <typename Output, typename Rows>
-    static void appendRankings(ruvia::Context& c, Output& output, const Rows& rows) {
+    static void appendRankings(auto& c, Output& output, const Rows& rows) {
         for (const auto& row : rows) {
             auto& item = output.emplace_back(c);
             item.template set<"label">(row[0].value().value_or(""));
@@ -180,7 +180,7 @@ class WebsiteDashboardService final {
     }
 
     template <typename Output>
-    static ruvia::Task<void> appendRanking(ruvia::Context& c, Output& output, std::string_view sql,
+    static ruvia::Task<void> appendRanking(auto& c, Output& output, std::string_view sql,
                                            std::string_view tenantId, std::string_view websiteId) {
         const auto rows = co_await c.db().query(sql, tenantId, websiteId);
         appendRankings(c, output, rows);
@@ -188,14 +188,15 @@ class WebsiteDashboardService final {
     }
 
     template <typename Output>
-    static ruvia::Task<void> appendClientIpRanking(ruvia::Context& c, Output& output,
+    static ruvia::Task<void> appendClientIpRanking(auto& c, Output& output,
                                                    const service::geoip::XdbDatabase& geoDatabase,
                                                    std::string_view sql, std::string_view tenantId,
                                                    std::string_view websiteId) {
         const auto rows = co_await c.db().query(sql, tenantId, websiteId);
         for (const auto& row : rows) {
             std::string label{row[0].value().value_or("")};
-            if (const auto location = geoDatabase.lookup(label)) {
+            const auto location = geoDatabase.lookup(label);
+            if (location) {
                 label += " · ";
                 label += location->display;
             } else if (label != "未知 IP") {
@@ -205,12 +206,14 @@ class WebsiteDashboardService final {
             item.template set<"label">(label);
             item.template set<"requestCount">(row[1].template as<std::int64_t>().value_or(0));
             item.template set<"responseBytes">(row[2].template as<std::int64_t>().value_or(0));
+            item.template set<"asn">(location ? location->asn : "");
+            item.template set<"asName">(location ? location->asName : "");
         }
         co_return;
     }
 
     template <typename Output, typename Rows>
-    static void appendCountries(ruvia::Context& c, Output& output, const Rows& rows,
+    static void appendCountries(auto& c, Output& output, const Rows& rows,
                                 const service::geoip::XdbDatabase& geoDatabase) {
         struct CountryTotal final {
             std::int64_t requestCount{};

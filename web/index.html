@@ -2,6 +2,31 @@
 <html lang="zh-CN" dir="ltr" class="light font-inter">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      // Apply the saved theme before styles paint; React owns subsequent changes.
+      // Keep the storage key and default aligned with ThemeProvider.
+      (() => {
+        let theme = 'light'
+        try {
+          const saved = localStorage.getItem('flexedge-theme')
+          if (saved === 'light' || saved === 'dark' || saved === 'system') {
+            theme = saved
+          }
+        } catch {
+          // Storage is optional; use the same light default as ThemeProvider.
+        }
+        let dark = theme === 'dark'
+        if (theme === 'system') {
+          try {
+            dark = window.matchMedia('(prefers-color-scheme: dark)').matches
+          } catch {
+            // Keep the document usable if media queries are unavailable.
+          }
+        }
+        document.documentElement.classList.toggle('dark', dark)
+        document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+      })()
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"

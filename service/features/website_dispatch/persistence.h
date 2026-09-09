@@ -1,6 +1,6 @@
 #pragma once
 
-#include "service/features/sync_event/fanout.h"
+#include "service/features/live_resource/fanout.h"
 
 #include <cstdint>
 #include <optional>
@@ -33,12 +33,16 @@ inline ruvia::Task<void> reconcileMarkers(service::background::WorkerContext& co
             "SELECT revision FROM sys_website WHERE tenant_id = $1 AND id = $2 AND revision = $3 "
             "AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
             tenantId, websiteId, revision);
+        std::string markerId;
         if (!locked.empty()) {
-            (void)co_await service::sync_runtime::upsertMarker(
+            markerId = co_await service::sync_runtime::upsertMarker(
                 transaction, tenantId, service::sync_runtime::MarkerResourceType::website,
                 websiteId, service::sync_runtime::MarkerOperation::apply, revision);
         }
         co_await transaction.commit();
+        if (!markerId.empty())
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks,
+                                                  markerId);
     }
     co_return;
 }
@@ -61,7 +65,9 @@ claim(service::background::WorkerContext& context) {
         co_return std::nullopt;
     }
     const auto& row = rows.front();
-    service::sync_event::fanout::hub().publish(row[1].value().value_or(""));
+    service::live_resource::hub().publish(row[1].value().value_or(""),
+                                         service::live_resource::Resource::tasks,
+                                         row[0].value().value_or(""));
     co_return WebsiteMarker{
         .id = std::string(row[0].value().value_or("")),
         .tenantId = std::string(row[1].value().value_or("")),
@@ -75,7 +81,8 @@ inline ruvia::Task<void> failWebsiteMarker(service::background::WorkerContext& c
                                            const WebsiteMarker& marker, std::string_view error) {
     const auto message = service::sync_runtime::boundedError(error);
     const auto lease = service::sync_runtime::makeRunningLease(
-        marker.tenantId, marker.id, marker.version, context.leaseOwner());
+        marker.tenantId, marker.id, marker.version, context.leaseOwner(),
+        service::sync_runtime::MarkerResourceType::website, marker.resourceId);
     auto transaction = co_await context.db().beginTransaction();
     const auto resultTransition =
         co_await service::sync_runtime::failRunningAndRecordEvent(transaction, lease, message);

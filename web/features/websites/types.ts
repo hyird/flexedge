@@ -1,4 +1,4 @@
-import type { Revisioned } from '@/lib/types'
+import type { Revisioned } from '@/lib/resource'
 
 export type WebsiteDomain = {
   id: string
@@ -67,6 +67,11 @@ export type Website = Revisioned & {
   config: WebsiteConfig
   certificates: Array<{ id: string; domains: string[]; usable: boolean }>
   runtime: {
+    origin_sources?: Array<{
+      node_id: string
+      node_revision: number
+      reported_at: string
+    }>
     domain_states: Array<{
       id: string
       access_protocol: string
@@ -87,38 +92,4 @@ export type Website = Revisioned & {
     target_node_count: number
     synced_node_count: number
   }
-}
-
-export type WebsiteDashboardSeriesPoint = {
-  timestamp: string
-  request_count: number
-  response_bytes: number
-  bandwidth_bps: number
-}
-
-export type WebsiteDashboardRanking = {
-  label: string
-  request_count: number
-  response_bytes: number
-}
-
-export type WebsiteDashboard = {
-  summary: {
-    previous_month_peak_bps: number
-    current_month_peak_bps: number
-    today_peak_bps: number
-    current_bandwidth_bps: number
-    today_unique_ips: number
-    today_response_bytes: number
-  }
-  hourly: WebsiteDashboardSeriesPoint[]
-  daily: WebsiteDashboardSeriesPoint[]
-  status_codes: WebsiteDashboardRanking[]
-  methods: WebsiteDashboardRanking[]
-  countries: WebsiteDashboardRanking[]
-  hosts: WebsiteDashboardRanking[]
-  referers: WebsiteDashboardRanking[]
-  paths: WebsiteDashboardRanking[]
-  client_ips_by_bytes: WebsiteDashboardRanking[]
-  client_ips_by_requests: WebsiteDashboardRanking[]
 }

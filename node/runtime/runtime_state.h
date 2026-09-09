@@ -6,7 +6,6 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
-#include <vector>
 
 #include "node/runtime/compiled_config.h"
 
@@ -14,14 +13,6 @@ namespace flexedge::node {
 
 class RuntimeState final {
   public:
-    void apply(std::shared_ptr<const v2::ActiveState> state,
-               std::vector<v2::DeliveryObject> objects) {
-        auto compiled =
-            std::make_shared<const CompiledConfig>(std::move(state), std::move(objects));
-        validateNext(*compiled);
-        publish(std::move(compiled));
-    }
-
     void validateNext(const CompiledConfig& config) const {
         const auto current = config_.load(std::memory_order_acquire);
         if (!current) {

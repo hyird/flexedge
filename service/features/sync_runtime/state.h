@@ -10,7 +10,7 @@
 #include <ruvia/core/Task.h>
 #include <ruvia/web/db/DbTransaction.h>
 
-#include "service/features/sync_event/fanout.h"
+#include "service/features/live_resource/fanout.h"
 
 namespace service::sync_runtime {
 
@@ -128,6 +128,8 @@ struct MarkerReference final {
     std::string_view tenantId;
     std::string_view markerId;
     std::int64_t version{};
+    MarkerResourceType resourceType{};
+    std::string_view resourceId;
 };
 
 struct RunningMarkerLease final {
@@ -149,18 +151,37 @@ inline constexpr std::string_view kEventOutcomeFailed{"failed"};
 [[nodiscard]] inline RunningMarkerLease makeRunningLease(std::string_view tenantId,
                                                          std::string_view markerId,
                                                          std::int64_t version,
-                                                         std::string_view owner) {
+                                                         std::string_view owner,
+                                                         MarkerResourceType resourceType = MarkerResourceType::website,
+                                                         std::string_view resourceId = {}) {
     if (tenantId.empty() || markerId.empty() || owner.empty() || version <= 0) {
         throw std::invalid_argument("invalid running marker lease");
     }
-    return {.marker = {.tenantId = tenantId, .markerId = markerId, .version = version},
+    return {.marker = {.tenantId = tenantId, .markerId = markerId, .version = version,
+                       .resourceType = resourceType, .resourceId = resourceId},
             .owner = owner};
 }
 
 namespace detail {
 
+inline service::live_resource::Resource resourceForMarkerType(MarkerResourceType resourceType) {
+    using service::live_resource::Resource;
+    switch (resourceType) {
+    case MarkerResourceType::provider: return Resource::providers;
+    case MarkerResourceType::dnsZone: return Resource::dnsZones;
+    case MarkerResourceType::certificate: return Resource::certificates;
+    case MarkerResourceType::website: return Resource::websites;
+    }
+    return Resource::tasks;
+}
+
 inline void publishRecordedResultEvent(const RunningMarkerLease& lease) {
-    service::sync_event::fanout::hub().publish(lease.marker.tenantId);
+    const auto resource = resourceForMarkerType(lease.marker.resourceType);
+    using service::live_resource::Resource;
+    service::live_resource::hub().publish(lease.marker.tenantId, Resource::tasks,
+                                          lease.marker.markerId);
+    service::live_resource::hub().publish(lease.marker.tenantId, resource,
+                                          lease.marker.resourceId);
 }
 
 } // namespace detail
@@ -245,13 +266,21 @@ inline ruvia::Task<void> removeMarker(ruvia::DbTransaction& transaction, std::st
 
 template <typename Database>
 inline ruvia::Task<void> recoverStaleRunning(Database& database, MarkerResourceType resourceType) {
-    (void)co_await database.execute(
+    const auto rows = co_await database.query(
         "UPDATE sys_sync_task SET is_done = FALSE, is_ok = FALSE, count_fails = count_fails + 1, "
         "error = $2, next_attempt_at = NOW() + CAST($3 AS BIGINT) * INTERVAL '1 second', "
         "lease_owner = NULL, lease_until = NULL, updated_at = NOW() WHERE resource_type = $1 "
-        "AND lease_until IS NOT NULL AND lease_until <= NOW()",
+        "AND lease_until IS NOT NULL AND lease_until <= NOW() RETURNING tenant_id, id, resource_id",
         resourceTypeName(resourceType), std::string_view{kLeaseRecoveryRetryError},
         kRetryDelaySeconds);
+    for (const auto& row : rows) {
+        service::live_resource::hub().publish(row[0].value().value_or(""),
+                                              service::live_resource::Resource::tasks,
+                                              row[1].value().value_or(""));
+        service::live_resource::hub().publish(
+            row[0].value().value_or(""), detail::resourceForMarkerType(resourceType),
+            row[2].value().value_or(""));
+    }
     co_return;
 }
 
@@ -299,8 +328,15 @@ inline ruvia::Task<bool> recordRunningResultEvent(Database& database,
 }
 
 template <typename Database> inline ruvia::Task<void> pruneResultEvents(Database& database) {
-    (void)co_await database.execute(
-        "DELETE FROM sys_sync_event WHERE emitted_at < NOW() - INTERVAL '7 days'");
+    const auto removed = co_await database.query(
+        "WITH removed AS (DELETE FROM sys_sync_event WHERE emitted_at < NOW() - INTERVAL '7 days' "
+        "RETURNING tenant_id, task_id) SELECT DISTINCT tenant_id, task_id FROM removed");
+    // The worker passes its autocommit database handle. Retention changes task
+    // history and status projections just like any other committed mutation.
+    for (const auto& row : removed)
+        service::live_resource::hub().publish(row[0].value().value_or(""),
+                                              service::live_resource::Resource::tasks,
+                                              row[1].value().value_or(""));
     co_return;
 }
 

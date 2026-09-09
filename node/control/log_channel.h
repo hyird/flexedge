@@ -1,5 +1,9 @@
 #pragma once
 
+#include "node/control/connect.h"
+#include "node/control/log_delivery.h"
+#include "node/control/authenticate.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -11,6 +15,7 @@
 #include <utility>
 
 #include <ruvia/core/Task.h>
+#include <ruvia/core/Channel.h>
 #include <ruvia/core/Timer.h>
 #include <ruvia/core/StopToken.h>
 #include <ruvia/web/WebSocketClient.h>
@@ -21,7 +26,6 @@
 #include "node/proto/edge_control.pb.h"
 #include "node/runtime/log_buffer.h"
 #include "node/runtime/node_credentials.h"
-#include "node/runtime/secret_buffer.h"
 #include "node/runtime/version.h"
 
 namespace flexedge::node {
@@ -35,18 +39,16 @@ struct LogChannelConfig final {
 class LogChannel final {
   public:
     LogChannel(ruvia::EventLoop loop, LogChannelConfig config, NodeCredentials& credentials,
-               NodeLogBuffer& logs)
+               NodeLogBuffer& logs, ruvia::ChannelReceiver<bool> queued)
         : loop_(std::move(loop)), config_(std::move(config)), credentials_(credentials),
-          logs_(logs) {}
+          logs_(logs), queued_(std::move(queued)) {}
 
     ruvia::Task<void> run() {
         const auto worker = loop_.handle();
         auto retryDelay = std::chrono::seconds(1);
         while (!config_.stopToken.stopRequested()) {
             if (!logs_.pending()) {
-                if (co_await ruvia::sleepFor(worker, std::chrono::milliseconds(10),
-                                             config_.stopToken) ==
-                    ruvia::TimerSleepResult::kStopRequested) {
+                if (!(co_await queued_.receive(config_.stopToken)).hasValue()) {
                     co_return;
                 }
                 continue;
@@ -56,6 +58,9 @@ class LogChannel final {
                 ruvia::WebSocketClient client(loop_, config_.webSocket);
                 co_await runSession(client);
                 retryDelay = std::chrono::seconds(1);
+                // A fully acknowledged batch is not a failed connection.
+                // Return to queue readiness without imposing retry latency.
+                continue;
             } catch (const ControlStreamEnded&) {
                 retryDelay = std::chrono::seconds(1);
             } catch (const ruvia::WebSocketClientError& error) {
@@ -79,10 +84,6 @@ class LogChannel final {
     }
 
   private:
-    static std::string serialize(const v2::ClientEnvelope& envelope) {
-        return serializeArtifact(envelope);
-    }
-
     v2::ClientEnvelope authenticateEnvelope() const {
         v2::ClientEnvelope envelope;
         envelope.set_request_id("log-authenticate");
@@ -95,46 +96,16 @@ class LogChannel final {
     }
 
     ruvia::Task<std::string> authenticate(const ruvia::WebSocketClientHandle& client) {
-        auto envelope = authenticateEnvelope();
-        auto* secret = envelope.mutable_authenticate()->mutable_secret();
-        SecretStringGuard secretCleanser(*secret);
-        auto bytes = serialize(envelope);
-        SecretStringGuard bytesCleanser(bytes);
-        co_await client.binary(bytes);
-        const auto welcomeEnvelope = co_await readServerEnvelope(client);
-        if (welcomeEnvelope.request_id() != envelope.request_id() ||
-            !welcomeEnvelope.has_welcome() || welcomeEnvelope.welcome().node_id().empty()) {
+        const auto welcome = co_await authenticateControlEnvelope(client, authenticateEnvelope(),
+            "control plane did not authenticate log ingestion");
+        if (welcome.node_id().empty()) {
             throw std::runtime_error("control plane did not authenticate log ingestion");
         }
-        co_return welcomeEnvelope.welcome().node_id();
-    }
-
-    ruvia::Task<void> deliver(const ruvia::WebSocketClientHandle& client, std::string_view nodeId,
-                              std::uint64_t sequence) {
-        auto delivery = logs_.take(nodeId);
-        if (!delivery) {
-            co_return;
-        }
-        try {
-            v2::ClientEnvelope envelope;
-            const auto requestId = "logs-" + std::to_string(sequence);
-            envelope.set_request_id(requestId);
-            *envelope.mutable_log_delivery() = delivery->value();
-            co_await client.binary(serialize(envelope));
-            const auto acknowledgement = co_await readServerEnvelope(client);
-            if (acknowledgement.request_id() != requestId ||
-                !acknowledgement.has_log_delivery_ack()) {
-                throw std::runtime_error("control plane did not acknowledge log delivery");
-            }
-            logs_.acknowledge(std::move(*delivery));
-        } catch (...) {
-            logs_.restore(std::move(*delivery));
-            throw;
-        }
+        co_return welcome.node_id();
     }
 
     ruvia::Task<void> runSession(ruvia::WebSocketClient& client) {
-        co_await client.connect();
+        co_await connectControlTransport(client, config_.stopToken);
         if (client.subprotocol() != kControlSubprotocol) {
             throw std::runtime_error("control plane did not select the required subprotocol");
         }
@@ -142,7 +113,7 @@ class LogChannel final {
         const auto nodeId = co_await authenticate(connection);
         std::uint64_t sequence{};
         while (!config_.stopToken.stopRequested() && logs_.pending()) {
-            co_await deliver(connection, nodeId, ++sequence);
+            co_await deliverLogs(connection, logs_, nodeId, ++sequence);
         }
     }
 
@@ -150,6 +121,7 @@ class LogChannel final {
     LogChannelConfig config_;
     NodeCredentials& credentials_;
     NodeLogBuffer& logs_;
+    ruvia::ChannelReceiver<bool> queued_;
 };
 
 } // namespace flexedge::node

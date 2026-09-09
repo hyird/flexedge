@@ -6,7 +6,7 @@
 #include <ruvia/web/ModelJson.h>
 
 #include "service/domains/agent/agent.types.h"
-#include "service/features/node_runtime/model.h"
+#include "service/features/node_runtime/transport.h"
 
 namespace service::agent {
 

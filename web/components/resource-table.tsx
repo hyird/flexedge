@@ -8,6 +8,7 @@ import {
 } from '@tanstack/react-table'
 import { CircleAlert, Inbox, RotateCcw } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useDelayedLoading } from '@/hooks/use-delayed-loading'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
@@ -51,6 +52,7 @@ export function ResourceTable<T>({
   emptyTitle = '暂无数据',
   emptyDescription = '调整筛选条件或创建第一条记录。',
 }: Props<T>) {
+  const { pending, showSkeleton } = useDelayedLoading(loading && !data.length)
   const tableContainerRef = useRef<HTMLDivElement>(null)
   const [useContentWidth, setUseContentWidth] = useState(false)
   const pagination: PaginationState = {
@@ -100,8 +102,8 @@ export function ResourceTable<T>({
   }, [columns, data, error, fixedLayout, loading])
 
   return (
-    <div className='min-w-0 space-y-3' aria-busy={loading}>
-      {loading && (
+    <div className='min-w-0 space-y-3' aria-busy={pending}>
+      {pending && (
         <span role='status' className='sr-only'>
           正在加载数据…
         </span>
@@ -142,9 +144,12 @@ export function ResourceTable<T>({
             ))}
           </TableHeader>
           <TableBody>
-            {error ? (
+            {error && !pending ? (
               <TableRow>
-                <TableCell colSpan={columns.length} className='h-48 text-center'>
+                <TableCell
+                  colSpan={columns.length}
+                  className='h-48 text-center'
+                >
                   <div
                     role='alert'
                     className='mx-auto flex max-w-sm flex-col items-center'
@@ -169,7 +174,7 @@ export function ResourceTable<T>({
                   </div>
                 </TableCell>
               </TableRow>
-            ) : loading ? (
+            ) : showSkeleton || (pending && !data.length) ? (
               Array.from({ length: Math.min(pageSize, 8) }).map(
                 (_, rowIndex) => (
                   <TableRow key={rowIndex}>
@@ -178,6 +183,7 @@ export function ResourceTable<T>({
                         <Skeleton
                           className={cn(
                             'h-5',
+                            !showSkeleton && 'invisible',
                             cellIndex === 0 ? 'w-36' : 'w-20'
                           )}
                         />
@@ -201,7 +207,10 @@ export function ResourceTable<T>({
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={columns.length} className='h-48 text-center'>
+                <TableCell
+                  colSpan={columns.length}
+                  className='h-48 text-center'
+                >
                   <div className='mx-auto flex max-w-sm flex-col items-center'>
                     <div className='mb-3 flex size-10 items-center justify-center rounded-full bg-muted'>
                       <Inbox className='size-5 text-muted-foreground' />
@@ -217,7 +226,7 @@ export function ResourceTable<T>({
           </TableBody>
         </Table>
       </div>
-      {!error && <DataTablePagination table={table} disabled={loading} />}
+      {!error && <DataTablePagination table={table} disabled={pending} />}
     </div>
   )
 }

@@ -9,7 +9,7 @@
 #include <ruvia/core/Task.h>
 
 #include "service/features/background/worker_pool.h"
-#include "service/features/certificate/provider_config.h"
+#include "service/features/certificate/provider_runtime_credentials.h"
 #include "service/features/dns_sync/queue.h"
 #include "service/features/logging/logger.h"
 #include "service/features/provider_verification/failure.h"
@@ -41,7 +41,8 @@ inline ruvia::Task<void> reconcile(service::background::WorkerContext& context) 
 inline ruvia::Task<std::optional<std::string>>
 loadCurrentRuntime(service::background::WorkerContext& context, const VerificationTask& task) {
     const auto lease = service::sync_runtime::makeRunningLease(
-        task.tenantId, task.id, task.generation, context.leaseOwner());
+        task.tenantId, task.id, task.generation, context.leaseOwner(),
+        service::sync_runtime::MarkerResourceType::provider, task.providerId);
     if (!co_await service::sync_runtime::renewRunningLease(context.db(), lease)) {
         throw std::runtime_error("供应商检测标记 lease 已失效");
     }
@@ -63,7 +64,8 @@ inline ruvia::Task<void> completeVerification(service::background::WorkerContext
                                               VerificationResult result) {
     const bool dns = task.kind == "dns";
     const auto lease = service::sync_runtime::makeRunningLease(
-        task.tenantId, task.id, task.generation, context.leaseOwner());
+        task.tenantId, task.id, task.generation, context.leaseOwner(),
+        service::sync_runtime::MarkerResourceType::provider, task.providerId);
     auto transaction = co_await context.db().beginTransaction();
     const auto rows = co_await transaction.query(
         "SELECT runtime::text FROM sys_provider WHERE id = $1 AND tenant_id = $2 AND kind = $3 "
@@ -124,7 +126,8 @@ inline ruvia::Task<void> failVerification(service::background::WorkerContext& co
                                           bool permanent) {
     const auto message = service::sync_runtime::boundedError(error);
     const auto lease = service::sync_runtime::makeRunningLease(
-        task.tenantId, task.id, task.generation, context.leaseOwner());
+        task.tenantId, task.id, task.generation, context.leaseOwner(),
+        service::sync_runtime::MarkerResourceType::provider, task.providerId);
     auto transaction = co_await context.db().beginTransaction();
     const auto resultTransition =
         co_await service::sync_runtime::failRunningAndRecordEvent(transaction, lease, message);

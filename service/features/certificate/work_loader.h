@@ -11,7 +11,7 @@
 
 #include "service/features/background/worker_pool.h"
 #include "service/features/certificate/acme_types.h"
-#include "service/features/certificate/provider_config.h"
+#include "service/features/certificate/provider_config_mapper.h"
 #include "service/features/certificate/task.h"
 #include "service/features/dns/driver.h"
 #include "service/utils/secret.h"
@@ -35,7 +35,7 @@ struct CertificateWork final {
 inline ruvia::Task<CertificateWork> loadWork(service::background::WorkerContext& context,
                                              const CertificateTask& task) {
     const auto rows = co_await context.db().query(
-        "SELECT certificate.tenant_id, certificate.domain, certificate.subject_alt_names[1], "
+        "SELECT certificate.tenant_id, certificate.subject_alt_names[1], "
         "certificate.subject_alt_names[2], certificate.provider_id, certificate.dns_zone_id, "
         "provider.provider, provider.status, provider.revision, provider.config::text, "
         "provider.runtime::text, "
@@ -55,26 +55,26 @@ inline ruvia::Task<CertificateWork> loadWork(service::background::WorkerContext&
         throw AcmeError("证书任务对应的资源不存在或版本已变化", true);
     }
     const auto& row = rows.front();
-    if (row[7].value().value_or("") != "verified") {
+    if (row[6].value().value_or("") != "verified") {
         throw AcmeError("证书供应商尚未通过检测", false);
     }
-    if (row[13].value().value_or("") != "verified") {
+    if (row[12].value().value_or("") != "verified") {
         throw AcmeError("DNS 服务商尚未通过检测", false);
     }
 
     CertificateProviderConfigData providerConfig;
     try {
         providerConfig =
-            parseCertificateProviderConfig(row[9].value().value_or("{}"), context.resource());
+            parseCertificateProviderConfig(row[8].value().value_or("{}"), context.resource());
     } catch (const std::runtime_error&) {
         throw AcmeError("证书供应商配置损坏", true);
     }
     std::optional<std::string> accountEmail = providerConfig.accountEmail;
 
     std::optional<EabCredentials> eab;
-    const auto provider = std::string(row[6].value().value_or(""));
+    const auto provider = std::string(row[5].value().value_or(""));
     if (provider == "zerossl") {
-        const auto runtime = parseCertificateProviderRuntime(row[10].value().value_or("{}"),
+        const auto runtime = parseCertificateProviderRuntime(row[9].value().value_or("{}"),
                                                              {.resource = context.resource()});
         if (!runtime) {
             throw AcmeError("ZeroSSL EAB 凭据不存在，请重新检测证书供应商", true);
@@ -95,8 +95,9 @@ inline ruvia::Task<CertificateWork> loadWork(service::background::WorkerContext&
     }
 
     std::vector<std::string> domains;
-    domains.reserve(3);
-    for (const auto index : {1U, 2U, 3U}) {
+    domains.reserve(2);
+    // The generated SAN array already includes the certificate's primary domain.
+    for (const auto index : {1U, 2U}) {
         const auto& value = row[index];
         if (const auto domain = value.value(); domain && !domain->empty()) {
             domains.emplace_back(*domain);
@@ -107,16 +108,16 @@ inline ruvia::Task<CertificateWork> loadWork(service::background::WorkerContext&
     }
     co_return CertificateWork{
         .tenantId = std::string(row[0].value().value_or("")),
-        .providerId = std::string(row[4].value().value_or("")),
+        .providerId = std::string(row[3].value().value_or("")),
         .provider = provider,
-        .providerRevision = row[8].as<std::int64_t>().value_or(0),
+        .providerRevision = row[7].as<std::int64_t>().value_or(0),
         .accountEmail = std::move(accountEmail),
         .eab = std::move(eab),
         .domains = std::move(domains),
-        .dnsZoneId = std::string(row[5].value().value_or("")),
-        .zoneDomain = std::string(row[11].value().value_or("")),
+        .dnsZoneId = std::string(row[4].value().value_or("")),
+        .zoneDomain = std::string(row[10].value().value_or("")),
         .dnsMinimumRecordTtl =
-            service::dns::DnsProviderDriver(row[12].value().value_or("")).minimumRecordTtl(),
+            service::dns::DnsProviderDriver(row[11].value().value_or("")).minimumRecordTtl(),
     };
 }
 

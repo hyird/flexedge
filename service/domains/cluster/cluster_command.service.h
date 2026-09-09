@@ -1,6 +1,7 @@
 #pragma once
 
 #include "service/features/node_dispatch/notifications.h"
+#include "service/features/live_resource/fanout.h"
 
 #include <algorithm>
 #include <cctype>
@@ -55,6 +56,9 @@ class ClusterCommandService final {
                 transaction, tenantId, rows.front()[0].value().value_or(""));
             co_await transaction.commit();
             service::node_dispatch::notifications::published(tenantId);
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::clusters,
+                                                  rows.front()[0].value().value_or(""));
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::nodes);
         } catch (const ruvia::DbError& error) {
             if (isIdentityConflict(error)) {
                 service::common::throwAppError(ClusterError::EXISTS);
@@ -110,6 +114,8 @@ class ClusterCommandService final {
             co_await service::node_dispatch::publishClusterRelease(transaction, tenantId, id);
             co_await transaction.commit();
             service::node_dispatch::notifications::published(tenantId);
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::clusters, id);
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::nodes);
         } catch (const ruvia::DbError& error) {
             if (isIdentityConflict(error)) {
                 service::common::throwAppError(ClusterError::EXISTS);
@@ -163,6 +169,8 @@ class ClusterCommandService final {
         co_await service::cluster_dns::reconcileCluster(transaction, tenantId, id);
         co_await transaction.commit();
         service::node_dispatch::notifications::published(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::clusters, id);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::nodes);
         co_return;
     }
 

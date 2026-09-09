@@ -1,6 +1,6 @@
 #pragma once
 
-#include "service/features/sync_event/fanout.h"
+#include "service/features/live_resource/fanout.h"
 
 #include <cstdint>
 #include <optional>
@@ -30,7 +30,12 @@ inline ruvia::Task<std::optional<DnsTask>> claim(service::background::WorkerCont
         co_return std::nullopt;
     }
     const auto& row = rows.front();
-    service::sync_event::fanout::hub().publish(row[1].value().value_or(""));
+    service::live_resource::hub().publish(row[1].value().value_or(""),
+                                         service::live_resource::Resource::tasks,
+                                         row[0].value().value_or(""));
+    service::live_resource::hub().publish(row[1].value().value_or(""),
+                                         service::live_resource::Resource::dnsZones,
+                                         row[2].value().value_or(""));
     co_return DnsTask{
         .id = std::string(row[0].value().value_or("")),
         .tenantId = std::string(row[1].value().value_or("")),

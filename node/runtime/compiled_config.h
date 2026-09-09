@@ -17,6 +17,7 @@
 #include "node/proto/edge_control.pb.h"
 #include "node/proto/schema_version.h"
 #include "node/data/route_rules.h"
+#include "node/runtime/compression_validation.h"
 
 namespace flexedge::node {
 
@@ -52,6 +53,12 @@ class CompiledConfig final {
         validateEndpoints();
         validateWebsites();
     }
+
+    // Index pointers refer to objects owned by this immutable snapshot.
+    CompiledConfig(const CompiledConfig&) = delete;
+    CompiledConfig& operator=(const CompiledConfig&) = delete;
+    CompiledConfig(CompiledConfig&&) = delete;
+    CompiledConfig& operator=(CompiledConfig&&) = delete;
 
     [[nodiscard]] const v2::NodeSpec& nodeSpec() const noexcept { return state_->node_spec(); }
 
@@ -97,7 +104,7 @@ class CompiledConfig final {
         const auto& specContent = spec.content();
         if (!spec.has_content() || specContent.node_id().empty() ||
             specContent.schema_version() != kNodeSpecSchemaVersion || specContent.revision() <= 0 ||
-            !isSha256Digest(spec.digest_sha256()) ||
+            !flexedge::crypto::isSha256Digest(spec.digest_sha256()) ||
             artifactDigest(specContent) != spec.digest_sha256()) {
             throw std::runtime_error("invalid node spec");
         }
@@ -106,7 +113,7 @@ class CompiledConfig final {
         if (!manifest.has_content() || releaseContent.cluster_id().empty() ||
             releaseContent.release_id().empty() || releaseContent.generation() <= 0 ||
             !supportedClusterReleaseSchema(releaseContent.schema_version()) ||
-            releaseContent.access_domain().empty() || !isSha256Digest(manifest.digest_sha256()) ||
+            releaseContent.access_domain().empty() || !flexedge::crypto::isSha256Digest(manifest.digest_sha256()) ||
             artifactDigest(releaseContent) != manifest.digest_sha256()) {
             throw std::runtime_error("invalid cluster release manifest");
         }
@@ -116,7 +123,7 @@ class CompiledConfig final {
         std::unordered_map<std::string, v2::ObjectKind> expected;
         expected.reserve(static_cast<std::size_t>(release().content().objects_size()));
         for (const auto& reference : release().content().objects()) {
-            if (!isSha256Digest(reference.digest_sha256()) ||
+            if (!flexedge::crypto::isSha256Digest(reference.digest_sha256()) ||
                 (reference.kind() != v2::OBJECT_KIND_WEBSITE &&
                  reference.kind() != v2::OBJECT_KIND_CERTIFICATE) ||
                 !expected.emplace(reference.digest_sha256(), reference.kind()).second) {
@@ -193,7 +200,7 @@ class CompiledConfig final {
             throw std::runtime_error("unsupported minimum TLS version");
         }
         validateAccessLog(website);
-        validateCompression(website);
+        validateResponseCompression(website);
     }
 
     static void validateWebsiteOrigins(const v2::Website& website) {
@@ -258,73 +265,6 @@ class CompiledConfig final {
             validateWebsiteOrigins(*website);
             validateWebsiteDomains(*website);
         }
-    }
-
-    static void validateCompressionLimits(const v2::Website& website) {
-        if (website.response_compression_enabled() &&
-            (website.response_compression_min_bytes() < 256 ||
-             website.response_compression_min_bytes() > 1024 * 1024 ||
-             (website.response_compression_max_bytes() != 0 &&
-              website.response_compression_max_bytes() <
-                  website.response_compression_min_bytes()) ||
-             website.response_compression_max_bytes() > 64 * 1024 * 1024 ||
-             website.response_compression_algorithms().empty())) {
-            throw std::runtime_error("invalid response compression policy");
-        }
-    }
-
-    static void validateCompressionAlgorithms(const v2::Website& website) {
-        std::unordered_set<std::string> algorithms;
-        for (const auto& algorithm : website.response_compression_algorithms()) {
-            if ((algorithm != "br" && algorithm != "zstd" && algorithm != "gzip") ||
-                !algorithms.emplace(algorithm).second) {
-                throw std::runtime_error("invalid response compression algorithm");
-            }
-        }
-    }
-
-    static bool validCompressionMimeType(std::string_view value) noexcept {
-        const auto validToken = [](std::string_view segment) {
-            return !segment.empty() && std::ranges::all_of(segment, [](unsigned char ch) {
-                return std::isalnum(ch) || ch == '!' || ch == '#' || ch == '$' || ch == '&' ||
-                       ch == '^' || ch == '_' || ch == '.' || ch == '+' || ch == '-';
-            });
-        };
-        const auto slash = value.find('/');
-        if (slash == std::string_view::npos ||
-            value.find('/', slash + 1) != std::string_view::npos) {
-            return false;
-        }
-        const auto type = value.substr(0, slash);
-        const auto subtype = value.substr(slash + 1);
-        return validToken(type) && (subtype == "*" || validToken(subtype));
-    }
-
-    template <typename Values>
-    static void validateCompressionMatchValues(const Values& values, bool extension,
-                                               bool mimeType) {
-        if (values.size() > 32) {
-            throw std::runtime_error("too many response compression match values");
-        }
-        std::unordered_set<std::string> seen;
-        for (const auto& value : values) {
-            if (value.empty() || value.size() > 127 ||
-                std::ranges::any_of(value,
-                                    [](unsigned char ch) { return std::isspace(ch) != 0; }) ||
-                (extension && value.front() != '.') ||
-                (mimeType && !validCompressionMimeType(value)) || !seen.emplace(value).second) {
-                throw std::runtime_error("invalid response compression match value");
-            }
-        }
-    }
-
-    static void validateCompression(const v2::Website& website) {
-        validateCompressionLimits(website);
-        validateCompressionAlgorithms(website);
-        validateCompressionMatchValues(website.response_compression_mime_types(), false, true);
-        validateCompressionMatchValues(website.response_compression_extensions(), true, false);
-        validateCompressionMatchValues(website.response_compression_excluded_extensions(), true,
-                                       false);
     }
 
     static void validateAccessLog(const v2::Website& website) {

@@ -34,5 +34,8 @@ RUVIA_RESPONSE_MODEL(DnsProviderPageResponse, RUVIA_REQUIRED_FIELD(code, ruvia::
 RUVIA_RESPONSE_MODEL(DnsProviderDetailResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, DnsProviderDto));
+RUVIA_RESPONSE_MODEL(DnsProviderOptionsResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+                     RUVIA_REQUIRED_FIELD(message, ruvia::String),
+                     RUVIA_REQUIRED_FIELD(data, ruvia::Array<DnsProviderDto>));
 
 } // namespace service::provider

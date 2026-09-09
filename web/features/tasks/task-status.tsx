@@ -7,7 +7,8 @@ import {
   CircleMinus,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
-import { taskStatuses, type Task } from './data'
+import { taskStatuses } from './task-display'
+import { type Task } from './types'
 
 const icons = {
   queued: Clock3,

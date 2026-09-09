@@ -1,5 +1,5 @@
 import { createFileRoute, redirect } from '@tanstack/react-router'
-import { sessionQueryOptions } from '@/lib/auth'
+import { ensureAuthenticatedSession } from '@/features/auth/data'
 import { SignIn } from '@/features/auth/sign-in'
 
 export const Route = createFileRoute('/sign-in')({
@@ -14,8 +14,7 @@ export const Route = createFileRoute('/sign-in')({
     }
   },
   beforeLoad: async ({ context }) => {
-    const authenticated = await context.queryClient
-      .ensureQueryData(sessionQueryOptions)
+    const authenticated = await ensureAuthenticatedSession(context.queryClient)
       .then(() => true)
       .catch(() => false)
 

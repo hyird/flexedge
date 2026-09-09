@@ -513,8 +513,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
                 return;
             }
             self->log("origin attempt timed out");
-            self->health_.failure(self->websiteId_, self->currentOriginId_,
-                                  self->unhealthyThreshold_);
+            self->currentHealth_.failure(self->unhealthyThreshold_);
             if (action == TimeoutAction::kFailover) {
                 self->tryNextOrigin();
             } else {
@@ -710,11 +709,11 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
                 return;
             }
             logIo("buffered origin exchange failed", error);
-            health_.failure(websiteId_, currentOriginId_, unhealthyThreshold_);
+            currentHealth_.failure(unhealthyThreshold_);
             tryNextOrigin();
             return;
         }
-        health_.success(websiteId_, currentOriginId_, healthyThreshold_);
+        currentHealth_.success(healthyThreshold_);
         const auto* website = activeConfig_->website(bufferedRequest_.authority);
         if (website == nullptr) {
             website = activeConfig_->website(requestHost_);
@@ -755,7 +754,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         }
         if (error) {
             logIo("origin connect failed", error);
-            health_.failure(websiteId_, currentOriginId_, unhealthyThreshold_);
+            currentHealth_.failure(unhealthyThreshold_);
             tryNextOrigin();
             return;
         }
@@ -800,7 +799,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         }
         const auto* origin = origins_[originIndex_++];
         originHost_ = origin->host();
-        currentOriginId_ = origin->id();
+        currentHealth_ = health_.target(websiteId_, origin->id());
         originPort_ = static_cast<std::uint16_t>(origin->port());
         originSecure_ = origin->protocol() == "https";
         const auto attempt = originAttempt_;
@@ -826,8 +825,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
                     return;
                 }
                 self->logIo("origin request write failed", error);
-                self->health_.failure(self->websiteId_, self->currentOriginId_,
-                                      self->unhealthyThreshold_);
+                self->currentHealth_.failure(self->unhealthyThreshold_);
                 self->tryNextOrigin();
                 return;
             }
@@ -848,8 +846,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
             }
             if (error) {
                 self->logIo("origin response head read failed", error);
-                self->health_.failure(self->websiteId_, self->currentOriginId_,
-                                      self->unhealthyThreshold_);
+                self->currentHealth_.failure(self->unhealthyThreshold_);
                 self->tryNextOrigin();
                 return;
             }
@@ -861,16 +858,14 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
             }
             if (status == OriginResponseHeadStatus::kFailure) {
                 self->log("origin response head parse failed");
-                self->health_.failure(self->websiteId_, self->currentOriginId_,
-                                      self->unhealthyThreshold_);
+                self->currentHealth_.failure(self->unhealthyThreshold_);
                 self->tryNextOrigin();
                 return;
             }
             self->tunnel_ = self->responseCodec_->tunnel();
             self->relayBytes_ = self->responseCodec_->takeOutput();
             self->captureResponseHeaders(self->relayBytes_);
-            self->health_.success(self->websiteId_, self->currentOriginId_,
-                                  self->healthyThreshold_);
+            self->currentHealth_.success(self->healthyThreshold_);
             self->relayOriginBytes(attempt);
         };
         originTransport_->read(asio::buffer(originReadBuffer_), std::move(completion));
@@ -1137,7 +1132,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
     std::string originHost_;
     std::string websiteId_;
     std::string requestHost_;
-    std::string currentOriginId_;
+    OriginHealthRegistry::Target currentHealth_;
     std::string clientAddress_;
     std::string requestMethod_;
     std::string requestTarget_;
@@ -1197,6 +1192,17 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
 
 class HttpListener final : public std::enable_shared_from_this<HttpListener> {
   public:
+    template <typename... Args>
+    [[nodiscard]] static std::shared_ptr<HttpListener> create(Args&&... args) {
+        auto listener = std::shared_ptr<HttpListener>(new HttpListener(std::forward<Args>(args)...));
+        listener->stopRegistration_ = listener->owner_.onStop(
+            [weak = std::weak_ptr<HttpListener>(listener)] {
+                if (const auto self = weak.lock()) self->stop();
+            });
+        return listener;
+    }
+
+  private:
     HttpListener(ruvia::EventLoop owner, RuntimeState& runtime, OriginHealthRegistry& health,
                  RuntimeMetrics& metrics, NodeLogBuffer::Producer& logs,
                  OriginConnectionPool& originConnections, BufferedBytesBudget& requestBuffers,
@@ -1229,12 +1235,17 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
         if (error) {
             throw std::system_error(error, "could not start edge HTTP listener");
         }
-        stopRegistration_ = owner_.onStop([this] { stop(); });
+
     }
 
+  public:
     ~HttpListener() { stop(); }
 
+  private:
     void start() {
+        if (!acceptor_.is_open()) {
+            return;
+        }
         if (activationGate_ && !activationGate_->active()) {
             activationTimer_.expires_after(std::chrono::milliseconds(1));
             const auto self = shared_from_this();
@@ -1248,14 +1259,15 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
         accept();
     }
 
+  public:
     void requestStart(std::shared_ptr<const ListenerActivationGate> activationGate = nullptr) {
-        activationGate_ = std::move(activationGate);
-        if (owner_.isCurrent()) {
-            start();
-            return;
-        }
         const auto self = shared_from_this();
-        if (!owner_.post([self] { self->start(); }).accepted()) {
+        if (!owner_.post([self, gate = std::move(activationGate)] {
+                if (self->started_) return;
+                self->started_ = true;
+                self->activationGate_ = gate;
+                self->start();
+            }).accepted()) {
             throw std::runtime_error("edge HTTP listener worker is stopping");
         }
     }
@@ -1264,6 +1276,8 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
         return acceptor_.local_endpoint();
     }
 
+  private:
+    // Socket cancellation and accept initiation must stay on the owning loop.
     void stop() noexcept {
         std::error_code ignored;
         activationTimer_.cancel(ignored);
@@ -1271,15 +1285,20 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
         ignored = acceptor_.close(ignored);
     }
 
+  public:
     void requestStop() noexcept {
         if (owner_.isCurrent()) {
             stop();
             return;
         }
-        const auto self = shared_from_this();
-        if (!owner_.post([self] { self->stop(); }).accepted()) {
-            stop();
-        }
+        // Cleanup must not fall back to the caller thread when the bounded
+        // worker mailbox is full or stopping. The loop's onStop hook also
+        // closes the socket; a weak capture cannot retain a stopped loop.
+        asio::post(owner_.executor(), [weak = weak_from_this()] {
+            if (const auto self = weak.lock()) {
+                self->stop();
+            }
+        });
     }
 
   private:
@@ -1318,6 +1337,7 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
     ruvia::EventLoopStopRegistration stopRegistration_;
     std::shared_ptr<const ListenerActivationGate> activationGate_;
     std::uint64_t sequence_{};
+    bool started_{}; // Accessed only by the owning event loop.
 };
 
 } // namespace flexedge::node

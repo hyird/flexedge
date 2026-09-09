@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -7,6 +8,7 @@
 #include <ruvia/web/Controller.h>
 
 #include "service/common/types.h"
+#include "service/common/uuid.h"
 #include "service/domains/dns_zone/dns_zone.types.h"
 
 namespace service::dns_zone {
@@ -75,11 +77,13 @@ struct DnsRecordConfigValidator final {
 };
 
 inline bool hasUniqueRecordIds(const ruvia::Array<service::dns_sync::ZoneRecordInput>& records) {
-    std::unordered_set<std::string_view> ids;
+    std::unordered_set<std::string> ids;
     ids.reserve(records.size());
     for (const auto& record : records) {
         const auto& id = record.get<"id">();
-        if (!id || !ids.insert(id->view()).second) {
+        const auto parsedId = service::common::parseUuid(
+            id ? std::optional<std::string_view>{id->view()} : std::nullopt);
+        if (!parsedId || !ids.insert(*parsedId).second) {
             return false;
         }
     }

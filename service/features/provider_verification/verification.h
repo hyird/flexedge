@@ -11,9 +11,9 @@
 
 #include "service/features/background/worker_pool.h"
 #include "service/features/certificate/provider.h"
-#include "service/features/certificate/provider_config.h"
+#include "service/features/certificate/provider_config_mapper.h"
 #include "service/features/dns/driver.h"
-#include "service/features/dns/provider_config.h"
+#include "service/features/dns/provider_config_mapper.h"
 #include "service/features/dns/provider_runtime.h"
 #include "service/features/provider_verification/failure.h"
 #include "service/features/provider_verification/task.h"

@@ -28,7 +28,7 @@ struct OriginRuntimeState final {
     service::node_runtime::NodeRuntimeData::OriginHealth health;
 };
 
-inline WebsiteRuntimeDto toRuntime(ruvia::Context& c,
+inline WebsiteRuntimeDto toRuntime(auto& c,
                                    const service::website_config::WebsiteConfigData& config,
                                    const service::website_dns::WebsiteRuntimeData& input,
                                    const std::vector<BoundCertificate>& certificates,
@@ -39,10 +39,10 @@ inline WebsiteRuntimeDto toRuntime(ruvia::Context& c,
                               : syncedCount == targetCount ? std::string_view{"applied"}
                               : syncedCount == 0           ? std::string_view{"pending"}
                                                            : std::string_view{"partial"};
-    output.set<"deployStatus">(deployStatus);
-    output.set<"targetNodeCount">(targetCount);
-    output.set<"syncedNodeCount">(syncedCount);
-    auto& domains = output.ensure<"domainStates">();
+    output.template set<"deployStatus">(deployStatus);
+    output.template set<"targetNodeCount">(targetCount);
+    output.template set<"syncedNodeCount">(syncedCount);
+    auto& domains = output.template ensure<"domainStates">();
     for (const auto& domain : config.domains) {
         const auto state = std::ranges::find_if(input.domainStates, [&](const auto& candidate) {
             return candidate.id && *candidate.id == domain.id;
@@ -60,28 +60,28 @@ inline WebsiteRuntimeDto toRuntime(ruvia::Context& c,
         const auto resolutionStatus = runtimeState && runtimeState->resolutionStatus
                                           ? std::string_view(*runtimeState->resolutionStatus)
                                           : std::string_view{"unverified"};
-        item.set<"id">(domain.id);
-        item.set<"accessProtocol">(https ? std::string_view{"https"} : std::string_view{"http"});
-        item.set<"resolutionStatus">(resolutionStatus);
+        item.template set<"id">(domain.id);
+        item.template set<"accessProtocol">(https ? std::string_view{"https"} : std::string_view{"http"});
+        item.template set<"resolutionStatus">(resolutionStatus);
         if (runtimeState && runtimeState->lastVerifiedAt) {
-            item.set<"lastVerifiedAt">(*runtimeState->lastVerifiedAt);
+            item.template set<"lastVerifiedAt">(*runtimeState->lastVerifiedAt);
         }
         if (runtimeState && runtimeState->lastError) {
-            item.set<"lastError">(*runtimeState->lastError);
+            item.template set<"lastError">(*runtimeState->lastError);
         }
     }
-    auto& origins = output.ensure<"originStates">();
+    auto& origins = output.template ensure<"originStates">();
     origins.reserve(originStates.size());
     for (const auto& state : originStates) {
         auto& item = origins.emplace_back(c);
-        item.set<"nodeId">(state.nodeId);
-        item.set<"nodeName">(state.nodeName);
-        item.set<"originId">(state.health.originId);
-        item.set<"status">(state.health.status);
-        item.set<"checkedAtUnixMillis">(state.health.checkedAtUnixMillis);
-        item.set<"latencyMillis">(state.health.latencyMillis);
+        item.template set<"nodeId">(state.nodeId);
+        item.template set<"nodeName">(state.nodeName);
+        item.template set<"originId">(state.health.originId);
+        item.template set<"status">(state.health.status);
+        item.template set<"checkedAtUnixMillis">(state.health.checkedAtUnixMillis);
+        item.template set<"latencyMillis">(state.health.latencyMillis);
         if (state.health.lastError) {
-            item.set<"lastError">(*state.health.lastError);
+            item.template set<"lastError">(*state.health.lastError);
         }
     }
     return output;

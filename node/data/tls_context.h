@@ -55,6 +55,12 @@ class TlsContextSet final {
         }
     }
 
+    // OpenSSL's SNI callback retains this object's address.
+    TlsContextSet(const TlsContextSet&) = delete;
+    TlsContextSet& operator=(const TlsContextSet&) = delete;
+    TlsContextSet(TlsContextSet&&) = delete;
+    TlsContextSet& operator=(TlsContextSet&&) = delete;
+
     [[nodiscard]] bool empty() const noexcept { return contexts_.empty(); }
 
     [[nodiscard]] asio::ssl::context& defaultContext() const {

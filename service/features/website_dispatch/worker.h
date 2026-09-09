@@ -33,7 +33,8 @@ inline ruvia::Task<void> recoverStaleMarkers(service::background::WorkerContext&
 inline ruvia::Task<void> execute(service::background::WorkerContext& context,
                                  const WebsiteMarker& marker) {
     const auto lease = service::sync_runtime::makeRunningLease(
-        marker.tenantId, marker.id, marker.version, context.leaseOwner());
+        marker.tenantId, marker.id, marker.version, context.leaseOwner(),
+        service::sync_runtime::MarkerResourceType::website, marker.resourceId);
     co_await service::website_dns::probeWebsite(context, marker.resourceId, lease, marker.version);
     co_return;
 }
@@ -48,7 +49,7 @@ inline ruvia::Task<void> processMarker(service::background::WorkerContext& conte
     } catch (...) {
         markerError = "网站同步发生未知错误";
     }
-    if (!markerError.empty()) {
+    if (!context.stopToken().stopRequested() && !markerError.empty()) {
         co_await failWebsiteMarker(context, marker, markerError);
     }
     co_return;
@@ -57,8 +58,11 @@ inline ruvia::Task<void> processMarker(service::background::WorkerContext& conte
 inline ruvia::Task<void> processMarkers(service::background::WorkerContext& context,
                                         std::size_t& processed) {
     for (; processed < kMaxJobsPerTick; ++processed) {
+        if (context.stopToken().stopRequested()) {
+            break;
+        }
         const auto marker = co_await claim(context);
-        if (!marker) {
+        if (context.stopToken().stopRequested() || !marker) {
             break;
         }
         co_await processMarker(context, *marker);
@@ -72,6 +76,9 @@ inline ruvia::Task<void> runMaintenance(service::background::WorkerContext& cont
     if (std::chrono::steady_clock::now() >= nextLeaseRecovery) {
         co_await recoverStaleMarkers(context);
         nextLeaseRecovery = std::chrono::steady_clock::now() + kLeaseRecoveryInterval;
+    }
+    if (context.stopToken().stopRequested()) {
+        co_return;
     }
     if (std::chrono::steady_clock::now() >= nextReconciliation) {
         co_await reconcileMarkers(context);

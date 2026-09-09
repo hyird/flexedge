@@ -41,10 +41,16 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      - name: Frontend lint
+        run: bun run lint
+
+      - name: Frontend tests
+        run: bun run test
+
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-14 g++-14 ninja-build
+          sudo apt-get install -y gcc-14 g++-14 ninja-build python3
           gcc-14 --version
           g++-14 --version
 
@@ -86,7 +92,7 @@ jobs:
         run: cmake --build build/ci --parallel
 
       - name: Test
-        run: ctest --test-dir build/ci --output-on-failure --build-config "$BUILD_TYPE"
+        run: ctest --test-dir build/ci --output-on-failure --no-tests=error --build-config "$BUILD_TYPE"
 
       - name: Stage Server artifact
         run: cmake --install build/ci --component Server --prefix build/artifact

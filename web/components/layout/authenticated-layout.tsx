@@ -3,8 +3,6 @@ import { getCookie } from '@/lib/cookies'
 import { cn } from '@/lib/utils'
 import { SearchProvider } from '@/context/search-provider'
 import { AppSidebar } from '@/components/layout/app-sidebar'
-import { NodeRuntimeMonitor } from '@/components/node-runtime-monitor'
-import { SyncEventMonitor } from '@/components/sync-event-monitor'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { SkipToMain } from '@/components/skip-to-main'
 
@@ -16,8 +14,6 @@ export function AuthenticatedLayout({ children }: AuthenticatedLayoutProps) {
   const defaultOpen = getCookie('sidebar_state') !== 'false'
   return (
     <SearchProvider>
-      <SyncEventMonitor />
-      <NodeRuntimeMonitor />
       <SidebarProvider defaultOpen={defaultOpen}>
         <SkipToMain />
         <AppSidebar />

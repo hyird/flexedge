@@ -1,12 +1,8 @@
-import { z } from 'zod'
 import { useFieldArray, useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation } from '@tanstack/react-query'
 import { Plus, X } from 'lucide-react'
 import { toast } from 'sonner'
-import { sendData } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
-import type { DnsZone } from '@/lib/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -35,21 +31,10 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-import { DnsLineSelect } from '@/components/dns-line-tree'
-
-const recordSchema = z.object({
-  id: z.string().uuid(),
-  type: z.enum(['A', 'AAAA', 'CNAME', 'TXT', 'MX']),
-  name: z.string().trim().min(1, '请输入主机记录').max(253),
-  content: z.string().trim().min(1, '请输入记录值').max(4096),
-  ttl: z.number().int().min(1).max(86400),
-  priority: z.number().int().min(0).max(65535).optional(),
-  proxied: z.boolean(),
-  line_code: z.string().trim().min(1, '请输入线路代码').max(64),
-})
-
-const recordsSchema = z.object({ records: z.array(recordSchema).max(10000) })
-type RecordsValues = z.infer<typeof recordsSchema>
+import { DnsLineSelect } from '@/features/dns-zones/dns-line-tree'
+import type { DnsZone } from '@/features/dns-zones/types'
+import { saveDnsRecords } from './data'
+import { recordsSchema, type RecordsValues } from './records-form'
 
 export function RecordsDialog({
   zone,
@@ -60,7 +45,6 @@ export function RecordsDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
-  const queryClient = useQueryClient()
   const supportsProxy = zone.dns_provider === 'cloudflare'
   const systemRecords = zone.runtime.projected_records
   const form = useForm<RecordsValues>({
@@ -73,21 +57,10 @@ export function RecordsDialog({
     keyName: 'formKey',
   })
   const mutation = useMutation({
-    mutationFn: (values: RecordsValues) =>
-      sendData(
-        'put',
-        `/dns-zones/${zone.id}`,
-        {
-          records: supportsProxy
-            ? values.records
-            : values.records.map((record) => ({ ...record, proxied: false })),
-        },
-        zone.revision
-      ),
+    mutationFn: (values: RecordsValues) => saveDnsRecords(zone, values.records),
     onSuccess: async (response) => {
       toast.success(response.message)
       onOpenChange(false)
-      await queryClient.invalidateQueries({ queryKey: queryKeys.dnsZones })
     },
   })
 
@@ -128,7 +101,9 @@ export function RecordsDialog({
                         >
                           <span className='font-medium'>{record.type}</span>
                           <span className='break-all'>{record.name}</span>
-                          <span className='break-all text-muted-foreground'>{record.content}</span>
+                          <span className='break-all text-muted-foreground'>
+                            {record.content}
+                          </span>
                           <span>TTL {record.ttl}</span>
                           <span className='text-muted-foreground'>
                             {record.line_code}

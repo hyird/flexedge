@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -102,7 +103,9 @@ class NodeLogBuffer final {
     static constexpr std::size_t kMaxQueryStringBytes{log_contract::kMaxQueryStringBytes};
     static constexpr std::size_t kMaxCookiesBytes{log_contract::kMaxCookiesBytes};
 
-    explicit NodeLogBuffer(std::size_t workerShardCount = 0) {
+    explicit NodeLogBuffer(std::size_t workerShardCount = 0,
+                           std::function<void()> onQueued = {})
+        : onQueued_(std::move(onQueued)) {
         shards_.reserve(workerShardCount == 0 ? 1 : workerShardCount + 2);
         if (workerShardCount == 0) {
             shards_.push_back(std::make_unique<Shard>(kMaxPendingEvents, kMaxPendingBytes));
@@ -427,8 +430,12 @@ class NodeLogBuffer final {
             shard.retainedEvents.fetch_sub(1, std::memory_order_relaxed);
             throw;
         }
+        if (onQueued_) onQueued_();
         return true;
     }
+
+    // Immutable after construction; producers may notify concurrently.
+    std::function<void()> onQueued_;
 
     static std::uint64_t nowMs() {
         return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(

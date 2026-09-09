@@ -104,6 +104,17 @@ class TlsSession final : public std::enable_shared_from_this<TlsSession> {
 
 class HttpsListener final : public std::enable_shared_from_this<HttpsListener> {
   public:
+    template <typename... Args>
+    [[nodiscard]] static std::shared_ptr<HttpsListener> create(Args&&... args) {
+        auto listener = std::shared_ptr<HttpsListener>(new HttpsListener(std::forward<Args>(args)...));
+        listener->stopRegistration_ = listener->owner_.onStop(
+            [weak = std::weak_ptr<HttpsListener>(listener)] {
+                if (const auto self = weak.lock()) self->stop();
+            });
+        return listener;
+    }
+
+  private:
     HttpsListener(ruvia::EventLoop owner, RuntimeState& runtime, OriginHealthRegistry& health,
                   TlsContextRegistry& tlsContexts, RuntimeMetrics& metrics,
                   NodeLogBuffer::Producer& logs, OriginConnectionPool& originConnections,
@@ -137,15 +148,20 @@ class HttpsListener final : public std::enable_shared_from_this<HttpsListener> {
         if (error) {
             throw std::system_error(error, "could not start edge HTTPS listener");
         }
-        stopRegistration_ = owner_.onStop([this] { stop(); });
+
     }
 
+  public:
     ~HttpsListener() { stop(); }
 
     void requestStart(std::shared_ptr<const ListenerActivationGate> activationGate = nullptr) {
-        activationGate_ = std::move(activationGate);
         const auto self = shared_from_this();
-        if (!owner_.post([self] { self->start(); }).accepted()) {
+        if (!owner_.post([self, gate = std::move(activationGate)] {
+                if (self->started_) return;
+                self->started_ = true;
+                self->activationGate_ = gate;
+                self->start();
+            }).accepted()) {
             throw std::runtime_error("edge HTTPS listener worker is stopping");
         }
     }
@@ -159,12 +175,18 @@ class HttpsListener final : public std::enable_shared_from_this<HttpsListener> {
             stop();
             return;
         }
-        const auto self = shared_from_this();
-        if (!owner_.post([self] { self->stop(); }).accepted()) {
-            stop();
-        }
+        // Cleanup must not fall back to the caller thread when the bounded
+        // worker mailbox is full or stopping. The loop's onStop hook also
+        // closes the socket; a weak capture cannot retain a stopped loop.
+        asio::post(owner_.executor(), [weak = weak_from_this()] {
+            if (const auto self = weak.lock()) {
+                self->stop();
+            }
+        });
     }
 
+  private:
+    // Socket cancellation and accept initiation must stay on the owning loop.
     void stop() noexcept {
         std::error_code ignored;
         activationTimer_.cancel(ignored);
@@ -174,6 +196,9 @@ class HttpsListener final : public std::enable_shared_from_this<HttpsListener> {
 
   private:
     void start() {
+        if (!acceptor_.is_open()) {
+            return;
+        }
         if (activationGate_ && !activationGate_->active()) {
             activationTimer_.expires_after(std::chrono::milliseconds(1));
             const auto self = shared_from_this();
@@ -226,6 +251,7 @@ class HttpsListener final : public std::enable_shared_from_this<HttpsListener> {
     ruvia::EventLoopStopRegistration stopRegistration_;
     std::shared_ptr<const ListenerActivationGate> activationGate_;
     std::uint64_t sequence_{};
+    bool started_{}; // Accessed only by the owning event loop.
 };
 
 } // namespace flexedge::node

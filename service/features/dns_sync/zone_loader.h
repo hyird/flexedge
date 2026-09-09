@@ -12,9 +12,9 @@
 
 #include "service/features/background/worker_pool.h"
 #include "service/features/dns/driver.h"
-#include "service/features/dns/provider_config.h"
+#include "service/features/dns/provider_config_mapper.h"
 #include "service/features/dns_sync/queue.h"
-#include "service/features/dns_sync/snapshot.h"
+#include "service/features/dns_sync/mapper.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/dns_sync/task.h"
 

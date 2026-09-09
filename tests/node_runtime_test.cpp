@@ -1,3 +1,6 @@
+#include "common/file_digest.h"
+#include "tests/support/config_fixture.h"
+#include "tests/support/http_client.h"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -11,6 +14,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include <asio/buffer.hpp>
@@ -30,6 +34,8 @@
 #include <ruvia/http/Http2Connection.h>
 
 #include "node/data/http_listener.h"
+
+
 #include "node/data/chunked_body.h"
 #include "node/data/chunked_wire_tracker.h"
 #include "node/data/health_supervisor.h"
@@ -40,7 +46,7 @@
 #include "node/runtime/http_redirect.h"
 #include "node/runtime/node_credentials.h"
 #include "node/proto/schema_version.h"
-#include "node/runtime/release_response.h"
+#include "node/proto/release_metadata.h"
 #include "node/runtime/self_updater.h"
 #include "node/runtime/runtime_state.h"
 #include "node/runtime/state_cipher.h"
@@ -54,179 +60,16 @@
     } while (false)
 
 namespace {
+static_assert(!std::is_copy_constructible_v<flexedge::node::CompiledConfig>);
+static_assert(!std::is_copy_assignable_v<flexedge::node::CompiledConfig>);
+static_assert(!std::is_move_constructible_v<flexedge::node::CompiledConfig>);
+static_assert(!std::is_move_assignable_v<flexedge::node::CompiledConfig>);
+static_assert(!std::is_copy_constructible_v<flexedge::node::TlsContextSet>);
+static_assert(!std::is_move_constructible_v<flexedge::node::TlsContextSet>);
+static_assert(!std::is_move_assignable_v<flexedge::node::TlsContextSet>);
 
-struct TestConfig final {
-    flexedge::node::v2::ActiveState active;
-    std::vector<flexedge::node::v2::DeliveryObject> objects;
-
-    flexedge::node::v2::Website* mutableWebsite() {
-        for (auto& object : objects) {
-            if (object.content().has_website()) {
-                return object.mutable_content()->mutable_website();
-            }
-        }
-        throw std::runtime_error("test website object is missing");
-    }
-
-    const flexedge::node::v2::Website& website() const {
-        for (const auto& object : objects) {
-            if (object.content().has_website()) {
-                return object.content().website();
-            }
-        }
-        throw std::runtime_error("test website object is missing");
-    }
-
-    flexedge::node::v2::Certificate* mutableCertificate(std::size_t index) {
-        for (auto& object : objects) {
-            if (!object.content().has_certificate()) {
-                continue;
-            }
-            if (index == 0) {
-                return object.mutable_content()->mutable_certificate();
-            }
-            --index;
-        }
-        throw std::runtime_error("test certificate object is missing");
-    }
-
-    flexedge::node::v2::Certificate* addCertificate() {
-        flexedge::node::v2::DeliveryObject object;
-        object.mutable_content()->mutable_certificate();
-        objects.push_back(std::move(object));
-        return objects.back().mutable_content()->mutable_certificate();
-    }
-
-    void setGeneration(std::int64_t generation) {
-        active.mutable_node_spec()->mutable_content()->set_revision(generation);
-        active.mutable_release()->mutable_content()->set_generation(generation);
-        active.mutable_release()->mutable_content()->set_release_id("release-" +
-                                                                    std::to_string(generation));
-    }
-
-    void duplicateWebsite() {
-        flexedge::node::v2::DeliveryObject duplicate;
-        *duplicate.mutable_content()->mutable_website() = website();
-        objects.push_back(std::move(duplicate));
-    }
-
-    void finalize() {
-        for (auto& object : objects) {
-            if (object.content().has_certificate()) {
-                object.set_digest_sha256(flexedge::node::artifactDigest(object.content()));
-            }
-        }
-        auto* website = mutableWebsite();
-        for (auto& domain : *website->mutable_domains()) {
-            if (!domain.https_enabled()) {
-                continue;
-            }
-            bool resolved = false;
-            for (const auto& object : objects) {
-                resolved = resolved || (object.content().has_certificate() &&
-                                        object.digest_sha256() == domain.certificate_digest());
-            }
-            if (resolved) {
-                continue;
-            }
-            for (const auto& object : objects) {
-                if (object.content().has_certificate()) {
-                    domain.set_certificate_digest(object.digest_sha256());
-                    break;
-                }
-            }
-        }
-        auto* manifest = active.mutable_release()->mutable_content();
-        manifest->clear_objects();
-        for (auto& object : objects) {
-            object.set_digest_sha256(flexedge::node::artifactDigest(object.content()));
-            auto* reference = manifest->add_objects();
-            reference->set_kind(object.content().has_website()
-                                    ? flexedge::node::v2::OBJECT_KIND_WEBSITE
-                                    : flexedge::node::v2::OBJECT_KIND_CERTIFICATE);
-            reference->set_digest_sha256(object.digest_sha256());
-        }
-        active.mutable_node_spec()->set_digest_sha256(
-            flexedge::node::artifactDigest(active.node_spec().content()));
-        active.mutable_release()->set_digest_sha256(flexedge::node::artifactDigest(*manifest));
-    }
-};
-
-TestConfig snapshot(bool forceHttps = true) {
-    TestConfig value;
-    auto* nodeSpec = value.active.mutable_node_spec()->mutable_content();
-    nodeSpec->set_node_id("f3384ad8-afbe-4aa4-8fe5-b292809c4e04");
-    nodeSpec->set_schema_version(flexedge::node::kNodeSpecSchemaVersion);
-    nodeSpec->set_revision(3);
-    nodeSpec->set_enabled(true);
-    auto* endpoint = nodeSpec->add_endpoints();
-    endpoint->set_id("endpoint-1");
-    endpoint->set_ip_address("127.0.0.1");
-    endpoint->set_http_port(80);
-    endpoint->set_https_port(443);
-    auto* release = value.active.mutable_release()->mutable_content();
-    release->set_cluster_id("53a74853-e03f-4ec9-9560-a9acdf4fe780");
-    release->set_release_id("release-3");
-    release->set_generation(3);
-    release->set_access_domain("edge.example.com");
-    release->set_enabled(true);
-    release->set_schema_version(flexedge::node::kClusterReleaseSchemaVersion);
-    flexedge::node::v2::DeliveryObject websiteObject;
-    auto* website = websiteObject.mutable_content()->mutable_website();
-    website->set_id("website-1");
-    website->set_enabled(true);
-    website->set_revision(2);
-    website->set_https_enabled(true);
-    website->set_force_https(forceHttps);
-    website->set_minimum_tls_version("1.2");
-    website->set_origin_connect_timeout_seconds(10);
-    website->set_origin_read_timeout_seconds(30);
-    website->set_health_check_path("/");
-    website->set_access_log_enabled(true);
-    website->set_access_log_request_headers(true);
-    website->set_access_log_request_body(true);
-    website->set_access_log_response_headers(true);
-    website->add_access_log_status_code_ranges("2xx");
-    website->set_health_check_interval_seconds(10);
-    website->set_health_check_timeout_seconds(3);
-    website->set_health_check_expected_status(200);
-    website->set_healthy_threshold(2);
-    website->set_unhealthy_threshold(3);
-    website->set_response_compression_enabled(true);
-    website->set_response_compression_min_bytes(1024);
-    website->set_response_compression_max_bytes(32 * 1024 * 1024);
-    website->add_response_compression_algorithms("zstd");
-    website->add_response_compression_algorithms("br");
-    website->add_response_compression_algorithms("gzip");
-    website->add_response_compression_mime_types("text/*");
-    website->add_response_compression_mime_types("application/json");
-    website->add_response_compression_extensions(".html");
-    website->add_response_compression_extensions(".txt");
-    website->add_response_compression_excluded_extensions(".apk");
-    auto* domain = website->add_domains();
-    domain->set_hostname("WWW.Example.COM.");
-    domain->set_https_enabled(true);
-    auto* httpOnlyDomain = website->add_domains();
-    httpOnlyDomain->set_hostname("http.example.com");
-    httpOnlyDomain->set_https_enabled(false);
-    auto* origin = website->add_origins();
-    origin->set_id("origin-1");
-    origin->set_protocol("http");
-    origin->set_host("192.0.2.10");
-    origin->set_port(8080);
-    origin->set_role("primary");
-    origin->set_weight(100);
-    origin->set_enabled(true);
-    flexedge::node::v2::DeliveryObject certificateObject;
-    auto* certificate = certificateObject.mutable_content()->mutable_certificate();
-    certificate->set_id("certificate-1");
-    certificate->set_certificate_chain_pem("certificate");
-    certificate->set_private_key_pem("private-key");
-    value.objects.push_back(std::move(certificateObject));
-    value.objects.push_back(std::move(websiteObject));
-    value.finalize();
-    return value;
-}
+using flexedge::testing::TestConfig;
+using flexedge::testing::snapshot;
 
 std::shared_ptr<const flexedge::node::CompiledConfig> compiled(TestConfig value) {
     value.finalize();
@@ -236,48 +79,13 @@ std::shared_ptr<const flexedge::node::CompiledConfig> compiled(TestConfig value)
 }
 
 void apply(flexedge::node::RuntimeState& runtime, TestConfig value) {
-    value.finalize();
-    runtime.apply(std::make_shared<const flexedge::node::v2::ActiveState>(std::move(value.active)),
-                  std::move(value.objects));
+    auto config = compiled(std::move(value));
+    runtime.validateNext(*config);
+    runtime.publish(std::move(config));
 }
 
-std::string request(std::uint16_t port, std::string_view host = "WWW.Example.COM:80",
-                    std::string_view extraHeaders = {}, std::string_view target = "/a?q=1",
-                    std::string_view method = "GET", std::string_view body = {}) {
-    asio::io_context context;
-    asio::ip::tcp::socket socket(context);
-    socket.connect({asio::ip::address_v4::loopback(), port});
-    const auto bytes = std::string(method) + " " + std::string(target) + " HTTP/1.1\r\nHost: " + std::string(host) + "\r\n" +
-                       std::string(extraHeaders) + (body.empty() ? "" : "Content-Length: " + std::to_string(body.size()) + "\r\n") +
-                       "Connection: close\r\n\r\n" + std::string(body);
-    asio::write(socket, asio::buffer(bytes));
-    std::string response;
-    std::array<char, 1024> buffer{};
-    std::error_code error;
-    for (;;) {
-        const auto size = socket.read_some(asio::buffer(buffer), error);
-        response.append(buffer.data(), size);
-        if (error == asio::error::eof) {
-            break;
-        }
-        if (error) {
-            throw std::system_error(error, "could not read edge response");
-        }
-    }
-    return response;
-}
-
-template <typename Predicate>
-bool waitUntil(Predicate predicate, std::chrono::milliseconds timeout) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (predicate()) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    return predicate();
-}
+using flexedge::testing::request;
+using flexedge::testing::waitUntil;
 
 bool acceptUntilStopped(asio::ip::tcp::acceptor& acceptor, asio::ip::tcp::socket& socket,
                         std::stop_token stopToken) {
@@ -406,7 +214,7 @@ std::string tlsAlpn(std::uint16_t port, std::string_view serverName, bool offerH
 }
 
 TlsResponse tlsHttp2Request(std::uint16_t port, std::string_view serverName,
-                            std::string_view target = "/tls") {
+                            std::string_view target = "/tls", bool eventStream = false) {
     asio::io_context context;
     asio::ssl::context tlsContext(asio::ssl::context::tls_client);
     tlsContext.set_verify_mode(asio::ssl::verify_none);
@@ -420,8 +228,11 @@ TlsResponse tlsHttp2Request(std::uint16_t port, std::string_view serverName,
     REQUIRE(flexedge::node::negotiatedHttpProtocol(stream.native_handle()) ==
             flexedge::node::HttpWireProtocol::kHttp2);
     auto connection = ruvia::Http2Connection::client();
+    std::vector<ruvia::HttpHeaderView> headers;
+    if (eventStream) headers.push_back({"accept", "text/event-stream"});
     const auto submitted = connection.submitRequestHead(
-        {.method = "GET", .scheme = "https", .authority = serverName, .target = target});
+        {.method = "GET", .scheme = "https", .authority = serverName,
+         .target = target, .headers = headers});
     REQUIRE(submitted.submitted() != nullptr);
     auto flush = [&] {
         while (!connection.pendingOutput().empty()) {
@@ -494,6 +305,16 @@ int main(int argc, char* argv[]) {
             throw std::runtime_error("test executable path is unavailable");
         }
         const auto executablePath = std::filesystem::absolute(argv[0]);
+        REQUIRE(flexedge::node::validCredentialNodeId(std::string(32, 'a')));
+        REQUIRE(!flexedge::node::validCredentialNodeId(std::string(32, 'A')));
+        REQUIRE(!flexedge::node::validCredentialNodeId(std::string(31, 'a')));
+        REQUIRE(!flexedge::node::validCredentialNodeId(std::string(33, 'a')));
+        REQUIRE(flexedge::node::validCredentialSecret(std::string(32, '!')));
+        REQUIRE(flexedge::node::validCredentialSecret(std::string(128, '~')));
+        REQUIRE(!flexedge::node::validCredentialSecret(std::string(31, '!')));
+        REQUIRE(!flexedge::node::validCredentialSecret(std::string(129, '!')));
+        REQUIRE(!flexedge::node::validCredentialSecret(std::string(32, ' ')));
+        REQUIRE(!flexedge::node::validCredentialSecret(std::string(32, '\x7f')));
         const auto credentialsRoot =
             std::filesystem::temp_directory_path() /
             ("flexedge-node-credentials-" +
@@ -515,6 +336,21 @@ int main(int argc, char* argv[]) {
         REQUIRE(credentials.nodeId() == nodeId);
         REQUIRE(credentials.secret() == secret);
         REQUIRE(std::filesystem::exists(credentialsPath));
+        const auto invalidCredentialsPath = credentialsRoot / "invalid-credentials";
+        const std::string validCredentialText =
+            "node_id=" + std::string(nodeId) + "\nsecret=" + std::string(secret) + "\n";
+        for (const auto& prefix : {"node_id=\n", "secret=\n", "node_id=duplicate\n",
+                                   "secret=duplicate\n"}) {
+            flexedge::node::writeSecureFileAtomic(invalidCredentialsPath,
+                                                  prefix + validCredentialText);
+            bool rejected = false;
+            try {
+                (void)flexedge::node::NodeCredentials::load(invalidCredentialsPath);
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            REQUIRE(rejected);
+        }
 #ifndef _WIN32
         const auto credentialPermissions = std::filesystem::status(credentialsPath).permissions();
         REQUIRE((credentialPermissions & std::filesystem::perms::group_all) ==
@@ -522,55 +358,6 @@ int main(int argc, char* argv[]) {
         REQUIRE((credentialPermissions & std::filesystem::perms::others_all) ==
                 std::filesystem::perms::none);
 #endif
-
-        constexpr std::string_view releaseDigest =
-            "76e30167972c658115198c3dd5d851c585fdffc29a0289bd49f1a5663ddabeac";
-        const auto release = flexedge::node::parseNodeReleaseHeaders(
-            "HTTP/2 200\r\n"
-            "etag: \"76e30167972c658115198c3dd5d851c585fdffc29a0289bd49f1a5663ddabeac\"\r\n"
-            "X-FlexEdge-Node-SHA256: "
-            "76e30167972c658115198c3dd5d851c585fdffc29a0289bd49f1a5663ddabeac\r\n"
-            "x-flexedge-node-version: 0.3.3\r\n\r\n");
-        REQUIRE(release);
-        REQUIRE(release->statusCode == 200);
-        REQUIRE(release->sha256 == releaseDigest);
-        REQUIRE(release->version == "0.3.3");
-        REQUIRE(release->entityTag == flexedge::node::nodeReleaseEntityTag(releaseDigest));
-        const auto releaseHeadersPath = credentialsRoot / "release.headers";
-        {
-            std::ofstream output(releaseHeadersPath, std::ios::binary);
-            output
-                << "HTTP/2 200\r\n"
-                   "ETag: \"76e30167972c658115198c3dd5d851c585fdffc29a0289bd49f1a5663ddabeac\"\r\n"
-                   "X-FlexEdge-Node-SHA256: "
-                   "76e30167972c658115198c3dd5d851c585fdffc29a0289bd49f1a5663ddabeac\r\n"
-                   "X-FlexEdge-Node-Version: 0.3.3\r\n\r\n";
-        }
-        const auto releaseFromFile = flexedge::node::readNodeReleaseResponse(releaseHeadersPath);
-        REQUIRE(releaseFromFile);
-        REQUIRE(releaseFromFile->sha256 == releaseDigest);
-
-        const auto unchangedRelease = flexedge::node::parseNodeReleaseHeaders(
-            "HTTP/1.1 302 Found\r\nLocation: https://edge.example/node\r\n\r\n"
-            "HTTP/2 304\r\n"
-            "ETag: \"76e30167972c658115198c3dd5d851c585fdffc29a0289bd49f1a5663ddabeac\"\r\n"
-            "X-FlexEdge-Node-SHA256: "
-            "76e30167972c658115198c3dd5d851c585fdffc29a0289bd49f1a5663ddabeac\r\n"
-            "X-FlexEdge-Node-Version: 0.3.3\r\n\r\n");
-        REQUIRE(unchangedRelease);
-        REQUIRE(unchangedRelease->statusCode == 304);
-        REQUIRE(!flexedge::node::parseNodeReleaseHeaders(
-            "HTTP/1.1 200 OK\r\nETag: \"bad\"\r\n"
-            "X-FlexEdge-Node-SHA256: "
-            "76e30167972c658115198c3dd5d851c585fdffc29a0289bd49f1a5663ddabeac\r\n"
-            "X-FlexEdge-Node-Version: 0.3.3\r\n\r\n"));
-        REQUIRE(!flexedge::node::parseNodeReleaseHeaders(
-            "HTTP/1.1 200 OK\r\n"
-            "ETag: \"76e30167972c658115198c3dd5d851c585fdffc29a0289bd49f1a5663ddabeac\"\r\n"
-            "X-FlexEdge-Node-SHA256: "
-            "76e30167972c658115198c3dd5d851c585fdffc29a0289bd49f1a5663ddabeac\r\n"
-            "X-FlexEdge-Node-Version: 0.3.3\r\n"
-            "X-FlexEdge-Node-Version: 0.3.3\r\n\r\n"));
 
         flexedge::node::NodeLogBuffer deliveryBuffer;
         deliveryBuffer.access({
@@ -746,7 +533,7 @@ int main(int argc, char* argv[]) {
             std::ofstream output(nextNodePath, std::ios::binary | std::ios::trunc);
             output.write(nextNodeBytes.data(), static_cast<std::streamsize>(nextNodeBytes.size()));
         }
-        const auto nextNodeDigest = flexedge::node::binarySha256(nextNodePath);
+        const auto nextNodeDigest = flexedge::crypto::fileSha256(nextNodePath);
         bool restartRequested{};
         flexedge::node::SelfUpdater wsUpdater({
             .binaryPath = updaterBinaryPath,
@@ -756,7 +543,7 @@ int main(int argc, char* argv[]) {
             .requestRestart = [&] { restartRequested = true; },
         });
         REQUIRE(!wsUpdater.updateAvailable("invalid"));
-        REQUIRE(!wsUpdater.updateAvailable(flexedge::node::binarySha256(updaterBinaryPath)));
+        REQUIRE(!wsUpdater.updateAvailable(flexedge::crypto::fileSha256(updaterBinaryPath)));
         REQUIRE(wsUpdater.updateAvailable(nextNodeDigest));
         const auto upgradeRejected = [](auto&& action) {
             try {
@@ -766,7 +553,7 @@ int main(int argc, char* argv[]) {
                 return true;
             }
         };
-        const auto originalDigest = flexedge::node::binarySha256(updaterBinaryPath);
+        const auto originalDigest = flexedge::crypto::fileSha256(updaterBinaryPath);
         wsUpdater.begin("0.0.1", nextNodeDigest,
                         static_cast<std::uint64_t>(nextNodeBytes.size()));
         REQUIRE(upgradeRejected([&] { wsUpdater.append(1, "bad-offset"); }));
@@ -777,13 +564,13 @@ int main(int argc, char* argv[]) {
         wsUpdater.append(0, "partial");
         wsUpdater.abort();
         REQUIRE(!restartRequested);
-        REQUIRE(flexedge::node::binarySha256(updaterBinaryPath) == originalDigest);
+        REQUIRE(flexedge::crypto::fileSha256(updaterBinaryPath) == originalDigest);
         wsUpdater.begin("0.0.1", nextNodeDigest,
                         static_cast<std::uint64_t>(nextNodeBytes.size()));
         wsUpdater.append(0, std::string(nextNodeBytes.size(), 'x'));
         REQUIRE(upgradeRejected([&] { wsUpdater.commit(); }));
         REQUIRE(!restartRequested);
-        REQUIRE(flexedge::node::binarySha256(updaterBinaryPath) == originalDigest);
+        REQUIRE(flexedge::crypto::fileSha256(updaterBinaryPath) == originalDigest);
         for (const auto& entry : std::filesystem::directory_iterator(credentialsRoot)) {
             REQUIRE(!entry.path().filename().string().starts_with(".node.upgrade."));
         }
@@ -797,13 +584,20 @@ int main(int argc, char* argv[]) {
 #ifndef _WIN32
         wsUpdater.commit();
         REQUIRE(restartRequested);
-        REQUIRE(flexedge::node::binarySha256(updaterBinaryPath) == nextNodeDigest);
+        REQUIRE(flexedge::crypto::fileSha256(updaterBinaryPath) == nextNodeDigest);
         const auto wsUpgrade = flexedge::node::takePendingUpgradeRecord(
             credentialsRoot / "pending-upgrade", nextNodeDigest);
         REQUIRE(wsUpgrade && wsUpgrade->currentVersion == "0.0.1");
 #else
-        wsUpdater.abort();
+        REQUIRE(upgradeRejected([&] { wsUpdater.commit(); }));
+        REQUIRE(!flexedge::node::takePendingUpgradeRecord(
+            credentialsRoot / "pending-upgrade", originalDigest));
+        REQUIRE(!std::filesystem::exists(credentialsRoot / "pending-upgrade"));
         REQUIRE(!restartRequested);
+        REQUIRE(flexedge::crypto::fileSha256(updaterBinaryPath) == originalDigest);
+        for (const auto& entry : std::filesystem::directory_iterator(credentialsRoot)) {
+            REQUIRE(!entry.path().filename().string().starts_with(".node.upgrade."));
+        }
 #endif
 
         flexedge::node::NodeLogBuffer boundedBodyBuffer;
@@ -1028,7 +822,7 @@ int main(int argc, char* argv[]) {
                 std::filesystem::remove_all(path, ignored);
             }
         } stateCleanup{stateDirectory};
-        const auto nodeDigest = flexedge::node::binarySha256(executablePath);
+        const auto nodeDigest = flexedge::crypto::fileSha256(executablePath);
         const auto upgradeRecordPath = stateDirectory / "pending-upgrade";
         const flexedge::node::UpgradeRecord upgradeRecord{
             .previousVersion = "0.3.23",
@@ -1050,6 +844,7 @@ int main(int argc, char* argv[]) {
         auto storedSnapshot = snapshot();
         storedSnapshot.finalize();
         stateStore.stage(storedSnapshot.active, storedSnapshot.objects);
+        REQUIRE(!std::filesystem::exists(stateDirectory / "releases"));
         stateStore.activateStaged();
         const auto persisted = stateStore.load();
         REQUIRE(persisted.active.SerializeAsString() == storedSnapshot.active.SerializeAsString());
@@ -1078,57 +873,6 @@ int main(int argc, char* argv[]) {
             stateStore.activateStaged();
             REQUIRE(stateStore.load().active.has_release());
         }
-
-        flexedge::node::OriginHealthRegistry healthState;
-        REQUIRE(healthState.healthy("website", "origin"));
-        healthState.failure("website", "origin", 2);
-        REQUIRE(healthState.healthy("website", "origin"));
-        healthState.failure("website", "origin", 2);
-        REQUIRE(!healthState.healthy("website", "origin"));
-        healthState.success("website", "origin", 2);
-        REQUIRE(!healthState.healthy("website", "origin"));
-        healthState.success("website", "origin", 2);
-        REQUIRE(healthState.healthy("website", "origin"));
-        flexedge::node::OriginHealthRegistry::KeySet retainedHealthKeys;
-        retainedHealthKeys.emplace(flexedge::node::OriginHealthRegistry::key("website", "origin"));
-        healthState.retain(retainedHealthKeys);
-        REQUIRE(healthState.healthy("website", "origin"));
-        healthState.failure("website", "origin", 1);
-        std::vector<std::thread> healthReporters;
-        for (std::size_t index = 0; index < 8; ++index) {
-            healthReporters.emplace_back([&] { healthState.success("website", "origin", 1); });
-        }
-        for (auto& reporter : healthReporters) {
-            reporter.join();
-        }
-        REQUIRE(healthState.healthy("website", "origin"));
-        retainedHealthKeys.clear();
-        healthState.retain(retainedHealthKeys);
-        REQUIRE(healthState.healthy("website", "origin"));
-
-        retainedHealthKeys.emplace(flexedge::node::OriginHealthRegistry::key("website", "origin"));
-        std::atomic<bool> observeHealth{true};
-        std::atomic<std::uint64_t> healthObservations{};
-        std::vector<std::thread> healthReaders;
-        for (std::size_t index = 0; index < 8; ++index) {
-            healthReaders.emplace_back([&] {
-                while (observeHealth.load(std::memory_order_relaxed)) {
-                    if (healthState.healthy("website", "origin")) {
-                        healthObservations.fetch_add(1, std::memory_order_relaxed);
-                    }
-                }
-            });
-        }
-        for (std::size_t index = 0; index < 64; ++index) {
-            healthState.retain(retainedHealthKeys);
-            healthState.success("website", "origin", 1);
-        }
-        observeHealth.store(false, std::memory_order_relaxed);
-        for (auto& reader : healthReaders) {
-            reader.join();
-        }
-        REQUIRE(healthObservations.load(std::memory_order_relaxed) != 0);
-        REQUIRE(healthState.healthy("website", "origin"));
 
         const auto config = compiled(snapshot());
         REQUIRE(config->website("www.example.com:80") != nullptr);
@@ -1203,31 +947,86 @@ int main(int argc, char* argv[]) {
         auto firstWorkerLogs = logBuffer.workerProducer(0);
         auto secondWorkerLogs = logBuffer.workerProducer(1);
         (void)runtimeMetrics.sample();
-        auto firstListener = std::make_shared<flexedge::node::HttpListener>(
+        auto firstListener = flexedge::node::HttpListener::create(
             loops.loop(0), runtime, listenerHealth, runtimeMetrics, firstWorkerLogs,
             firstOriginConnections, requestBuffers, responseBuffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto port = firstListener->localEndpoint().port();
-        auto secondListener = std::make_shared<flexedge::node::HttpListener>(
+        auto secondListener = flexedge::node::HttpListener::create(
             loops.loop(1), runtime, listenerHealth, runtimeMetrics, secondWorkerLogs,
             secondOriginConnections, requestBuffers, responseBuffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), port));
         flexedge::node::BufferedBytesBudget constrainedRequestBuffers(32);
-        auto constrainedListener = std::make_shared<flexedge::node::HttpListener>(
+        auto constrainedListener = flexedge::node::HttpListener::create(
             loops.loop(0), runtime, listenerHealth, runtimeMetrics, firstWorkerLogs,
             firstOriginConnections, constrainedRequestBuffers, responseBuffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto constrainedPort = constrainedListener->localEndpoint().port();
-        firstListener->start();
-        secondListener->start();
-        constrainedListener->start();
+        firstListener->requestStart();
+        secondListener->requestStart();
+        constrainedListener->requestStart();
         loops.start();
+        // A listener stopped while waiting for activation must release its
+        // timer/self references even if another start request was queued.
+        auto verifyStoppedBeforeActivation = [&](auto listener) {
+            const std::weak_ptr weak(listener);
+            const auto gate = std::make_shared<flexedge::node::ListenerActivationGate>();
+            listener->requestStart(gate);
+            listener->requestStart(gate);
+            listener->requestStop();
+            listener.reset();
+            REQUIRE(waitUntil([&] { return weak.expired(); }, std::chrono::seconds(2)));
+        };
+        verifyStoppedBeforeActivation(flexedge::node::HttpListener::create(
+            loops.loop(0), runtime, listenerHealth, runtimeMetrics, firstWorkerLogs,
+            firstOriginConnections, requestBuffers, responseBuffers,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0)));
+        flexedge::node::TlsContextRegistry inactiveTlsContexts;
+        verifyStoppedBeforeActivation(flexedge::node::HttpsListener::create(
+            loops.loop(0), runtime, listenerHealth, inactiveTlsContexts, runtimeMetrics,
+            firstWorkerLogs, firstOriginConnections, requestBuffers, responseBuffers,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0)));
         const auto constrainedResponse = request(constrainedPort);
         REQUIRE(constrainedResponse.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
         REQUIRE(waitUntil([&] { return constrainedRequestBuffers.usedBytes() == 0; },
                           std::chrono::seconds(1)));
         REQUIRE(constrainedRequestBuffers.rejectedReservations() == 1);
-        constrainedListener->stop();
+        constrainedListener->requestStop();
+        // Retire and recreate the health record only after a real upstream
+        // request arrives. Its subsequent failure belongs to the old target.
+        {
+            asio::io_context originContext;
+            asio::ip::tcp::acceptor originAcceptor(originContext,
+                {asio::ip::address_v4::loopback(), 0});
+            auto pendingConfig = snapshot(false);
+            pendingConfig.setGeneration(nextGeneration++);
+            pendingConfig.mutableWebsite()->set_unhealthy_threshold(1);
+            auto* origin = pendingConfig.mutableWebsite()->mutable_origins(0);
+            origin->set_host("127.0.0.1");
+            origin->set_port(originAcceptor.local_endpoint().port());
+            apply(runtime, std::move(pendingConfig));
+            const flexedge::node::OriginHealthRegistry::KeySet keys{
+                flexedge::node::OriginHealthRegistry::key("website-1", "origin-1")};
+            listenerHealth.publish(listenerHealth.prepare(keys));
+            std::atomic<bool> replacedHealth{false};
+            std::jthread upstream([&](std::stop_token stop) {
+                asio::ip::tcp::socket socket(originContext);
+                if (!acceptUntilStopped(originAcceptor, socket, stop)) return;
+                std::array<char, 4096> bytes{};
+                std::error_code error;
+                if (socket.read_some(asio::buffer(bytes), error) == 0 || error) return;
+                listenerHealth.publish(listenerHealth.prepare({}));
+                listenerHealth.publish(listenerHealth.prepare(keys));
+                replacedHealth.store(true);
+                // Closing without a response drives the real failure callback.
+            });
+            const auto failedResponse = request(port);
+            upstream.request_stop();
+            upstream.join();
+            REQUIRE(replacedHealth.load());
+            REQUIRE(failedResponse.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+            REQUIRE(listenerHealth.healthy("website-1", "origin-1"));
+        }
         const auto noRouteResponse = request(port, "unknown.example.com");
         REQUIRE(noRouteResponse.starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
         REQUIRE(waitUntil([&] { return runtimeMetrics.connectionCount() == 0; },
@@ -1436,10 +1235,11 @@ int main(int argc, char* argv[]) {
         healthWebsite->mutable_origins(0)->set_port(healthPort);
         apply(runtime, std::move(healthSnapshot));
         flexedge::node::OriginHealthRegistry nodeHealth;
-        nodeHealth.failure("website-1", "origin-1", 1);
-        flexedge::node::OriginHealthSupervisor nodeSupervisor(loops.loop(0), runtime, nodeHealth,
+        nodeHealth.publish(nodeHealth.prepare({flexedge::node::OriginHealthRegistry::key("website-1", "origin-1")}));
+        nodeHealth.target("website-1", "origin-1").failure(1);
+        auto nodeSupervisor = flexedge::node::OriginHealthSupervisor::create(loops.loop(0), runtime, nodeHealth,
                                                               firstOriginTls);
-        nodeSupervisor.requestStart();
+        nodeSupervisor->requestStart();
         const auto nodeHealthy = waitUntil(
             [&] { return nodeHealth.healthy("website-1", "origin-1"); }, std::chrono::seconds(3));
         if (!nodeHealthy) {
@@ -1447,7 +1247,7 @@ int main(int argc, char* argv[]) {
         }
         REQUIRE(nodeHealthy);
         REQUIRE(healthRequests.load() == 1);
-        nodeSupervisor.stop();
+        nodeSupervisor->requestStop();
 
         const auto wwwIdentity = makeIdentity("www.example.com", 1);
         const auto apiIdentity = makeIdentity("api.example.com", 2);
@@ -1455,7 +1255,7 @@ int main(int argc, char* argv[]) {
             originContext, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto tlsOriginPort = tlsOriginAcceptor.local_endpoint().port();
         std::jthread tlsOriginServer([&](std::stop_token stopToken) {
-            for (int requestIndex = 0; requestIndex < 5; ++requestIndex) {
+            for (int requestIndex = 0; requestIndex < 8; ++requestIndex) {
                 asio::ip::tcp::socket originSocket(originContext);
                 if (!acceptUntilStopped(tlsOriginAcceptor, originSocket, stopToken)) {
                     return;
@@ -1465,6 +1265,23 @@ int main(int argc, char* argv[]) {
                 const auto requestSize =
                     originSocket.read_some(asio::buffer(originRequest), ignored);
                 const auto requestHead = std::string_view(originRequest.data(), requestSize);
+                if (requestHead.contains("GET /retired-success ")) {
+                    nodeHealth.publish(nodeHealth.prepare({}));
+                    nodeHealth.publish(nodeHealth.prepare(
+                        {flexedge::node::OriginHealthRegistry::key("website-1", "origin-1")}));
+                    nodeHealth.target("website-1", "origin-1").failure(1);
+                    constexpr std::string_view response =
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                        "Content-Length: 9\r\nConnection: close\r\n\r\ndata: x\n\n";
+                    asio::write(originSocket, asio::buffer(response));
+                    continue;
+                }
+                if (requestHead.contains("GET /retired-health ")) {
+                    nodeHealth.publish(nodeHealth.prepare({}));
+                    nodeHealth.publish(nodeHealth.prepare(
+                        {flexedge::node::OriginHealthRegistry::key("website-1", "origin-1")}));
+                    continue;
+                }
                 if (requestHead.contains("GET /large ")) {
                     const std::string body(96 * 1024, 'L');
                     const auto originResponse = std::string("HTTP/1.1 200 OK\r\nContent-Length: ") +
@@ -1482,6 +1299,8 @@ int main(int argc, char* argv[]) {
         tlsSnapshot.setGeneration(nextGeneration++);
         auto* tlsWebsite = tlsSnapshot.mutableWebsite();
         tlsWebsite->set_hsts_enabled(true);
+        tlsWebsite->set_unhealthy_threshold(1);
+        tlsWebsite->set_healthy_threshold(1);
         tlsWebsite->set_http2_enabled(true);
         tlsWebsite->mutable_origins(0)->set_host("127.0.0.1");
         tlsWebsite->mutable_origins(0)->set_port(tlsOriginPort);
@@ -1530,7 +1349,7 @@ int main(int argc, char* argv[]) {
         flexedge::node::TlsContextRegistry tlsContexts;
         tlsContexts.publish(
             std::make_shared<const flexedge::node::TlsContextSet>(*runtime.config()));
-        auto httpsListener = std::make_shared<flexedge::node::HttpsListener>(
+        auto httpsListener = flexedge::node::HttpsListener::create(
             loops.loop(0), runtime, nodeHealth, tlsContexts, runtimeMetrics, firstWorkerLogs,
             firstOriginConnections, requestBuffers, responseBuffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
@@ -1548,6 +1367,19 @@ int main(int argc, char* argv[]) {
         const auto largeHttp2Response = tlsHttp2Request(httpsPort, "www.example.com", "/large");
         REQUIRE(largeHttp2Response.peerCommonName == "200");
         REQUIRE(largeHttp2Response.bytes == std::string(96 * 1024, 'L'));
+        const auto retiredHttp2 = tlsHttp2Request(httpsPort, "www.example.com", "/retired-health");
+        REQUIRE(retiredHttp2.peerCommonName == "502");
+        REQUIRE(nodeHealth.healthy("website-1", "origin-1"));
+        const auto retiredStreamingHttp2 =
+            tlsHttp2Request(httpsPort, "www.example.com", "/retired-health", true);
+        REQUIRE(retiredStreamingHttp2.peerCommonName == "502");
+        REQUIRE(nodeHealth.healthy("website-1", "origin-1"));
+        const auto retiredStreamingSuccess =
+            tlsHttp2Request(httpsPort, "www.example.com", "/retired-success", true);
+        REQUIRE(retiredStreamingSuccess.peerCommonName == "200");
+        REQUIRE(retiredStreamingSuccess.bytes == "data: x\n\n");
+        REQUIRE(!nodeHealth.healthy("website-1", "origin-1"));
+        nodeHealth.target("website-1", "origin-1").success(1);
         const auto wwwResponse = tlsRequest(httpsPort, "www.example.com");
         REQUIRE(wwwResponse.peerCommonName == "www.example.com");
         REQUIRE(wwwResponse.bytes.ends_with("\r\n\r\nTLS"));
@@ -1628,7 +1460,8 @@ int main(int argc, char* argv[]) {
         flexedge::node::OriginConnectionPool trustedOriginConnections(loops.loop(0).executor(),
                                                                       trustedOriginTls);
         flexedge::node::OriginHealthRegistry secureOriginHealth;
-        auto secureOriginListener = std::make_shared<flexedge::node::HttpListener>(
+        secureOriginHealth.publish(secureOriginHealth.prepare({flexedge::node::OriginHealthRegistry::key("website-1", "origin-1")}));
+        auto secureOriginListener = flexedge::node::HttpListener::create(
             loops.loop(0), runtime, secureOriginHealth, runtimeMetrics, firstWorkerLogs,
             trustedOriginConnections, requestBuffers, responseBuffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
@@ -1638,13 +1471,13 @@ int main(int argc, char* argv[]) {
         REQUIRE(secureOriginResponse.starts_with("HTTP/1.1 200 OK\r\n"));
         REQUIRE(secureOriginResponse.ends_with("\r\n\r\nSECURE"));
 
-        secureOriginHealth.failure("website-1", "origin-1", 1);
-        flexedge::node::OriginHealthSupervisor secureOriginSupervisor(
+        secureOriginHealth.target("website-1", "origin-1").failure(1);
+        auto secureOriginSupervisor = flexedge::node::OriginHealthSupervisor::create(
             loops.loop(0), runtime, secureOriginHealth, trustedOriginTls);
-        secureOriginSupervisor.requestStart();
+        secureOriginSupervisor->requestStart();
         REQUIRE(waitUntil([&] { return secureOriginHealth.healthy("website-1", "origin-1"); },
                           std::chrono::seconds(3)));
-        secureOriginSupervisor.stop();
+        secureOriginSupervisor->requestStop();
         secureOriginListener->requestStop();
 
         asio::ssl::context bufferedOriginServerContext(asio::ssl::context::tls_server);
@@ -1694,7 +1527,7 @@ int main(int argc, char* argv[]) {
         bufferedOriginWebsite->mutable_origins(0)->set_host("localhost");
         bufferedOriginWebsite->mutable_origins(0)->set_port(bufferedOriginPort);
         apply(runtime, std::move(bufferedOriginSnapshot));
-        auto bufferedOriginListener = std::make_shared<flexedge::node::HttpListener>(
+        auto bufferedOriginListener = flexedge::node::HttpListener::create(
             loops.loop(0), runtime, secureOriginHealth, runtimeMetrics, firstWorkerLogs,
             trustedOriginConnections, requestBuffers, responseBuffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
@@ -1809,7 +1642,7 @@ int main(int argc, char* argv[]) {
         reusableWebsite->mutable_origins(0)->set_port(reusableOriginPort);
         apply(runtime, std::move(reusableOriginSnapshot));
         flexedge::node::OriginHealthRegistry reusableOriginHealth;
-        auto reusableEdgeListener = std::make_shared<flexedge::node::HttpListener>(
+        auto reusableEdgeListener = flexedge::node::HttpListener::create(
             loops.loop(0), runtime, reusableOriginHealth, runtimeMetrics, firstWorkerLogs,
             firstOriginConnections, requestBuffers, responseBuffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
@@ -1822,10 +1655,20 @@ int main(int argc, char* argv[]) {
         REQUIRE(reusableOriginConnections.load() == 1);
         REQUIRE(reusableOriginRequests.load() == 2);
         reusableEdgeListener->requestStop();
-        firstListener->stop();
-        secondListener->stop();
+        firstListener->requestStop();
+        secondListener->requestStop();
+        // Posting cleanup after shutdown must not keep an otherwise unused
+        // listener (and its event loop handle) alive indefinitely.
+        auto stoppedLoopListener = flexedge::node::HttpListener::create(
+            loops.loop(0), runtime, listenerHealth, runtimeMetrics, firstWorkerLogs,
+            firstOriginConnections, requestBuffers, responseBuffers,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const std::weak_ptr stoppedLoopWeak(stoppedLoopListener);
         loops.stop();
         loops.join();
+        stoppedLoopListener->requestStop();
+        stoppedLoopListener.reset();
+        REQUIRE(stoppedLoopWeak.expired());
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -1,11 +1,11 @@
 import { createFileRoute, redirect } from '@tanstack/react-router'
-import { sessionQueryOptions } from '@/lib/auth'
 import { AuthenticatedLayout } from '@/components/layout/authenticated-layout'
+import { ensureAuthenticatedSession } from '@/features/auth/data'
 
 export const Route = createFileRoute('/_authenticated')({
   beforeLoad: async ({ context, location }) => {
     try {
-      await context.queryClient.ensureQueryData(sessionQueryOptions)
+      await ensureAuthenticatedSession(context.queryClient)
     } catch {
       throw redirect({
         to: '/sign-in',
@@ -13,5 +13,9 @@ export const Route = createFileRoute('/_authenticated')({
       })
     }
   },
-  component: AuthenticatedLayout,
+  component: () => (
+    <>
+      <AuthenticatedLayout />
+    </>
+  ),
 })

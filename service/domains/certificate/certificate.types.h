@@ -2,7 +2,7 @@
 
 #include <ruvia/web/Model.h>
 
-#include "service/features/certificate/model.h"
+#include "service/features/certificate/config_transport.h"
 
 namespace service::certificate {
 
@@ -48,4 +48,7 @@ RUVIA_RESPONSE_MODEL(CertificatePageResponse, RUVIA_REQUIRED_FIELD(code, ruvia::
 RUVIA_RESPONSE_MODEL(CertificateDetailResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, CertificateDto));
+RUVIA_RESPONSE_MODEL(CertificateOptionsResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+                     RUVIA_REQUIRED_FIELD(message, ruvia::String),
+                     RUVIA_REQUIRED_FIELD(data, ruvia::Array<CertificateDto>));
 } // namespace service::certificate

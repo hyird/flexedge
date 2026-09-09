@@ -2,7 +2,7 @@
 
 #include <ruvia/web/Model.h>
 
-#include "service/features/dns_sync/snapshot.h"
+#include "service/features/dns_sync/transport.h"
 
 namespace service::dns_zone {
 
@@ -25,6 +25,9 @@ RUVIA_RESPONSE_MODEL(DnsZoneOptionListDataDto,
 RUVIA_RESPONSE_MODEL(DnsZoneOptionListResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, DnsZoneOptionListDataDto));
+RUVIA_RESPONSE_MODEL(DnsZoneCollectionResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+                     RUVIA_REQUIRED_FIELD(message, ruvia::String),
+                     RUVIA_REQUIRED_FIELD(data, ruvia::Array<DnsZoneOptionDto>));
 
 RUVIA_REQUEST_MODEL(CreateDnsZoneBody,
                     RUVIA_OPTIONAL_FIELD_NAME("dns_provider_id", dnsProviderId, ruvia::String),

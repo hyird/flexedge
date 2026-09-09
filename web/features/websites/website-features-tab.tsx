@@ -1,5 +1,4 @@
 import type { UseFormReturn } from 'react-hook-form'
-import type { Certificate } from '@/lib/types'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -27,6 +26,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { TabsContent } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
+import type { Certificate } from '@/features/certificates/types'
 import { CompressionAlgorithmSelect } from './compression-algorithm-select'
 import {
   linesToValues,

@@ -3,6 +3,7 @@
 #include <ruvia/web/Controller.h>
 
 #include "service/common/types.h"
+#include "service/features/certificate/config_mapper.h"
 #include "service/domains/certificate/certificate.types.h"
 
 namespace service::certificate {

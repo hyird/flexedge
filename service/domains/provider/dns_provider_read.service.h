@@ -13,13 +13,13 @@
 #include "service/common/http.h"
 #include "service/domains/provider/dns_provider.error.h"
 #include "service/domains/provider/dns_provider.types.h"
-#include "service/features/dns/provider_config.h"
+#include "service/features/dns/provider_config_mapper.h"
 
 namespace service::provider {
 
 class DnsProviderReadService final {
   public:
-    ruvia::Task<DnsProviderPageDataDto> list(ruvia::Context& c, const std::string& tenantId,
+    ruvia::Task<DnsProviderPageDataDto> list(auto& c, const std::string& tenantId,
                                              std::int64_t page, std::int64_t pageSize,
                                              std::int64_t skip,
                                              const std::optional<std::string>& keyword,
@@ -42,25 +42,25 @@ class DnsProviderReadService final {
         }
         const auto countRows = co_await c.db().query("SELECT COUNT(*)" + where, params);
         const auto total = countRows.empty() ? std::int64_t{0}
-                                             : countRows.front()[0].as<std::int64_t>().value_or(0);
+                                             : countRows.front()[0].template as<std::int64_t>().value_or(0);
         const auto rows =
             co_await c.db().query(selectColumns() + where + " ORDER BY provider.sort DESC LIMIT " +
                                       std::to_string(pageSize) + " OFFSET " + std::to_string(skip),
                                   params);
 
         DnsProviderPageDataDto result(c);
-        result.set<"total">(total);
-        result.set<"page">(page);
-        result.set<"pageSize">(pageSize);
-        result.set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
-        auto& items = result.ensure<"list">();
+        result.template set<"total">(total);
+        result.template set<"page">(page);
+        result.template set<"pageSize">(pageSize);
+        result.template set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
+        auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
             fill(items.emplace_back(c), parseRow(c, row));
         }
         co_return result;
     }
 
-    ruvia::Task<DnsProviderDto> get(ruvia::Context& c, const std::string& tenantId,
+    ruvia::Task<DnsProviderDto> get(auto& c, const std::string& tenantId,
                                     const std::string& id) const {
         const auto rows = co_await c.db().query(
             selectColumns() + " FROM sys_provider provider WHERE provider.id = $1 AND "
@@ -103,7 +103,7 @@ class DnsProviderReadService final {
                "NULL)";
     }
 
-    template <typename Row> static StoredProvider parseRow(ruvia::Context& c, const Row& row) {
+    template <typename Row> static StoredProvider parseRow(auto& c, const Row& row) {
         const auto config =
             service::dns::parseDnsProviderConfig(row[5].value().value_or("{}"), c.resource());
         return {
@@ -130,21 +130,21 @@ class DnsProviderReadService final {
     }
 
     static void fill(DnsProviderDto& item, const StoredProvider& provider) {
-        item.set<"id">(provider.id);
-        item.set<"revision">(provider.revision);
-        item.set<"name">(provider.name);
-        item.set<"accountId">(provider.accountId);
-        item.set<"provider">(provider.provider);
-        item.set<"tokenHint">(provider.hint);
-        item.set<"status">(provider.status);
-        item.set<"createdAt">(provider.createdAt);
-        item.set<"updatedAt">(provider.updatedAt);
-        item.set<"zoneCount">(provider.zoneCount);
+        item.template set<"id">(provider.id);
+        item.template set<"revision">(provider.revision);
+        item.template set<"name">(provider.name);
+        item.template set<"accountId">(provider.accountId);
+        item.template set<"provider">(provider.provider);
+        item.template set<"tokenHint">(provider.hint);
+        item.template set<"status">(provider.status);
+        item.template set<"createdAt">(provider.createdAt);
+        item.template set<"updatedAt">(provider.updatedAt);
+        item.template set<"zoneCount">(provider.zoneCount);
         if (provider.lastVerifiedAt) {
-            item.set<"lastVerifiedAt">(*provider.lastVerifiedAt);
+            item.template set<"lastVerifiedAt">(*provider.lastVerifiedAt);
         }
         if (provider.lastError) {
-            item.set<"lastError">(*provider.lastError);
+            item.template set<"lastError">(*provider.lastError);
         }
     }
 };

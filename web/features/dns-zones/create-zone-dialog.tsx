@@ -1,15 +1,14 @@
 import { z } from 'zod'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { getData, sendData } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
-import type { DnsProvider } from '@/lib/types'
+import { apiErrorMessage } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import {
   Form,
   FormControl,
+  FormDescription,
   FormField,
   FormItem,
   FormLabel,
@@ -30,6 +29,8 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
+import type { DnsProvider } from '@/features/providers/types'
+import { availableDnsZonesQuery, createDnsZone } from './data'
 
 const createSchema = z.object({
   dns_provider_id: z.string().uuid('请选择 DNS 服务商'),
@@ -47,29 +48,24 @@ export function CreateZoneDialog({
   onOpenChange: (open: boolean) => void
   providers: DnsProvider[]
 }) {
-  const queryClient = useQueryClient()
   const form = useForm<CreateValues>({
     resolver: zodResolver(createSchema),
     defaultValues: { dns_provider_id: '', domain: '' },
   })
   const providerId = form.watch('dns_provider_id')
-  const availableQuery = useQuery({
-    queryKey: [...queryKeys.dnsZones, 'available', providerId],
-    queryFn: () =>
-      getData<{ list: Array<{ domain: string; status: string }> }>(
-        '/dns-zones/available',
-        { dns_provider_id: providerId }
-      ).then((data) => data.list),
-    enabled: !!providerId,
-  })
+  const domain = form.watch('domain')
+  const availableQuery = useQuery(availableDnsZonesQuery(providerId))
+  const availableZones = availableQuery.data ?? []
+  const canSelectDomain =
+    !!providerId && availableQuery.isSuccess && availableZones.length > 0
+  const canSubmit =
+    canSelectDomain && availableZones.some((zone) => zone.domain === domain)
   const mutation = useMutation({
-    mutationFn: (values: CreateValues) =>
-      sendData('post', '/dns-zones/', values),
+    mutationFn: createDnsZone,
     onSuccess: async (response) => {
       toast.success(response.message)
       onOpenChange(false)
       form.reset()
-      await queryClient.invalidateQueries({ queryKey: queryKeys.dnsZones })
     },
   })
 
@@ -127,7 +123,7 @@ export function CreateZoneDialog({
                   <Select
                     value={field.value}
                     onValueChange={field.onChange}
-                    disabled={!providerId || availableQuery.isLoading}
+                    disabled={!canSelectDomain || mutation.isPending}
                   >
                     <FormControl>
                       <SelectTrigger>
@@ -135,19 +131,63 @@ export function CreateZoneDialog({
                           placeholder={
                             availableQuery.isLoading
                               ? '正在加载…'
-                              : '选择可用域名'
+                              : !providerId
+                                ? '请先选择 DNS 服务商账号'
+                                : availableQuery.isError
+                                  ? '域名加载失败'
+                                  : availableZones.length === 0
+                                    ? '暂无可用域名'
+                                    : '选择可用域名'
                           }
                         />
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      {availableQuery.data?.map((zone) => (
+                      {availableZones.map((zone) => (
                         <SelectItem key={zone.domain} value={zone.domain}>
                           {zone.domain}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
+                  {providerId && availableQuery.isError && (
+                    <div role='alert' className='space-y-2'>
+                      <p className='text-sm text-destructive'>
+                        {apiErrorMessage(availableQuery.error)}
+                      </p>
+                      <Button
+                        type='button'
+                        variant='outline'
+                        size='sm'
+                        disabled={availableQuery.isFetching}
+                        onClick={() => void availableQuery.refetch()}
+                      >
+                        {availableQuery.isFetching
+                          ? '正在重试…'
+                          : '重新加载域名'}
+                      </Button>
+                    </div>
+                  )}
+                  {providerId &&
+                    availableQuery.isSuccess &&
+                    availableZones.length === 0 && (
+                      <div className='space-y-2'>
+                        <FormDescription role='status'>
+                          此账号暂无可添加的域名，请确认服务商中已有域名且尚未托管。
+                        </FormDescription>
+                        <Button
+                          type='button'
+                          variant='outline'
+                          size='sm'
+                          disabled={availableQuery.isFetching}
+                          onClick={() => void availableQuery.refetch()}
+                        >
+                          {availableQuery.isFetching
+                            ? '正在刷新…'
+                            : '刷新可用域名'}
+                        </Button>
+                      </div>
+                    )}
                   <FormMessage />
                 </FormItem>
               )}
@@ -161,7 +201,7 @@ export function CreateZoneDialog({
           <Button
             type='submit'
             form='create-zone-form'
-            disabled={mutation.isPending}
+            disabled={mutation.isPending || !canSubmit}
           >
             {mutation.isPending ? '正在添加…' : '添加并同步'}
           </Button>

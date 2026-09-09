@@ -1,9 +1,10 @@
-import { useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { useDeferredValue, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getData, type ApiEnvelope } from '@/lib/api'
+import { ChevronDown } from 'lucide-react'
 import { formatBytes, formatDate } from '@/lib/format'
-import { queryKeys } from '@/lib/query-keys'
-import type { PageData } from '@/lib/types'
+import { DEFAULT_PAGE_SIZE } from '@/lib/page-size'
+import { cn } from '@/lib/utils'
+import { useDelayedLoading } from '@/hooks/use-delayed-loading'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -29,33 +30,13 @@ import {
 } from '@/components/ui/sheet'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { PageSizeSelect } from '@/components/data-table/page-size-select'
+import { LiveLogError } from '@/features/logs/live-log-error'
+import { useLiveLogs } from '@/features/logs/use-live-logs'
+import { updateAccessLogDetailState } from './access-log-detail-state'
+import { parseAccessLogs, type AccessLog } from './access-log-schema'
+import { websiteAccessLogHistoryQuery } from './data'
 import type { Website } from './types'
-
-type AccessLog = {
-  id: string
-  occurred_at: string
-  node_id: string
-  node_name: string
-  client_ip?: string
-  client_ip_location?: string
-  protocol: string
-  method: string
-  host: string
-  target: string
-  status_code: number
-  request_bytes: number
-  response_bytes: number
-  duration_ms: number
-  user_agent?: string
-  referer?: string
-  request_headers?: string
-  request_body?: string
-  request_body_truncated: boolean
-  response_headers?: string
-  query_string?: string
-  cookies?: string
-  tls_fingerprint?: string
-}
 
 function accessLogStatusLabel(status: number) {
   if (status >= 500) return '服务器错误'
@@ -231,11 +212,37 @@ function AccessLogList({
   logs,
   emptyMessage,
   label,
+  live = false,
+  openDetailIds,
+  onDetailOpenChange,
 }: {
   logs: AccessLog[]
   emptyMessage: string
   label: string
+  live?: boolean
+  openDetailIds?: ReadonlySet<string>
+  onDetailOpenChange?: (id: string, open: boolean) => void
 }) {
+  const [localOpenDetailIds, setLocalOpenDetailIds] = useState<Set<string>>(
+    new Set()
+  )
+  const detailIds = live
+    ? (openDetailIds ?? new Set<string>())
+    : localOpenDetailIds
+
+  const handleDetailOpenChange = (id: string, open: boolean) => {
+    if (live) {
+      onDetailOpenChange?.(id, open)
+      return
+    }
+    setLocalOpenDetailIds((current) => {
+      const next = new Set(current)
+      if (open) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
   return (
     <div className='bg-card font-mono text-xs' role='region' aria-label={label}>
       {logs.map((log) => {
@@ -244,6 +251,8 @@ function AccessLogList({
         return (
           <Collapsible
             key={log.id}
+            open={detailIds.has(log.id)}
+            onOpenChange={(open) => handleDetailOpenChange(log.id, open)}
             className='grid grid-cols-[minmax(0,1fr)_auto_auto] gap-x-3 gap-y-0 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50'
           >
             <div className='flex min-w-0 items-center gap-2'>
@@ -295,10 +304,17 @@ function AccessLogList({
               <Button
                 variant='ghost'
                 size='sm'
-                className='col-start-3 row-span-2 row-start-1 self-center'
-                aria-label={`查看请求详情 ${log.method} ${log.target}`}
+                className='col-start-3 row-span-2 row-start-1 h-7 self-center font-sans text-xs text-muted-foreground hover:text-foreground'
+                aria-label={`${detailIds.has(log.id) ? '收起' : '查看'}请求详情 ${log.method} ${log.target}`}
               >
-                请求详情
+                {detailIds.has(log.id) ? '收起' : '详情'}
+                <ChevronDown
+                  aria-hidden='true'
+                  className={cn(
+                    'h-3.5 w-3.5 transition-transform',
+                    detailIds.has(log.id) && 'rotate-180'
+                  )}
+                />
               </Button>
             </CollapsibleTrigger>
             <CollapsibleContent className='col-span-3 mt-2 min-w-0 space-y-3 rounded-md border bg-muted/20 p-3'>
@@ -324,7 +340,7 @@ function AccessLogList({
               ).map(([label, value]) => (
                 <div key={label} className='min-w-0 space-y-1'>
                   <h4 className='font-sans font-medium'>{label}</h4>
-                  <pre className='max-h-64 overflow-auto rounded-md border bg-background p-2 break-all whitespace-pre-wrap'>
+                  <pre className='max-h-64 min-h-[calc(1lh+1rem+2px)] overflow-auto rounded-md border bg-background p-2 break-all whitespace-pre-wrap'>
                     {value ?? ''}
                   </pre>
                 </div>
@@ -349,77 +365,73 @@ export function AccessLogSheet({
   website: Website
   onOpenChange: (open: boolean) => void
 }) {
-  const [logs, setLogs] = useState<AccessLog[]>([])
-  const [connected, setConnected] = useState(false)
   const [view, setView] = useState<AccessLogView>('live')
   const [keyword, setKeyword] = useState('')
   const [method, setMethod] = useState<AccessLogMethod>('all')
   const [statusClass, setStatusClass] = useState<AccessLogStatusClass>('all')
   const [historyPage, setHistoryPage] = useState(1)
+  const [historyPageSize, setHistoryPageSize] = useState(DEFAULT_PAGE_SIZE)
+  const [openDetailIds, setOpenDetailIds] = useState<ReadonlySet<string>>(
+    new Set()
+  )
+  const [frozenLiveLogs, setFrozenLiveLogs] = useState<AccessLog[] | null>(null)
   const deferredKeyword = useDeferredValue(keyword.trim())
 
-  useEffect(() => {
-    if (view !== 'live') return
-
-    const source = new EventSource(
-      `/api/websites/${website.id}/access-logs/stream?limit=100`,
-      { withCredentials: true }
-    )
-    source.addEventListener('ready', () => setConnected(true))
-    source.addEventListener('logs', (event) => {
-      const payload = JSON.parse(
-        (event as MessageEvent<string>).data
-      ) as ApiEnvelope<{
-        list: AccessLog[]
-      }>
-      setLogs((current) => {
-        const merged = [...payload.data.list, ...current]
-        return Array.from(
-          new Map(merged.map((item) => [item.id, item])).values()
-        )
-          .sort((a, b) => b.occurred_at.localeCompare(a.occurred_at))
-          .slice(0, 1000)
-      })
-    })
-    source.onerror = () => setConnected(false)
-    return () => source.close()
-  }, [view, website.id])
+  const { logs, connected, error } = useLiveLogs(
+    `/api/websites/${website.id}/access-logs/stream?limit=100`,
+    parseAccessLogs,
+    view === 'live'
+  )
 
   const liveLogs = useMemo(
     () =>
       logs.filter((log) => accessLogMatches(log, keyword, method, statusClass)),
     [keyword, logs, method, statusClass]
   )
+  const displayedLiveLogs = frozenLiveLogs ?? liveLogs
   const historyQuery = useQuery({
-    queryKey: [
-      ...queryKeys.websites,
-      website.id,
-      'access-logs',
-      historyPage,
-      deferredKeyword,
-      method,
-      statusClass,
-    ],
-    queryFn: () =>
-      getData<PageData<AccessLog>>(`/websites/${website.id}/access-logs`, {
-        page: historyPage,
-        page_size: 50,
-        keyword: deferredKeyword || undefined,
-        method: method === 'all' ? undefined : method,
-        status_class: statusClass === 'all' ? undefined : statusClass,
-      }),
+    ...websiteAccessLogHistoryQuery(website.id, {
+      page: historyPage,
+      page_size: historyPageSize,
+      keyword: deferredKeyword || undefined,
+      method: method === 'all' ? undefined : method,
+      status_class: statusClass === 'all' ? undefined : statusClass,
+    }),
     enabled: view === 'history',
   })
   const history = historyQuery.data
+  const historyLoading = useDelayedLoading(
+    view === 'history' && historyQuery.isLoading
+  )
   const changeFilters = (next: {
     keyword?: string
     method?: AccessLogMethod
     statusClass?: AccessLogStatusClass
   }) => {
+    setOpenDetailIds(new Set())
+    setFrozenLiveLogs(null)
     if (next.keyword !== undefined) setKeyword(next.keyword)
     if (next.method !== undefined) setMethod(next.method)
     if (next.statusClass !== undefined) setStatusClass(next.statusClass)
     setHistoryPage(1)
+  }
+
+  const changeView = (nextView: AccessLogView) => {
+    setOpenDetailIds(new Set())
+    setFrozenLiveLogs(null)
+    setView(nextView)
+  }
+
+  const changeLiveDetail = (id: string, open: boolean) => {
+    const next = updateAccessLogDetailState(
+      openDetailIds,
+      id,
+      open,
+      liveLogs,
+      frozenLiveLogs
+    )
+    setOpenDetailIds(next.openDetailIds)
+    setFrozenLiveLogs(next.frozenLiveLogs)
   }
 
   return (
@@ -439,11 +451,11 @@ export function AccessLogSheet({
             条；更早记录请在“历史日志”中检索。展开“请求详情”查看已采集的请求头和请求体等内容。
           </SheetDescription>
         </SheetHeader>
+        <LiveLogError error={error} />
         <Tabs
           value={view}
           onValueChange={(value) => {
-            setConnected(false)
-            setView(value as AccessLogView)
+            changeView(value as AccessLogView)
           }}
           className='min-h-0 flex-1 gap-3'
         >
@@ -453,9 +465,12 @@ export function AccessLogSheet({
               <TabsTrigger value='history'>历史日志</TabsTrigger>
             </TabsList>
             {view === 'live' && (
-              <span className='text-xs text-muted-foreground'>
-                显示 {liveLogs.length} / {logs.length} 条
-              </span>
+              <div className='flex items-center gap-2 text-xs text-muted-foreground'>
+                {frozenLiveLogs && <span>已暂停实时更新，收起详情后恢复</span>}
+                <span>
+                  显示 {displayedLiveLogs.length} / {logs.length} 条
+                </span>
+              </div>
             )}
             {view === 'history' && history && (
               <span className='text-xs text-muted-foreground'>
@@ -479,11 +494,14 @@ export function AccessLogSheet({
           >
             <ScrollArea className='min-h-0 flex-1 px-4'>
               <AccessLogList
-                logs={liveLogs}
+                logs={displayedLiveLogs}
                 emptyMessage={
                   logs.length ? '没有符合筛选条件的实时日志' : '等待访问日志…'
                 }
                 label='实时访问日志列表'
+                live
+                openDetailIds={openDetailIds}
+                onDetailOpenChange={changeLiveDetail}
               />
             </ScrollArea>
           </TabsContent>
@@ -491,8 +509,14 @@ export function AccessLogSheet({
             value='history'
             className='mt-0 flex min-h-0 flex-1 flex-col'
           >
-            {historyQuery.isLoading ? (
-              <div className='space-y-1 px-4' aria-label='正在加载历史访问日志'>
+            {historyLoading.pending ? (
+              <div
+                className={cn(
+                  'space-y-1 px-4',
+                  !historyLoading.showSkeleton && 'invisible'
+                )}
+                aria-label='正在加载历史访问日志'
+              >
                 <Skeleton className='h-16 w-full' />
                 <Skeleton className='h-16 w-full' />
                 <Skeleton className='h-16 w-full' />
@@ -517,35 +541,48 @@ export function AccessLogSheet({
                     label='历史访问日志列表'
                   />
                 </ScrollArea>
-                <div className='flex items-center justify-end gap-2 border-t px-4 py-2 text-xs text-muted-foreground'>
-                  <Button
-                    variant='outline'
-                    size='sm'
-                    disabled={
-                      (history?.page ?? 1) <= 1 || historyQuery.isFetching
-                    }
-                    onClick={() =>
-                      setHistoryPage((page) => Math.max(1, page - 1))
-                    }
-                  >
-                    上一页
-                  </Button>
-                  <span>
-                    {history?.page ?? 1} /{' '}
-                    {Math.max(1, history?.total_pages ?? 1)}
-                  </span>
-                  <Button
-                    variant='outline'
-                    size='sm'
-                    disabled={
-                      !history ||
-                      history.page >= history.total_pages ||
-                      historyQuery.isFetching
-                    }
-                    onClick={() => setHistoryPage((page) => page + 1)}
-                  >
-                    下一页
-                  </Button>
+                <div className='flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2 text-xs text-muted-foreground'>
+                  <div className='flex items-center gap-2'>
+                    <PageSizeSelect
+                      value={historyPageSize}
+                      disabled={historyQuery.isFetching}
+                      onValueChange={(size) => {
+                        setHistoryPageSize(size)
+                        setHistoryPage(1)
+                      }}
+                    />
+                    <span className='hidden sm:inline'>每页行数</span>
+                  </div>
+                  <div className='flex items-center gap-2'>
+                    <Button
+                      variant='outline'
+                      size='sm'
+                      disabled={
+                        (history?.page ?? 1) <= 1 || historyQuery.isFetching
+                      }
+                      onClick={() =>
+                        setHistoryPage((page) => Math.max(1, page - 1))
+                      }
+                    >
+                      上一页
+                    </Button>
+                    <span>
+                      {history?.page ?? 1} /{' '}
+                      {Math.max(1, history?.total_pages ?? 1)}
+                    </span>
+                    <Button
+                      variant='outline'
+                      size='sm'
+                      disabled={
+                        !history ||
+                        history.page >= history.total_pages ||
+                        historyQuery.isFetching
+                      }
+                      onClick={() => setHistoryPage((page) => page + 1)}
+                    >
+                      下一页
+                    </Button>
+                  </div>
                 </div>
               </>
             )}

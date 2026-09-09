@@ -1,11 +1,8 @@
 #pragma once
 
-#include <algorithm>
-#include <cctype>
 #include <filesystem>
 #include <memory>
 #include <optional>
-#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -87,12 +84,6 @@ class StateStore final {
             writeEncrypted(directory_ / "objects" / (object.digest_sha256() + ".pb"),
                            serializeArtifact(object));
         }
-        const auto releaseId = active.release().content().release_id();
-        if (!safeIdentifier(releaseId)) {
-            throw std::runtime_error("invalid release identifier");
-        }
-        writeEncrypted(directory_ / "releases" / releaseId / "manifest.pb",
-                       serializeArtifact(active.release()));
         writeEncrypted(directory_ / "staged" / "state.pb", serializeArtifact(active));
     }
 
@@ -110,13 +101,7 @@ class StateStore final {
     }
 
   private:
-    [[nodiscard]] static bool safeDigest(std::string_view value) { return isSha256Digest(value); }
-
-    [[nodiscard]] static bool safeIdentifier(std::string_view value) {
-        return !value.empty() && value.size() <= 64 &&
-               std::ranges::all_of(
-                   value, [](unsigned char ch) { return std::isalnum(ch) != 0 || ch == '-'; });
-    }
+    [[nodiscard]] static bool safeDigest(std::string_view value) { return flexedge::crypto::isSha256Digest(value); }
 
     [[nodiscard]] std::optional<std::string>
     readEncrypted(const std::filesystem::path& path) const {

@@ -18,7 +18,7 @@
 #include "service/features/dns/driver.h"
 #include "service/features/dns_sync/failure.h"
 #include "service/features/dns_sync/reconciliation.h"
-#include "service/features/dns_sync/snapshot.h"
+#include "service/features/dns_sync/mapper.h"
 #include "service/features/dns_sync/task.h"
 #include "service/features/dns_sync/zone_loader.h"
 #include "service/features/dns_sync/zone_persistence.h"
@@ -38,7 +38,7 @@ mergeRemoteRecords(service::background::WorkerContext& context, const DnsTask& t
                    const std::vector<service::dns::ProviderRecord>& remoteRecords,
                    const std::vector<service::dns::ProviderLine>& lines) {
     auto plan = planRemoteMerge(service::sync_runtime::markerOperationName(task.operation), config,
-                                runtime, desiredConfig, domain, driver, remoteRecords, lines);
+                                runtime, desiredConfig, domain, driver.recordNames(), remoteRecords, lines);
     if (!plan.conflicts.empty()) {
         co_await storeConflicts(context, task, lease, desiredRevision, runtime, lines,
                                 plan.conflicts);
@@ -142,7 +142,7 @@ inline ruvia::Task<ZoneRuntimeDto> reconcileZoneRecords(
             state.set<"syncStatus">("synced");
             state.set<"syncedRevision">(revision);
 
-            auto resolved = toRemoteRecord(managed, driver, domain);
+            auto resolved = toRemoteRecord(managed, driver.recordNames(), domain);
             resolved.id = remoteId;
             const auto existing = std::ranges::find_if(
                 remoteRecords, [&](const auto& item) { return item.id == remoteId; });
@@ -159,8 +159,9 @@ inline ruvia::Task<ZoneRuntimeDto> reconcileZoneRecords(
 
 inline ruvia::Task<std::int64_t> syncZone(service::background::WorkerContext& context,
                                           const DnsTask& task) {
-    const auto lease = service::sync_runtime::makeRunningLease(task.tenantId, task.id, task.version,
-                                                               context.leaseOwner());
+    const auto lease = service::sync_runtime::makeRunningLease(
+        task.tenantId, task.id, task.version, context.leaseOwner(),
+        service::sync_runtime::MarkerResourceType::dnsZone, task.resourceId);
     const auto state = co_await loadZoneSyncState(context, task, lease);
     if (!state) {
         co_return task.version;

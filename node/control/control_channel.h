@@ -1,5 +1,8 @@
 #pragma once
 
+#include "node/control/connect.h"
+#include "node/control/authenticate.h"
+
 #include "node/proto/control_reply.h"
 
 #include <algorithm>
@@ -28,9 +31,9 @@
 #include "node/runtime/log_buffer.h"
 #include "node/runtime/node_credentials.h"
 #include "node/runtime/runtime_state.h"
-#include "node/runtime/secret_buffer.h"
 #include "node/runtime/self_updater.h"
 #include "node/runtime/state_store.h"
+#include "node/runtime/config_activation.h"
 #include "node/runtime/version.h"
 
 namespace flexedge::node {
@@ -110,18 +113,8 @@ class ControlChannel final {
     }
 
     ruvia::Task<v2::Welcome> authenticate(const ruvia::WebSocketClientHandle& client) {
-        constexpr std::string_view requestId{"authenticate"};
-        auto envelope = authenticateEnvelope(std::string(requestId));
-        auto* secret = envelope.mutable_authenticate()->mutable_secret();
-        SecretStringGuard secretCleanser(*secret);
-        auto bytes = serialize(envelope);
-        SecretStringGuard bytesCleanser(bytes);
-        co_await client.binary(bytes);
-        const auto welcomeEnvelope = co_await readServerEnvelope(client);
-        if (welcomeEnvelope.request_id() != requestId || !welcomeEnvelope.has_welcome()) {
-            throw std::runtime_error("control plane did not authenticate the device");
-        }
-        co_return welcomeEnvelope.welcome();
+        co_return co_await authenticateControlEnvelope(client, authenticateEnvelope("authenticate"),
+            "control plane did not authenticate the device");
     }
 
     v2::ClientEnvelope heartbeat(std::string_view nodeId, std::uint64_t sequence) {
@@ -226,40 +219,6 @@ class ControlChannel final {
         }
     }
 
-    void applyPersisted(const v2::ActiveState& active,
-                        const std::vector<v2::DeliveryObject>& objects) {
-        auto state = std::make_shared<v2::ActiveState>(active);
-        auto compiled = std::make_shared<const CompiledConfig>(state, objects);
-        runtime_.validateNext(*compiled);
-        auto reload = dataPlane_.prepare(compiled);
-        dataPlane_.prime(reload);
-        dataPlane_.activate(std::move(reload));
-    }
-
-    void apply(const v2::DesiredState& desired, const std::vector<v2::DeliveryObject>& objects,
-               v2::ApplyPhase& phase) {
-        v2::ActiveState active;
-        *active.mutable_node_spec() = desired.node_spec();
-        *active.mutable_release() = desired.release();
-        phase = v2::APPLY_PHASE_STAGE;
-        store_.stage(active, objects);
-        phase = v2::APPLY_PHASE_VALIDATE;
-        auto state = std::make_shared<v2::ActiveState>(active);
-        auto compiled = std::make_shared<const CompiledConfig>(state, objects);
-        runtime_.validateNext(*compiled);
-        auto reload = dataPlane_.prepare(compiled);
-        phase = v2::APPLY_PHASE_ACTIVATE;
-        dataPlane_.prime(reload);
-        try {
-            store_.activateStaged();
-        } catch (...) {
-            dataPlane_.abort(reload);
-            throw;
-        }
-        dataPlane_.activate(std::move(reload));
-        lastError_.clear();
-    }
-
     ruvia::Task<void> receiveDesiredState(const ruvia::WebSocketClientHandle& client,
                                           std::string_view nodeId,
                                           std::string_view expectedRequestId) {
@@ -327,7 +286,8 @@ class ControlChannel final {
         v2::ApplyPhase phase = v2::APPLY_PHASE_STAGE;
         std::exception_ptr failure;
         try {
-            apply(desired, objects, phase);
+            activateDesiredConfig(store_, dataPlane_, desired, objects, phase);
+            lastError_.clear();
             result->set_applied(true);
             result->set_failed_phase(v2::APPLY_PHASE_UNSPECIFIED);
         } catch (const std::exception& error) {
@@ -349,27 +309,13 @@ class ControlChannel final {
         }
     }
 
-    static void validateWelcome(const v2::Welcome& welcome) {
-        if (welcome.node_id().empty() || welcome.desired_node_spec_revision() <= 0 ||
-            welcome.desired_release_id().empty() ||
-            !isSha256Digest(welcome.desired_manifest_digest()) ||
-            !isSha256Digest(welcome.node_binary_sha256())) {
-            throw std::runtime_error("control plane sent invalid welcome state");
-        }
-    }
-
     ruvia::Task<void> processReleaseProbe(const ruvia::WebSocketClientHandle& connection,
                                           std::string_view nodeId, std::uint64_t& sequence,
                                           std::uint32_t waitSeconds) {
         const auto request = releaseProbe(++sequence, waitSeconds);
         co_await connection.binary(serialize(request));
         const auto acknowledgement = co_await readServerEnvelope(connection);
-        if (acknowledgement.request_id() != request.request_id() ||
-            !acknowledgement.has_release_probe_ack() ||
-            !isSha256Digest(acknowledgement.release_probe_ack().node_binary_sha256()) ||
-            acknowledgement.release_probe_ack().desired_node_spec_revision() < 1 ||
-            acknowledgement.release_probe_ack().desired_release_id().empty() ||
-            !isSha256Digest(acknowledgement.release_probe_ack().desired_manifest_digest())) {
+        if (!matchesReleaseProbeAck(acknowledgement, request.request_id())) {
             throw std::runtime_error("control plane did not acknowledge release probe");
         }
         const auto& value = acknowledgement.release_probe_ack();
@@ -388,9 +334,7 @@ class ControlChannel final {
         const auto request = heartbeat(nodeId, ++sequence);
         co_await connection.binary(serialize(request));
         const auto acknowledgement = co_await readServerEnvelope(connection);
-        if (acknowledgement.request_id() != request.request_id() ||
-            !acknowledgement.has_heartbeat_ack() ||
-            !isSha256Digest(acknowledgement.heartbeat_ack().node_binary_sha256())) {
+        if (!matchesHeartbeatAck(acknowledgement, request.request_id())) {
             throw std::runtime_error("control plane did not acknowledge heartbeat");
         }
         const auto& value = acknowledgement.heartbeat_ack();
@@ -435,12 +379,12 @@ class ControlChannel final {
     ruvia::Task<void> runSession(ruvia::WebSocketClient& client) {
         auto persistent = store_.load();
         if (persistent.active.has_node_spec()) {
-            applyPersisted(persistent.active, persistent.objects);
+            activatePersistedConfig(dataPlane_, persistent.active, persistent.objects);
         }
         if (config_.stopToken.stopRequested()) {
             co_return;
         }
-        co_await client.connect();
+        co_await connectControlTransport(client, config_.stopToken);
         if (client.subprotocol() != kControlSubprotocol) {
             throw std::runtime_error("control plane did not select the required subprotocol");
         }
@@ -449,7 +393,9 @@ class ControlChannel final {
         }
         const auto connection = client.withOptions({.stopToken = config_.stopToken});
         const auto welcome = co_await authenticate(connection);
-        validateWelcome(welcome);
+        if (!validWelcome(welcome)) {
+            throw std::runtime_error("control plane sent invalid welcome state");
+        }
         const auto& nodeId = welcome.node_id();
         if (persistent.active.has_node_spec() &&
             persistent.active.node_spec().content().node_id() != nodeId) {

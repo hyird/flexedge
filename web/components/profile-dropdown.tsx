@@ -1,9 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { LogOut, UserRound } from 'lucide-react'
-import { sessionQueryOptions } from '@/lib/auth'
-import { initials } from '@/lib/format'
 import useDialogState from '@/hooks/use-dialog-state'
-import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -14,6 +11,8 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { SignOutDialog } from '@/components/sign-out-dialog'
+import { UserAvatar } from '@/components/user-avatar'
+import { sessionQueryOptions } from '@/features/auth/data'
 
 export function ProfileDropdown() {
   const { data: user } = useQuery(sessionQueryOptions)
@@ -24,19 +23,13 @@ export function ProfileDropdown() {
     <>
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
-          <Button
-            variant='ghost'
-            size='icon'
-            className='relative rounded-full'
-            aria-label='打开用户菜单'
-          >
-            <Avatar className='size-8'>
-              <AvatarFallback>{initials(name)}</AvatarFallback>
-            </Avatar>
+          <Button variant='ghost' size='icon' aria-label='打开用户菜单'>
+            <UserAvatar />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent className='w-56' align='end' forceMount>
-          <DropdownMenuLabel className='font-normal'>
+          <DropdownMenuLabel className='flex items-center gap-3 font-normal'>
+            <UserAvatar />
             <div className='flex flex-col gap-1.5'>
               <p className='text-sm leading-none font-medium'>{name}</p>
               <p className='text-xs leading-none text-muted-foreground'>

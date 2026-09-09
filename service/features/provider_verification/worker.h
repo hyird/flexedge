@@ -58,7 +58,7 @@ inline ruvia::Task<void> processMarker(service::background::WorkerContext& conte
     } catch (...) {
         exception = std::current_exception();
     }
-    if (exception) {
+    if (!context.stopToken().stopRequested() && exception) {
         const auto failure = classifyTaskFailure(exception);
         co_await failVerification(context, task, failure.message, failure.permanent);
     }
@@ -68,8 +68,11 @@ inline ruvia::Task<void> processMarker(service::background::WorkerContext& conte
 inline ruvia::Task<void> processMarkers(service::background::WorkerContext& context,
                                         std::size_t& processed) {
     for (; processed < kMaxJobsPerTick; ++processed) {
+        if (context.stopToken().stopRequested()) {
+            break;
+        }
         const auto marker = co_await claim(context);
-        if (!marker) {
+        if (context.stopToken().stopRequested() || !marker) {
             break;
         }
         co_await processMarker(context, *marker);
@@ -83,6 +86,9 @@ inline ruvia::Task<void> runMaintenance(service::background::WorkerContext& cont
     if (std::chrono::steady_clock::now() >= nextLeaseRecovery) {
         co_await recoverStaleMarkers(context);
         nextLeaseRecovery = std::chrono::steady_clock::now() + kLeaseRecoveryInterval;
+    }
+    if (context.stopToken().stopRequested()) {
+        co_return;
     }
     if (std::chrono::steady_clock::now() >= nextReconciliation) {
         co_await reconcile(context);

@@ -3,7 +3,7 @@
 #include <cstdint>
 
 #include "service/domains/website/website.types.h"
-#include "service/features/geoip/xdb_database.h"
+#include "service/features/geoip/runtime_database.h"
 
 namespace service::website {
 

@@ -4,7 +4,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -19,13 +18,9 @@
 #include <vector>
 
 #include <asio/ip/address.hpp>
+#include "service/features/geoip/location.h"
 
 namespace service::geoip {
-
-struct IpLocation final {
-    std::string country;
-    std::string display;
-};
 
 namespace detail {
 
@@ -37,72 +32,6 @@ constexpr std::size_t kXdbContentOffset = kXdbHeaderLength + kXdbVectorLength;
 constexpr std::size_t kXdbV4AddressLength = 4;
 constexpr std::size_t kXdbV6AddressLength = 16;
 constexpr std::size_t kXdbMaximumRegionLength = 16 * 1024;
-
-[[nodiscard]] inline bool isUnknownLocationPart(std::string_view value) {
-    return value.empty() || value == "0" || value == "未知" || value == "未知地区";
-}
-
-[[nodiscard]] inline std::optional<IpLocation> parseLocation(std::string_view value) {
-    std::vector<std::string_view> parts;
-    std::size_t start{};
-    while (start <= value.size()) {
-        const auto end = value.find('|', start);
-        parts.push_back(value.substr(start, end == std::string_view::npos ? std::string_view::npos
-                                                                          : end - start));
-        if (end == std::string_view::npos) {
-            break;
-        }
-        start = end + 1;
-    }
-    if (parts.empty()) {
-        return std::nullopt;
-    }
-
-    constexpr std::array<std::string_view, 14> continents{
-        "亚洲", "欧洲",   "非洲",   "北美洲",        "南美洲",        "大洋洲",  "南极洲",
-        "Asia", "Europe", "Africa", "North America", "South America", "Oceania", "Antarctica"};
-    std::size_t countryIndex{};
-    if (std::find(continents.begin(), continents.end(), parts.front()) != continents.end()) {
-        countryIndex = 1;
-    }
-    if (countryIndex >= parts.size() || isUnknownLocationPart(parts[countryIndex])) {
-        return std::nullopt;
-    }
-
-    IpLocation result{.country = std::string{parts[countryIndex]},
-                      .display = std::string{parts[countryIndex]}};
-    std::size_t details{};
-    for (std::size_t index = countryIndex + 1; index < parts.size() && details < 2; ++index) {
-        const auto part = parts[index];
-        if (isUnknownLocationPart(part) || part == result.country ||
-            result.display.find(part) != std::string::npos) {
-            continue;
-        }
-        result.display += " · ";
-        result.display += part;
-        ++details;
-    }
-    return result;
-}
-
-[[nodiscard]] inline std::optional<std::string> environmentValue(const char* name) {
-#ifdef _WIN32
-    char* raw{};
-    std::size_t length{};
-    if (_dupenv_s(&raw, &length, name) != 0 || !raw) {
-        return std::nullopt;
-    }
-    std::string result{raw, length > 0 ? length - 1 : 0};
-    std::free(raw);
-    return result;
-#else
-    const auto* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return std::nullopt;
-    }
-    return std::string{raw};
-#endif
-}
 
 [[nodiscard]] inline std::uint16_t readLittleEndian16(const std::uint8_t* input) {
     return static_cast<std::uint16_t>(input[0]) |
@@ -174,6 +103,7 @@ class XdbReader final {
         const auto left = readLittleEndian32(vectorIndex_.data() + bucket);
         const auto right = readLittleEndian32(vectorIndex_.data() + bucket + 4);
         if (left == 0 || right == 0 || right < left || left < indexStart_ ||
+            right > indexEnd_ || (left - indexStart_) % recordLength_ != 0 ||
             right + recordLength_ > fileSize_ || (right - left) % recordLength_ != 0) {
             return std::nullopt;
         }
@@ -285,13 +215,9 @@ parseAddress(std::string_view value, int expectedIpVersion) {
 
 class XdbDatabase final {
   public:
-    XdbDatabase() {
-        if (const auto path = detail::environmentValue("FLEXEDGE_XDB_V4_PATH")) {
-            ipv4_ = detail::XdbReader::open(*path, 4);
-        }
-        if (const auto path = detail::environmentValue("FLEXEDGE_XDB_V6_PATH")) {
-            ipv6_ = detail::XdbReader::open(*path, 6);
-        }
+    XdbDatabase(const std::filesystem::path& ipv4Path, const std::filesystem::path& ipv6Path) {
+        if (!ipv4Path.empty()) ipv4_ = detail::XdbReader::open(ipv4Path, 4);
+        if (!ipv6Path.empty()) ipv6_ = detail::XdbReader::open(ipv6Path, 6);
     }
 
     XdbDatabase(const XdbDatabase&) = delete;
@@ -314,17 +240,15 @@ class XdbDatabase final {
 
     [[nodiscard]] std::optional<std::string> country(std::string_view ip) const {
         const auto location = lookup(ip);
-        return location ? std::optional<std::string>{location->country} : std::nullopt;
+        if (!location || location->country.empty()) {
+            return std::nullopt;
+        }
+        return location->country;
     }
 
   private:
     std::unique_ptr<detail::XdbReader> ipv4_;
     std::unique_ptr<detail::XdbReader> ipv6_;
 };
-
-[[nodiscard]] inline const XdbDatabase& xdbDatabase() {
-    static const XdbDatabase database;
-    return database;
-}
 
 } // namespace service::geoip
