@@ -12,7 +12,7 @@
 
 #include "service/common/domain_name.h"
 #include "service/features/dns_sync/queue.h"
-#include "service/features/website_config/model.h"
+#include "service/features/website_config/mapper.h"
 
 namespace service::website_dns {
 

@@ -1,5 +1,4 @@
 import { useQuery } from '@tanstack/react-query'
-import { sessionQueryOptions } from '@/lib/auth'
 import {
   Sidebar,
   SidebarContent,
@@ -7,6 +6,7 @@ import {
   SidebarHeader,
   SidebarRail,
 } from '@/components/ui/sidebar'
+import { sessionQueryOptions } from '@/features/auth/data'
 import { AppTitle } from './app-title'
 import { sidebarData } from './data/sidebar-data'
 import { NavGroup } from './nav-group'

@@ -2,6 +2,7 @@
 #include <string>
 
 #include "service/features/log_ingest/envelope.h"
+#include "service/features/log_ingest/tail_cursor.h"
 
 #define REQUIRE(condition)                                                                         \
     do {                                                                                           \
@@ -10,6 +11,17 @@
     } while (false)
 
 int main() {
+    const auto cursor = service::log_ingest::parseTailCursor(
+        "123:01234567-89AB-CDEF-0123-456789ABCDEF");
+    REQUIRE(cursor && cursor->ingestedUnixMicros == 123);
+    REQUIRE(service::log_ingest::encodeTailCursor(cursor->ingestedUnixMicros, cursor->id) ==
+            "123:01234567-89ab-cdef-0123-456789abcdef");
+    for (const auto invalid : {"", "0:01234567-89ab-cdef-0123-456789abcdef",
+                               "-1:01234567-89ab-cdef-0123-456789abcdef",
+                               "9223372036854775808:01234567-89ab-cdef-0123-456789abcdef",
+                               "123:not-a-uuid", "123x:01234567-89ab-cdef-0123-456789abcdef"}) {
+        REQUIRE(!service::log_ingest::parseTailCursor(invalid));
+    }
     flexedge::node::v2::LogDelivery delivery;
     delivery.set_node_id("920dc14b-cc26-49e4-9937-93a7637bef79");
     auto* access = delivery.add_events()->mutable_access_log();

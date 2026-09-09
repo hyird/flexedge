@@ -5,8 +5,9 @@
 #include <ruvia/core/Task.h>
 
 #include "service/features/background/worker_pool.h"
-#include "service/features/certificate/model.h"
+#include "service/features/certificate/config_mapper.h"
 #include "service/features/certificate/queue.h"
+#include "service/features/live_resource/fanout.h"
 #include "service/features/node_dispatch/queue.h"
 #include "service/features/node_dispatch/notifications.h"
 #include "service/features/sync_runtime/state.h"
@@ -31,6 +32,11 @@ inline ruvia::Task<void> expireCertificates(service::background::WorkerContext& 
         co_await transaction.commit();
         if (!updated.empty()) {
             service::node_dispatch::notifications::published(row[0].value().value_or(""));
+            service::live_resource::hub().publish(
+                row[0].value().value_or(""), service::live_resource::Resource::certificates,
+                row[1].value().value_or(""));
+            service::live_resource::hub().publish(
+                row[0].value().value_or(""), service::live_resource::Resource::tasks);
         }
     }
     co_return;
@@ -52,7 +58,8 @@ reconcileMissingIssuanceMarkers(service::background::WorkerContext& context) {
             "SELECT issued_revision FROM sys_certificate WHERE tenant_id = $1 AND id = $2 AND "
             "issuance_revision = $3 AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
             row[0].value().value_or(""), row[1].value().value_or(""), revision);
-        if (!locked.empty()) {
+        const bool changed = !locked.empty();
+        if (changed) {
             co_await enqueueCertificateRevision(
                 transaction, row[0].value().value_or(""), row[1].value().value_or(""), revision,
                 locked.front()[0].as<std::int64_t>().value_or(0) == 0
@@ -60,6 +67,13 @@ reconcileMissingIssuanceMarkers(service::background::WorkerContext& context) {
                     : service::sync_runtime::MarkerOperation::renew);
         }
         co_await transaction.commit();
+        if (changed) {
+            service::live_resource::hub().publish(
+                row[0].value().value_or(""), service::live_resource::Resource::certificates,
+                row[1].value().value_or(""));
+            service::live_resource::hub().publish(
+                row[0].value().value_or(""), service::live_resource::Resource::tasks);
+        }
     }
     co_return;
 }
@@ -102,6 +116,11 @@ inline ruvia::Task<void> scheduleAutoRenewals(service::background::WorkerContext
                                             row[1].value().value_or(""), issuanceRevision,
                                             service::sync_runtime::MarkerOperation::renew);
         co_await transaction.commit();
+        service::live_resource::hub().publish(
+            row[0].value().value_or(""), service::live_resource::Resource::certificates,
+            row[1].value().value_or(""));
+        service::live_resource::hub().publish(
+            row[0].value().value_or(""), service::live_resource::Resource::tasks);
     }
     co_return;
 }

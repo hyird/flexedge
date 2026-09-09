@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { getData, apiErrorMessage } from '@/lib/api'
+import { apiErrorMessage } from '@/lib/api'
 import { formatDate } from '@/lib/format'
-import { queryKeys } from '@/lib/query-keys'
+import { cn } from '@/lib/utils'
+import { useDelayedLoading } from '@/hooks/use-delayed-loading'
 import { Button } from '@/components/ui/button'
 import {
   Sheet,
@@ -12,8 +13,10 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import { Skeleton } from '@/components/ui/skeleton'
-import { resourceLinks, taskTitle, type Task, type TaskHistory } from './data'
+import { taskDetailQuery, taskHistoryQuery } from './data'
+import { resourceLinks, taskTitle } from './task-display'
 import { TaskStatus } from './task-status'
+import { type Task } from './types'
 
 export function TaskDetail({
   task: selected,
@@ -22,30 +25,10 @@ export function TaskDetail({
   task: Task | null
   onClose: () => void
 }) {
-  const latest = useQuery({
-    queryKey: [
-      ...queryKeys.tasks,
-      'detail',
-      selected?.id,
-      selected?.resource_id,
-      selected?.version,
-    ],
-    enabled: Boolean(selected),
-    queryFn: () =>
-      getData<Task>(`/tasks/${selected!.id}`, {
-        resource_id: selected!.resource_id,
-        version: selected!.version,
-      }),
-  })
+  const latest = useQuery(taskDetailQuery(selected))
   const task = latest.data ?? selected
-  const history = useQuery({
-    queryKey: [...queryKeys.tasks, 'history', task?.id, task?.version],
-    enabled: Boolean(task && task.resource_type !== 'node'),
-    queryFn: () =>
-      getData<TaskHistory>(`/tasks/${task!.id}/history`, {
-        version: task!.version,
-      }),
-  })
+  const history = useQuery(taskHistoryQuery(task))
+  const historyLoading = useDelayedLoading(history.isFetching && !history.data)
   return (
     <Sheet
       open={Boolean(task)}
@@ -134,8 +117,13 @@ export function TaskDetail({
                 <p className='text-sm text-muted-foreground'>
                   展示该节点对此发布版本的最新应用结果；尚未确认的发布保持排队状态。
                 </p>
-              ) : history.isPending ? (
-                <Skeleton className='h-20 w-full' />
+              ) : historyLoading.pending ? (
+                <Skeleton
+                  className={cn(
+                    'h-20 w-full',
+                    !historyLoading.showSkeleton && 'invisible'
+                  )}
+                />
               ) : history.isError ? (
                 <div role='alert' className='space-y-2 text-sm'>
                   <p>{apiErrorMessage(history.error)}</p>

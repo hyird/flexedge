@@ -16,7 +16,7 @@
 #include "service/features/dns/driver.h"
 #include "service/features/dns_sync/queue.h"
 #include "service/features/dns_sync/reconciliation.h"
-#include "service/features/dns_sync/snapshot.h"
+#include "service/features/dns_sync/mapper.h"
 #include "service/features/dns_sync/task.h"
 #include "service/features/logging/logger.h"
 #include "service/features/sync_runtime/error.h"
@@ -95,7 +95,7 @@ importInitialRemoteRecords(service::background::WorkerContext& context, const Dn
             configRecords.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
         record.set<"id">(id);
         record.set<"type">(remote.type);
-        record.set<"name">(driver.localRecordName(remote.name, domain));
+        record.set<"name">(driver.recordNames().localRecordName(remote.name, domain));
         record.set<"content">(remote.content);
         record.set<"ttl">(remote.ttl);
         record.set<"proxied">(remote.proxied);
@@ -361,8 +361,9 @@ finishDeletedZoneWithoutRemote(service::background::WorkerContext& context, cons
 inline ruvia::Task<void> failDnsTask(service::background::WorkerContext& context,
                                      const DnsTask& task, std::string_view error, bool permanent) {
     const auto message = service::sync_runtime::boundedError(error);
-    const auto lease = service::sync_runtime::makeRunningLease(task.tenantId, task.id, task.version,
-                                                               context.leaseOwner());
+    const auto lease = service::sync_runtime::makeRunningLease(
+        task.tenantId, task.id, task.version, context.leaseOwner(),
+        service::sync_runtime::MarkerResourceType::dnsZone, task.resourceId);
     auto transaction = co_await context.db().beginTransaction();
     (void)co_await transaction.query(
         "SELECT id FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 LIMIT 1 FOR UPDATE",

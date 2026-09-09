@@ -205,6 +205,14 @@ message NodeSpecContent {
     string name = 4;
     bool enabled = 5;
     repeated Endpoint endpoints = 6;
+    NodeCacheResources cache = 7;
+}
+
+message NodeCacheResources {
+    uint64 memory_bytes = 1;
+    uint64 disk_bytes = 2;
+    uint64 max_object_bytes = 3;
+    string directory = 4;
 }
 
 message ClusterReleaseManifest {
@@ -306,6 +314,32 @@ message Website {
     repeated RouteRule route_rules = 38;
     uint32 health_check_expected_status = 39;
     string default_origin_group = 40;
+    bool cache_enabled = 41;
+    CachePolicy cache_policy = 42;
+}
+
+message CachePolicy {
+    string id = 1;
+    int64 revision = 2;
+    bool enabled = 3;
+    repeated CacheRule rules = 4;
+}
+
+message CacheRule {
+    string id = 1;
+    string name = 2;
+    bool enabled = 3;
+    string match_type = 4;
+    repeated string patterns = 5;
+    string action = 6;
+    uint32 ttl_seconds = 7;
+    string query_mode = 8;
+    repeated uint32 status_codes = 9;
+    uint64 min_object_bytes = 10;
+    uint64 max_object_bytes = 11;
+    uint32 stale_if_error_seconds = 12;
+    bool respect_origin_cache_control = 13;
+    bool range_enabled = 14;
 }
 
 message RouteRule {

@@ -19,31 +19,10 @@
 #include "service/features/dns/cloudflare.h"
 #include "service/features/dns/record_reconciliation.h"
 #include "service/features/dns/registry.h"
+#include "service/features/dns/record_model.h"
+#include "service/features/dns/record_name_policy.h"
 
 namespace service::dns {
-
-struct ProviderZone final {
-    std::string id;
-    std::string name;
-    std::string status;
-};
-
-struct ProviderRecord final {
-    std::string id;
-    std::string type;
-    std::string name;
-    std::string content;
-    std::int64_t ttl;
-    std::optional<std::int64_t> priority;
-    bool proxied;
-    std::string lineCode;
-};
-
-struct ProviderLine final {
-    std::string code;
-    std::string name;
-    std::string displayName;
-};
 
 class DnsProviderDriver final {
   public:
@@ -91,7 +70,7 @@ class DnsProviderDriver final {
         }
         const auto zones = co_await aliyunClient().listDomains(c, accountId, secret);
         const auto found = std::find_if(zones.begin(), zones.end(), [domain](const auto& zone) {
-            return dnsNameEquals(zone.name, domain);
+            return RecordNamePolicy::dnsNameEquals(zone.name, domain);
         });
         if (found == zones.end()) {
             throw AliyunError(AliyunErrorCode::domainNotFound, "阿里云 DNS 中未找到该托管域名");
@@ -147,7 +126,7 @@ class DnsProviderDriver final {
                     std::string_view localName, std::string_view content, std::int64_t ttl,
                     std::optional<std::int64_t> priority, bool proxied, std::string_view lineCode,
                     const std::vector<ProviderRecord>& remoteRecords) const {
-        const auto name = remoteRecordName(localName, domain);
+        const auto name = recordNames().remoteRecordName(localName, domain);
         const auto plan = planRecordReconciliation(
             remoteRecords, remoteRecordId,
             [this, type, name, content, lineCode](const ProviderRecord& record) {
@@ -198,47 +177,7 @@ class DnsProviderDriver final {
         co_return;
     }
 
-    [[nodiscard]] std::string remoteRecordName(std::string_view name,
-                                               std::string_view domain) const {
-        std::string result(name);
-        if (result.ends_with('.')) {
-            result.pop_back();
-        }
-        if (kind_ == DnsProviderKind::cloudflare) {
-            if (result == "@") {
-                return std::string(domain);
-            }
-            if (dnsNameEquals(result, domain) || isSubdomain(result, domain)) {
-                return result;
-            }
-            return result + "." + std::string(domain);
-        }
-        if (result == "@" || dnsNameEquals(result, domain)) {
-            return "@";
-        }
-        if (isSubdomain(result, domain)) {
-            result.resize(result.size() - domain.size() - 1);
-        }
-        return result.empty() ? "@" : result;
-    }
-
-    [[nodiscard]] std::string localRecordName(std::string_view name,
-                                              std::string_view domain) const {
-        if (kind_ == DnsProviderKind::aliyun) {
-            return name.empty() ? "@" : std::string(name);
-        }
-        std::string result(name);
-        if (result.ends_with('.')) {
-            result.pop_back();
-        }
-        if (dnsNameEquals(result, domain)) {
-            return "@";
-        }
-        if (isSubdomain(result, domain)) {
-            result.resize(result.size() - domain.size() - 1);
-        }
-        return result.empty() ? "@" : result;
-    }
+    [[nodiscard]] RecordNamePolicy recordNames() const { return RecordNamePolicy(kind_); }
 
   private:
     [[nodiscard]] const DnsProviderDescriptor& descriptor() const noexcept {
@@ -248,19 +187,6 @@ class DnsProviderDriver final {
             }
         }
         std::terminate();
-    }
-
-    static bool dnsNameEquals(std::string_view left, std::string_view right) {
-        return left.size() == right.size() &&
-               std::equal(left.begin(), left.end(), right.begin(), [](char lhs, char rhs) {
-                   return std::tolower(static_cast<unsigned char>(lhs)) ==
-                          std::tolower(static_cast<unsigned char>(rhs));
-               });
-    }
-
-    static bool isSubdomain(std::string_view name, std::string_view domain) {
-        return name.size() > domain.size() && name.ends_with(domain) &&
-               name[name.size() - domain.size() - 1] == '.';
     }
 
     [[nodiscard]] bool recordHasSameIdentity(const ProviderRecord& record, std::string_view type,

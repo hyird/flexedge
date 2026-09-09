@@ -4,6 +4,7 @@ import { ListTodo, RefreshCw } from 'lucide-react'
 import { apiErrorMessage } from '@/lib/api'
 import { formatDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { useDelayedLoading } from '@/hooks/use-delayed-loading'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { Button } from '@/components/ui/button'
 import {
@@ -20,15 +21,18 @@ import {
   SheetTrigger,
 } from '@/components/ui/sheet'
 import { Skeleton } from '@/components/ui/skeleton'
-import { taskKey, taskTitle, useTasks, type Task } from './data'
+import { useTasks } from './data'
 import { TaskDetail } from './task-detail'
+import { taskKey, taskTitle } from './task-display'
 import { TaskStatus } from './task-status'
+import { type Task } from './types'
 
 export function TaskCenter() {
   const mobile = useIsMobile()
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState<Task | null>(null)
   const tasks = useTasks({ page: 1, page_size: 6 })
+  const tasksLoading = useDelayedLoading(tasks.isFetching && !tasks.data)
   const active = tasks.data?.active ?? 0
   const failed = tasks.data?.failed ?? 0
   const trigger = (
@@ -78,10 +82,16 @@ export function TaskCenter() {
           mobile ? 'min-h-0 flex-1' : 'max-h-[min(65vh,28rem)]'
         )}
       >
-        {tasks.isPending ? (
+        {tasksLoading.pending ? (
           <div className='space-y-3 p-4'>
             {[0, 1, 2].map((i) => (
-              <Skeleton key={i} className='h-14 w-full' />
+              <Skeleton
+                key={i}
+                className={cn(
+                  'h-14 w-full',
+                  !tasksLoading.showSkeleton && 'invisible'
+                )}
+              />
             ))}
           </div>
         ) : tasks.isError ? (

@@ -1,5 +1,4 @@
 import { formatDate } from '@/lib/format'
-import type { Certificate } from '@/lib/types'
 import { Badge } from '@/components/ui/badge'
 import {
   Sheet,
@@ -9,6 +8,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import { StatusBadge } from '@/components/status-badge'
+import type { Certificate } from '@/features/certificates/types'
 
 export function CertificateDetailSheet({
   certificate,

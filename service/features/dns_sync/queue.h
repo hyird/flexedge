@@ -14,8 +14,8 @@
 
 #include "service/common/database.h"
 #include "service/common/domain_name.h"
-#include "service/features/dns_sync/snapshot.h"
-#include "service/features/node_config/model.h"
+#include "service/features/dns_sync/mapper.h"
+#include "service/features/node_config/mapper.h"
 #include "service/features/sync_runtime/state.h"
 
 namespace service::dns_sync {

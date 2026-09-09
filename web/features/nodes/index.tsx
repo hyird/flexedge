@@ -3,16 +3,12 @@ import {
   keepPreviousData,
   useMutation,
   useQuery,
-  useQueryClient,
 } from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
 import { FileTerminal, KeyRound, Pencil, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
-import { getData, sendData } from '@/lib/api'
-import { dnsLinePath } from '@/lib/dns-lines'
 import { formatBytesPerSecond, formatDate } from '@/lib/format'
-import { queryKeys } from '@/lib/query-keys'
-import type { Cluster, DnsLine, DnsZone, Node, PageData } from '@/lib/types'
+import { DEFAULT_PAGE_SIZE } from '@/lib/page-size'
 import { useResourceFilters } from '@/hooks/use-resource-filters'
 import {
   DropdownMenuItem,
@@ -32,9 +28,19 @@ import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
 import { RowActions } from '@/components/row-actions'
 import { StatusBadge } from '@/components/status-badge'
+import { clusterOptionsQuery } from '@/features/clusters/data'
+import { dnsLinePath } from '@/features/dns-zones/dns-lines'
+import type { Node } from '@/features/nodes/types'
 import { CredentialsDialog } from './credentials-dialog'
-import { NodeDialog, type NodeCredentials } from './node-dialog'
+import {
+  nodesQuery,
+  removeNode,
+  getNodeCredentials,
+  type NodeCredentials,
+} from './data'
+import { NodeDialog } from './node-dialog'
 import { NodeLogSheet } from './node-log-sheet'
+import { useClusterDnsLines } from './use-cluster-dns-lines'
 
 export function NodesPanel({
   initialClusterId,
@@ -47,9 +53,8 @@ export function NodesPanel({
   onCreateOpenChange?: (open: boolean) => void
   showClusterFilter?: boolean
 }) {
-  const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const filter = useResourceFilters({
     keyword: '',
     clusterId: initialClusterId ?? 'all',
@@ -61,55 +66,28 @@ export function NodesPanel({
   const [credentials, setCredentials] = useState<NodeCredentials | null>(null)
   const [logNode, setLogNode] = useState<Node | null>(null)
 
-  const clustersQuery = useQuery({
-    queryKey: [...queryKeys.clusters, 'options'],
-    queryFn: () =>
-      getData<PageData<Cluster>>('/clusters/').then((data) => data.list),
-  })
+  const clustersQuery = useQuery(clusterOptionsQuery)
   const clusters = useMemo(() => clustersQuery.data ?? [], [clustersQuery.data])
-  const clusterIds = useMemo(
-    () => clusters.map((cluster) => cluster.id),
-    [clusters]
-  )
-  const linesQuery = useQuery<Record<string, DnsLine[]>>({
-    queryKey: [...queryKeys.dnsZones, 'lines-by-cluster', clusterIds],
-    queryFn: async () => {
-      const entries = await Promise.all(
-        clusters.map(async (cluster) => {
-          const zone = await getData<DnsZone>(
-            `/dns-zones/${cluster.dns_zone_id}`
-          )
-          return [cluster.id, zone.runtime.lines] as const
-        })
-      )
-      return Object.fromEntries(entries)
-    },
-    enabled: clusterIds.length > 0,
-  })
+  const linesByCluster = useClusterDnsLines(clusters)
   const query = useQuery({
-    queryKey: [...queryKeys.nodes, page, pageSize, keyword, clusterId, status],
+    ...nodesQuery({
+      page,
+      page_size: pageSize,
+      keyword: keyword || undefined,
+      cluster_id: clusterId === 'all' ? undefined : clusterId,
+      status: status === 'all' ? undefined : status,
+    }),
     placeholderData: keepPreviousData,
-    queryFn: () =>
-      getData<PageData<Node>>('/nodes/', {
-        page,
-        page_size: pageSize,
-        keyword: keyword || undefined,
-        cluster_id: clusterId === 'all' ? undefined : clusterId,
-        status: status === 'all' ? undefined : status,
-      }),
   })
   const remove = useMutation({
-    mutationFn: (item: Node) =>
-      sendData('delete', `/nodes/${item.id}`, undefined, item.revision),
-    onSuccess: async (response) => {
+    mutationFn: removeNode,
+    onSuccess: (response) => {
       toast.success(response.message)
       setRemoveTarget(null)
-      await queryClient.invalidateQueries({ queryKey: queryKeys.nodes })
     },
   })
   const { mutate: loadNodeCredentials } = useMutation({
-    mutationFn: (item: Node) =>
-      getData<NodeCredentials>(`/nodes/${item.id}/credentials`),
+    mutationFn: (item: Node) => getNodeCredentials(item.id),
     onSuccess: setCredentials,
   })
 
@@ -118,7 +96,9 @@ export function NodesPanel({
       {
         accessorKey: 'name',
         size: 155,
-        header: ({ column }) => <DataTableColumnHeader column={column} title='节点' />,
+        header: ({ column }) => (
+          <DataTableColumnHeader column={column} title='节点' />
+        ),
         cell: ({ row }) => (
           <DataTableCellContent>
             <span className='font-medium' title={row.original.name}>
@@ -144,7 +124,9 @@ export function NodesPanel({
         id: 'connection',
         size: 100,
         header: '连接',
-        cell: ({ row }) => <StatusBadge status={row.original.runtime.connection_status} />,
+        cell: ({ row }) => (
+          <StatusBadge status={row.original.runtime.connection_status} />
+        ),
       },
       {
         id: 'heartbeat',
@@ -183,7 +165,7 @@ export function NodesPanel({
         header: 'DNS 线路',
         cell: ({ row }) => {
           const endpoints = row.original.config.endpoints
-          const lines = linesQuery.data?.[row.original.cluster_id] ?? []
+          const lines = linesByCluster?.[row.original.cluster_id] ?? []
           return (
             <div className='grid gap-1 text-sm'>
               {endpoints.map((endpoint) => {
@@ -247,7 +229,7 @@ export function NodesPanel({
         ),
       },
     ],
-    [linesQuery.data, loadNodeCredentials]
+    [linesByCluster, loadNodeCredentials]
   )
 
   return (

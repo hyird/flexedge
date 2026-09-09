@@ -15,6 +15,7 @@
 #include <ruvia/web/Error.h>
 
 #include "service/common/types.h"
+#include "service/common/uuid.h"
 
 namespace service::common {
 
@@ -66,30 +67,6 @@ inline std::optional<std::int64_t> parseEntityTag(std::optional<std::string_view
 inline void setRevisionEtag(ruvia::Context& c, std::int64_t revision) {
     const auto value = std::string{"\""} + std::to_string(revision) + "\"";
     c.header("ETag", value);
-}
-
-inline std::optional<std::string> parseUuid(std::optional<std::string_view> input) {
-    if (!input || input->size() != 36) {
-        return std::nullopt;
-    }
-
-    std::string value;
-    value.reserve(input->size());
-    for (std::size_t index = 0; index < input->size(); ++index) {
-        const char ch = (*input)[index];
-        if (index == 8 || index == 13 || index == 18 || index == 23) {
-            if (ch != '-') {
-                return std::nullopt;
-            }
-            value.push_back(ch);
-            continue;
-        }
-        if (!std::isxdigit(static_cast<unsigned char>(ch))) {
-            return std::nullopt;
-        }
-        value.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
-    }
-    return value;
 }
 
 inline constexpr std::int64_t kUnknownErrorCode{10000};
@@ -173,8 +150,8 @@ inline std::string_view responseErrorMessage(ruvia::HttpErrorInfo info) noexcept
     });
 }
 
-inline auto requirePagination(ruvia::Context& c, std::int64_t defaultPageSize = 10,
-                              std::int64_t maxPageSize = 100) {
+inline auto requirePagination(ruvia::Context& c, std::int64_t defaultPageSize = 100,
+                              std::int64_t maxPageSize = 1000) {
     const auto parsePositive = [&](std::string_view name, std::int64_t defaultValue,
                                    std::optional<std::int64_t> maximum = std::nullopt) {
         const auto input = c.req().query(name);
@@ -247,7 +224,7 @@ inline OperationResponse operation(ruvia::Context& c, std::string_view message) 
     return response;
 }
 
-template <typename ResponseT, typename DataT> inline ResponseT ok(ruvia::Context& c, DataT&& data) {
+template <typename ResponseT, typename DataT> inline ResponseT ok(auto& c, DataT&& data) {
     ResponseT response(c);
     response.template set<"code">(0);
     response.template set<"message">("ok");

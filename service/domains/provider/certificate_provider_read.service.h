@@ -8,13 +8,13 @@
 #include <ruvia/web/db/Db.h>
 
 #include "service/domains/provider/certificate_provider.types.h"
-#include "service/features/certificate/provider_config.h"
+#include "service/features/certificate/provider_config_mapper.h"
 
 namespace service::provider {
 
 class CertificateProviderReadService final {
   public:
-    ruvia::Task<ruvia::Array<CertificateProviderDto>> list(ruvia::Context& c,
+    ruvia::Task<ruvia::Array<CertificateProviderDto>> list(auto& c,
                                                            const std::string& tenantId) const {
         const auto rows = co_await c.db().query(
             "SELECT id, revision, provider, config::text, status, TO_CHAR(last_verified_at, "
@@ -32,7 +32,7 @@ class CertificateProviderReadService final {
 
   private:
     template <typename Row>
-    static void fill(ruvia::Context& c, CertificateProviderDto& item, const Row& row) {
+    static void fill(auto& c, CertificateProviderDto& item, const Row& row) {
         const auto config = service::certificate_issuance::parseCertificateProviderConfig(
             row[3].value().value_or("{}"), c.resource());
         item.set<"id">(row[0].value().value_or(""));

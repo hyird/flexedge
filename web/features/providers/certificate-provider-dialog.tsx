@@ -1,12 +1,8 @@
-import { z } from 'zod'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation } from '@tanstack/react-query'
 import { ShieldCheck } from 'lucide-react'
 import { toast } from 'sonner'
-import { sendData } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
-import type { CertificateProvider } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import {
   Form,
@@ -32,35 +28,12 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-
-const certificateSchema = z
-  .object({
-    provider: z.enum(['letsencrypt', 'zerossl']),
-    credential_mode: z.enum(['email', 'access_key']),
-    account_email: z.string(),
-    access_key: z.string().max(255),
-  })
-  .superRefine((value, ctx) => {
-    if (
-      value.credential_mode === 'email' &&
-      !z.email().safeParse(value.account_email).success
-    ) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['account_email'],
-        message: '请输入有效邮箱',
-      })
-    }
-    if (value.credential_mode === 'access_key' && !value.access_key.trim()) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['access_key'],
-        message: '请输入 API Access Key',
-      })
-    }
-  })
-
-type CertificateValues = z.infer<typeof certificateSchema>
+import type { CertificateProvider } from '@/features/providers/types'
+import {
+  certificateProviderFormSchema,
+  type CertificateProviderFormValues as CertificateValues,
+} from './certificate-provider-form'
+import { saveCertificateProvider } from './data'
 
 export function CertificateProviderDialog({
   provider,
@@ -71,9 +44,8 @@ export function CertificateProviderDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
-  const queryClient = useQueryClient()
   const form = useForm<CertificateValues>({
-    resolver: zodResolver(certificateSchema),
+    resolver: zodResolver(certificateProviderFormSchema(provider)),
     defaultValues: {
       provider:
         (provider?.provider as CertificateValues['provider']) ?? 'letsencrypt',
@@ -86,32 +58,11 @@ export function CertificateProviderDialog({
   })
   const mode = form.watch('credential_mode')
   const mutation = useMutation({
-    mutationFn: (values: CertificateValues) => {
-      const body = {
-        credential_mode: values.credential_mode,
-        account_email:
-          values.credential_mode === 'email' ? values.account_email : '',
-        access_key:
-          values.credential_mode === 'access_key' ? values.access_key : '',
-      }
-      return provider
-        ? sendData(
-            'put',
-            `/providers/certificate/${provider.id}`,
-            body,
-            provider.revision
-          )
-        : sendData('post', '/providers/certificate', {
-            provider: values.provider,
-            ...body,
-          })
-    },
+    mutationFn: (values: CertificateValues) =>
+      saveCertificateProvider(values, provider),
     onSuccess: async (response) => {
       toast.success(response.message)
       onOpenChange(false)
-      await queryClient.invalidateQueries({
-        queryKey: [...queryKeys.providers, 'certificate'],
-      })
     },
   })
 
@@ -199,7 +150,10 @@ export function CertificateProviderDialog({
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>
-                      Access Key {provider ? '（留空保持不变）' : ''}
+                      Access Key{' '}
+                      {provider?.credential_mode === 'access_key'
+                        ? '（留空保持不变）'
+                        : ''}
                     </FormLabel>
                     <FormControl>
                       <Input

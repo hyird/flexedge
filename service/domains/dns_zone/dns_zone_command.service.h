@@ -1,6 +1,6 @@
 #pragma once
 
-#include "service/features/sync_event/fanout.h"
+#include "service/features/live_resource/fanout.h"
 
 #include <algorithm>
 #include <cctype>
@@ -19,7 +19,9 @@
 #include "service/domains/dns_zone/dns_zone.error.h"
 #include "service/domains/dns_zone/dns_zone.types.h"
 #include "service/features/dns_sync/queue.h"
-#include "service/features/dns_sync/snapshot.h"
+#include "service/features/dns_sync/mapper.h"
+#include "service/features/dns_sync/line.h"
+#include "service/features/live_resource/fanout.h"
 
 namespace service::dns_zone {
 
@@ -70,7 +72,8 @@ class DnsZoneCommandService final {
                 transaction, tenantId, std::string(inserted.front()[0].value().value_or("")),
                 inserted.front()[1].as<std::int64_t>().value_or(1));
             co_await transaction.commit();
-            service::sync_event::fanout::hub().publish(tenantId);
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::dnsZones,
+                                                  inserted.front()[0].value().value_or(""));
         } catch (const ruvia::DbError& error) {
             if (service::common::isUniqueConstraintViolation(error, "uk_dns_zone_domain")) {
                 service::common::throwAppError(DnsZoneError::EXISTS);
@@ -123,7 +126,7 @@ class DnsZoneCommandService final {
         const auto desiredRevision = rows.front()[1].as<std::int64_t>().value_or(1);
         co_await service::dns_sync::enqueueZoneRevision(transaction, tenantId, id, desiredRevision);
         co_await transaction.commit();
-        service::sync_event::fanout::hub().publish(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::dnsZones, id);
         co_return;
     }
 
@@ -144,7 +147,7 @@ class DnsZoneCommandService final {
             : conflictPolicy == "local" ? service::sync_runtime::MarkerOperation::syncLocal
                                         : service::sync_runtime::MarkerOperation::sync);
         co_await transaction.commit();
-        service::sync_event::fanout::hub().publish(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::dnsZones, id);
         co_return;
     }
 
@@ -182,7 +185,7 @@ class DnsZoneCommandService final {
         (void)co_await service::dns_sync::enqueueZoneDeletion(transaction, tenantId, id,
                                                               desiredRevision);
         co_await transaction.commit();
-        service::sync_event::fanout::hub().publish(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::dnsZones, id);
         co_return;
     }
 
@@ -200,7 +203,7 @@ class DnsZoneCommandService final {
             if (!line.code || !line.status) {
                 throwCorruptConfig();
             }
-            if (*line.status == "enabled") {
+            if (service::dns_sync::isEnabledLine(line)) {
                 enabledLines.emplace(*line.code);
             }
         }

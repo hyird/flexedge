@@ -42,9 +42,6 @@ inline bool certificateCoversHostname(std::string_view certificateDomain,
     }
 
     const auto base = certificate.substr(2);
-    if (host == base) {
-        return true;
-    }
     const auto suffix = "." + base;
     if (host.size() <= suffix.size() || !host.ends_with(suffix)) {
         return false;

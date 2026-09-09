@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -12,15 +11,12 @@
 #include <string_view>
 #include <utility>
 
-#ifndef _WIN32
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
 
-#include "node/proto/artifact.h"
+#include "common/sha256.h"
+#include "node/runtime/binary_install.h"
 #include "node/proto/control_protocol.h"
-#include "node/runtime/binary_digest.h"
-#include "node/runtime/release_response.h"
+#include "common/file_digest.h"
+#include "node/proto/release_metadata.h"
 #include "node/runtime/upgrade_record.h"
 
 namespace flexedge::node {
@@ -40,7 +36,7 @@ struct SelfUpdaterConfig final {
 class SelfUpdater final {
   public:
     explicit SelfUpdater(SelfUpdaterConfig config)
-        : config_(std::move(config)), currentDigest_(binarySha256(config_.binaryPath)) {
+        : config_(std::move(config)), currentDigest_(flexedge::crypto::fileSha256(config_.binaryPath)) {
         validateConfig();
     }
 
@@ -50,7 +46,7 @@ class SelfUpdater final {
     ~SelfUpdater() { abort(); }
 
     [[nodiscard]] bool updateAvailable(std::string_view digest) const noexcept {
-        return validNodeReleaseDigest(digest) && digest != currentDigest_;
+        return flexedge::crypto::isSha256Digest(digest) && digest != currentDigest_;
     }
 
     void begin(std::string_view version, std::string_view digest, std::uint64_t totalBytes) {
@@ -66,7 +62,7 @@ class SelfUpdater final {
             .version = std::string(version),
             .digest = std::string(digest),
             .totalBytes = totalBytes,
-            .candidate = candidatePath(),
+            .candidate = nodeUpgradeCandidatePath(config_.binaryPath),
         };
         value.output.open(value.candidate, std::ios::binary | std::ios::out | std::ios::trunc);
         if (!value.output) {
@@ -112,12 +108,12 @@ class SelfUpdater final {
         value.output.flush();
         value.output.close();
         if (!value.output) {
-            removeCandidate(value.candidate);
+            removeNodeUpgradeCandidate(value.candidate);
             throw std::runtime_error("could not finalize node upgrade candidate");
         }
 
         try {
-            if (binarySha256(value.candidate) != value.digest) {
+            if (flexedge::crypto::fileSha256(value.candidate) != value.digest) {
                 throw std::runtime_error("control plane node release digest mismatch");
             }
             const UpgradeRecord upgradeRecord{
@@ -131,14 +127,14 @@ class SelfUpdater final {
                 std::cerr << "flexedge node could not persist upgrade record: " << error.what()
                           << '\n';
             }
-            installCandidate(value.candidate);
+            installNodeUpgradeCandidate(value.candidate, config_.binaryPath);
             std::cerr << "flexedge node " << upgradeRecord.message() << "; restarting service\n";
             (void)log("info", upgradeRecord.message());
             if (config_.requestRestart) {
                 config_.requestRestart();
             }
         } catch (...) {
-            removeCandidate(value.candidate);
+            removeNodeUpgradeCandidate(value.candidate);
             throw;
         }
     }
@@ -148,7 +144,7 @@ class SelfUpdater final {
             return;
         }
         transfer_->output.close();
-        removeCandidate(transfer_->candidate);
+        removeNodeUpgradeCandidate(transfer_->candidate);
         transfer_.reset();
     }
 
@@ -168,41 +164,6 @@ class SelfUpdater final {
         } catch (...) {
             return false;
         }
-    }
-
-    [[nodiscard]] std::filesystem::path candidatePath() const {
-        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-        auto candidate = config_.binaryPath.parent_path();
-        candidate /= "." + config_.binaryPath.filename().string() + ".upgrade." +
-#ifdef _WIN32
-                     "windows"
-#else
-                     std::to_string(::getpid())
-#endif
-                     + "." + std::to_string(now);
-        return candidate;
-    }
-
-    static void removeCandidate(const std::filesystem::path& path) noexcept {
-        std::error_code ignored;
-        std::filesystem::remove(path, ignored);
-    }
-
-    void installCandidate(const std::filesystem::path& candidate) const {
-#ifdef _WIN32
-        (void)candidate;
-        throw std::runtime_error("node self-upgrade is not supported on Windows");
-#else
-        if (::chmod(candidate.c_str(),
-                    S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH) != 0) {
-            throw std::runtime_error("failed to set node binary permissions");
-        }
-        std::error_code error;
-        std::filesystem::rename(candidate, config_.binaryPath, error);
-        if (error) {
-            throw std::runtime_error("failed to replace node binary");
-        }
-#endif
     }
 
     void validateConfig() const {

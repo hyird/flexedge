@@ -39,8 +39,9 @@ inline ruvia::Task<void> recoverStaleMarkers(service::background::WorkerContext&
 
 inline ruvia::Task<void> execute(service::background::WorkerContext& context,
                                  const CertificateTask& task) {
-    const auto lease = service::sync_runtime::makeRunningLease(task.tenantId, task.id, task.version,
-                                                               context.leaseOwner());
+    const auto lease = service::sync_runtime::makeRunningLease(
+        task.tenantId, task.id, task.version, context.leaseOwner(),
+        service::sync_runtime::MarkerResourceType::certificate, task.certificateId);
     auto work = co_await loadWork(context, task);
     const auto settings = settingsForProvider(work.provider);
     if (!settings) {

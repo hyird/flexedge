@@ -76,7 +76,7 @@ WITH history AS (
 
 class TaskService final {
   public:
-    ruvia::Task<TaskDto> detail(ruvia::Context& c, const std::string& tenant, const std::string& id,
+    ruvia::Task<TaskDto> detail(auto& c, const std::string& tenant, const std::string& id,
                                 const std::string& resourceId, std::int64_t version) {
         const auto rows = co_await c.db().query(
             kTaskRecordsSql + taskColumns() +
@@ -90,7 +90,7 @@ class TaskService final {
         co_return item;
     }
 
-    ruvia::Task<TaskPageDto> list(ruvia::Context& c, const std::string& tenant, std::int64_t page,
+    ruvia::Task<TaskPageDto> list(auto& c, const std::string& tenant, std::int64_t page,
                                   std::int64_t pageSize, std::int64_t skip, const std::string& type,
                                   const std::string& status, const std::string& keyword,
                                   std::int64_t days) {
@@ -104,18 +104,18 @@ class TaskService final {
                 "count(*) FILTER (WHERE status IN ('queued', 'running', 'retrying')), "
                 "count(*) FILTER (WHERE status = 'failed') FROM records",
             tenant, type, status, keyword, days);
-        const auto total = counts.front()[0].as<std::int64_t>().value_or(0);
-        data.set<"total">(total);
-        data.set<"page">(page);
-        data.set<"pageSize">(pageSize);
-        data.set<"totalPages">((total + pageSize - 1) / pageSize);
-        data.set<"active">(counts.front()[1].as<std::int64_t>().value_or(0));
-        data.set<"failed">(counts.front()[2].as<std::int64_t>().value_or(0));
+        const auto total = counts.front()[0].template as<std::int64_t>().value_or(0);
+        data.template set<"total">(total);
+        data.template set<"page">(page);
+        data.template set<"pageSize">(pageSize);
+        data.template set<"totalPages">((total + pageSize - 1) / pageSize);
+        data.template set<"active">(counts.front()[1].template as<std::int64_t>().value_or(0));
+        data.template set<"failed">(counts.front()[2].template as<std::int64_t>().value_or(0));
         const auto rows = co_await tx.query(kTaskRecordsSql + taskColumns() +
                                                 "FROM filtered ORDER BY updated_at DESC, id, "
                                                 "resource_id, version DESC LIMIT $6 OFFSET $7",
                                             tenant, type, status, keyword, days, pageSize, skip);
-        auto& list = data.ensure<"list">();
+        auto& list = data.template ensure<"list">();
         for (const auto& row : rows) {
             auto& item = list.emplace_back(c);
             assign(item, row);
@@ -124,7 +124,7 @@ class TaskService final {
         co_return data;
     }
 
-    ruvia::Task<TaskHistoryDto> history(ruvia::Context& c, const std::string& tenant,
+    ruvia::Task<TaskHistoryDto> history(auto& c, const std::string& tenant,
                                         const std::string& id, std::int64_t version) {
         const auto rows = co_await c.db().query(
             "SELECT outcome, error, TO_CHAR(emitted_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') "
@@ -132,16 +132,16 @@ class TaskService final {
             "ORDER BY id DESC LIMIT 101",
             tenant, id, version);
         TaskHistoryDto data(c);
-        data.set<"truncated">(rows.size() > 100);
-        auto& list = data.ensure<"list">();
+        data.template set<"truncated">(rows.size() > 100);
+        auto& list = data.template ensure<"list">();
         std::size_t count = 0;
         for (const auto& row : rows) {
             if (count++ == 100)
                 break;
             auto& item = list.emplace_back(c);
-            item.set<"outcome">(row[0].value().value_or(""));
-            item.set<"error">(row[1].value().value_or(""));
-            item.set<"emittedAt">(row[2].value().value_or(""));
+            item.template set<"outcome">(row[0].value().value_or(""));
+            item.template set<"error">(row[1].value().value_or(""));
+            item.template set<"emittedAt">(row[2].value().value_or(""));
         }
         co_return data;
     }
@@ -154,17 +154,17 @@ class TaskService final {
                "COALESCE(TO_CHAR(next_attempt_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), '') ";
     }
     template <typename Row> static void assign(TaskDto& item, const Row& row) {
-        item.set<"id">(row[0].value().value_or(""));
-        item.set<"resourceType">(row[1].value().value_or(""));
-        item.set<"resourceId">(row[2].value().value_or(""));
-        item.set<"name">(row[3].value().value_or(""));
-        item.set<"operation">(row[4].value().value_or(""));
-        item.set<"version">(row[5].template as<std::int64_t>().value_or(0));
-        item.set<"status">(row[6].value().value_or(""));
-        item.set<"error">(row[7].value().value_or(""));
-        item.set<"failures">(row[8].template as<std::int64_t>().value_or(0));
-        item.set<"updatedAt">(row[9].value().value_or(""));
-        item.set<"nextAttemptAt">(row[10].value().value_or(""));
+        item.template set<"id">(row[0].value().value_or(""));
+        item.template set<"resourceType">(row[1].value().value_or(""));
+        item.template set<"resourceId">(row[2].value().value_or(""));
+        item.template set<"name">(row[3].value().value_or(""));
+        item.template set<"operation">(row[4].value().value_or(""));
+        item.template set<"version">(row[5].template as<std::int64_t>().value_or(0));
+        item.template set<"status">(row[6].value().value_or(""));
+        item.template set<"error">(row[7].value().value_or(""));
+        item.template set<"failures">(row[8].template as<std::int64_t>().value_or(0));
+        item.template set<"updatedAt">(row[9].value().value_or(""));
+        item.template set<"nextAttemptAt">(row[10].value().value_or(""));
     }
 };
 

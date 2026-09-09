@@ -3,15 +3,12 @@ import {
   keepPreviousData,
   useMutation,
   useQuery,
-  useQueryClient,
 } from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
 import { Download, Eye, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
-import { api, getData, sendData } from '@/lib/api'
 import { formatDate } from '@/lib/format'
-import { queryKeys } from '@/lib/query-keys'
-import type { Certificate, PageData } from '@/lib/types'
+import { DEFAULT_PAGE_SIZE } from '@/lib/page-size'
 import { useResourceFilters } from '@/hooks/use-resource-filters'
 import { Button } from '@/components/ui/button'
 import {
@@ -33,13 +30,19 @@ import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
 import { RowActions } from '@/components/row-actions'
 import { StatusBadge } from '@/components/status-badge'
+import type { Certificate } from '@/features/certificates/types'
 import { CertificateDetailSheet } from './certificate-detail-sheet'
 import { CertificateDialog } from './certificate-dialog'
+import {
+  certificatesQuery,
+  renewCertificate as requestRenewal,
+  removeCertificate,
+  downloadCertificate,
+} from './data'
 
 export function Certificates() {
-  const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const filter = useResourceFilters({ keyword: '', status: 'all' })
   const { keyword, status } = filter.filters
   const [dialog, setDialog] = useState<Certificate | 'new' | null>(null)
@@ -47,49 +50,31 @@ export function Certificates() {
   const [removeTarget, setRemoveTarget] = useState<Certificate | null>(null)
 
   const query = useQuery({
-    queryKey: [...queryKeys.certificates, page, pageSize, keyword, status],
+    ...certificatesQuery({
+      page,
+      page_size: pageSize,
+      keyword: keyword || undefined,
+      status: status === 'all' ? undefined : status,
+    }),
     placeholderData: keepPreviousData,
-    queryFn: () =>
-      getData<PageData<Certificate>>('/certificates/', {
-        page,
-        page_size: pageSize,
-        keyword: keyword || undefined,
-        status: status === 'all' ? undefined : status,
-      }),
   })
   const { mutate: renewCertificate } = useMutation({
-    mutationFn: (item: Certificate) =>
-      sendData(
-        'post',
-        `/certificates/${item.id}/renew`,
-        undefined,
-        item.revision
-      ),
+    mutationFn: requestRenewal,
     onSuccess: async (response) => {
       toast.success(response.message)
-      await queryClient.invalidateQueries({ queryKey: queryKeys.certificates })
     },
   })
   const remove = useMutation({
-    mutationFn: (item: Certificate) =>
-      sendData('delete', `/certificates/${item.id}`, undefined, item.revision),
+    mutationFn: removeCertificate,
     onSuccess: async (response) => {
       toast.success(response.message)
       setRemoveTarget(null)
-      await queryClient.invalidateQueries({ queryKey: queryKeys.certificates })
     },
   })
 
   const download = async (item: Certificate) => {
-    const response = await api.get<Blob>(`/certificates/${item.id}/download`, {
-      responseType: 'blob',
-    })
-    const disposition = response.headers['content-disposition'] as
-      string | undefined
-    const filename =
-      disposition?.match(/filename="([^"]+)"/)?.[1] ??
-      `${item.domains[0] || 'certificate'}.zip`
-    const url = URL.createObjectURL(response.data)
+    const { blob, filename } = await downloadCertificate(item)
+    const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
     link.download = filename

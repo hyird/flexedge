@@ -3,9 +3,11 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include <ruvia/core/Task.h>
 #include <ruvia/web/Context.h>
+#include <ruvia/web/ModelJson.h>
 #include <ruvia/web/Controller.h>
 
 #include "service/common/domain_name.h"
@@ -14,6 +16,8 @@
 #include "service/domains/dns_zone/dns_zone_command.service.h"
 #include "service/domains/dns_zone/dns_zone_read.service.h"
 #include "service/middleware/auth.h"
+#include "service/features/live_resource/fanout.h"
+#include "service/features/live_resource/sse.h"
 
 namespace service::dns_zone {
 
@@ -21,17 +25,33 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
   public:
     RUVIA_CONTROLLER_GROUP("/api/dns-zones", service::middleware::AuthMiddleware)
     RUVIA_ROUTES_BEGIN
-    RUVIA_GET("/available", available);
-    RUVIA_GET("/options", options);
+    RUVIA_GET_SSE("/available/stream", available);
+    RUVIA_GET_SSE("/stream", list);
+    RUVIA_GET_SSE("/options/stream", options);
+    RUVIA_GET_SSE("/collection/stream", collection);
     RUVIA_POST("/:id/sync", sync);
-    RUVIA_GET("/:id", get);
+    RUVIA_GET_SSE("/:id/stream", get);
     RUVIA_PUT("/:id", update, DnsZoneConfigValidator);
-    RUVIA_GET("/", list);
     RUVIA_POST("/", create, CreateDnsZoneValidator);
     RUVIA_DELETE("/:id", remove);
     RUVIA_ROUTES_END
 
   private:
+    ruvia::Task<void> collection(ruvia::Context& c) {
+        const auto keyword = service::common::requireKeyword(c.req().query("keyword"));
+        const auto tenant = tenantId(c);
+        auto sub = service::live_resource::hub().subscribe(c.worker(), tenant,
+            service::live_resource::Resource::dnsZones, {},
+            service::live_resource::queryKey("collection", keyword.value_or("")));
+        co_await service::live_resource::streamSnapshot(
+            c, std::move(sub), [tenant, keyword](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+                auto data = co_await dnsZoneReadService().options(read, tenant, keyword, std::nullopt, std::nullopt, true);
+                co_return std::string(ruvia::toJson(
+                    service::common::ok<DnsZoneCollectionResponse>(read, std::move(data.ensure<"list">())),
+                    {.resource = read.resource()}));
+            });
+    }
+
     static std::string requireId(ruvia::Context& c) {
         return service::common::requireUuidParam(c, "id");
     }
@@ -44,17 +64,26 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
         return service::common::requireExpectedRevision(c);
     }
 
-    ruvia::Task<ruvia::HttpResponse> available(ruvia::Context& c) {
+    ruvia::Task<void> available(ruvia::Context& c) {
         const auto providerId = service::common::parseUuid(c.req().query("dns_provider_id"));
         if (!providerId) {
             service::common::throwAppError(service::common::kValidationErrorCode,
                                            "dns_provider_id 必须是 UUID", 400);
         }
-        co_return c.json(service::common::ok<AvailableDnsZoneListResponse>(
-            c, co_await dnsZoneReadService().available(c, tenantId(c), *providerId)));
+        const auto tenant = tenantId(c);
+        auto sub = service::live_resource::hub().subscribe(c.worker(), tenant,
+            service::live_resource::Resource::dnsZones, {},
+            service::live_resource::queryKey("available", *providerId));
+        co_await service::live_resource::streamSnapshot(
+            c, std::move(sub), [tenant, providerId](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+                auto data = co_await dnsZoneReadService().available(read, tenant, *providerId);
+                co_return std::string(ruvia::toJson(
+                    service::common::ok<AvailableDnsZoneListResponse>(read, std::move(data)),
+                    {.resource = read.resource()}));
+            });
     }
 
-    ruvia::Task<ruvia::HttpResponse> list(ruvia::Context& c) {
+    ruvia::Task<void> list(ruvia::Context& c) {
         const auto [page, pageSize, skip] = service::common::requirePagination(c);
         const auto keyword = service::common::requireKeyword(c.req().query("keyword"));
         std::optional<std::string> providerId;
@@ -65,12 +94,21 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
                                                "dns_provider_id 必须是 UUID", 400);
             }
         }
-        co_return c.json(service::common::ok<DnsZonePageResponse>(
-            c, co_await dnsZoneReadService().list(c, tenantId(c), page, pageSize, skip, keyword,
-                                                  providerId)));
+        const auto tenant = tenantId(c);
+        auto sub = service::live_resource::hub().subscribe(c.worker(), tenant,
+            service::live_resource::Resource::dnsZones, {},
+            service::live_resource::queryKey("list", page, pageSize, keyword.value_or(""),
+                                             providerId));
+        co_await service::live_resource::streamSnapshot(
+            c, std::move(sub), [tenant, page, pageSize, skip, keyword, providerId](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+                auto data = co_await dnsZoneReadService().list(read, tenant, page, pageSize, skip, keyword, providerId);
+                co_return std::string(ruvia::toJson(
+                    service::common::ok<DnsZonePageResponse>(read, std::move(data)),
+                    {.resource = read.resource()}));
+            });
     }
 
-    ruvia::Task<ruvia::HttpResponse> options(ruvia::Context& c) {
+    ruvia::Task<void> options(ruvia::Context& c) {
         const auto keyword = service::common::requireKeyword(c.req().query("keyword"));
         std::optional<std::string> ownerOf;
         if (const auto value = c.req().query("owner_of")) {
@@ -88,8 +126,18 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
                                                "available 必须是 true 或 false", 400);
             }
         }
-        co_return c.json(service::common::ok<DnsZoneOptionListResponse>(
-            c, co_await dnsZoneReadService().options(c, tenantId(c), keyword, ownerOf, available)));
+        const auto tenant = tenantId(c);
+        auto sub = service::live_resource::hub().subscribe(c.worker(), tenant,
+            service::live_resource::Resource::dnsZones, {},
+            service::live_resource::queryKey("options", keyword.value_or(""), ownerOf,
+                                             available));
+        co_await service::live_resource::streamSnapshot(
+            c, std::move(sub), [tenant, keyword, ownerOf, available](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+                auto data = co_await dnsZoneReadService().options(read, tenant, keyword, ownerOf, available);
+                co_return std::string(ruvia::toJson(
+                    service::common::ok<DnsZoneOptionListResponse>(read, std::move(data)),
+                    {.resource = read.resource()}));
+            });
     }
 
     ruvia::Task<ruvia::HttpResponse> create(ruvia::Context& c) {
@@ -99,10 +147,19 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
         co_return c.json(service::common::operation(c, "域名已保存，同步任务已提交"));
     }
 
-    ruvia::Task<ruvia::HttpResponse> get(ruvia::Context& c) {
-        auto data = co_await dnsZoneReadService().get(c, tenantId(c), requireId(c));
-        service::common::setRevisionEtag(c, data.get<"revision">().value);
-        co_return c.json(service::common::ok<DnsZoneDetailResponse>(c, std::move(data)));
+    ruvia::Task<void> get(ruvia::Context& c) {
+        const auto id = requireId(c);
+        const auto tenant = tenantId(c);
+        auto sub = service::live_resource::hub().subscribe(c.worker(), tenant,
+            service::live_resource::Resource::dnsZones, id,
+            service::live_resource::queryKey("detail"));
+        co_await service::live_resource::streamSnapshot(
+            c, std::move(sub), [tenant, id](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+                auto data = co_await dnsZoneReadService().get(read, tenant, id);
+                co_return std::string(ruvia::toJson(
+                    service::common::ok<DnsZoneDetailResponse>(read, std::move(data)),
+                    {.resource = read.resource()}));
+            });
     }
 
     ruvia::Task<ruvia::HttpResponse> update(ruvia::Context& c) {

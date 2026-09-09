@@ -122,15 +122,22 @@ int main() {
     try {
         std::rethrow_exception(brokenPipe);
     } catch (const std::exception& error) {
-        REQUIRE(service::logging::peerDisconnected(error));
+        REQUIRE(service::common::peerDisconnected(error));
+        REQUIRE(service::common::sseClientDisconnected(error));
     }
     const auto applicationFailure =
         std::make_exception_ptr(std::runtime_error("database connection failed"));
     try {
         std::rethrow_exception(applicationFailure);
     } catch (const std::exception& error) {
-        REQUIRE(!service::logging::peerDisconnected(error));
+        REQUIRE(!service::common::peerDisconnected(error));
+        REQUIRE(!service::common::sseClientDisconnected(error));
     }
+    REQUIRE(service::common::sseClientDisconnected(
+        std::system_error(std::make_error_code(std::errc::connection_aborted), "write failed")));
+    const std::runtime_error cancelled("redis operation cancelled");
+    REQUIRE(service::common::sseClientDisconnected(cancelled));
+    REQUIRE(!service::common::peerDisconnected(cancelled));
     return 0;
 }
 

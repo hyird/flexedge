@@ -23,10 +23,12 @@
 #include "node/proto/edge_control.pb.h"
 #include "service/common/http.h"
 #include "service/domains/agent/agent_protocol.h"
+#include "service/domains/agent/agent_transport.h"
+#include "service/domains/agent/agent_report.mapper.h"
 #include "service/domains/agent/agent_command.service.h"
 #include "service/domains/agent/agent_read.service.h"
 #include "service/features/log_ingest/ingest.h"
-#include "service/features/node_release/artifact.h"
+#include "service/features/node_release/catalog.h"
 #include "service/features/node_dispatch/notifications.h"
 #include "service/utils/sensitive_string.h"
 

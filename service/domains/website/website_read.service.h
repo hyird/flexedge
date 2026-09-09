@@ -16,15 +16,15 @@
 #include "service/domains/website/website.error.h"
 #include "service/domains/website/website.types.h"
 #include "service/domains/website/website_runtime.mapper.h"
-#include "service/features/node_runtime/model.h"
-#include "service/features/website_config/model.h"
-#include "service/features/website_dns/model.h"
+#include "service/features/node_runtime/mapper.h"
+#include "service/features/website_config/mapper.h"
+#include "service/features/website_dns/mapper.h"
 
 namespace service::website {
 
 class WebsiteReadService final {
   public:
-    ruvia::Task<WebsitePageDataDto> list(ruvia::Context& c, const std::string& tenantId,
+    ruvia::Task<WebsitePageDataDto> list(auto& c, const std::string& tenantId,
                                          std::int64_t page, std::int64_t pageSize,
                                          std::int64_t skip,
                                          const std::optional<std::string>& keyword,
@@ -59,7 +59,7 @@ class WebsiteReadService final {
 
         const auto countRows = co_await c.db().query("SELECT COUNT(*)" + where, params);
         const auto total = countRows.empty() ? std::int64_t{0}
-                                             : countRows.front()[0].as<std::int64_t>().value_or(0);
+                                             : countRows.front()[0].template as<std::int64_t>().value_or(0);
         const auto rows =
             co_await c.db().query(selectColumns() + where + " ORDER BY website.sort DESC LIMIT " +
                                       std::to_string(pageSize) + " OFFSET " + std::to_string(skip),
@@ -72,21 +72,21 @@ class WebsiteReadService final {
         const auto certificates = co_await loadBoundCertificatesByWebsite(c, tenantId, websiteIds);
 
         WebsitePageDataDto result(c);
-        auto& items = result.ensure<"list">();
+        auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
             const auto config = parseConfig(c, row[5].value().value_or("{}"));
             const auto available = certificates.find(std::string(row[0].value().value_or("")));
             fillWebsite(c, items.emplace_back(c), row, config,
                         available == certificates.end() ? emptyCertificates() : available->second);
         }
-        result.set<"total">(total);
-        result.set<"page">(page);
-        result.set<"pageSize">(pageSize);
-        result.set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
+        result.template set<"total">(total);
+        result.template set<"page">(page);
+        result.template set<"pageSize">(pageSize);
+        result.template set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
         co_return result;
     }
 
-    ruvia::Task<WebsiteDto> detail(ruvia::Context& c, const std::string& tenantId,
+    ruvia::Task<WebsiteDto> detail(auto& c, const std::string& tenantId,
                                    const std::string& id) const {
         const auto rows = co_await c.db().query(
             selectColumns() +
@@ -103,13 +103,15 @@ class WebsiteReadService final {
         }
         const auto config = parseConfig(c, rows.front()[5].value().value_or("{}"));
         const auto certificates = co_await loadBoundCertificatesByWebsite(c, tenantId, {id});
+        ruvia::Array<WebsiteOriginSourceDto> sources(c.resource());
         const auto originStates =
-            co_await loadOriginRuntime(c, tenantId, rows.front()[1].value().value_or(""), id);
+            co_await loadOriginRuntime(c, tenantId, rows.front()[1].value().value_or(""), id, sources);
         WebsiteDto result(c);
         const auto available = certificates.find(id);
         fillWebsite(c, result, rows.front(), config,
                     available == certificates.end() ? emptyCertificates() : available->second,
                     originStates);
+        result.template ensure<"runtime">().template set<"originSources">(std::move(sources));
         co_return result;
     }
 
@@ -135,7 +137,7 @@ class WebsiteReadService final {
                "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), website.status";
     }
 
-    static service::website_config::WebsiteConfigData parseConfig(ruvia::Context& c,
+    static service::website_config::WebsiteConfigData parseConfig(auto& c,
                                                                   std::string_view json) {
         auto config = service::website_config::parseStored(json, {.resource = c.resource()});
         if (!config) {
@@ -150,7 +152,7 @@ class WebsiteReadService final {
     }
 
     static ruvia::Task<BoundCertificatesByWebsite>
-    loadBoundCertificatesByWebsite(ruvia::Context& c, const std::string& tenantId,
+    loadBoundCertificatesByWebsite(auto& c, const std::string& tenantId,
                                    const std::vector<std::string>& websiteIds) {
         BoundCertificatesByWebsite result;
         if (websiteIds.empty()) {
@@ -188,21 +190,27 @@ class WebsiteReadService final {
             result[std::string(row[0].value().value_or(""))].push_back(
                 {.id = std::string(row[1].value().value_or("")),
                  .domains = std::move(domains),
-                 .usable = row[4].as<bool>().value_or(false)});
+                 .usable = row[4].template as<bool>().value_or(false)});
         }
         co_return result;
     }
 
     static ruvia::Task<std::vector<OriginRuntimeState>>
-    loadOriginRuntime(ruvia::Context& c, const std::string& tenantId, std::string_view clusterId,
-                      std::string_view websiteId) {
+    loadOriginRuntime(auto& c, const std::string& tenantId, std::string_view clusterId,
+                      std::string_view websiteId, ruvia::Array<WebsiteOriginSourceDto>& sources) {
         const auto rows = co_await c.db().query(
-            "SELECT id, name, runtime::text FROM sys_node WHERE tenant_id = $1 AND cluster_id = "
+            "SELECT id, name, runtime::text, revision, "
+            "TO_CHAR(last_heartbeat_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') "
+            "FROM sys_node WHERE tenant_id = $1 AND cluster_id = "
             "$2 AND status = 'enabled' AND registration_status = 'registered' AND "
             "deleted_at IS NULL ORDER BY sort ASC",
             tenantId, clusterId);
         std::vector<OriginRuntimeState> result;
         for (const auto& row : rows) {
+            auto& source = sources.emplace_back(c);
+            source.template set<"nodeId">(row[0].value().value_or(""));
+            source.template set<"nodeRevision">(row[3].template as<std::int64_t>().value_or(0));
+            source.template set<"reportedAt">(row[4].value().value_or(""));
             const auto runtime = service::node_runtime::parseStored(row[2].value().value_or("{}"),
                                                                     {.resource = c.resource()});
             if (!runtime) {
@@ -220,7 +228,7 @@ class WebsiteReadService final {
     }
 
     template <typename Row>
-    static void fillWebsite(ruvia::Context& c, WebsiteDto& item, const Row& row,
+    static void fillWebsite(auto& c, WebsiteDto& item, const Row& row,
                             const service::website_config::WebsiteConfigData& config,
                             const std::vector<BoundCertificate>& certificates,
                             const std::vector<OriginRuntimeState>& originStates = {}) {
@@ -231,27 +239,27 @@ class WebsiteReadService final {
         }
         const auto targetCount = row[7].template as<std::int64_t>().value_or(0);
         const auto syncedCount = row[8].template as<std::int64_t>().value_or(0);
-        item.set<"id">(row[0].value().value_or(""));
-        item.set<"clusterId">(row[1].value().value_or(""));
-        item.set<"clusterName">(row[2].value().value_or(""));
-        item.set<"accessDomain">(row[3].value().value_or(""));
-        item.set<"status">(row[11].value().value_or(""));
-        item.set<"revision">(row[4].template as<std::int64_t>().value_or(1));
-        item.set<"config">(service::website_config::toOutput(config, {.resource = c.resource()}));
-        auto& certificateDtos = item.ensure<"certificates">();
+        item.template set<"id">(row[0].value().value_or(""));
+        item.template set<"clusterId">(row[1].value().value_or(""));
+        item.template set<"clusterName">(row[2].value().value_or(""));
+        item.template set<"accessDomain">(row[3].value().value_or(""));
+        item.template set<"status">(row[11].value().value_or(""));
+        item.template set<"revision">(row[4].template as<std::int64_t>().value_or(1));
+        item.template set<"config">(service::website_config::toOutput(config, {.resource = c.resource()}));
+        auto& certificateDtos = item.template ensure<"certificates">();
         for (const auto& certificate : certificates) {
             auto& output = certificateDtos.emplace_back(c);
-            output.set<"id">(certificate.id);
-            output.set<"usable">(certificate.usable);
-            auto& domains = output.ensure<"domains">();
+            output.template set<"id">(certificate.id);
+            output.template set<"usable">(certificate.usable);
+            auto& domains = output.template ensure<"domains">();
             for (const auto& domain : certificate.domains) {
                 domains.emplace_back(domain, ruvia::ModelOptions{.resource = c.resource()});
             }
         }
-        item.set<"runtime">(detail::toRuntime(c, config, *runtime, certificates, targetCount,
+        item.template set<"runtime">(detail::toRuntime(c, config, *runtime, certificates, targetCount,
                                               syncedCount, originStates));
-        item.set<"createdAt">(row[9].value().value_or(""));
-        item.set<"updatedAt">(row[10].value().value_or(""));
+        item.template set<"createdAt">(row[9].value().value_or(""));
+        item.template set<"updatedAt">(row[10].value().value_or(""));
     }
 
     [[noreturn]] static void throwCorruptConfig() {

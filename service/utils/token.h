@@ -11,18 +11,9 @@
 #include <openssl/rand.h>
 
 #include "service/utils/sensitive_string.h"
+#include "common/hex.h"
 
 namespace service::utils {
-
-inline std::string hexEncode(const unsigned char* input, std::size_t size) {
-    static constexpr char digits[] = "0123456789abcdef";
-    std::string result(size * 2, '\0');
-    for (std::size_t index = 0; index < size; ++index) {
-        result[index * 2] = digits[input[index] >> 4];
-        result[index * 2 + 1] = digits[input[index] & 0x0f];
-    }
-    return result;
-}
 
 inline std::string randomToken() {
     std::array<unsigned char, 32> bytes{};
@@ -30,7 +21,7 @@ inline std::string randomToken() {
     if (RAND_bytes(bytes.data(), static_cast<int>(bytes.size())) != 1) {
         throw std::runtime_error("failed to generate secure token");
     }
-    return hexEncode(bytes.data(), bytes.size());
+    return flexedge::crypto::hexEncode(bytes);
 }
 
 inline std::string tokenHash(std::string_view token) {
@@ -41,7 +32,7 @@ inline std::string tokenHash(std::string_view token) {
         1) {
         throw std::runtime_error("failed to hash secure token");
     }
-    return hexEncode(digest.data(), digestSize);
+    return flexedge::crypto::hexEncode({digest.data(), digestSize});
 }
 
 inline bool tokenHashMatches(std::string_view token, std::string_view expectedHash) {

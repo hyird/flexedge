@@ -1,15 +1,5 @@
-import { dnsLinePath } from '@/lib/dns-lines'
 import { formatDate } from '@/lib/format'
-import type { DnsZone } from '@/lib/types'
 import { Badge } from '@/components/ui/badge'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
 import {
   Sheet,
   SheetContent,
@@ -18,13 +8,18 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from '@/components/ui/tabs'
-import { DnsLineTree } from '@/components/dns-line-tree'
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { StatusBadge } from '@/components/status-badge'
+import { DnsLineTree } from '@/features/dns-zones/dns-line-tree'
+import { dnsLinePath } from '@/features/dns-zones/dns-lines'
+import type { DnsZone } from '@/features/dns-zones/types'
 import { displaySyncStatus } from './dns-zone-display'
 
 export function ZoneDetailSheet({

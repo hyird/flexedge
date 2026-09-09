@@ -56,5 +56,8 @@ RUVIA_RESPONSE_MODEL(ClusterPageDataDto, RUVIA_REQUIRED_FIELD(list, ruvia::Array
 RUVIA_RESPONSE_MODEL(ClusterPageResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, ClusterPageDataDto));
+RUVIA_RESPONSE_MODEL(ClusterOptionsResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+                     RUVIA_REQUIRED_FIELD(message, ruvia::String),
+                     RUVIA_REQUIRED_FIELD(data, ruvia::Array<ClusterDto>));
 
 } // namespace service::cluster

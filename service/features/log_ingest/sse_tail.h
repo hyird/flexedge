@@ -3,6 +3,8 @@
 #include <chrono>
 #include <exception>
 #include <optional>
+#include <memory>
+#include <utility>
 #include <string>
 #include <string_view>
 
@@ -10,10 +12,20 @@
 #include <ruvia/web/Context.h>
 #include <ruvia/web/Streaming.h>
 
+#include "service/common/connection_error.h"
 #include "service/features/log_ingest/fanout.h"
 #include "service/features/log_ingest/tail.h"
+#include "service/features/live_resource/read_scope.h"
+#include "service/domains/auth/session_credential.h"
+#include "service/domains/auth/auth_session_read.service.h"
+#include "service/middleware/auth.h"
 
 namespace service::log_ingest {
+
+struct TailBatch final {
+    std::string payload;
+    std::optional<std::string> cursor;
+};
 
 template <typename TailData>
 inline std::optional<std::string> tailResponseCursor(const TailData& data) {
@@ -34,57 +46,40 @@ inline void advanceTailCursor(std::optional<TailCursor>& target,
     }
 }
 
-// Emits an initial snapshot, then a replacement snapshot for each coalesced
-// notification. The client therefore never needs a companion REST read.
-template <typename Fetch, typename WriteEvent>
-ruvia::Task<void> streamSseSnapshots(ruvia::Context& c, fanout::Hub::Subscription subscription,
-                                     Fetch fetch, WriteEvent writeEvent) {
-    try {
-        auto initial = co_await fetch();
-        auto events = c.streamSse();
-        co_await events.write(
-            {.data = "{}", .event = "ready", .retry = std::chrono::milliseconds{3000}});
-        co_await writeEvent(c, events, std::move(initial));
-
-        while (!events.aborted()) {
-            const auto signal =
-                co_await subscription.receiveFor(fanout::kSseHeartbeatInterval, c.stopToken());
-            if (events.aborted()) {
-                co_return;
-            }
-            if (!signal.hasValue()) {
-                if (signal.status() != ruvia::WorkerWaitStatus::kTimedOut) {
-                    co_return;
-                }
-                co_await events.write({.event = "heartbeat"});
-                continue;
-            }
-            auto snapshot = co_await fetch();
-            co_await writeEvent(c, events, std::move(snapshot));
-        }
-    } catch (const std::exception& error) {
-        if (sseClientDisconnected(error)) {
-            co_return;
-        }
-        throw;
-    }
-}
-
-template <typename Fetch, typename CursorValue, typename WriteEvent>
+template <typename Fetch>
 ruvia::Task<void> streamSseTail(ruvia::Context& c, fanout::Hub::Subscription subscription,
-                                std::optional<TailCursor> after, Fetch fetch,
-                                CursorValue cursorValue, WriteEvent writeEvent) {
+                                std::optional<TailCursor> after, Fetch fetch) {
     try {
-        auto initial = co_await fetch(after);
-        const auto initialCursor = cursorValue(initial);
+        auto events = c.streamSse();
+        auto credential = std::make_shared<std::optional<service::auth::SessionCredential>>(
+            service::auth::readSessionCookie(c));
+        auto checkedAt = std::chrono::steady_clock::now();
+        auto initial = co_await service::live_resource::readOnce<TailBatch>(c,
+            [fetch, after](auto& read) { return fetch(read, after); });
+        const auto initialCursor = initial.cursor;
         advanceTailCursor(after, initialCursor);
 
-        auto events = c.streamSse();
         co_await events.write(
             {.data = "{}", .event = "ready", .retry = std::chrono::milliseconds{3000}});
-        co_await writeEvent(c, events, std::move(initial), initialCursor);
+        ruvia::SseMessage initialMessage{.data = initial.payload, .event = "logs"};
+        if (initialCursor) {
+            initialMessage.id = *initialCursor;
+        }
+        co_await events.write(initialMessage);
 
         while (!events.aborted()) {
+            if (std::chrono::steady_clock::now() - checkedAt >= fanout::kSseHeartbeatInterval) {
+                const auto principal = co_await service::live_resource::readOnce<std::optional<service::auth::AuthenticatedPrincipal>>(
+                    c, [credential](auto& read) -> ruvia::Task<std::optional<service::auth::AuthenticatedPrincipal>> {
+                        if (!*credential) co_return std::nullopt;
+                        co_return co_await service::auth::resolveSessionPrincipal(read.db(), **credential);
+                    });
+                if (!principal || principal->system_tenant_id != service::middleware::currentTenantId(c)) {
+                    co_await events.write({.data = "{}", .event = "session-expired"});
+                    co_return;
+                }
+                checkedAt = std::chrono::steady_clock::now();
+            }
             const auto signal =
                 co_await subscription.receiveFor(fanout::kSseHeartbeatInterval, c.stopToken());
             if (events.aborted()) {
@@ -98,16 +93,17 @@ ruvia::Task<void> streamSseTail(ruvia::Context& c, fanout::Hub::Subscription sub
                 continue;
             }
 
-            auto update = co_await fetch(after);
-            const auto updateCursor = cursorValue(update);
+            auto update = co_await service::live_resource::readOnce<TailBatch>(c,
+                [fetch, after](auto& read) { return fetch(read, after); });
+            const auto updateCursor = update.cursor;
             if (!updateCursor) {
                 continue;
             }
             advanceTailCursor(after, updateCursor);
-            co_await writeEvent(c, events, std::move(update), updateCursor);
+            co_await events.write({.data = update.payload, .event = "logs", .id = *updateCursor});
         }
     } catch (const std::exception& error) {
-        if (sseClientDisconnected(error)) {
+        if (service::common::sseClientDisconnected(error)) {
             co_return;
         }
         throw;

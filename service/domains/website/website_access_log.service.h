@@ -14,14 +14,14 @@
 #include "service/domains/website/website_access_log.mapper.h"
 #include "service/domains/website/website.error.h"
 #include "service/domains/website/website.types.h"
-#include "service/features/log_ingest/tail.h"
+#include "service/features/log_ingest/tail_cursor.h"
 
 namespace service::website {
 
 class WebsiteAccessLogService final {
   public:
     ruvia::Task<WebsiteAccessLogTailDataDto>
-    tail(ruvia::Context& c, const std::string& tenantId, const std::string& websiteId,
+    tail(auto& c, const std::string& tenantId, const std::string& websiteId,
          std::int64_t limit, const std::optional<service::log_ingest::TailCursor>& after) const {
         std::vector<ruvia::DbValue> params{ruvia::DbValue{tenantId}, ruvia::DbValue{websiteId}};
         std::string cursorPredicate;
@@ -57,7 +57,7 @@ class WebsiteAccessLogService final {
         }
 
         WebsiteAccessLogTailDataDto result(c);
-        auto& items = result.ensure<"list">();
+        auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
             if (!row[0].value()) {
                 continue;
@@ -65,15 +65,15 @@ class WebsiteAccessLogService final {
             fillWebsiteAccessLog(items.emplace_back(c), row);
         }
         if (!items.empty()) {
-            result.set<"cursor">(service::log_ingest::encodeTailCursor(
-                rows.front()[22].as<std::int64_t>().value_or(0),
+            result.template set<"cursor">(service::log_ingest::encodeTailCursor(
+                rows.front()[22].template as<std::int64_t>().value_or(0),
                 rows.front()[0].value().value_or("")));
         }
         co_return result;
     }
 
     ruvia::Task<WebsiteAccessLogPageDataDto>
-    history(ruvia::Context& c, const std::string& tenantId, const std::string& websiteId,
+    history(auto& c, const std::string& tenantId, const std::string& websiteId,
             std::int64_t page, std::int64_t pageSize, std::int64_t skip,
             const std::optional<std::string>& keyword, const std::optional<std::string>& method,
             const std::optional<std::string>& statusClass) const {
@@ -113,7 +113,7 @@ class WebsiteAccessLogService final {
 
         const auto countRows = co_await c.db().query("SELECT COUNT(*)" + where, params);
         const auto total = countRows.empty() ? std::int64_t{0}
-                                             : countRows.front()[0].as<std::int64_t>().value_or(0);
+                                             : countRows.front()[0].template as<std::int64_t>().value_or(0);
         const auto rows = co_await c.db().query(
             "SELECT access.id, TO_CHAR(access.occurred_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
             "access.node_id, COALESCE(node.name, ''), access.client_ip::text, access.protocol, "
@@ -125,15 +125,15 @@ class WebsiteAccessLogService final {
                 std::to_string(pageSize) + " OFFSET " + std::to_string(skip),
             params);
         WebsiteAccessLogPageDataDto result(c);
-        auto& items = result.ensure<"list">();
+        auto& items = result.template ensure<"list">();
         items.reserve(rows.size());
         for (const auto& row : rows) {
             fillWebsiteAccessLog(items.emplace_back(c), row);
         }
-        result.set<"total">(total);
-        result.set<"page">(page);
-        result.set<"pageSize">(pageSize);
-        result.set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
+        result.template set<"total">(total);
+        result.template set<"page">(page);
+        result.template set<"pageSize">(pageSize);
+        result.template set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
         co_return result;
     }
 };

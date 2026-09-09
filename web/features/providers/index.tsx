@@ -3,15 +3,12 @@ import {
   keepPreviousData,
   useMutation,
   useQuery,
-  useQueryClient,
 } from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
 import { CheckCircle2, Pencil, Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
-import { getData, sendData } from '@/lib/api'
 import { formatDate } from '@/lib/format'
-import { queryKeys } from '@/lib/query-keys'
-import type { CertificateProvider, DnsProvider, PageData } from '@/lib/types'
+import { DEFAULT_PAGE_SIZE } from '@/lib/page-size'
 import { useResourceFilters } from '@/hooks/use-resource-filters'
 import { Button } from '@/components/ui/button'
 import {
@@ -27,7 +24,17 @@ import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
 import { RowActions } from '@/components/row-actions'
 import { StatusBadge } from '@/components/status-badge'
+import type {
+  CertificateProvider,
+  DnsProvider,
+} from '@/features/providers/types'
 import { CertificateProviderDialog } from './certificate-provider-dialog'
+import {
+  verifyProvider as verifyProviderRequest,
+  removeProvider,
+  dnsProvidersQuery,
+  certificateProvidersQuery,
+} from './data'
 import { DnsProviderDialog } from './dns-provider-dialog'
 import { providerLabel } from './provider-display'
 
@@ -35,10 +42,10 @@ export function Providers() {
   const [tab, setTab] = useState('dns')
   const certificateFilter = useResourceFilters({ keyword: '' })
   const [certificatePage, setCertificatePage] = useState(1)
-  const [certificatePageSize, setCertificatePageSize] = useState(10)
-  const queryClient = useQueryClient()
+  const [certificatePageSize, setCertificatePageSize] =
+    useState(DEFAULT_PAGE_SIZE)
   const [dnsPage, setDnsPage] = useState(1)
-  const [dnsPageSize, setDnsPageSize] = useState(10)
+  const [dnsPageSize, setDnsPageSize] = useState(DEFAULT_PAGE_SIZE)
   const filter = useResourceFilters({ keyword: '' })
   const { keyword } = filter.filters
   const [dnsDialog, setDnsDialog] = useState<DnsProvider | 'new' | null>(null)
@@ -52,19 +59,14 @@ export function Providers() {
   >(null)
 
   const dnsQuery = useQuery({
-    queryKey: [...queryKeys.providers, 'dns', dnsPage, dnsPageSize, keyword],
+    ...dnsProvidersQuery({
+      page: dnsPage,
+      page_size: dnsPageSize,
+      keyword: keyword || undefined,
+    }),
     placeholderData: keepPreviousData,
-    queryFn: () =>
-      getData<PageData<DnsProvider>>('/providers/dns', {
-        page: dnsPage,
-        page_size: dnsPageSize,
-        keyword: keyword || undefined,
-      }),
   })
-  const certificateQuery = useQuery({
-    queryKey: [...queryKeys.providers, 'certificate'],
-    queryFn: () => getData<CertificateProvider[]>('/providers/certificate'),
-  })
+  const certificateQuery = useQuery(certificateProvidersQuery)
   // This endpoint returns the complete list; filter and paginate it locally.
   const certificates = (certificateQuery.data ?? []).filter((item) =>
     `${item.provider} ${item.account_email ?? ''}`
@@ -73,38 +75,22 @@ export function Providers() {
   )
 
   const { mutate: verifyProvider } = useMutation({
-    mutationFn: ({
-      kind,
-      id,
-      revision,
-    }: {
-      kind: 'dns' | 'certificate'
-      id: string
-      revision: number
-    }) =>
-      sendData('post', `/providers/${kind}/${id}/verify`, undefined, revision),
-    onSuccess: async (response, variables) => {
+    mutationFn: verifyProviderRequest,
+    onSuccess: async (response) => {
       toast.success(response.message)
-      await queryClient.invalidateQueries({
-        queryKey: [...queryKeys.providers, variables.kind],
-      })
     },
   })
 
   const remove = useMutation({
     mutationFn: (target: NonNullable<typeof removeTarget>) =>
-      sendData(
-        'delete',
-        `/providers/${target.kind}/${target.item.id}`,
-        undefined,
-        target.item.revision
-      ),
-    onSuccess: async (response, target) => {
+      removeProvider({
+        kind: target.kind,
+        id: target.item.id,
+        revision: target.item.revision,
+      }),
+    onSuccess: async (response) => {
       toast.success(response.message)
       setRemoveTarget(null)
-      await queryClient.invalidateQueries({
-        queryKey: [...queryKeys.providers, target.kind],
-      })
     },
   })
 
@@ -193,7 +179,11 @@ export function Providers() {
       {
         accessorKey: 'provider',
         header: '供应商',
-        cell: ({ row }) => <div className='font-medium'>{providerLabel(row.original.provider)}</div>,
+        cell: ({ row }) => (
+          <div className='font-medium'>
+            {providerLabel(row.original.provider)}
+          </div>
+        ),
       },
       {
         accessorKey: 'credential_mode',

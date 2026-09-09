@@ -3,15 +3,12 @@ import {
   keepPreviousData,
   useMutation,
   useQuery,
-  useQueryClient,
 } from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
 import { Eye, FilePenLine, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
-import { getData, sendData } from '@/lib/api'
 import { formatDate } from '@/lib/format'
-import { queryKeys } from '@/lib/query-keys'
-import type { DnsProvider, DnsZone, PageData } from '@/lib/types'
+import { DEFAULT_PAGE_SIZE } from '@/lib/page-size'
 import { useResourceFilters } from '@/hooks/use-resource-filters'
 import { Button } from '@/components/ui/button'
 import {
@@ -34,18 +31,17 @@ import { ResourceTable } from '@/components/resource-table'
 import { ResourceToolbar } from '@/components/resource-toolbar'
 import { RowActions } from '@/components/row-actions'
 import { StatusBadge } from '@/components/status-badge'
+import type { DnsZone } from '@/features/dns-zones/types'
+import { dnsProviderOptionsQuery } from '@/features/providers/data'
 import { CreateZoneDialog } from './create-zone-dialog'
-import {
-  displaySyncStatus,
-  hasMeaningfulConflicts,
-} from './dns-zone-display'
+import { dnsZonesQuery, syncDnsZone, removeDnsZone } from './data'
+import { displaySyncStatus, hasMeaningfulConflicts } from './dns-zone-display'
 import { RecordsDialog } from './records-dialog'
 import { ZoneDetailSheet } from './zone-detail-sheet'
 
 export function DnsZones() {
-  const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const filter = useResourceFilters({ keyword: '', providerId: 'all' })
   const { keyword, providerId } = filter.filters
   const [createOpen, setCreateOpen] = useState(false)
@@ -53,47 +49,27 @@ export function DnsZones() {
   const [detailTarget, setDetailTarget] = useState<DnsZone | null>(null)
   const [removeTarget, setRemoveTarget] = useState<DnsZone | null>(null)
 
-  const providersQuery = useQuery({
-    queryKey: [...queryKeys.providers, 'dns', 'options'],
-    queryFn: () =>
-      getData<PageData<DnsProvider>>('/providers/dns').then((data) => data.list),
-  })
+  const providersQuery = useQuery(dnsProviderOptionsQuery)
   const query = useQuery({
-    queryKey: [...queryKeys.dnsZones, page, pageSize, keyword, providerId],
+    ...dnsZonesQuery({
+      page,
+      page_size: pageSize,
+      keyword: keyword || undefined,
+      dns_provider_id: providerId === 'all' ? undefined : providerId,
+    }),
     placeholderData: keepPreviousData,
-    queryFn: () =>
-      getData<PageData<DnsZone>>('/dns-zones/', {
-        page,
-        page_size: pageSize,
-        keyword: keyword || undefined,
-        dns_provider_id: providerId === 'all' ? undefined : providerId,
-      }),
   })
   const { mutate: syncZone } = useMutation({
-    mutationFn: ({
-      item,
-      policy,
-    }: {
-      item: DnsZone
-      policy?: 'local' | 'remote'
-    }) =>
-      sendData(
-        'post',
-        `/dns-zones/${item.id}/sync`,
-        policy ? { conflict_policy: policy } : undefined
-      ),
+    mutationFn: syncDnsZone,
     onSuccess: async (response) => {
       toast.success(response.message)
-      await queryClient.invalidateQueries({ queryKey: queryKeys.dnsZones })
     },
   })
   const remove = useMutation({
-    mutationFn: (item: DnsZone) =>
-      sendData('delete', `/dns-zones/${item.id}`, undefined, item.revision),
+    mutationFn: removeDnsZone,
     onSuccess: async (response) => {
       toast.success(response.message)
       setRemoveTarget(null)
-      await queryClient.invalidateQueries({ queryKey: queryKeys.dnsZones })
     },
   })
 
@@ -132,7 +108,9 @@ export function DnsZones() {
       {
         accessorKey: 'sync_status',
         header: '同步状态',
-        cell: ({ row }) => <StatusBadge status={displaySyncStatus(row.original)} />,
+        cell: ({ row }) => (
+          <StatusBadge status={displaySyncStatus(row.original)} />
+        ),
       },
       {
         accessorKey: 'last_synced_at',

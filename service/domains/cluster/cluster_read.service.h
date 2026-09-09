@@ -17,7 +17,7 @@ namespace service::cluster {
 
 class ClusterReadService final {
   public:
-    ruvia::Task<ClusterPageDataDto> list(ruvia::Context& c, const std::string& tenantId,
+    ruvia::Task<ClusterPageDataDto> list(auto& c, const std::string& tenantId,
                                          std::int64_t page, std::int64_t pageSize,
                                          std::int64_t skip,
                                          const std::optional<std::string>& keyword,
@@ -51,7 +51,7 @@ class ClusterReadService final {
 
         const auto countRows = co_await c.db().query("SELECT COUNT(*)" + where, params);
         const auto total = countRows.empty() ? std::int64_t{0}
-                                             : countRows.front()[0].as<std::int64_t>().value_or(0);
+                                             : countRows.front()[0].template as<std::int64_t>().value_or(0);
         const auto rows = co_await c.db().query(
             "SELECT cluster.id, cluster.name, cluster.dns_zone_id, zone.domain, provider.provider, "
             "cluster.hostname_prefix, cluster.hostname_prefix || '.' || zone.domain, "
@@ -69,26 +69,26 @@ class ClusterReadService final {
             params);
 
         ClusterPageDataDto result(c);
-        result.set<"total">(total);
-        result.set<"page">(page);
-        result.set<"pageSize">(pageSize);
-        result.set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
-        auto& items = result.ensure<"list">();
+        result.template set<"total">(total);
+        result.template set<"page">(page);
+        result.template set<"pageSize">(pageSize);
+        result.template set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
+        auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
             auto& item = items.emplace_back(c);
-            item.set<"id">(row[0].value().value_or(""));
-            item.set<"name">(row[1].value().value_or(""));
-            item.set<"dnsZoneId">(row[2].value().value_or(""));
-            item.set<"dnsZoneDomain">(row[3].value().value_or(""));
-            item.set<"dnsProviderName">(row[4].value().value_or(""));
-            item.set<"hostnamePrefix">(row[5].value().value_or(""));
-            item.set<"accessDomain">(row[6].value().value_or(""));
-            item.set<"nodeCount">(row[7].as<std::int64_t>().value_or(0));
-            item.set<"onlineNodeCount">(row[8].as<std::int64_t>().value_or(0));
-            item.set<"status">(row[9].value().value_or("disabled"));
-            item.set<"revision">(row[10].as<std::int64_t>().value_or(1));
-            item.set<"createdAt">(row[11].value().value_or(""));
-            item.set<"updatedAt">(row[12].value().value_or(""));
+            item.template set<"id">(row[0].value().value_or(""));
+            item.template set<"name">(row[1].value().value_or(""));
+            item.template set<"dnsZoneId">(row[2].value().value_or(""));
+            item.template set<"dnsZoneDomain">(row[3].value().value_or(""));
+            item.template set<"dnsProviderName">(row[4].value().value_or(""));
+            item.template set<"hostnamePrefix">(row[5].value().value_or(""));
+            item.template set<"accessDomain">(row[6].value().value_or(""));
+            item.template set<"nodeCount">(row[7].template as<std::int64_t>().value_or(0));
+            item.template set<"onlineNodeCount">(row[8].template as<std::int64_t>().value_or(0));
+            item.template set<"status">(row[9].value().value_or("disabled"));
+            item.template set<"revision">(row[10].template as<std::int64_t>().value_or(1));
+            item.template set<"createdAt">(row[11].value().value_or(""));
+            item.template set<"updatedAt">(row[12].value().value_or(""));
         }
         co_return result;
     }

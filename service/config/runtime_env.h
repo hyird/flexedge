@@ -1,5 +1,7 @@
 #pragma once
 
+#include "common/hex.h"
+
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -25,28 +27,27 @@ inline std::string randomHex(std::size_t byteCount) {
         throw std::runtime_error("failed to generate runtime secret");
     }
 
-    constexpr char kHex[] = "0123456789abcdef";
-    std::string encoded;
-    encoded.reserve(byteCount * 2);
-    for (const auto byte : bytes) {
-        const auto value = static_cast<unsigned char>(byte);
-        encoded.push_back(kHex[value >> 4]);
-        encoded.push_back(kHex[value & 0x0f]);
-    }
-    return encoded;
+    return flexedge::crypto::hexEncode(
+        {reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size()});
 }
 
 inline bool endsWithNewline(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
-        return true;
+        throw std::runtime_error("failed to read dotenv before generating runtime secrets");
     }
     input.seekg(0, std::ios::end);
-    if (input.tellg() <= 0) {
+    const auto size = input.tellg();
+    if (size < 0) {
+        throw std::runtime_error("failed to inspect dotenv size");
+    }
+    if (size == 0) {
         return true;
     }
     input.seekg(-1, std::ios::end);
-    return input.get() == '\n';
+    const auto last = input.get();
+    if (!input) throw std::runtime_error("failed to read dotenv ending");
+    return last == '\n';
 }
 
 inline void restrictPermissions(const std::filesystem::path& path) {
@@ -100,6 +101,9 @@ inline bool ensureRuntimeSecrets(const std::filesystem::path& path, const ruvia:
         throw std::runtime_error("failed to persist generated runtime secrets");
     }
     output.close();
+    if (!output) {
+        throw std::runtime_error("failed to close dotenv after generating runtime secrets");
+    }
     runtime_env_detail::restrictPermissions(path);
     return true;
 }

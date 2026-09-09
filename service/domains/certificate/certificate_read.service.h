@@ -27,7 +27,7 @@ namespace service::certificate {
 class CertificateReadService final {
   public:
     ruvia::Task<CertificatePageDataDto>
-    list(ruvia::Context& c, const std::string& tenantId, std::int64_t page, std::int64_t pageSize,
+    list(auto& c, const std::string& tenantId, std::int64_t page, std::int64_t pageSize,
          std::int64_t skip, const std::optional<std::string>& keyword,
          std::optional<std::string_view> status, std::optional<bool> usable) const {
         std::string where =
@@ -62,24 +62,24 @@ class CertificateReadService final {
         }
         const auto countRows = co_await c.db().query("SELECT COUNT(*)" + where, params);
         const auto total = countRows.empty() ? std::int64_t{0}
-                                             : countRows.front()[0].as<std::int64_t>().value_or(0);
+                                             : countRows.front()[0].template as<std::int64_t>().value_or(0);
         const auto rows =
             co_await c.db().query(certificateColumns() + where + " ORDER BY cert.sort DESC LIMIT " +
                                       std::to_string(pageSize) + " OFFSET " + std::to_string(skip),
                                   params);
         CertificatePageDataDto result(c);
-        result.set<"total">(total);
-        result.set<"page">(page);
-        result.set<"pageSize">(pageSize);
-        result.set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
-        auto& items = result.ensure<"list">();
+        result.template set<"total">(total);
+        result.template set<"page">(page);
+        result.template set<"pageSize">(pageSize);
+        result.template set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
+        auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
             fillCertificate(c, items.emplace_back(c), row);
         }
         co_return result;
     }
 
-    ruvia::Task<CertificateDto> get(ruvia::Context& c, const std::string& tenantId,
+    ruvia::Task<CertificateDto> get(auto& c, const std::string& tenantId,
                                     const std::string& id) const {
         const auto rows = co_await c.db().query(
             certificateColumns() +
@@ -108,7 +108,7 @@ class CertificateReadService final {
     }
 
     ruvia::Task<service::certificate_material::CertificateDownload>
-    download(ruvia::Context& c, const std::string& tenantId, const std::string& id) const {
+    download(auto& c, const std::string& tenantId, const std::string& id) const {
         const auto rows = co_await c.db().query(
             "SELECT domain, material::text, COALESCE(issued_revision > 0 AND expires_at > NOW(), "
             "FALSE) FROM sys_certificate WHERE id = $1 AND tenant_id = $2 AND deleted_at IS "
@@ -117,7 +117,7 @@ class CertificateReadService final {
         if (rows.empty()) {
             service::common::throwAppError(CertificateError::NOT_FOUND);
         }
-        if (!rows.front()[2].as<bool>().value_or(false)) {
+        if (!rows.front()[2].template as<bool>().value_or(false)) {
             service::common::throwAppError(CertificateError::CERTIFICATE_UNAVAILABLE);
         }
         const auto material = service::certificate_material::parseStored(

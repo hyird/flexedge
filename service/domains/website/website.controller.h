@@ -21,6 +21,8 @@
 #include "service/features/log_ingest/sse_tail.h"
 #include "service/features/log_ingest/tail.h"
 #include "service/middleware/auth.h"
+#include "service/features/live_resource/fanout.h"
+#include "service/features/live_resource/sse.h"
 
 namespace service::website {
 
@@ -28,11 +30,11 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
   public:
     RUVIA_CONTROLLER_GROUP("/api/websites", service::middleware::AuthMiddleware)
     RUVIA_ROUTES_BEGIN
-    RUVIA_GET("/", list);
-    RUVIA_GET("/:id/access-logs", accessLogHistory);
+    RUVIA_GET_SSE("/stream", list);
+    RUVIA_GET_SSE("/:id/access-logs/history/stream", accessLogHistory);
     RUVIA_GET_SSE("/:id/access-logs/stream", accessLogStream);
     RUVIA_GET_SSE("/:id/dashboard/stream", dashboardStream);
-    RUVIA_GET("/:id", detail);
+    RUVIA_GET_SSE("/:id/stream", detail);
     RUVIA_POST("/:id/dns-probe", requestDnsProbe);
     RUVIA_POST("/", create, WebsiteConfigValidator);
     RUVIA_PUT("/:id", update, WebsiteConfigValidator);
@@ -61,27 +63,7 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
         return service::common::requireExpectedRevision(c);
     }
 
-    static ruvia::Task<void> writeLogEvent(ruvia::Context& c, ruvia::SseWriter& events,
-                                           WebsiteAccessLogTailDataDto data,
-                                           const std::optional<std::string>& cursor) {
-        auto response = service::common::ok<WebsiteAccessLogTailResponse>(c, std::move(data));
-        const auto payload = ruvia::toJson(response, {.resource = c.resource()});
-        if (cursor) {
-            co_await events.write({.data = payload, .event = "logs", .id = *cursor});
-        } else {
-            co_await events.write({.data = payload, .event = "logs"});
-        }
-    }
-
-    static ruvia::Task<void> writeDashboardEvent(ruvia::Context& c, ruvia::SseWriter& events,
-                                                  WebsiteDashboardDto data) {
-        const auto payload = ruvia::toJson(
-            service::common::ok<WebsiteDashboardResponse>(c, std::move(data)),
-            {.resource = c.resource()});
-        co_await events.write({.data = payload, .event = "dashboard"});
-    }
-
-    ruvia::Task<ruvia::HttpResponse> list(ruvia::Context& c) {
+    ruvia::Task<void> list(ruvia::Context& c) {
         const auto [page, pageSize, skip] = service::common::requirePagination(c);
         const auto keyword = service::common::requireKeyword(c.req().query("keyword"));
         std::optional<std::string> clusterId;
@@ -100,15 +82,33 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
             }
             status.emplace(*value);
         }
-        co_return c.json(service::common::ok<WebsitePageResponse>(
-            c, co_await websiteReadService().list(c, tenantId(c), page, pageSize, skip, keyword,
-                                                  clusterId, status)));
+        const auto tenant = tenantId(c);
+        auto sub = service::live_resource::hub().subscribe(c.worker(), tenant,
+            service::live_resource::Resource::websites, {},
+            service::live_resource::queryKey("list", page, pageSize, keyword.value_or(""),
+                                             clusterId, status));
+        co_await service::live_resource::streamSnapshot(
+            c, std::move(sub), [tenant, page, pageSize, skip, keyword, clusterId, status](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+                auto data = co_await websiteReadService().list(read, tenant, page, pageSize, skip, keyword, clusterId, status);
+                co_return std::string(ruvia::toJson(
+                    service::common::ok<WebsitePageResponse>(read, std::move(data)),
+                    {.resource = read.resource()}));
+            });
     }
 
-    ruvia::Task<ruvia::HttpResponse> detail(ruvia::Context& c) {
-        auto data = co_await websiteReadService().detail(c, tenantId(c), requireId(c));
-        service::common::setRevisionEtag(c, data.get<"revision">().value);
-        co_return c.json(service::common::ok<WebsiteDetailResponse>(c, std::move(data)));
+    ruvia::Task<void> detail(ruvia::Context& c) {
+        const auto id = requireId(c);
+        const auto tenant = tenantId(c);
+        auto sub = service::live_resource::hub().subscribe(c.worker(), tenant,
+            service::live_resource::Resource::websites, id,
+            service::live_resource::queryKey("detail"));
+        co_await service::live_resource::streamSnapshot(
+            c, std::move(sub), [tenant, id](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+                auto data = co_await websiteReadService().detail(read, tenant, id);
+                co_return std::string(ruvia::toJson(
+                    service::common::ok<WebsiteDetailResponse>(read, std::move(data)),
+                    {.resource = read.resource()}));
+            });
     }
 
     ruvia::Task<ruvia::HttpResponse> requestDnsProbe(ruvia::Context& c) {
@@ -116,8 +116,8 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
         co_return c.json(service::common::operation(c, "域名解析检测已提交"));
     }
 
-    ruvia::Task<ruvia::HttpResponse> accessLogHistory(ruvia::Context& c) {
-        const auto [page, pageSize, skip] = service::common::requirePagination(c, 50);
+    ruvia::Task<void> accessLogHistory(ruvia::Context& c) {
+        const auto [page, pageSize, skip] = service::common::requirePagination(c);
         const auto keyword = service::common::requireKeyword(c.req().query("keyword"));
         std::optional<std::string> method;
         if (const auto value = c.req().query("method")) {
@@ -137,10 +137,19 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
             }
             statusClass.emplace(*value);
         }
-        co_return c.json(service::common::ok<WebsiteAccessLogPageResponse>(
-            c,
-            co_await websiteAccessLogService().history(c, tenantId(c), requireId(c), page, pageSize,
-                                                       skip, keyword, method, statusClass)));
+        const auto id = requireId(c);
+        const auto tenant = tenantId(c);
+        auto sub = service::live_resource::hub().subscribe(c.worker(), tenant,
+            service::live_resource::Resource::accessHistory, id,
+            service::live_resource::queryKey("history", page, pageSize, keyword.value_or(""),
+                                             method, statusClass));
+        co_await service::live_resource::streamSnapshot(
+            c, std::move(sub), [tenant, id, page, pageSize, skip, keyword, method, statusClass](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+                auto data = co_await websiteAccessLogService().history(read, tenant, id, page, pageSize, skip, keyword, method, statusClass);
+                co_return std::string(ruvia::toJson(
+                    service::common::ok<WebsiteAccessLogPageResponse>(read, std::move(data)),
+                    {.resource = read.resource()}));
+            });
     }
 
     ruvia::Task<void> accessLogStream(ruvia::Context& c) {
@@ -153,25 +162,31 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
                 c.worker(), service::log_ingest::notifications::LogResourceType::access, tenant,
                 id),
             service::log_ingest::optionalSseTailCursor(c),
-            [&c, tenant, id, limit](const std::optional<service::log_ingest::TailCursor>& after) {
-                return websiteAccessLogService().tail(c, tenant, id, limit, after);
-            },
-            [](const WebsiteAccessLogTailDataDto& data) {
-                return service::log_ingest::tailResponseCursor(data);
-            },
-            writeLogEvent);
+            [tenant, id, limit](auto& read, const std::optional<service::log_ingest::TailCursor>& after)
+                -> ruvia::Task<service::log_ingest::TailBatch> {
+                auto data = co_await websiteAccessLogService().tail(read, tenant, id, limit, after);
+                auto cursor = service::log_ingest::tailResponseCursor(data);
+                auto json = ruvia::toJson(service::common::ok<WebsiteAccessLogTailResponse>(read, std::move(data)),
+                                          {.resource = read.resource()});
+                co_return service::log_ingest::TailBatch{.payload = std::string(json.data(), json.size()),
+                                                         .cursor = std::move(cursor)};
+            });
     }
 
     ruvia::Task<void> dashboardStream(ruvia::Context& c) {
         const auto tenant = tenantId(c);
         const auto id = requireId(c);
-        co_await service::log_ingest::streamSseSnapshots(
-            c,
-            service::log_ingest::fanout::hub().subscribe(
-                c.worker(), service::log_ingest::notifications::LogResourceType::access, tenant,
-                id),
-            [&c, tenant, id]() { return websiteDashboardService().dashboard(c, tenant, id); },
-            writeDashboardEvent);
+        auto sub = service::live_resource::hub().subscribe(
+            c.worker(), tenant, service::live_resource::Resource::accessHistory, id,
+            service::live_resource::queryKey("dashboard"));
+        co_await service::live_resource::streamSnapshot(
+            c, std::move(sub),
+            [tenant, id](auto& read) -> ruvia::Task<std::string> {
+                auto data = co_await websiteDashboardService().dashboard(read, tenant, id);
+                auto json = ruvia::toJson(service::common::ok<WebsiteDashboardResponse>(read, std::move(data)),
+                                          {.resource = read.resource()});
+                co_return std::string(json.data(), json.size());
+            }, "dashboard");
     }
 
     ruvia::Task<ruvia::HttpResponse> create(ruvia::Context& c) {

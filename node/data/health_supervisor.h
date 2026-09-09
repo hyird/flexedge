@@ -16,28 +16,58 @@
 
 namespace flexedge::node {
 
-class OriginHealthSupervisor final {
+class OriginHealthSupervisor final : public std::enable_shared_from_this<OriginHealthSupervisor> {
   public:
+    static std::shared_ptr<OriginHealthSupervisor> create(
+        ruvia::EventLoop loop, RuntimeState& runtime, OriginHealthRegistry& registry,
+        OriginTlsContext& tlsContext) {
+        auto result = std::shared_ptr<OriginHealthSupervisor>(
+            new OriginHealthSupervisor(std::move(loop), runtime, registry, tlsContext));
+        result->stopRegistration_ = result->loop_.onStop([weak = result->weak_from_this()] {
+            if (const auto self = weak.lock()) self->stop();
+        });
+        return result;
+    }
+
+  private:
     OriginHealthSupervisor(ruvia::EventLoop loop, RuntimeState& runtime,
                            OriginHealthRegistry& registry, OriginTlsContext& tlsContext)
         : loop_(std::move(loop)), runtime_(runtime), registry_(registry), timer_(loop_.ioContext()),
-          stopRegistration_(loop_.onStop([this] { stop(); })), tlsContext_(tlsContext) {}
+          tlsContext_(tlsContext) {}
 
+  public:
     ~OriginHealthSupervisor() { stop(); }
 
     void requestStart() {
-        if (!loop_.post([this] { tick(); }).accepted()) {
+        if (!loop_.post([self = shared_from_this()] {
+                if (self->started_ || self->stopped_) return;
+                self->started_ = true;
+                self->tick();
+            }).accepted()) {
             throw std::runtime_error("origin health worker is stopping");
         }
     }
 
+    void requestStop() noexcept {
+        if (loop_.isCurrent()) {
+            stop();
+            return;
+        }
+        asio::post(loop_.executor(), [weak = weak_from_this()] {
+            if (const auto self = weak.lock()) self->stop();
+        });
+    }
+
+  private:
     void stop() noexcept {
+        stopped_ = true;
         std::error_code ignored;
         timer_.cancel(ignored);
     }
 
   private:
     void tick() {
+        if (stopped_) return;
         const auto config = runtime_.config();
         if (config && config->enabled()) {
             for (const auto* website : config->websites()) {
@@ -54,10 +84,8 @@ class OriginHealthSupervisor final {
                         continue;
                     }
                     std::make_shared<OriginHealthProbe>(
-                        loop_, registry_, tlsContext_,
+                        loop_, registry_.target(website->id(), origin.id()), tlsContext_,
                         OriginProbeConfig{
-                            .websiteId = website->id(),
-                            .originId = origin.id(),
                             .protocol = origin.protocol(),
                             .host = origin.host(),
                             .port = static_cast<std::uint16_t>(origin.port()),
@@ -75,9 +103,9 @@ class OriginHealthSupervisor final {
             }
         }
         timer_.expires_after(std::chrono::seconds(1));
-        timer_.async_wait([this](const std::error_code& error) {
+        timer_.async_wait([weak = weak_from_this()](const std::error_code& error) {
             if (!error) {
-                tick();
+                if (const auto self = weak.lock()) self->tick();
             }
         });
     }
@@ -88,6 +116,8 @@ class OriginHealthSupervisor final {
     asio::steady_timer timer_;
     ruvia::EventLoopStopRegistration stopRegistration_;
     OriginTlsContext& tlsContext_;
+    bool started_{};
+    bool stopped_{};
 };
 
 } // namespace flexedge::node

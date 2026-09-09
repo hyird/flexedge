@@ -14,7 +14,7 @@
 #include "service/domains/node/node.error.h"
 #include "service/domains/node/node.mapper.h"
 #include "service/domains/node/node.types.h"
-#include "service/features/log_ingest/tail.h"
+#include "service/features/log_ingest/tail_cursor.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
 
@@ -22,7 +22,7 @@ namespace service::node {
 
 class NodeReadService final {
   public:
-    ruvia::Task<NodePageDataDto> list(ruvia::Context& c, const std::string& tenantId,
+    ruvia::Task<NodePageDataDto> list(auto& c, const std::string& tenantId,
                                       std::int64_t page, std::int64_t pageSize, std::int64_t skip,
                                       const std::optional<std::string>& keyword,
                                       const std::optional<std::string>& clusterId,
@@ -64,7 +64,7 @@ class NodeReadService final {
 
         const auto countRows = co_await c.db().query("SELECT COUNT(*)" + where, params);
         const auto total = countRows.empty() ? std::int64_t{0}
-                                             : countRows.front()[0].as<std::int64_t>().value_or(0);
+                                             : countRows.front()[0].template as<std::int64_t>().value_or(0);
         const auto rows = co_await c.db().query(
             "SELECT node.id, node.cluster_id, cluster.name, node.revision, "
             "node.node_spec_revision, node.config::text, node.runtime::text, "
@@ -81,18 +81,18 @@ class NodeReadService final {
             params);
 
         NodePageDataDto result(c);
-        result.set<"total">(total);
-        result.set<"page">(page);
-        result.set<"pageSize">(pageSize);
-        result.set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
-        auto& items = result.ensure<"list">();
+        result.template set<"total">(total);
+        result.template set<"page">(page);
+        result.template set<"pageSize">(pageSize);
+        result.template set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
+        auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
             fillNode(c, items.emplace_back(c), row);
         }
         co_return result;
     }
 
-    ruvia::Task<NodeCredentialsDto> credentials(ruvia::Context& c, const std::string& tenantId,
+    ruvia::Task<NodeCredentialsDto> credentials(auto& c, const std::string& tenantId,
                                                 const std::string& id) const {
         const auto rows = co_await c.db().query(
             "SELECT revision, agent_id, node_secret_envelope FROM sys_node WHERE "
@@ -107,14 +107,14 @@ class NodeReadService final {
         }
         service::utils::SensitiveString secret(service::utils::openSecret(*envelope));
         NodeCredentialsDto result(c);
-        result.set<"nodeId">(rows.front()[1].value().value_or(""));
-        result.set<"secret">(secret.view());
-        result.set<"revision">(rows.front()[0].as<std::int64_t>().value_or(1));
+        result.template set<"nodeId">(rows.front()[1].value().value_or(""));
+        result.template set<"secret">(secret.view());
+        result.template set<"revision">(rows.front()[0].template as<std::int64_t>().value_or(1));
         co_return result;
     }
 
     ruvia::Task<NodeLogTailDataDto>
-    logs(ruvia::Context& c, const std::string& tenantId, const std::string& id, std::int64_t limit,
+    logs(auto& c, const std::string& tenantId, const std::string& id, std::int64_t limit,
          const std::optional<service::log_ingest::TailCursor>& after) const {
         std::vector<ruvia::DbValue> params{ruvia::DbValue{tenantId}, ruvia::DbValue{id}};
         std::string cursorPredicate;
@@ -143,21 +143,21 @@ class NodeReadService final {
         }
 
         NodeLogTailDataDto result(c);
-        auto& items = result.ensure<"list">();
+        auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
             if (!row[0].value()) {
                 continue;
             }
             auto& item = items.emplace_back(c);
-            item.set<"id">(row[0].value().value_or(""));
-            item.set<"occurredAt">(row[1].value().value_or(""));
-            item.set<"level">(row[2].value().value_or(""));
-            item.set<"category">(row[3].value().value_or(""));
-            item.set<"message">(row[4].value().value_or(""));
+            item.template set<"id">(row[0].value().value_or(""));
+            item.template set<"occurredAt">(row[1].value().value_or(""));
+            item.template set<"level">(row[2].value().value_or(""));
+            item.template set<"category">(row[3].value().value_or(""));
+            item.template set<"message">(row[4].value().value_or(""));
         }
         if (!items.empty()) {
-            result.set<"cursor">(service::log_ingest::encodeTailCursor(
-                rows.front()[5].as<std::int64_t>().value_or(0),
+            result.template set<"cursor">(service::log_ingest::encodeTailCursor(
+                rows.front()[5].template as<std::int64_t>().value_or(0),
                 rows.front()[0].value().value_or("")));
         }
         co_return result;

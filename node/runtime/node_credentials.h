@@ -1,14 +1,13 @@
 #pragma once
 
-#include <algorithm>
-#include <cctype>
 #include <filesystem>
-#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
 #include <openssl/crypto.h>
+
+#include "node/proto/credential_validation.h"
 
 #include "node/runtime/secret_buffer.h"
 #include "node/runtime/secure_file.h"
@@ -26,6 +25,8 @@ class NodeCredentials final {
         std::string nodeId;
         std::string secret;
         SecretStringGuard secretCleanser(secret);
+        bool hasNodeId = false;
+        bool hasSecret = false;
         std::size_t offset{};
         while (offset < bytes->size()) {
             const auto end = bytes->find('\n', offset);
@@ -41,15 +42,17 @@ class NodeCredentials final {
             }
             const auto name = line.substr(0, separator);
             const auto value = line.substr(separator + 1);
-            if (name == "node_id" && nodeId.empty()) {
+            if (name == "node_id" && !hasNodeId) {
+                hasNodeId = true;
                 nodeId.assign(value);
-            } else if (name == "secret" && secret.empty()) {
+            } else if (name == "secret" && !hasSecret) {
+                hasSecret = true;
                 secret.assign(value);
             } else {
                 throw std::runtime_error("invalid node credentials file field");
             }
         }
-        if (!validNodeId(nodeId) || !validSecret(secret)) {
+        if (!validCredentialNodeId(nodeId) || !validCredentialSecret(secret)) {
             throw std::runtime_error("node credentials file contains invalid values");
         }
         return NodeCredentials(std::move(nodeId), std::move(secret));
@@ -67,18 +70,6 @@ class NodeCredentials final {
 
     [[nodiscard]] const std::string& nodeId() const noexcept { return nodeId_; }
     [[nodiscard]] std::string_view secret() const noexcept { return secret_; }
-
-    [[nodiscard]] static bool validNodeId(std::string_view value) noexcept {
-        return value.size() == 32 && std::ranges::all_of(value, [](unsigned char ch) {
-                   return std::isdigit(ch) != 0 || (ch >= 'a' && ch <= 'f');
-               });
-    }
-
-    [[nodiscard]] static bool validSecret(std::string_view value) noexcept {
-        return value.size() >= 32 && value.size() <= 128 &&
-               std::ranges::all_of(value,
-                                   [](unsigned char ch) { return ch >= 0x21 && ch <= 0x7e; });
-    }
 
   private:
     NodeCredentials(std::string nodeId, std::string secret)

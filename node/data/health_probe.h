@@ -32,8 +32,6 @@
 namespace flexedge::node {
 
 struct OriginProbeConfig final {
-    std::string websiteId;
-    std::string originId;
     std::string protocol;
     std::string host;
     std::uint16_t port{};
@@ -46,9 +44,9 @@ struct OriginProbeConfig final {
 
 class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealthProbe> {
   public:
-    OriginHealthProbe(ruvia::EventLoop loop, OriginHealthRegistry& registry,
+    OriginHealthProbe(ruvia::EventLoop loop, OriginHealthRegistry::Target target,
                       OriginTlsContext& tlsContext, OriginProbeConfig config)
-        : loop_(std::move(loop)), registry_(registry), tlsContext_(tlsContext),
+        : loop_(std::move(loop)), target_(std::move(target)), tlsContext_(tlsContext),
           config_(std::move(config)), resolver_(loop_.ioContext()), socket_(loop_.ioContext()),
           timer_(loop_.ioContext()) {}
 
@@ -218,8 +216,8 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
         ignored = socket_.close(ignored);
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - startedAt_);
-        registry_.recordProbe(
-            config_.websiteId, config_.originId, healthy,
+        target_.recordProbe(
+            healthy,
             healthy ? config_.healthyThreshold : config_.unhealthyThreshold,
             static_cast<std::uint32_t>((std::min)(elapsed.count(), std::int64_t{600000})), error);
     }
@@ -241,7 +239,7 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
     }
 
     ruvia::EventLoop loop_;
-    OriginHealthRegistry& registry_;
+    OriginHealthRegistry::Target target_;
     OriginTlsContext& tlsContext_;
     OriginProbeConfig config_;
     asio::ip::tcp::resolver resolver_;

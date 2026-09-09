@@ -7,13 +7,7 @@ import {
 import { type Table } from '@tanstack/react-table'
 import { cn, getPageNumbers } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { PageSizeSelect } from './page-size-select'
 
 type DataTablePaginationProps<TData> = {
   table: Table<TData>
@@ -43,24 +37,13 @@ export function DataTablePagination<TData>({
           第 {currentPage} / {totalPages} 页
         </div>
         <div className='flex items-center gap-2 @max-2xl/content:flex-row-reverse'>
-          <Select
+          <PageSizeSelect
+            value={table.getState().pagination.pageSize}
             disabled={disabled}
-            value={`${table.getState().pagination.pageSize}`}
-            onValueChange={(value) => {
-              table.setPagination({ pageIndex: 0, pageSize: Number(value) })
+            onValueChange={(pageSize) => {
+              table.setPagination({ pageIndex: 0, pageSize })
             }}
-          >
-            <SelectTrigger className='h-8 w-17.5' aria-label='每页行数'>
-              <SelectValue placeholder={table.getState().pagination.pageSize} />
-            </SelectTrigger>
-            <SelectContent side='top'>
-              {[10, 20, 30, 40, 50].map((pageSize) => (
-                <SelectItem key={pageSize} value={`${pageSize}`}>
-                  {pageSize}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          />
           <p className='hidden text-sm font-medium sm:block'>每页行数</p>
         </div>
       </div>

@@ -13,7 +13,7 @@
 #include <ruvia/web/Controller.h>
 
 #include "service/common/domain_name.h"
-#include "service/common/http.h"
+#include "service/common/uuid.h"
 #include "service/common/ip_address.h"
 #include "service/domains/website/website.types.h"
 #include "common/route_policy.h"
@@ -393,12 +393,14 @@ struct WebsiteRouteRuleValidator final {
 
 inline bool
 validDomainSet(const ruvia::Array<service::website_config::WebsiteDomainInput>& domains) {
-    std::unordered_set<std::string_view> ids;
+    std::unordered_set<std::string> ids;
     std::unordered_set<std::string> hostnames;
     for (const auto& domain : domains) {
         const auto& id = domain.get<"id">();
+        const auto parsedId = service::common::parseUuid(
+            id ? std::optional<std::string_view>{id->view()} : std::nullopt);
         const auto& hostname = domain.get<"hostname">();
-        if (!id || !hostname || !ids.insert(id->view()).second) {
+        if (!parsedId || !hostname || !ids.insert(*parsedId).second) {
             return false;
         }
         std::string normalized(hostname->view());
@@ -414,13 +416,15 @@ validDomainSet(const ruvia::Array<service::website_config::WebsiteDomainInput>& 
 
 inline bool
 validOriginSet(const ruvia::Array<service::website_config::WebsiteOriginInput>& origins) {
-    std::unordered_set<std::string_view> ids;
+    std::unordered_set<std::string> ids;
     std::unordered_set<std::string_view> enabledGroups;
     std::unordered_set<std::string_view> enabledPrimaryGroups;
     for (const auto& origin : origins) {
         const auto& id = origin.get<"id">();
+        const auto parsedId = service::common::parseUuid(
+            id ? std::optional<std::string_view>{id->view()} : std::nullopt);
         const auto& group = origin.get<"group">();
-        if (!id || !group || !ids.insert(id->view()).second) {
+        if (!parsedId || !group || !ids.insert(*parsedId).second) {
             return false;
         }
         const auto& role = origin.get<"role">();
@@ -437,13 +441,15 @@ validOriginSet(const ruvia::Array<service::website_config::WebsiteOriginInput>& 
 
 inline bool
 validRouteRuleSet(const ruvia::Array<service::website_config::WebsiteRouteRuleInput>& rules) {
-    std::unordered_set<std::string_view> ids;
+    std::unordered_set<std::string> ids;
     for (const auto& rule : rules) {
         const auto& id = rule.get<"id">();
+        const auto parsedId = service::common::parseUuid(
+            id ? std::optional<std::string_view>{id->view()} : std::nullopt);
         const auto& requestHeaders = rule.get<"requestHeaders">();
         const auto& responseHeaders = rule.get<"responseHeaders">();
         const auto& originGroup = rule.get<"originGroup">();
-        if (!id || !requestHeaders || !responseHeaders || !ids.emplace(id->view()).second ||
+        if (!parsedId || !requestHeaders || !responseHeaders || !ids.insert(*parsedId).second ||
             !validRouteHeaderSet(*requestHeaders) || !validRouteHeaderSet(*responseHeaders)) {
             return false;
         }
@@ -455,10 +461,10 @@ validRouteRuleSet(const ruvia::Array<service::website_config::WebsiteRouteRuleIn
 }
 
 inline bool hasUniqueCertificateIds(const ruvia::Array<ruvia::String>& values) {
-    std::unordered_set<std::string_view> ids;
+    std::unordered_set<std::string> ids;
     for (const auto& value : values) {
-        if (!service::common::parseUuid(std::optional<std::string_view>{value.view()}) ||
-            !ids.insert(value.view()).second) {
+        const auto id = service::common::parseUuid(value.view());
+        if (!id || !ids.insert(*id).second) {
             return false;
         }
     }

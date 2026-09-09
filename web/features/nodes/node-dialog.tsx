@@ -1,12 +1,8 @@
-import { z } from 'zod'
 import { useFieldArray, useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { Plus, X } from 'lucide-react'
 import { toast } from 'sonner'
-import { getData, sendData } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
-import type { Cluster, DnsZone, Node } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import {
   Form,
@@ -32,23 +28,12 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-import { DnsLineSelect } from '@/components/dns-line-tree'
-
-const endpointSchema = z.object({
-  id: z.string().uuid(),
-  ip_address: z.string().trim().min(1, '请输入 IP 地址').max(45),
-  line_code: z.string().trim().min(1, '请输入线路代码').max(64),
-})
-
-const schema = z.object({
-  cluster_id: z.string().uuid('请选择所属集群'),
-  name: z.string().trim().min(1, '请输入节点名称').max(100),
-  status: z.enum(['enabled', 'disabled']),
-  endpoints: z.array(endpointSchema).min(1, '至少配置一个 IP').max(8),
-})
-
-type Values = z.infer<typeof schema>
-export type NodeCredentials = { node_id: string; secret: string; revision: number }
+import type { Cluster } from '@/features/clusters/types'
+import { dnsZoneLinesQuery } from '@/features/dns-zones/data'
+import { DnsLineSelect } from '@/features/dns-zones/dns-line-tree'
+import type { Node } from '@/features/nodes/types'
+import { createNode, updateNode, type NodeCredentials } from './data'
+import { nodeFormSchema, type NodeFormValues as Values } from './node-form'
 
 export function NodeDialog({
   node,
@@ -65,9 +50,8 @@ export function NodeDialog({
   onOpenChange: (open: boolean) => void
   onCredentials: (credentials: NodeCredentials) => void
 }) {
-  const queryClient = useQueryClient()
   const form = useForm<Values>({
-    resolver: zodResolver(schema),
+    resolver: zodResolver(nodeFormSchema),
     defaultValues: {
       cluster_id: node?.cluster_id ?? initialClusterId ?? '',
       name: node?.name ?? '',
@@ -83,36 +67,26 @@ export function NodeDialog({
   })
   const clusterId = form.watch('cluster_id')
   const selectedCluster = clusters.find((cluster) => cluster.id === clusterId)
-  const linesQuery = useQuery({
-    queryKey: [...queryKeys.dnsZones, 'lines', selectedCluster?.dns_zone_id],
-    queryFn: () =>
-      getData<DnsZone>(`/dns-zones/${selectedCluster!.dns_zone_id}`).then(
-        (zone) => zone.runtime.lines
-      ),
-    enabled: !!selectedCluster?.dns_zone_id,
-  })
+  const linesQuery = useQuery(dnsZoneLinesQuery(selectedCluster?.dns_zone_id))
   const endpoints = useFieldArray({
     control: form.control,
     name: 'endpoints',
     keyName: 'formKey',
   })
   const mutation = useMutation({
-    mutationFn: (values: Values) => {
+    mutationFn: async (values: Values) => {
       const body = {
         cluster_id: values.cluster_id,
         name: values.name,
         status: values.status,
         config: { endpoints: values.endpoints },
       }
-      return node
-        ? sendData('put', `/nodes/${node.id}`, body, node.revision)
-        : sendData<NodeCredentials>('post', '/nodes/', body)
+      return node ? updateNode(node, body) : createNode(body)
     },
-    onSuccess: async (response) => {
+    onSuccess: (response) => {
       toast.success(response.message)
       onOpenChange(false)
-      if (!node && response.data) onCredentials(response.data as NodeCredentials)
-      await queryClient.invalidateQueries({ queryKey: queryKeys.nodes })
+      if (response.data) onCredentials(response.data)
     },
   })
 

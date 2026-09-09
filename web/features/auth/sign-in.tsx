@@ -5,12 +5,9 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { Activity, Globe2, Loader2, LockKeyhole, Network } from 'lucide-react'
 import { toast } from 'sonner'
-import { login, sessionQueryOptions } from '@/lib/auth'
-import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import {
   Card,
-  CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
@@ -25,6 +22,7 @@ import {
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import { PasswordInput } from '@/components/password-input'
+import { login } from '@/features/auth/data'
 
 const schema = z.object({
   username: z.string().trim().min(1, '请输入用户名'),
@@ -43,9 +41,9 @@ export function SignIn() {
   })
 
   const mutation = useMutation({
-    mutationFn: (values: Values) => login(values.username, values.password),
+    mutationFn: (values: Values) =>
+      login(queryClient, values.username, values.password),
     onSuccess: async (user) => {
-      queryClient.setQueryData(sessionQueryOptions.queryKey, user)
       toast.success(`欢迎回来，${user.nickname || user.username}`)
       await navigate({ to: search.redirect || '/', replace: true })
     },
@@ -133,20 +131,17 @@ export function SignIn() {
         <div className='absolute inset-x-16 top-[14%] rounded-xl border bg-background p-5 shadow-2xl'>
           <div className='mb-7 flex items-center justify-between border-b pb-4'>
             <div>
-              <p className='text-lg font-semibold'>运行概览</p>
+              <p className='text-lg font-semibold'>边缘资源，统一管理</p>
               <p className='text-sm text-muted-foreground'>
-                全球边缘资源实时状态
+                网站接入、节点分发与运行观测
               </p>
             </div>
-            <span className='rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-600'>
-              系统正常
-            </span>
           </div>
           <div className='grid grid-cols-3 gap-4'>
             {[
-              [Globe2, '站点', '24'],
-              [Network, '节点', '18'],
-              [Activity, '在线率', '99.9%'],
+              [Globe2, '网站', '域名与回源'],
+              [Network, '节点', '接入与分发'],
+              [Activity, '观测', '日志与状态'],
             ].map(([Icon, label, value]) => (
               <Card key={String(label)} className='gap-3 py-5 shadow-none'>
                 <CardHeader className='px-5'>
@@ -154,31 +149,11 @@ export function SignIn() {
                     <CardDescription>{String(label)}</CardDescription>
                     <Icon className='size-4 text-muted-foreground' />
                   </div>
-                  <CardTitle className='text-2xl'>{String(value)}</CardTitle>
+                  <CardTitle className='text-base'>{String(value)}</CardTitle>
                 </CardHeader>
               </Card>
             ))}
           </div>
-          <Card className={cn('mt-4 gap-4 py-5 shadow-none')}>
-            <CardHeader className='px-5'>
-              <CardTitle className='text-base'>边缘流量</CardTitle>
-              <CardDescription>最近 12 小时</CardDescription>
-            </CardHeader>
-            <CardContent className='flex h-44 items-end gap-3 px-5'>
-              {[34, 58, 43, 72, 61, 84, 53, 76, 65, 91, 70, 86].map(
-                (height, index) => (
-                  <div
-                    key={index}
-                    className='flex-1 rounded-t bg-primary'
-                    style={{
-                      height: `${height}%`,
-                      opacity: 0.62 + index * 0.025,
-                    }}
-                  />
-                )
-              )}
-            </CardContent>
-          </Card>
         </div>
       </div>
     </div>

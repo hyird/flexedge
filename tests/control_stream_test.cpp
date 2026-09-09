@@ -1,3 +1,4 @@
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <iostream>
@@ -5,6 +6,7 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <asio/buffer.hpp>
 #include <asio/ip/tcp.hpp>
@@ -19,8 +21,12 @@
 #include <ruvia/web/WebSocketClient.h>
 
 #include "node/control/control_stream.h"
+#include "node/control/transport_config.h"
+#include "node/control/authenticate.h"
+#include "node/control/log_delivery.h"
 #include "node/proto/control_reply.h"
 #include "service/features/node_dispatch/notifications.h"
+#include "service/features/live_resource/fanout.h"
 #include "node/proto/control_protocol.h"
 
 namespace {
@@ -29,12 +35,16 @@ enum class ExpectedResult : std::uint8_t {
     kEnvelope,
     kStreamEnded,
     kProtocolError,
+    kAuthenticated,
+    kAuthenticationRejected,
+    kDelivered,
+    kDeliveryRejected,
 };
 
 class WebSocketOrigin final {
   public:
-    WebSocketOrigin(std::uint8_t opcode, std::string payload)
-        : opcode_(opcode), payload_(std::move(payload)),
+    WebSocketOrigin(std::uint8_t opcode, std::string payload, bool authentication = false)
+        : opcode_(opcode), payload_(std::move(payload)), authentication_(authentication),
           acceptor_(io_, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0)),
           thread_([this] { serve(); }) {}
 
@@ -89,6 +99,12 @@ class WebSocketOrigin final {
             response.append(flexedge::node::kControlSubprotocol);
             response.append("\r\n\r\n");
             asio::write(socket, asio::buffer(response));
+            if (authentication_) {
+                // Wait for the authentication send before replying. The client
+                // must exercise binary() as well as welcome validation.
+                std::array<char, 4096> incoming{};
+                (void)socket.read_some(asio::buffer(incoming));
+            }
 
             std::string frame;
             frame.push_back(static_cast<char>(0x80U | opcode_));
@@ -101,6 +117,7 @@ class WebSocketOrigin final {
 
     std::uint8_t opcode_;
     std::string payload_;
+    bool authentication_;
     asio::io_context io_;
     asio::ip::tcp::acceptor acceptor_;
     std::thread thread_;
@@ -110,6 +127,36 @@ ruvia::Task<int> exercise(ruvia::WebSocketClient& client, ExpectedResult expecte
     co_await client.connect();
     const auto connection = client.withOptions({});
     try {
+        if (expected == ExpectedResult::kDelivered || expected == ExpectedResult::kDeliveryRejected) {
+            flexedge::node::NodeLogBuffer logs;
+            (void)logs.node("info", "test", "retained until acknowledged");
+            try {
+                co_await flexedge::node::deliverLogs(connection, logs, "node", 1);
+                co_return expected == ExpectedResult::kDelivered &&
+                    logs.queuedEvents() == 0 && logs.retainedEvents() == 0 ? 0 : 6;
+            } catch (const std::runtime_error& error) {
+                const auto retry = logs.take("node");
+                co_return expected == ExpectedResult::kDeliveryRejected &&
+                    std::string_view(error.what()) == "control plane did not acknowledge log delivery" &&
+                    logs.queuedEvents() == 1 && logs.retainedEvents() == 1 && retry.has_value() ? 0 : 7;
+            }
+        }
+        if (expected == ExpectedResult::kAuthenticated ||
+            expected == ExpectedResult::kAuthenticationRejected) {
+            flexedge::node::v2::ClientEnvelope authentication;
+            authentication.set_request_id("auth");
+            authentication.mutable_authenticate()->set_node_id("node");
+            authentication.mutable_authenticate()->set_secret("synthetic-secret");
+            try {
+                const auto welcome = co_await flexedge::node::authenticateControlEnvelope(
+                    connection, std::move(authentication), "authentication rejected");
+                co_return expected == ExpectedResult::kAuthenticated &&
+                    welcome.node_id() == "node" ? 0 : 4;
+            } catch (const std::runtime_error& error) {
+                co_return expected == ExpectedResult::kAuthenticationRejected &&
+                    std::string_view(error.what()) == "authentication rejected" ? 0 : 5;
+            }
+        }
         const auto envelope = co_await flexedge::node::readServerEnvelope(connection);
         const bool matched = expected == ExpectedResult::kEnvelope &&
                              envelope.has_heartbeat_ack() &&
@@ -127,7 +174,10 @@ ruvia::Task<int> exercise(ruvia::WebSocketClient& client, ExpectedResult expecte
 }
 
 int runCase(std::uint8_t opcode, std::string payload, ExpectedResult expected) {
-    WebSocketOrigin origin(opcode, std::move(payload));
+    WebSocketOrigin origin(opcode, std::move(payload),
+        expected == ExpectedResult::kAuthenticated ||
+        expected == ExpectedResult::kAuthenticationRejected ||
+        expected == ExpectedResult::kDelivered || expected == ExpectedResult::kDeliveryRejected);
     ruvia::EventLoopPool loops({.loopCount = 1});
     const auto loop = loops.loop(0);
     ruvia::WebSocketClient client(
@@ -168,6 +218,41 @@ void verifyDeliveryProtocol() {
     require(releaseProbeReplies("watch-2", "binary", 8, "new-release", "new-digest", {}).size() ==
             1);
 
+    const std::string digest(64, 'a');
+    v2::Welcome welcome;
+    require(!validWelcome(welcome));
+    welcome.set_node_id("node-1");
+    welcome.set_desired_node_spec_revision(1);
+    welcome.set_desired_release_id("release-1");
+    welcome.set_desired_manifest_digest(digest);
+    welcome.set_node_binary_sha256(digest);
+    require(validWelcome(welcome));
+    for (int field = 0; field < 5; ++field) {
+        auto invalid = welcome;
+        switch (field) {
+            case 0: invalid.clear_node_id(); break;
+            case 1: invalid.set_desired_node_spec_revision(0); break;
+            case 2: invalid.clear_desired_release_id(); break;
+            case 3: invalid.set_desired_manifest_digest("bad"); break;
+            case 4: invalid.set_node_binary_sha256("bad"); break;
+        }
+        require(!validWelcome(invalid));
+    }
+    auto probe = releaseProbeReplies("probe-1", digest, 1, "release-1", digest, {}).front();
+    require(matchesReleaseProbeAck(probe, "probe-1"));
+    require(!matchesReleaseProbeAck(probe, "wrong-id"));
+    require(!matchesHeartbeatAck(probe, "probe-1"));
+    probe.mutable_release_probe_ack()->set_desired_manifest_digest("invalid");
+    require(!matchesReleaseProbeAck(probe, "probe-1"));
+    v2::ServerEnvelope heartbeatReply;
+    heartbeatReply.set_request_id("heartbeat-1");
+    heartbeatReply.mutable_heartbeat_ack()->set_node_binary_sha256(digest);
+    require(matchesHeartbeatAck(heartbeatReply, "heartbeat-1"));
+    require(!matchesHeartbeatAck(heartbeatReply, "wrong-id"));
+    require(!matchesReleaseProbeAck(heartbeatReply, "heartbeat-1"));
+    heartbeatReply.mutable_heartbeat_ack()->set_node_binary_sha256("invalid");
+    require(!matchesHeartbeatAck(heartbeatReply, "heartbeat-1"));
+
     v2::ApplyResult result;
     result.set_node_id("node-1");
     result.set_node_spec_revision(8);
@@ -202,7 +287,7 @@ void verifyDeliveryProtocol() {
     require(matchesApplyResultAck(reply, "watch-1", result));
 }
 
-ruvia::Task<bool> watchSignal(service::node_runtime::fanout::Hub::Subscription& subscription,
+ruvia::Task<bool> watchSignal(service::node_dispatch::fanout::Hub::Subscription& subscription,
                               std::chrono::milliseconds timeout) {
     co_return (co_await subscription.receiveFor(timeout, {})).hasValue();
 }
@@ -213,7 +298,7 @@ void verifyWatchNotifications() {
     auto watch =
         service::node_dispatch::notifications::hub().subscribe(loop.handle(), "delivery-test");
     loops.start();
-    service::node_runtime::fanout::hub().publish("delivery-test");
+    service::live_resource::hub().publishRuntime("delivery-test", "node-runtime-test", "{}");
     if (loop.start(watchSignal(watch, std::chrono::milliseconds(20))).get())
         throw std::runtime_error("heartbeats must not wake configuration watches");
     service::node_dispatch::notifications::published("other-tenant");
@@ -232,7 +317,56 @@ void verifyWatchNotifications() {
 }
 
 int main() {
+    flexedge::node::v2::ServerEnvelope deliveryReply;
+    deliveryReply.set_request_id("logs-1");
+    deliveryReply.mutable_log_delivery_ack();
+    if (runCase(0x2, deliveryReply.SerializeAsString(), ExpectedResult::kDelivered)) return 14;
+    deliveryReply.set_request_id("wrong");
+    if (runCase(0x2, deliveryReply.SerializeAsString(), ExpectedResult::kDeliveryRejected)) return 15;
+    deliveryReply.set_request_id("logs-1");
+    deliveryReply.mutable_heartbeat_ack();
+    if (runCase(0x2, deliveryReply.SerializeAsString(), ExpectedResult::kDeliveryRejected)) return 16;
+    flexedge::node::v2::ServerEnvelope authenticationReply;
+    authenticationReply.set_request_id("auth");
+    authenticationReply.mutable_welcome()->set_node_id("node");
+    if (runCase(0x2, authenticationReply.SerializeAsString(), ExpectedResult::kAuthenticated))
+        return 11;
+    authenticationReply.set_request_id("other");
+    if (runCase(0x2, authenticationReply.SerializeAsString(), ExpectedResult::kAuthenticationRejected))
+        return 12;
+    authenticationReply.set_request_id("auth");
+    authenticationReply.mutable_heartbeat_ack();
+    if (runCase(0x2, authenticationReply.SerializeAsString(), ExpectedResult::kAuthenticationRejected))
+        return 13;
     try {
+        const auto defaults = flexedge::node::controlTransportConfig("edge.example");
+        const auto explicitAddress =
+            flexedge::node::controlTransportConfig("ws://[::1]:8080/custom");
+        if (defaults.scheme != ruvia::WebSocketScheme::kWss ||
+            defaults.host != "edge.example" || defaults.port.has_value() ||
+            defaults.target != "/api/agent/connect" ||
+            defaults.subprotocols != std::vector<std::string>{
+                std::string(flexedge::node::kControlSubprotocol)} ||
+            explicitAddress.scheme != ruvia::WebSocketScheme::kWs ||
+            explicitAddress.host != "::1" || explicitAddress.port != 8080 ||
+            explicitAddress.target != "/custom") {
+            throw std::runtime_error("control transport address mapping failed");
+        }
+        for (const auto address : {"", "ws://", "edge.example:0", "edge.example:65536",
+                                   "edge.example:12x", "ws://[::1", "user@edge.example",
+                                   "edge.example/path?query", "edge.example/#fragment",
+                                   "http://edge.example", "edge.example:", "ws://[::1]:",
+                                   "::1", "edge.example\n", "edge.example/path with space",
+                                   "edge.example\\path", "edge.example]", "ws://[[::1]",
+                                   "ws://[example.com]", "ws://[127.0.0.1]", "ws://[1::2::3]"}) {
+            bool rejected = false;
+            try {
+                (void)flexedge::node::controlTransportConfig(address);
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            if (!rejected) throw std::runtime_error("invalid control address accepted");
+        }
         verifyDeliveryProtocol();
         verifyWatchNotifications();
         if constexpr (flexedge::node::kReleaseWatchMaximumSeconds != 10) {

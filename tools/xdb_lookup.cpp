@@ -1,4 +1,3 @@
-#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -12,14 +11,6 @@ struct Arguments final {
     std::string ipv6;
     std::string ip;
 };
-
-[[nodiscard]] bool setEnvironment(const char* name, const std::string& value) {
-#ifdef _WIN32
-    return _putenv_s(name, value.c_str()) == 0;
-#else
-    return setenv(name, value.c_str(), 1) == 0;
-#endif
-}
 
 [[nodiscard]] bool parseArguments(int argc, char** argv, Arguments& result) {
     for (int index = 1; index < argc; ++index) {
@@ -49,13 +40,7 @@ int main(int argc, char** argv) {
         std::cerr << "usage: xdb_lookup [--v4 <ipv4.xdb>] [--v6 <ipv6.xdb>] --ip <address>\n";
         return 1;
     }
-    if ((!arguments.ipv4.empty() &&
-         !setEnvironment("FLEXEDGE_XDB_V4_PATH", arguments.ipv4)) ||
-        (!arguments.ipv6.empty() && !setEnvironment("FLEXEDGE_XDB_V6_PATH", arguments.ipv6))) {
-        std::cerr << "could not configure XDB runtime paths\n";
-        return 1;
-    }
-    const auto& database = service::geoip::xdbDatabase();
+    const service::geoip::XdbDatabase database(arguments.ipv4, arguments.ipv6);
     if (!database.available()) {
         std::cerr << "could not open XDB database\n";
         return 1;

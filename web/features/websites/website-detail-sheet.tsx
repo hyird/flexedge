@@ -1,5 +1,5 @@
-import { type ReactNode, useEffect, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { type ReactNode } from 'react'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   Activity,
   Globe2,
@@ -9,15 +9,11 @@ import {
   ShieldCheck,
   type LucideIcon,
 } from 'lucide-react'
-import { apiErrorMessage, type ApiEnvelope, getData, sendData } from '@/lib/api'
+import { toast } from 'sonner'
+import { apiErrorMessage } from '@/lib/api'
 import { formatBytes, formatBytesPerSecond } from '@/lib/format'
-import { queryKeys } from '@/lib/query-keys'
-import type {
-  Website,
-  WebsiteDashboard,
-  WebsiteDashboardRanking,
-  WebsiteDashboardSeriesPoint,
-} from './types'
+import { useDelayedLoading } from '@/hooks/use-delayed-loading'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -35,13 +31,21 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-import { StatusBadge } from '@/components/status-badge'
+import { Skeleton } from '@/components/ui/skeleton'
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { toast } from 'sonner'
+import { StatusBadge } from '@/components/status-badge'
+import type {
+  WebsiteDashboardClientIpRanking,
+  WebsiteDashboardRanking,
+  WebsiteDashboardSeriesPoint,
+} from './dashboard-schema'
+import { websiteDetailQuery, probeWebsiteDns } from './data'
+import type { Website } from './types'
+import { useWebsiteDashboard } from './use-website-dashboard'
 import { originGroupLabel } from './website-display'
 
 function DashboardTooltip({
@@ -54,7 +58,10 @@ function DashboardTooltip({
   return (
     <Tooltip>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent sideOffset={6} className='max-w-[min(24rem,calc(100vw-2rem))]'>
+      <TooltipContent
+        sideOffset={6}
+        className='max-w-[min(24rem,calc(100vw-2rem))]'
+      >
         {content}
       </TooltipContent>
     </Tooltip>
@@ -82,7 +89,7 @@ function WebsiteDashboardMetric({
         </div>
       }
     >
-      <div className='min-w-0 cursor-help bg-card p-3'>
+      <div className='min-w-0 cursor-default bg-card p-3'>
         <div className='flex items-center justify-between gap-2 text-xs text-muted-foreground'>
           <span className='truncate'>{title}</span>
           <Icon className='size-3.5 shrink-0' aria-hidden='true' />
@@ -115,7 +122,7 @@ function WebsiteDashboardTrend({
   const hasData = data.some((item) => value(item) > 0)
 
   return (
-    <Card className='gap-3 py-3'>
+    <Card className='min-w-0 gap-3 py-3'>
       <CardHeader className='border-b px-3 [.border-b]:pb-3'>
         <CardTitle className='text-sm'>{title}</CardTitle>
         <CardDescription>{description}</CardDescription>
@@ -138,7 +145,7 @@ function WebsiteDashboardTrend({
                     }
                   >
                     <div
-                      className='group flex h-full min-w-0 flex-1 cursor-help items-end focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
+                      className='group flex h-full min-w-0 flex-1 cursor-default items-end focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'
                       tabIndex={0}
                     >
                       <div
@@ -170,23 +177,34 @@ function WebsiteDashboardTrend({
   )
 }
 
-function WebsiteDashboardRankingList({
+function clientIpTooltipDetails(item: WebsiteDashboardClientIpRanking) {
+  return (
+    <div className='space-y-1 break-words'>
+      <p>ASN：{item.asn || '未知'}</p>
+      <p>AS 名称：{item.as_name || '暂无数据'}</p>
+    </div>
+  )
+}
+
+function WebsiteDashboardRankingList<T extends WebsiteDashboardRanking>({
   title,
   description,
   data,
   value,
   format,
+  tooltipDetails,
 }: {
   title: string
   description: string
-  data: WebsiteDashboardRanking[]
-  value: (item: WebsiteDashboardRanking) => number
+  data: T[]
+  value: (item: T) => number
   format: (value: number) => string
+  tooltipDetails?: (item: T) => ReactNode
 }) {
   const maximum = Math.max(1, ...data.map(value))
 
   return (
-    <Card className='h-full gap-3 py-3'>
+    <Card className='h-full min-w-0 gap-3 py-3'>
       <CardHeader className='border-b px-3 [.border-b]:pb-3'>
         <CardTitle className='text-sm'>{title}</CardTitle>
         <CardDescription>{description}</CardDescription>
@@ -201,15 +219,19 @@ function WebsiteDashboardRankingList({
                   content={
                     <div className='space-y-1 break-all'>
                       <p>{item.label}</p>
+                      {tooltipDetails?.(item)}
                       <p className='font-medium'>{format(amount)}</p>
                     </div>
                   }
                 >
-                  <span className='min-w-0 cursor-help truncate font-mono' tabIndex={0}>
+                  <span
+                    className='min-w-0 cursor-default truncate font-mono'
+                    tabIndex={0}
+                  >
                     {item.label}
                   </span>
                 </DashboardTooltip>
-                <span className='shrink-0 tabular-nums text-muted-foreground'>
+                <span className='shrink-0 text-muted-foreground tabular-nums'>
                   {format(amount)}
                 </span>
               </div>
@@ -232,66 +254,28 @@ function WebsiteDashboardRankingList({
   )
 }
 
-export function WebsiteDetailSheet({
+function MountedWebsiteDetailSheet({
   website,
   onOpenChange,
 }: {
-  website: Website | null
+  website: Website
   onOpenChange: (open: boolean) => void
 }) {
   const websiteId = website?.id
-  const queryClient = useQueryClient()
-  const [dashboardSnapshot, setDashboardSnapshot] = useState<{
-    websiteId: string
-    data: WebsiteDashboard
-  } | null>(null)
+  const { data: dashboard, error: dashboardError } =
+    useWebsiteDashboard(websiteId)
+  const dashboardLoading = useDelayedLoading(!dashboard && !dashboardError)
 
-  useEffect(() => {
-    if (!websiteId) return
-
-    // The stream's first dashboard event is the initial snapshot. Later events
-    // replace it after access-log notifications; no dashboard REST read exists.
-    const stream = new EventSource(`/api/websites/${websiteId}/dashboard/stream`, {
-      withCredentials: true,
-    })
-    stream.addEventListener('dashboard', (event) => {
-      const payload = JSON.parse(
-        (event as MessageEvent<string>).data
-      ) as ApiEnvelope<WebsiteDashboard>
-      setDashboardSnapshot({ websiteId, data: payload.data })
-    })
-    return () => stream.close()
-  }, [websiteId])
-
-  const detailQuery = useQuery({
-    queryKey: [...queryKeys.websites, websiteId, 'detail'],
-    enabled: !!websiteId,
-    queryFn: () => {
-      if (!websiteId) throw new Error('网站不存在')
-      return getData<Website>(`/websites/${websiteId}`)
-    },
-  })
+  const detailQuery = useQuery(websiteDetailQuery(websiteId))
   const dnsProbeMutation = useMutation({
-    mutationFn: async () => {
-      if (!websiteId) throw new Error('网站不存在')
-      return sendData('post', `/websites/${websiteId}/dns-probe`)
-    },
-    onSuccess: async (response) => {
+    mutationFn: () => probeWebsiteDns(websiteId),
+    onSuccess: (response) => {
       toast.success(response.message)
-      await queryClient.invalidateQueries({
-        queryKey: [...queryKeys.websites, websiteId, 'detail'],
-      })
     },
     onError: (error) => toast.error(apiErrorMessage(error)),
   })
 
-  if (!website) return null
-
   const detail = detailQuery.data ?? website
-  const dashboard =
-    dashboardSnapshot && dashboardSnapshot.websiteId === websiteId
-      ? dashboardSnapshot.data
-      : undefined
   const summary = dashboard?.summary
   const domainStates = detail.runtime.domain_states
   const originStates = detail.runtime.origin_states
@@ -311,144 +295,190 @@ export function WebsiteDetailSheet({
         </SheetHeader>
         <ScrollArea className='min-h-0 flex-1'>
           <div className='space-y-4 p-4'>
-            <section
-              className='grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border sm:grid-cols-3 2xl:grid-cols-6'
-              aria-label='网站核心运行指标'
-            >
-              <WebsiteDashboardMetric
-                title='上月峰值带宽'
-                value={formatBytesPerSecond(summary?.previous_month_peak_bps)}
-                description='按分钟响应流量聚合'
-                icon={Activity}
-              />
-              <WebsiteDashboardMetric
-                title='当月峰值带宽'
-                value={formatBytesPerSecond(summary?.current_month_peak_bps)}
-                description='按分钟响应流量聚合'
-                icon={Network}
-              />
-              <WebsiteDashboardMetric
-                title='当天峰值带宽'
-                value={formatBytesPerSecond(summary?.today_peak_bps)}
-                description='按分钟响应流量聚合'
-                icon={Globe2}
-              />
-              <WebsiteDashboardMetric
-                title='当前带宽'
-                value={formatBytesPerSecond(summary?.current_bandwidth_bps)}
-                description='最近一分钟平均值'
-                icon={Server}
-              />
-              <WebsiteDashboardMetric
-                title='当天独立 IP'
-                value={summary?.today_unique_ips ?? '—'}
-                description='按客户端 IP 去重'
-                icon={Activity}
-              />
-              <WebsiteDashboardMetric
-                title='当天流量'
-                value={formatBytes(summary?.today_response_bytes)}
-                description='当天响应流量累计'
-                icon={ShieldCheck}
-              />
-            </section>
+            {dashboardError && (
+              <Alert variant='destructive'>
+                <AlertTitle>网站统计暂未更新</AlertTitle>
+                <AlertDescription>
+                  {dashboardError}
+                  {dashboard ? ' 当前展示上次有效数据。' : ''}
+                </AlertDescription>
+              </Alert>
+            )}
+            {dashboardLoading.pending && (
+              <div
+                role='status'
+                aria-label='正在加载网站统计'
+                className='space-y-4'
+              >
+                <p className='text-sm text-muted-foreground'>
+                  正在加载网站统计…
+                </p>
+                <Skeleton
+                  className={
+                    dashboardLoading.showSkeleton
+                      ? 'h-24 w-full'
+                      : 'invisible h-24 w-full'
+                  }
+                />
+                <Skeleton
+                  className={
+                    dashboardLoading.showSkeleton
+                      ? 'h-56 w-full'
+                      : 'invisible h-56 w-full'
+                  }
+                />
+              </div>
+            )}
+            {!dashboardLoading.pending && dashboard && (
+              <>
+                <section
+                  className='grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border sm:grid-cols-3 2xl:grid-cols-6'
+                  aria-label='网站核心运行指标'
+                >
+                  <WebsiteDashboardMetric
+                    title='上月峰值带宽'
+                    value={formatBytesPerSecond(
+                      summary?.previous_month_peak_bps
+                    )}
+                    description='按分钟响应流量聚合'
+                    icon={Activity}
+                  />
+                  <WebsiteDashboardMetric
+                    title='当月峰值带宽'
+                    value={formatBytesPerSecond(
+                      summary?.current_month_peak_bps
+                    )}
+                    description='按分钟响应流量聚合'
+                    icon={Network}
+                  />
+                  <WebsiteDashboardMetric
+                    title='当天峰值带宽'
+                    value={formatBytesPerSecond(summary?.today_peak_bps)}
+                    description='按分钟响应流量聚合'
+                    icon={Globe2}
+                  />
+                  <WebsiteDashboardMetric
+                    title='当前带宽'
+                    value={formatBytesPerSecond(summary?.current_bandwidth_bps)}
+                    description='最近一分钟平均值'
+                    icon={Server}
+                  />
+                  <WebsiteDashboardMetric
+                    title='当天独立 IP'
+                    value={summary?.today_unique_ips ?? '—'}
+                    description='按客户端 IP 去重'
+                    icon={Activity}
+                  />
+                  <WebsiteDashboardMetric
+                    title='当天流量'
+                    value={formatBytes(summary?.today_response_bytes)}
+                    description='当天响应流量累计'
+                    icon={ShieldCheck}
+                  />
+                </section>
 
-            <div className='grid gap-4 xl:grid-cols-2'>
-              <WebsiteDashboardTrend
-                title='24 小时流量趋势'
-                description='按小时汇总响应流量。'
-                data={dashboard?.hourly ?? []}
-                value={(item) => item.response_bytes}
-                format={formatBytes}
-              />
-              <WebsiteDashboardTrend
-                title='15 天流量趋势'
-                description='按天汇总响应流量。'
-                data={dashboard?.daily ?? []}
-                value={(item) => item.response_bytes}
-                format={formatBytes}
-              />
-              <WebsiteDashboardTrend
-                title='24 小时访问量趋势'
-                description='按小时汇总请求次数。'
-                data={dashboard?.hourly ?? []}
-                value={(item) => item.request_count}
-                format={(value) => `${value} 次`}
-              />
-              <WebsiteDashboardTrend
-                title='15 天访问量趋势'
-                description='按天汇总请求次数。'
-                data={dashboard?.daily ?? []}
-                value={(item) => item.request_count}
-                format={(value) => `${value} 次`}
-              />
-            </div>
+                <div className='grid min-w-0 grid-cols-1 gap-4 xl:grid-cols-2'>
+                  <WebsiteDashboardTrend
+                    title='24 小时流量趋势'
+                    description='按小时汇总响应流量。'
+                    data={dashboard?.hourly ?? []}
+                    value={(item) => item.response_bytes}
+                    format={formatBytes}
+                  />
+                  <WebsiteDashboardTrend
+                    title='15 天流量趋势'
+                    description='按天汇总响应流量。'
+                    data={dashboard?.daily ?? []}
+                    value={(item) => item.response_bytes}
+                    format={formatBytes}
+                  />
+                  <WebsiteDashboardTrend
+                    title='24 小时访问量趋势'
+                    description='按小时汇总请求次数。'
+                    data={dashboard?.hourly ?? []}
+                    value={(item) => item.request_count}
+                    format={(value) => `${value} 次`}
+                  />
+                  <WebsiteDashboardTrend
+                    title='15 天访问量趋势'
+                    description='按天汇总请求次数。'
+                    data={dashboard?.daily ?? []}
+                    value={(item) => item.request_count}
+                    format={(value) => `${value} 次`}
+                  />
+                </div>
 
-            <div className='grid auto-rows-fr gap-4 lg:grid-cols-2'>
-              <WebsiteDashboardRankingList
-                title='状态码分布'
-                description='最近 24 小时的请求数。'
-                data={dashboard?.status_codes ?? []}
-                value={(item) => item.request_count}
-                format={(value) => `${value} 次`}
-              />
-              <WebsiteDashboardRankingList
-                title='请求方法分布'
-                description='最近 24 小时的请求数。'
-                data={dashboard?.methods ?? []}
-                value={(item) => item.request_count}
-                format={(value) => `${value} 次`}
-              />
-              <WebsiteDashboardRankingList
-                title='国家/地区排行'
-                description='最近 24 小时按请求数，由本地 XDB 库解析。'
-                data={dashboard?.countries ?? []}
-                value={(item) => item.request_count}
-                format={(value) => `${value} 次`}
-              />
-              <WebsiteDashboardRankingList
-                title='域名访问排行'
-                description='最近 24 小时按请求数。'
-                data={dashboard?.hosts ?? []}
-                value={(item) => item.request_count}
-                format={(value) => `${value} 次`}
-              />
-              <WebsiteDashboardRankingList
-                title='请求来源排行'
-                description='最近 24 小时按请求数。'
-                data={dashboard?.referers ?? []}
-                value={(item) => item.request_count}
-                format={(value) => `${value} 次`}
-              />
-              <WebsiteDashboardRankingList
-                title='请求路径排行'
-                description='最近 24 小时按请求数。'
-                data={dashboard?.paths ?? []}
-                value={(item) => item.request_count}
-                format={(value) => `${value} 次`}
-              />
-              <WebsiteDashboardRankingList
-                title='独立 IP 排行（下行流量）'
-                description='最近 24 小时按响应流量。'
-                data={dashboard?.client_ips_by_bytes ?? []}
-                value={(item) => item.response_bytes}
-                format={formatBytes}
-              />
-              <WebsiteDashboardRankingList
-                title='独立 IP 排行（请求数）'
-                description='最近 24 小时按请求数。'
-                data={dashboard?.client_ips_by_requests ?? []}
-                value={(item) => item.request_count}
-                format={(value) => `${value} 次`}
-              />
-            </div>
+                <div className='grid min-w-0 auto-rows-fr grid-cols-1 gap-4 lg:grid-cols-2'>
+                  <WebsiteDashboardRankingList
+                    title='状态码分布'
+                    description='最近 24 小时的请求数。'
+                    data={dashboard?.status_codes ?? []}
+                    value={(item) => item.request_count}
+                    format={(value) => `${value} 次`}
+                  />
+                  <WebsiteDashboardRankingList
+                    title='请求方法分布'
+                    description='最近 24 小时的请求数。'
+                    data={dashboard?.methods ?? []}
+                    value={(item) => item.request_count}
+                    format={(value) => `${value} 次`}
+                  />
+                  <WebsiteDashboardRankingList
+                    title='国家/地区排行'
+                    description='最近 24 小时按请求数，由本地 XDB 库解析。'
+                    data={dashboard?.countries ?? []}
+                    value={(item) => item.request_count}
+                    format={(value) => `${value} 次`}
+                  />
+                  <WebsiteDashboardRankingList
+                    title='域名访问排行'
+                    description='最近 24 小时按请求数。'
+                    data={dashboard?.hosts ?? []}
+                    value={(item) => item.request_count}
+                    format={(value) => `${value} 次`}
+                  />
+                  <WebsiteDashboardRankingList
+                    title='请求来源排行'
+                    description='最近 24 小时按请求数。'
+                    data={dashboard?.referers ?? []}
+                    value={(item) => item.request_count}
+                    format={(value) => `${value} 次`}
+                  />
+                  <WebsiteDashboardRankingList
+                    title='请求路径排行'
+                    description='最近 24 小时按请求数。'
+                    data={dashboard?.paths ?? []}
+                    value={(item) => item.request_count}
+                    format={(value) => `${value} 次`}
+                  />
+                  <WebsiteDashboardRankingList
+                    title='独立 IP 排行（下行流量）'
+                    description='最近 24 小时按响应流量。'
+                    data={dashboard?.client_ips_by_bytes ?? []}
+                    tooltipDetails={clientIpTooltipDetails}
+                    value={(item) => item.response_bytes}
+                    format={formatBytes}
+                  />
+                  <WebsiteDashboardRankingList
+                    title='独立 IP 排行（请求数）'
+                    description='最近 24 小时按请求数。'
+                    data={dashboard?.client_ips_by_requests ?? []}
+                    tooltipDetails={clientIpTooltipDetails}
+                    value={(item) => item.request_count}
+                    format={(value) => `${value} 次`}
+                  />
+                </div>
+              </>
+            )}
 
-            <div className='grid gap-4 xl:grid-cols-2'>
-              <Card className='gap-3 py-3'>
+            <div className='grid min-w-0 grid-cols-1 gap-4 xl:grid-cols-2'>
+              <Card className='min-w-0 gap-3 py-3'>
                 <CardHeader className='flex flex-row items-start justify-between gap-3 border-b px-3 [.border-b]:pb-3'>
                   <div className='space-y-1.5'>
                     <CardTitle>域名解析状态</CardTitle>
-                    <CardDescription>由公共 DNS 探测服务校验 CNAME 指向。</CardDescription>
+                    <CardDescription>
+                      由公共 DNS 探测服务校验 CNAME 指向。
+                    </CardDescription>
                   </div>
                   <Button
                     type='button'
@@ -459,7 +489,9 @@ export function WebsiteDetailSheet({
                     disabled={dnsProbeMutation.isPending}
                   >
                     <RefreshCw
-                      className={dnsProbeMutation.isPending ? 'animate-spin' : undefined}
+                      className={
+                        dnsProbeMutation.isPending ? 'animate-spin' : undefined
+                      }
                       aria-hidden='true'
                     />
                     立即检测
@@ -490,18 +522,28 @@ export function WebsiteDetailSheet({
                             content={
                               <div className='space-y-1'>
                                 <p>{domain.hostname}</p>
-                                <p>解析状态：{runtime?.resolution_status ?? 'pending'}</p>
+                                <p>
+                                  解析状态：
+                                  {runtime?.resolution_status ?? 'pending'}
+                                </p>
                                 {runtime?.last_verified_at && (
                                   <p>最近检测：{runtime.last_verified_at}</p>
                                 )}
                                 {runtime?.last_error && (
-                                  <p className='break-all'>错误：{runtime.last_error}</p>
+                                  <p className='break-all'>
+                                    错误：{runtime.last_error}
+                                  </p>
                                 )}
                               </div>
                             }
                           >
-                            <span className='inline-flex cursor-help' tabIndex={0}>
-                              <StatusBadge status={runtime?.resolution_status ?? 'pending'} />
+                            <span
+                              className='inline-flex cursor-default'
+                              tabIndex={0}
+                            >
+                              <StatusBadge
+                                status={runtime?.resolution_status ?? 'pending'}
+                              />
                             </span>
                           </DashboardTooltip>
                           {runtime?.last_error && (
@@ -519,7 +561,7 @@ export function WebsiteDetailSheet({
                 </CardContent>
               </Card>
 
-              <Card className='gap-3 py-3'>
+              <Card className='min-w-0 gap-3 py-3'>
                 <CardHeader className='border-b px-3 [.border-b]:pb-3'>
                   <CardTitle>源站健康</CardTitle>
                   <CardDescription>各节点最新回源探测结果。</CardDescription>
@@ -546,20 +588,28 @@ export function WebsiteDetailSheet({
                             </p>
                             <p className='mt-1 text-xs text-muted-foreground'>
                               {originGroupLabel(origin.group)} ·{' '}
-                              {origin.role === 'primary' ? '主要源站' : '备用源站'} · 权重{' '}
-                              {origin.weight}
+                              {origin.role === 'primary'
+                                ? '主要源站'
+                                : '备用源站'}{' '}
+                              · 权重 {origin.weight}
                             </p>
                           </div>
                           <DashboardTooltip
                             content={
                               <div className='space-y-1'>
-                                <p>{origin.protocol}://{origin.host}:{origin.port}</p>
+                                <p>
+                                  {origin.protocol}://{origin.host}:
+                                  {origin.port}
+                                </p>
                                 <p>整体状态：{state}</p>
                                 {states.length > 0 ? (
                                   states.map((item) => (
                                     <p key={item.node_id} className='break-all'>
-                                      {item.node_name || '未知节点'}：{item.status} · {item.latency_millis} ms
-                                      {item.last_error ? ` · ${item.last_error}` : ''}
+                                      {item.node_name || '未知节点'}：
+                                      {item.status} · {item.latency_millis} ms
+                                      {item.last_error
+                                        ? ` · ${item.last_error}`
+                                        : ''}
                                     </p>
                                   ))
                                 ) : (
@@ -568,7 +618,10 @@ export function WebsiteDetailSheet({
                               </div>
                             }
                           >
-                            <span className='inline-flex cursor-help' tabIndex={0}>
+                            <span
+                              className='inline-flex cursor-default'
+                              tabIndex={0}
+                            >
                               <StatusBadge status={state} />
                             </span>
                           </DashboardTooltip>
@@ -577,7 +630,8 @@ export function WebsiteDetailSheet({
                           <div className='mt-2 flex flex-wrap gap-1.5'>
                             {states.map((item) => (
                               <Badge key={item.node_id} variant='outline'>
-                                {item.node_name || '未知节点'} · {item.latency_millis} ms
+                                {item.node_name || '未知节点'} ·{' '}
+                                {item.latency_millis} ms
                               </Badge>
                             ))}
                           </div>
@@ -592,5 +646,22 @@ export function WebsiteDetailSheet({
         </ScrollArea>
       </SheetContent>
     </Sheet>
+  )
+}
+
+export function WebsiteDetailSheet({
+  website,
+  onOpenChange,
+}: {
+  website: Website | null
+  onOpenChange: (open: boolean) => void
+}) {
+  if (!website) return null
+  return (
+    <MountedWebsiteDetailSheet
+      key={website.id}
+      website={website}
+      onOpenChange={onOpenChange}
+    />
   )
 }

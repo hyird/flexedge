@@ -1,11 +1,7 @@
-import { z } from 'zod'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { sendData } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
-import type { DnsProvider } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import {
   Form,
@@ -31,15 +27,12 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-
-const dnsSchema = z.object({
-  name: z.string().trim().min(1, '请输入账号名称').max(100),
-  provider: z.enum(['cloudflare', 'aliyun']),
-  account_id: z.string().trim().min(8, '账户标识至少 8 个字符').max(128),
-  api_token: z.string().max(256),
-})
-
-type DnsValues = z.infer<typeof dnsSchema>
+import type { DnsProvider } from '@/features/providers/types'
+import { saveDnsProvider } from './data'
+import {
+  dnsProviderFormSchema,
+  type DnsProviderFormValues as DnsValues,
+} from './dns-provider-form'
 
 export function DnsProviderDialog({
   provider,
@@ -50,9 +43,8 @@ export function DnsProviderDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
-  const queryClient = useQueryClient()
   const form = useForm<DnsValues>({
-    resolver: zodResolver(dnsSchema),
+    resolver: zodResolver(dnsProviderFormSchema(!!provider)),
     defaultValues: {
       name: provider?.name ?? '',
       provider: (provider?.provider as DnsValues['provider']) ?? 'cloudflare',
@@ -61,26 +53,10 @@ export function DnsProviderDialog({
     },
   })
   const mutation = useMutation({
-    mutationFn: (values: DnsValues) => {
-      if (provider) {
-        return sendData(
-          'put',
-          `/providers/dns/${provider.id}`,
-          {
-            name: values.name,
-            ...(values.api_token ? { api_token: values.api_token } : {}),
-          },
-          provider.revision
-        )
-      }
-      return sendData('post', '/providers/dns', values)
-    },
+    mutationFn: (values: DnsValues) => saveDnsProvider(values, provider),
     onSuccess: async (response) => {
       toast.success(response.message)
       onOpenChange(false)
-      await queryClient.invalidateQueries({
-        queryKey: [...queryKeys.providers, 'dns'],
-      })
     },
   })
 

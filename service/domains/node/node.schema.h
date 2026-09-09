@@ -1,13 +1,15 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_set>
 
 #include <ruvia/web/Controller.h>
 
-#include "service/common/http.h"
+#include "service/common/uuid.h"
 #include "service/common/ip_address.h"
 #include "service/common/types.h"
 #include "service/domains/node/node.types.h"
@@ -18,15 +20,19 @@ inline constexpr std::size_t kMaxNodeIpAddresses{8};
 
 inline bool
 hasUniqueEndpoints(const ruvia::Array<service::node_config::NodeEndpointInput>& values) {
-    std::unordered_set<std::string_view> ids;
-    std::unordered_set<std::string_view> addresses;
+    std::unordered_set<std::string> ids;
+    std::set<asio::ip::address> addresses;
     ids.reserve(values.size());
-    addresses.reserve(values.size());
     for (const auto& value : values) {
         const auto& id = value.get<"id">();
         const auto& address = value.get<"ipAddress">();
-        if (!id || !address || !ids.insert(id->view()).second ||
-            !addresses.insert(address->view()).second) {
+        const auto parsedId = service::common::parseUuid(
+            id ? std::optional<std::string_view>{id->view()} : std::nullopt);
+        if (!parsedId || !address || !ids.insert(*parsedId).second) {
+            return false;
+        }
+        const auto parsed = service::common::parseIpAddress(address->view());
+        if (!parsed || !addresses.insert(*parsed).second) {
             return false;
         }
     }
@@ -47,7 +53,7 @@ struct EndpointValidator final {
         const auto ipPath = std::string(path) + ".ip_address";
         if (!ipAddress || ipAddress->empty()) {
             validator.add(ipPath, "required", "IP 地址不能为空");
-        } else if (ipAddress->size() > 45 || !service::common::isIpAddress(ipAddress->view())) {
+        } else if (ipAddress->size() > 45 || !service::common::parseIpAddress(ipAddress->view())) {
             validator.add(ipPath, "format", "IP 地址格式不正确");
         }
 

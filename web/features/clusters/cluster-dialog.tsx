@@ -1,11 +1,8 @@
 import { z } from 'zod'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { getData, sendData } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
-import type { Cluster, DnsZoneOption } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import {
   Form,
@@ -31,6 +28,9 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
+import type { Cluster } from '@/features/clusters/types'
+import { dnsZoneOptionsQuery } from '@/features/dns-zones/data'
+import { saveCluster } from './data'
 
 const schema = z.object({
   name: z.string().trim().min(1, '请输入集群名称').max(100),
@@ -58,14 +58,7 @@ export function ClusterDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
-  const queryClient = useQueryClient()
-  const optionsQuery = useQuery({
-    queryKey: [...queryKeys.dnsZones, 'options'],
-    queryFn: () =>
-      getData<{ list: DnsZoneOption[] }>('/dns-zones/options').then(
-        (data) => data.list
-      ),
-  })
+  const optionsQuery = useQuery(dnsZoneOptionsQuery)
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: {
@@ -76,14 +69,10 @@ export function ClusterDialog({
     },
   })
   const mutation = useMutation({
-    mutationFn: (values: Values) =>
-      cluster
-        ? sendData('put', `/clusters/${cluster.id}`, values, cluster.revision)
-        : sendData('post', '/clusters/', values),
-    onSuccess: async (response) => {
+    mutationFn: (values: Values) => saveCluster(values, cluster),
+    onSuccess: (response) => {
       toast.success(response.message)
       onOpenChange(false)
-      await queryClient.invalidateQueries({ queryKey: queryKeys.clusters })
     },
   })
 

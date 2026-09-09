@@ -6,7 +6,7 @@
 
 #include <ruvia/web/Model.h>
 
-#include "service/features/node_config/model.h"
+#include "service/features/node_config/mapper.h"
 
 namespace service::node {
 

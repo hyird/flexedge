@@ -89,8 +89,9 @@ inline ruvia::Task<void> failCertificateTask(service::background::WorkerContext&
                                              const CertificateTask& task, std::string_view error,
                                              bool permanent) {
     const auto message = service::sync_runtime::boundedError(error);
-    const auto lease = service::sync_runtime::makeRunningLease(task.tenantId, task.id, task.version,
-                                                               context.leaseOwner());
+    const auto lease = service::sync_runtime::makeRunningLease(
+        task.tenantId, task.id, task.version, context.leaseOwner(),
+        service::sync_runtime::MarkerResourceType::certificate, task.certificateId);
     auto transaction = co_await context.db().beginTransaction();
     (void)co_await transaction.query(
         "SELECT id FROM sys_certificate WHERE tenant_id = $1 AND id = $2 LIMIT 1 FOR UPDATE",

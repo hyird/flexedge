@@ -1,6 +1,6 @@
 #pragma once
 
-#include "service/features/sync_event/fanout.h"
+#include "service/features/live_resource/fanout.h"
 
 #include <algorithm>
 #include <cctype>
@@ -18,7 +18,7 @@
 #include "service/domains/provider/dns_provider.error.h"
 #include "service/domains/provider/dns_provider_read.service.h"
 #include "service/domains/provider/dns_provider.types.h"
-#include "service/features/dns/provider_config.h"
+#include "service/features/dns/provider_config_mapper.h"
 #include "service/features/provider_verification/queue.h"
 #include "service/utils/secret.h"
 
@@ -59,14 +59,16 @@ class DnsProviderService final {
             service::utils::sealSecret(token), secretHint(token), c.resource());
         try {
             auto transaction = co_await c.db().beginTransaction();
-            (void)co_await transaction.execute(
+            const auto inserted = co_await transaction.query(
                 "INSERT INTO sys_provider (tenant_id, kind, provider, name, account_id, "
                 "revision, config, runtime, status, created_at, updated_at) VALUES ($1, 'dns', "
-                "$2, $3, $4, 1, $5::jsonb, '{}'::jsonb, 'unverified', NOW(), NOW())",
+                "$2, $3, $4, 1, $5::jsonb, '{}'::jsonb, 'unverified', NOW(), NOW()) RETURNING id",
                 tenantId, std::string_view(provider), std::string_view(name),
                 std::string_view(accountId), std::string_view(config));
             co_await transaction.commit();
-            service::sync_event::fanout::hub().publish(tenantId);
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::providers,
+                                                  inserted.front()[0].value().value_or(""));
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         } catch (const ruvia::DbError& error) {
             if (service::common::isUniqueConstraintViolation(error, "uk_provider_name")) {
                 service::common::throwAppError(DnsProviderError::NAME_EXISTS);
@@ -137,7 +139,8 @@ class DnsProviderService final {
                 co_await service::provider_verification::remove(transaction, tenantId, id);
             }
             co_await transaction.commit();
-            service::sync_event::fanout::hub().publish(tenantId);
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::providers, id);
+            service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         } catch (const ruvia::DbError& error) {
             if (service::common::isUniqueConstraintViolation(error, "uk_provider_name")) {
                 service::common::throwAppError(DnsProviderError::NAME_EXISTS);
@@ -162,7 +165,8 @@ class DnsProviderService final {
             service::common::throwAppError(DnsProviderError::REVISION_CONFLICT);
         }
         co_await transaction.commit();
-        service::sync_event::fanout::hub().publish(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::providers, id);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         co_return;
     }
 
@@ -194,7 +198,8 @@ class DnsProviderService final {
             id, tenantId, expectedRevision);
         co_await service::provider_verification::remove(transaction, tenantId, id);
         co_await transaction.commit();
-        service::sync_event::fanout::hub().publish(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::providers, id);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         co_return;
     }
 

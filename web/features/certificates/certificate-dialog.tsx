@@ -1,15 +1,7 @@
-import { z } from 'zod'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { getData, sendData } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
-import type {
-  Certificate,
-  CertificateProvider,
-  DnsZoneOption,
-} from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -37,20 +29,14 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-
-const createSchema = z.object({
-  domain: z
-    .string()
-    .trim()
-    .min(1, '请输入证书域名')
-    .max(253)
-    .regex(/^(?:\*\.)?([A-Za-z0-9-]+\.)+[A-Za-z]{2,63}$/, '域名格式不正确'),
-  certificate_provider_id: z.string().uuid('请选择证书供应商'),
-  dns_zone_id: z.string().uuid('请选择托管域名'),
-  auto_renew: z.boolean(),
-})
-
-type CreateValues = z.infer<typeof createSchema>
+import type { Certificate } from '@/features/certificates/types'
+import { dnsZoneOptionsQuery } from '@/features/dns-zones/data'
+import { certificateProvidersQuery } from '@/features/providers/data'
+import {
+  certificateFormSchema,
+  type CertificateFormValues as CreateValues,
+} from './certificate-form'
+import { createCertificate, updateCertificateRenewal } from './data'
 
 export function CertificateDialog({
   certificate,
@@ -61,22 +47,13 @@ export function CertificateDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
-  const queryClient = useQueryClient()
   const providersQuery = useQuery({
-    queryKey: [...queryKeys.providers, 'certificate'],
-    queryFn: () => getData<CertificateProvider[]>('/providers/certificate'),
+    ...certificateProvidersQuery,
     enabled: !certificate,
   })
-  const zonesQuery = useQuery({
-    queryKey: [...queryKeys.dnsZones, 'options'],
-    queryFn: () =>
-      getData<{ list: DnsZoneOption[] }>('/dns-zones/options').then(
-        (data) => data.list
-      ),
-    enabled: !certificate,
-  })
+  const zonesQuery = useQuery({ ...dnsZoneOptionsQuery, enabled: !certificate })
   const form = useForm<CreateValues>({
-    resolver: zodResolver(createSchema),
+    resolver: zodResolver(certificateFormSchema(!!certificate)),
     defaultValues: {
       domain: certificate?.domains[0] ?? '',
       certificate_provider_id: certificate?.certificate_provider_id ?? '',
@@ -87,22 +64,16 @@ export function CertificateDialog({
   const mutation = useMutation({
     mutationFn: (values: CreateValues) =>
       certificate
-        ? sendData(
-            'put',
-            `/certificates/${certificate.id}`,
-            { auto_renew: values.auto_renew },
-            certificate.revision
-          )
-        : sendData('post', '/certificates/', {
+        ? updateCertificateRenewal(certificate, values.auto_renew)
+        : createCertificate({
             domain: values.domain,
             certificate_provider_id: values.certificate_provider_id,
             dns_zone_id: values.dns_zone_id,
             config: { auto_renew: values.auto_renew },
           }),
-    onSuccess: async (response) => {
+    onSuccess: (response) => {
       toast.success(response.message)
       onOpenChange(false)
-      await queryClient.invalidateQueries({ queryKey: queryKeys.certificates })
     },
   })
 

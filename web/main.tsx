@@ -1,42 +1,21 @@
 import { StrictMode } from 'react'
 import ReactDOM from 'react-dom/client'
-import { AxiosError } from 'axios'
-import {
-  QueryCache,
-  QueryClient,
-  QueryClientProvider,
-} from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
 import { createRouter, RouterProvider } from '@tanstack/react-router'
 import { toast } from 'sonner'
 import { apiErrorMessage } from '@/lib/api'
+import { createAppQueryClient } from '@/lib/query-client'
+import { setLiveQueryQueryClient } from '@/lib/live-query'
+import { ThemeProvider } from '@/context/theme-provider'
+import { createSessionExpiryHandler } from '@/features/auth/session-expiry'
 import { routeTree } from './routeTree.gen'
 import './styles/index.css'
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: (failureCount, error) =>
-        !(
-          error instanceof AxiosError && [401, 403].includes(error.status ?? 0)
-        ) && failureCount < 2,
-      refetchOnWindowFocus: false,
-      // Resource data changes only through an explicit local mutation or a
-      // server-sent event. Keep it fresh until one of those signals arrives;
-      // remounting a page or restoring network connectivity must not become a
-      // hidden background refresh loop.
-      staleTime: Infinity,
-      refetchOnReconnect: false,
-    },
-    mutations: {
-      onError: (error) => toast.error(apiErrorMessage(error)),
-    },
-  },
-  queryCache: new QueryCache({
-    onError: (error, query) => {
-      if (query.state.data === undefined) toast.error(apiErrorMessage(error))
-    },
-  }),
-})
+const queryClient = createAppQueryClient(
+  (message) => toast.error(message),
+  (error) => handleSessionExpiry(error)
+)
+setLiveQueryQueryClient(queryClient, (error) => { handleSessionExpiry(error) })
 
 const router = createRouter({
   routeTree,
@@ -44,6 +23,17 @@ const router = createRouter({
   defaultPreload: 'intent',
   defaultPreloadStaleTime: 0,
 })
+
+const handleSessionExpiry = createSessionExpiryHandler(
+  queryClient,
+  () =>
+    router.navigate({
+      to: '/sign-in',
+      search: { redirect: undefined },
+      replace: true,
+    }),
+  (error) => toast.error(apiErrorMessage(error))
+)
 
 declare module '@tanstack/react-router' {
   interface Register {
@@ -59,7 +49,9 @@ if (!rootElement.innerHTML) {
   ReactDOM.createRoot(rootElement).render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
+        <ThemeProvider>
+          <RouterProvider router={router} />
+        </ThemeProvider>
       </QueryClientProvider>
     </StrictMode>
   )

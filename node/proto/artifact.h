@@ -7,6 +7,9 @@
 #include <string>
 #include <string_view>
 
+#include "common/sha256.h"
+#include "common/hex.h"
+
 #include <openssl/evp.h>
 
 #include <google/protobuf/io/coded_stream.h>
@@ -14,18 +17,6 @@
 #include <google/protobuf/message_lite.h>
 
 namespace flexedge::node {
-
-inline constexpr bool isSha256Digest(std::string_view value) noexcept {
-    if (value.size() != 64) {
-        return false;
-    }
-    for (const char ch : value) {
-        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
-            return false;
-        }
-    }
-    return true;
-}
 
 inline bool parseArtifact(std::string_view bytes, google::protobuf::MessageLite& message) {
     if (bytes.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
@@ -56,13 +47,7 @@ inline std::string artifactDigest(std::string_view bytes) {
         digestSize != digest.size()) {
         throw std::runtime_error("could not hash node protocol artifact");
     }
-    constexpr char kHex[] = "0123456789abcdef";
-    std::string result(digest.size() * 2, '\0');
-    for (std::size_t index = 0; index < digest.size(); ++index) {
-        result[index * 2] = kHex[digest[index] >> 4];
-        result[index * 2 + 1] = kHex[digest[index] & 0x0f];
-    }
-    return result;
+    return flexedge::crypto::hexEncode(digest);
 }
 
 inline std::string artifactDigest(const google::protobuf::MessageLite& message) {

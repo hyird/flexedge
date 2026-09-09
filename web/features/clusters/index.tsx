@@ -1,18 +1,11 @@
 import { useState } from 'react'
-import {
-  useInfiniteQuery,
-  useMutation,
-  useQueryClient,
-} from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { FolderTree, Pencil, Plus, Server, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
-import { getData, sendData } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
-import type { Cluster, PageData } from '@/lib/types'
 import { cn } from '@/lib/utils'
+import { useDelayedLoading } from '@/hooks/use-delayed-loading'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
 import {
   DropdownMenuItem,
   DropdownMenuSeparator,
@@ -22,28 +15,22 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { FeatureShell } from '@/components/feature-shell'
 import { RowActions } from '@/components/row-actions'
 import { StatusBadge } from '@/components/status-badge'
+import type { Cluster } from '@/features/clusters/types'
 import { NodesPanel } from '@/features/nodes'
 import { ClusterDialog } from './cluster-dialog'
+import { clusterOptionsQuery, removeCluster } from './data'
 
 export function Clusters() {
   const navigate = useNavigate()
   const search = useSearch({ from: '/_authenticated/clusters' })
-  const queryClient = useQueryClient()
   const [dialog, setDialog] = useState<Cluster | 'new' | null>(null)
   const [removeTarget, setRemoveTarget] = useState<Cluster | null>(null)
   const [createNodeOpen, setCreateNodeOpen] = useState(false)
-  const clustersQuery = useInfiniteQuery({
-    queryKey: [...queryKeys.clusters, 'tree'],
-    initialPageParam: 1,
-    queryFn: ({ pageParam }) =>
-      getData<PageData<Cluster>>('/clusters/', {
-        page: pageParam,
-        page_size: 100,
-      }),
-    getNextPageParam: (last) =>
-      last.page < last.total_pages ? last.page + 1 : undefined,
-  })
-  const clusters = clustersQuery.data?.pages.flatMap((page) => page.list) ?? []
+  const clustersQuery = useQuery(clusterOptionsQuery)
+  const [visibleCount, setVisibleCount] = useState(100)
+  const clustersLoading = useDelayedLoading(clustersQuery.isLoading)
+  const allClusters = clustersQuery.data ?? []
+  const clusters = allClusters.slice(0, visibleCount)
   const selected = clusters.find((cluster) => cluster.id === search.cluster_id)
   const selectCluster = (id?: string) => {
     setCreateNodeOpen(false)
@@ -53,18 +40,11 @@ export function Clusters() {
     })
   }
   const remove = useMutation({
-    mutationFn: (cluster: Cluster) =>
-      sendData(
-        'delete',
-        '/clusters/' + cluster.id,
-        undefined,
-        cluster.revision
-      ),
-    onSuccess: async (response, cluster) => {
+    mutationFn: removeCluster,
+    onSuccess: (response, cluster) => {
       toast.success(response.message)
       setRemoveTarget(null)
       if (search.cluster_id === cluster.id) selectCluster()
-      await queryClient.invalidateQueries({ queryKey: queryKeys.clusters })
     },
   })
   return (
@@ -93,57 +73,63 @@ export function Clusters() {
             className='max-h-64 min-h-0 overflow-y-auto p-2 md:max-h-none md:flex-1'
           >
             <div className='space-y-1'>
-              {clustersQuery.isLoading && (
-                <>
-                  <Skeleton className='h-9' />
-                  <Skeleton className='h-9' />
-                </>
-              )}
-              {clusters.map((cluster) => (
+              {clustersLoading.pending && (
                 <div
-                  key={cluster.id}
                   className={cn(
-                    'flex items-center rounded-md',
-                    search.cluster_id === cluster.id && 'bg-secondary'
+                    'space-y-1',
+                    !clustersLoading.showSkeleton && 'invisible'
                   )}
                 >
-                  <Button
-                    variant='ghost'
-                    className='min-w-0 flex-1 justify-start px-2'
-                    aria-current={
-                      search.cluster_id === cluster.id ? 'page' : undefined
-                    }
-                    onClick={() => selectCluster(cluster.id)}
-                    title={cluster.name + ' · ' + cluster.access_domain}
-                  >
-                    <Server className='size-4 shrink-0' />
-                    <span className='truncate'>{cluster.name}</span>
-                    <span className='ms-auto text-xs text-muted-foreground'>
-                      {cluster.online_node_count}/{cluster.node_count}
-                    </span>
-                  </Button>
-                  <RowActions>
-                    <DropdownMenuItem onSelect={() => setDialog(cluster)}>
-                      <Pencil />
-                      编辑集群
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      variant='destructive'
-                      onSelect={() => setRemoveTarget(cluster)}
-                    >
-                      <Trash2 />
-                      删除集群
-                    </DropdownMenuItem>
-                  </RowActions>
+                  <Skeleton className='h-9' />
+                  <Skeleton className='h-9' />
                 </div>
-              ))}
-              {!clustersQuery.isLoading &&
+              )}
+              {!clustersLoading.pending &&
+                clusters.map((cluster) => (
+                  <div
+                    key={cluster.id}
+                    className={cn(
+                      'flex items-center rounded-md',
+                      search.cluster_id === cluster.id && 'bg-secondary'
+                    )}
+                  >
+                    <Button
+                      variant='ghost'
+                      className='min-w-0 flex-1 justify-start px-2'
+                      aria-current={
+                        search.cluster_id === cluster.id ? 'page' : undefined
+                      }
+                      onClick={() => selectCluster(cluster.id)}
+                      title={cluster.name + ' · ' + cluster.access_domain}
+                    >
+                      <Server className='size-4 shrink-0' />
+                      <span className='truncate'>{cluster.name}</span>
+                      <span className='ms-auto text-xs text-muted-foreground'>
+                        {cluster.online_node_count}/{cluster.node_count}
+                      </span>
+                    </Button>
+                    <RowActions>
+                      <DropdownMenuItem onSelect={() => setDialog(cluster)}>
+                        <Pencil />
+                        编辑集群
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        variant='destructive'
+                        onSelect={() => setRemoveTarget(cluster)}
+                      >
+                        <Trash2 />
+                        删除集群
+                      </DropdownMenuItem>
+                    </RowActions>
+                  </div>
+                ))}
+              {!clustersLoading.pending &&
                 !clustersQuery.isError &&
                 !clusters.length && (
                   <p className='p-2 text-sm text-muted-foreground'>暂无集群</p>
                 )}
-              {clustersQuery.isError && (
+              {!clustersLoading.pending && clustersQuery.isError && (
                 <div role='alert' className='space-y-2 p-2 text-sm'>
                   <p>集群加载失败</p>
                   <Button
@@ -155,16 +141,14 @@ export function Clusters() {
                   </Button>
                 </div>
               )}
-              {clustersQuery.hasNextPage && (
+              {visibleCount < allClusters.length && (
                 <Button
                   variant='ghost'
                   className='w-full'
-                  disabled={clustersQuery.isFetchingNextPage}
-                  onClick={() => clustersQuery.fetchNextPage()}
+                  disabled={clustersQuery.isFetching}
+                  onClick={() => setVisibleCount((count) => count + 100)}
                 >
-                  {clustersQuery.isFetchingNextPage
-                    ? '正在加载…'
-                    : '加载更多集群'}
+                  加载更多集群
                 </Button>
               )}
             </div>
@@ -176,7 +160,7 @@ export function Clusters() {
         >
           <div className='flex min-h-10 flex-wrap items-center justify-between gap-3'>
             <div className='flex min-w-0 items-center gap-2'>
-              <h2 className='truncate text-base font-semibold leading-none'>
+              <h2 className='truncate text-base leading-none font-semibold'>
                 {search.cluster_id
                   ? (selected?.name ?? '所选集群')
                   : '全部节点'}
@@ -189,48 +173,31 @@ export function Clusters() {
             </Button>
           </div>
           {selected && (
-            <div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-4'>
-              <Card className='min-h-20 py-0 shadow-none'>
-                <CardContent className='flex h-full flex-col justify-center px-4 py-3 text-sm'>
-                  <div className='text-xs text-muted-foreground'>托管域名</div>
-                  <div
-                    className='truncate font-medium'
-                    title={`${selected.dns_zone_domain} · ${selected.dns_provider_name}`}
-                  >
-                    {selected.dns_zone_domain}{' '}
-                    <span className='font-normal text-muted-foreground'>
-                      · {selected.dns_provider_name}
-                    </span>
-                  </div>
-                </CardContent>
-              </Card>
-              <Card className='min-h-20 py-0 shadow-none'>
-                <CardContent className='flex h-full flex-col justify-center px-4 py-3 text-sm'>
-                  <div className='text-xs text-muted-foreground'>主机前缀</div>
-                  <code className='block truncate'>
-                    {selected.hostname_prefix}
-                  </code>
-                </CardContent>
-              </Card>
-              <Card className='min-h-20 py-0 shadow-none'>
-                <CardContent className='flex h-full flex-col justify-center px-4 py-3 text-sm'>
-                  <div className='text-xs text-muted-foreground'>接入域名</div>
-                  <code
-                    className='block truncate'
-                    title={selected.access_domain}
-                  >
-                    {selected.access_domain}
-                  </code>
-                </CardContent>
-              </Card>
-              <Card className='min-h-20 py-0 shadow-none'>
-                <CardContent className='flex h-full flex-col justify-center px-4 py-3 text-sm'>
-                  <div className='text-xs text-muted-foreground'>节点状态</div>
-                  <div className='font-medium'>
-                    {selected.online_node_count}/{selected.node_count} 在线
-                  </div>
-                </CardContent>
-              </Card>
+            <div className='flex flex-wrap items-center gap-x-5 gap-y-1 text-xs'>
+              <div className='flex min-w-0 items-baseline gap-2'>
+                <span className='shrink-0 text-muted-foreground'>托管域名</span>
+                <span
+                  className='truncate font-medium'
+                  title={selected.dns_zone_domain}
+                >
+                  {selected.dns_zone_domain}
+                </span>
+                <span className='truncate text-muted-foreground'>
+                  {selected.dns_provider_name}
+                </span>
+              </div>
+              <div className='flex min-w-0 items-baseline gap-2'>
+                <span className='shrink-0 text-muted-foreground'>接入域名</span>
+                <code className='truncate' title={selected.access_domain}>
+                  {selected.access_domain}
+                </code>
+              </div>
+              <div className='flex items-baseline gap-2 whitespace-nowrap'>
+                <span className='text-muted-foreground'>节点状态</span>
+                <span className='font-medium tabular-nums'>
+                  {selected.online_node_count}/{selected.node_count} 在线
+                </span>
+              </div>
             </div>
           )}
           <NodesPanel

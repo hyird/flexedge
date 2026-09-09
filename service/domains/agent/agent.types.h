@@ -30,4 +30,10 @@ struct HeartbeatReport final {
     std::vector<OriginHealth> originHealth;
 };
 
+struct ApplyFailureReport final {
+    std::int64_t revision;
+    std::string releaseId, manifestDigest, phase, errorCode, error;
+    bool retryable;
+};
+
 } // namespace service::agent

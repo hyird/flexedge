@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -9,13 +10,14 @@
 #include <string>
 #include <string_view>
 
-#include <ruvia/web/WebSocket.h>
 
-#include "node/proto/artifact.h"
+
+#include "common/sha256.h"
+#include "node/proto/credential_validation.h"
 #include "node/proto/control_protocol.h"
 #include "node/proto/edge_control.pb.h"
-#include "service/common/http.h"
-#include "service/domains/agent/agent.types.h"
+#include "service/common/uuid.h"
+
 
 namespace service::agent {
 
@@ -30,14 +32,8 @@ inline bool validRequestId(std::string_view value) {
 }
 
 inline bool validAuthenticate(const flexedge::node::v2::Authenticate& value) {
-    const bool validNodeId =
-        value.node_id().size() == 32 && std::ranges::all_of(value.node_id(), [](unsigned char ch) {
-            return std::isdigit(ch) != 0 || (ch >= 'a' && ch <= 'f');
-        });
-    const bool validSecret = value.secret().size() >= 32 && value.secret().size() <= 128 &&
-                             std::ranges::all_of(value.secret(), [](unsigned char ch) {
-                                 return ch >= 0x21 && ch <= 0x7e;
-                             });
+    const bool validNodeId = flexedge::node::validCredentialNodeId(value.node_id());
+    const bool validSecret = flexedge::node::validCredentialSecret(value.secret());
     const bool hasActiveRelease = !value.active_release_id().empty();
     const bool validSessionPurpose =
         value.session_purpose() == flexedge::node::v2::AGENT_SESSION_PURPOSE_CONTROL ||
@@ -46,18 +42,8 @@ inline bool validAuthenticate(const flexedge::node::v2::Authenticate& value) {
            hasActiveRelease == !value.active_manifest_digest().empty() &&
            (!hasActiveRelease ||
             (validReleaseId(value.active_release_id()) &&
-             flexedge::node::isSha256Digest(value.active_manifest_digest()))) &&
+             flexedge::crypto::isSha256Digest(value.active_manifest_digest()))) &&
            value.agent_version().size() <= 64 && validSessionPurpose;
-}
-
-inline bool parseClientEnvelope(const ruvia::WebSocketMessage& message,
-                                flexedge::node::v2::ClientEnvelope& envelope) {
-    if (!message.binary() ||
-        message.payload().size() > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
-        return false;
-    }
-    return envelope.ParseFromArray(message.payload().data(),
-                                   static_cast<int>(message.payload().size()));
 }
 
 inline bool validAuthenticationEnvelope(const flexedge::node::v2::ClientEnvelope& envelope) {
@@ -68,10 +54,10 @@ inline bool validAuthenticationEnvelope(const flexedge::node::v2::ClientEnvelope
 inline bool validHeartbeat(const flexedge::node::v2::Heartbeat& value) {
     return service::common::parseUuid(value.node_id()) && value.applied_node_spec_revision() >= 1 &&
            validReleaseId(value.active_release_id()) &&
-           flexedge::node::isSha256Digest(value.active_manifest_digest()) &&
+           flexedge::crypto::isSha256Digest(value.active_manifest_digest()) &&
            value.agent_version().size() <= 64 && value.cpu_usage() >= 0 && value.cpu_usage() <= 1 &&
            value.memory_usage() >= 0 && value.memory_usage() <= 1 && value.traffic_out_bps() >= 0 &&
-           value.connection_count() >= 0 && value.load_1m() >= 0 &&
+           value.connection_count() >= 0 && std::isfinite(value.load_1m()) && value.load_1m() >= 0 &&
            value.queued_log_events() <=
                static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) &&
            value.dropped_log_events() <=
@@ -94,13 +80,13 @@ inline bool validObjectRequest(const flexedge::node::v2::ObjectRequest& value) {
         return false;
     }
     return std::ranges::all_of(value.digest_sha256(), [](const auto& digest) {
-        return flexedge::node::isSha256Digest(digest);
+        return flexedge::crypto::isSha256Digest(digest);
     });
 }
 
 inline bool validNodeReleaseRequest(const flexedge::node::v2::NodeReleaseRequest& value) {
     return service::common::parseUuid(value.node_id()) &&
-           flexedge::node::isSha256Digest(value.digest_sha256()) &&
+           flexedge::crypto::isSha256Digest(value.digest_sha256()) &&
            value.offset() < flexedge::node::kMaximumNodeReleaseBytes;
 }
 
@@ -113,7 +99,7 @@ inline bool validApplyPhase(flexedge::node::v2::ApplyPhase phase) {
 inline bool validApplyResult(const flexedge::node::v2::ApplyResult& value) {
     if (!service::common::parseUuid(value.node_id()) || value.node_spec_revision() < 1 ||
         !validReleaseId(value.release_id()) ||
-        !flexedge::node::isSha256Digest(value.manifest_digest()) ||
+        !flexedge::crypto::isSha256Digest(value.manifest_digest()) ||
         value.error_code().size() > 64 || value.error().size() > 1000) {
         return false;
     }
@@ -121,36 +107,6 @@ inline bool validApplyResult(const flexedge::node::v2::ApplyResult& value) {
                                  value.error_code().empty() && value.error().empty()
                            : validApplyPhase(value.failed_phase()) && !value.error_code().empty() &&
                                  !value.error().empty();
-}
-
-inline HeartbeatReport toHeartbeatReport(const flexedge::node::v2::Heartbeat& value) {
-    HeartbeatReport result{
-        .nodeId = value.node_id(),
-        .appliedNodeSpecRevision = value.applied_node_spec_revision(),
-        .activeReleaseId = value.active_release_id(),
-        .activeManifestDigest = value.active_manifest_digest(),
-        .agentVersion = value.agent_version(),
-        .cpuUsage = value.cpu_usage(),
-        .memoryUsage = value.memory_usage(),
-        .trafficOutBps = value.traffic_out_bps(),
-        .connectionCount = value.connection_count(),
-        .load1m = value.load_1m(),
-        .queuedLogEvents = static_cast<std::int64_t>(value.queued_log_events()),
-        .droppedLogEvents = static_cast<std::int64_t>(value.dropped_log_events()),
-        .health = value.health(),
-        .lastError = value.last_error(),
-        .originHealth = {},
-    };
-    result.originHealth.reserve(value.origin_health_size());
-    for (const auto& item : value.origin_health()) {
-        result.originHealth.push_back({.websiteId = item.website_id(),
-                                       .originId = item.origin_id(),
-                                       .status = item.status(),
-                                       .checkedAtUnixMillis = item.checked_at_unix_millis(),
-                                       .latencyMillis = item.latency_millis(),
-                                       .lastError = item.last_error()});
-    }
-    return result;
 }
 
 } // namespace service::agent

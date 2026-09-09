@@ -13,7 +13,7 @@
 
 #include "service/features/background/worker_pool.h"
 #include "service/features/dns_sync/queue.h"
-#include "service/features/dns_sync/snapshot.h"
+#include "service/features/dns_sync/mapper.h"
 #include "service/features/sync_runtime/state.h"
 
 namespace service::certificate_issuance {

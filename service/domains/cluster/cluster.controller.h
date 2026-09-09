@@ -4,9 +4,11 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <ruvia/core/Task.h>
 #include <ruvia/web/Context.h>
+#include <ruvia/web/ModelJson.h>
 #include <ruvia/web/Controller.h>
 
 #include "service/common/http.h"
@@ -15,6 +17,8 @@
 #include "service/domains/cluster/cluster_command.service.h"
 #include "service/domains/cluster/cluster_read.service.h"
 #include "service/middleware/auth.h"
+#include "service/features/live_resource/fanout.h"
+#include "service/features/live_resource/sse.h"
 
 namespace service::cluster {
 
@@ -22,13 +26,39 @@ class ClusterController final : public ruvia::Controller<ClusterController> {
   public:
     RUVIA_CONTROLLER_GROUP("/api/clusters", service::middleware::AuthMiddleware)
     RUVIA_ROUTES_BEGIN
-    RUVIA_GET("/", list);
+    RUVIA_GET_SSE("/stream", list);
+    RUVIA_GET_SSE("/options/stream", options);
     RUVIA_POST("/", create, SaveClusterValidator);
     RUVIA_PUT("/:id", update, SaveClusterValidator);
     RUVIA_DELETE("/:id", remove);
     RUVIA_ROUTES_END
 
   private:
+    ruvia::Task<void> options(ruvia::Context& c) {
+        const auto keyword = service::common::requireKeyword(c.req().query("keyword"));
+        const auto tenant = tenantId(c);
+        auto sub = service::live_resource::hub().subscribe(
+            c.worker(), tenant, service::live_resource::Resource::clusters, {},
+            service::live_resource::queryKey("options", keyword.value_or("")));
+        co_await service::live_resource::streamSnapshot(
+            c, std::move(sub), [tenant, keyword](auto& read) -> ruvia::Task<std::string> {
+                ruvia::Array<ClusterDto> data(read.resource());
+                for (std::int64_t pageNumber = 1;; ++pageNumber) {
+                    auto page = co_await clusterReadService().list(read, tenant, pageNumber, 1000,
+                                                                   (pageNumber - 1) * 1000, keyword,
+                                                                   std::nullopt, std::nullopt);
+                    auto& items = page.template ensure<"list">();
+                    for (auto& item : items)
+                        data.push_back(std::move(item));
+                    if (pageNumber >= page.template get<"totalPages">().value)
+                        break;
+                }
+                co_return std::string(ruvia::toJson(
+                    service::common::ok<ClusterOptionsResponse>(read, std::move(data)),
+                    {.resource = read.resource()}));
+            });
+    }
+
     static std::string requireId(ruvia::Context& c) {
         return service::common::requireUuidParam(c, "id");
     }
@@ -37,7 +67,7 @@ class ClusterController final : public ruvia::Controller<ClusterController> {
         return service::middleware::currentTenantId(c);
     }
 
-    ruvia::Task<ruvia::HttpResponse> list(ruvia::Context& c) {
+    ruvia::Task<void> list(ruvia::Context& c) {
         const auto [page, pageSize, skip] = service::common::requirePagination(c);
         const auto keyword = service::common::requireKeyword(c.req().query("keyword"));
         std::optional<std::string> dnsZoneId;
@@ -56,9 +86,21 @@ class ClusterController final : public ruvia::Controller<ClusterController> {
             }
             status.emplace(*value);
         }
-        co_return c.json(service::common::ok<ClusterPageResponse>(
-            c, co_await clusterReadService().list(c, tenantId(c), page, pageSize, skip, keyword,
-                                                  dnsZoneId, status)));
+        const auto tenant = tenantId(c);
+        auto sub = service::live_resource::hub().subscribe(
+            c.worker(), tenant, service::live_resource::Resource::clusters, {},
+            service::live_resource::queryKey("list", page, pageSize, keyword.value_or(""),
+                                             dnsZoneId, status));
+        co_await service::live_resource::streamSnapshot(
+            c, std::move(sub),
+            [tenant, page, pageSize, skip, keyword, dnsZoneId,
+             status](auto& read) -> ruvia::Task<std::string> {
+                auto data = co_await clusterReadService().list(read, tenant, page, pageSize, skip,
+                                                               keyword, dnsZoneId, status);
+                co_return std::string(
+                    ruvia::toJson(service::common::ok<ClusterPageResponse>(read, std::move(data)),
+                                  {.resource = read.resource()}));
+            });
     }
 
     ruvia::Task<ruvia::HttpResponse> create(ruvia::Context& c) {

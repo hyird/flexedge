@@ -1,4 +1,9 @@
+#include "common/file_digest.h"
 #include <chrono>
+#include <atomic>
+#include <barrier>
+#include <thread>
+#include <vector>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -6,7 +11,7 @@
 #include <string>
 #include <system_error>
 
-#include "service/features/node_release/artifact.h"
+#include "service/features/node_release/catalog.h"
 
 #define REQUIRE(condition)                                                                         \
     do {                                                                                           \
@@ -63,18 +68,72 @@ void replaceFile(const std::filesystem::path& source, const std::filesystem::pat
 
 int main() {
     try {
+        constexpr std::string_view versionAlphabet =
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_+";
+        for (unsigned byte = 0; byte < 256; ++byte) {
+            const char character = static_cast<char>(byte);
+            REQUIRE(flexedge::node::validNodeReleaseVersion(std::string_view(&character, 1)) ==
+                    (versionAlphabet.find(character) != std::string_view::npos));
+        }
+        REQUIRE(!flexedge::node::validNodeReleaseVersion(""));
+        REQUIRE(flexedge::node::validNodeReleaseVersion(std::string(64, 'a')));
+        REQUIRE(!flexedge::node::validNodeReleaseVersion(std::string(65, 'a')));
+        REQUIRE(flexedge::node::validNodeReleaseVersion("1.2.3-rc.1+build_7"));
         TemporaryDirectory directory;
         const auto binaryPath = directory.path() / "node";
         const auto installerPath = directory.path() / "install-node.sh";
         const auto manifestPath = directory.path() / "node-release.manifest";
         writeFile(binaryPath, "node-release-one");
         writeFile(installerPath, "installer-release-one");
-        const auto firstDigest = flexedge::node::binarySha256(binaryPath);
+        const auto firstDigest = flexedge::crypto::fileSha256(binaryPath);
         writeFile(manifestPath,
                   "flexedge-node-release-v1\r\nversion=1.0.0\r\nsha256=" + firstDigest + "\r\n");
 
+        {
+            service::node_release::Catalog concurrentCatalog(std::chrono::nanoseconds::zero());
+            std::barrier start(8);
+            std::atomic<unsigned> configured{}, rejected{}, unexpected{};
+            std::vector<std::jthread> configurators;
+            for (unsigned index = 0; index < 8; ++index) {
+                configurators.emplace_back([&] {
+                    start.arrive_and_wait();
+                    try {
+                        concurrentCatalog.configure(binaryPath, installerPath, manifestPath);
+                        configured.fetch_add(1);
+                    } catch (const std::logic_error&) {
+                        rejected.fetch_add(1);
+                    } catch (...) { unexpected.fetch_add(1); }
+                });
+            }
+            for (auto& configurator : configurators) configurator.join();
+            REQUIRE(configured.load() == 1);
+            REQUIRE(rejected.load() == 7);
+            REQUIRE(unexpected.load() == 0);
+            REQUIRE(concurrentCatalog.current()->binary().digest() == firstDigest);
+        }
+
+        {
+            service::node_release::Catalog recoveringCatalog(std::chrono::nanoseconds::zero());
+            bool failed = false;
+            try {
+                recoveringCatalog.configure(directory.path() / "missing-node", installerPath, manifestPath);
+            } catch (const std::runtime_error&) { failed = true; }
+            REQUIRE(failed);
+            bool unpublished = false;
+            try { (void)recoveringCatalog.current(); }
+            catch (const std::logic_error&) { unpublished = true; }
+            REQUIRE(unpublished);
+            recoveringCatalog.configure(binaryPath, installerPath, manifestPath);
+            REQUIRE(recoveringCatalog.current()->binary().digest() == firstDigest);
+        }
+
         service::node_release::Catalog catalog(std::chrono::nanoseconds::zero());
         catalog.configure(binaryPath, installerPath, manifestPath);
+        bool duplicateConfigurationRejected = false;
+        try {
+            catalog.configure(binaryPath, installerPath, manifestPath);
+        } catch (const std::logic_error&) { duplicateConfigurationRejected = true; }
+        REQUIRE(duplicateConfigurationRejected);
         auto first = catalog.current();
         REQUIRE(first->binary().digest() == firstDigest);
         REQUIRE(first->version() == "1.0.0");
@@ -92,7 +151,7 @@ int main() {
         const auto stalled = catalog.current();
         REQUIRE(stalled->binary().digest() == firstDigest);
         REQUIRE(stalled->version() == "1.0.0");
-        const auto secondDigest = flexedge::node::binarySha256(binaryPath);
+        const auto secondDigest = flexedge::crypto::fileSha256(binaryPath);
         const auto nextManifestPath = directory.path() / "node-release.manifest.next";
         writeFile(nextManifestPath,
                   "flexedge-node-release-v1\nversion=2.0.0\nsha256=" + secondDigest + "\n");
@@ -121,7 +180,7 @@ int main() {
         const auto expiringManifestPath = directory.path() / "expiring-node-release.manifest";
         writeFile(expiringBinaryPath, "expiring-node-release-one");
         writeFile(expiringInstallerPath, "expiring-installer-release-one");
-        const auto expiringFirstDigest = flexedge::node::binarySha256(expiringBinaryPath);
+        const auto expiringFirstDigest = flexedge::crypto::fileSha256(expiringBinaryPath);
         writeFile(expiringManifestPath,
                   "flexedge-node-release-v1\nversion=1.0.0\nsha256=" + expiringFirstDigest + "\n");
         expiringCatalog.configure(expiringBinaryPath, expiringInstallerPath, expiringManifestPath);
@@ -130,7 +189,7 @@ int main() {
         const auto replacementPath = directory.path() / "expiring-node.next";
         writeFile(replacementPath, "expiring-node-release-two");
         replaceFile(replacementPath, expiringBinaryPath);
-        const auto expiringSecondDigest = flexedge::node::binarySha256(expiringBinaryPath);
+        const auto expiringSecondDigest = flexedge::crypto::fileSha256(expiringBinaryPath);
         const auto replacementManifestPath =
             directory.path() / "expiring-node-release.manifest.next";
         writeFile(replacementManifestPath,

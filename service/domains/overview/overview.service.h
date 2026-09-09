@@ -14,7 +14,7 @@ namespace service::overview {
 
 class OverviewService final {
   public:
-    ruvia::Task<OverviewDataDto> get(ruvia::Context& c, const std::string& tenantId) {
+    ruvia::Task<OverviewDataDto> get(auto& c, const std::string& tenantId) {
         const auto summaryRows = co_await c.db().query(
             "SELECT "
             "(SELECT COUNT(*) FROM sys_website website WHERE website.tenant_id = $1 AND "
@@ -46,29 +46,29 @@ class OverviewService final {
         OverviewResourceCountsDto resources(c);
         OverviewIssueCountsDto issues(c);
         if (summaryRows.empty()) {
-            resources.set<"websiteCount">(0);
-            resources.set<"domainCount">(0);
-            resources.set<"certificateCount">(0);
-            resources.set<"clusterCount">(0);
-            issues.set<"dnsZoneIssueCount">(0);
-            issues.set<"certificateExpiringCount">(0);
-            issues.set<"certificateFailedCount">(0);
-            issues.set<"activeMarkerCount">(0);
-            issues.set<"retryMarkerCount">(0);
+            resources.template set<"websiteCount">(0);
+            resources.template set<"domainCount">(0);
+            resources.template set<"certificateCount">(0);
+            resources.template set<"clusterCount">(0);
+            issues.template set<"dnsZoneIssueCount">(0);
+            issues.template set<"certificateExpiringCount">(0);
+            issues.template set<"certificateFailedCount">(0);
+            issues.template set<"activeMarkerCount">(0);
+            issues.template set<"retryMarkerCount">(0);
         } else {
             const auto& row = summaryRows.front();
-            resources.set<"websiteCount">(count(row, 0));
-            resources.set<"domainCount">(count(row, 1));
-            resources.set<"certificateCount">(count(row, 2));
-            resources.set<"clusterCount">(count(row, 3));
-            issues.set<"dnsZoneIssueCount">(count(row, 4));
-            issues.set<"certificateExpiringCount">(count(row, 5));
-            issues.set<"certificateFailedCount">(count(row, 6));
-            issues.set<"activeMarkerCount">(count(row, 7));
-            issues.set<"retryMarkerCount">(count(row, 8));
+            resources.template set<"websiteCount">(count(row, 0));
+            resources.template set<"domainCount">(count(row, 1));
+            resources.template set<"certificateCount">(count(row, 2));
+            resources.template set<"clusterCount">(count(row, 3));
+            issues.template set<"dnsZoneIssueCount">(count(row, 4));
+            issues.template set<"certificateExpiringCount">(count(row, 5));
+            issues.template set<"certificateFailedCount">(count(row, 6));
+            issues.template set<"activeMarkerCount">(count(row, 7));
+            issues.template set<"retryMarkerCount">(count(row, 8));
         }
-        result.set<"resources">(std::move(resources));
-        result.set<"issues">(std::move(issues));
+        result.template set<"resources">(std::move(resources));
+        result.template set<"issues">(std::move(issues));
 
         const auto markerRows = co_await c.db().query(
             "SELECT marker.id, marker.resource_type, marker.resource_id, CASE "
@@ -95,18 +95,18 @@ class OverviewService final {
             "marker "
             "WHERE marker.tenant_id = $1 ORDER BY marker.updated_at DESC, marker.id DESC LIMIT 8",
             tenantId);
-        auto& recentMarkers = result.ensure<"recentMarkers">();
+        auto& recentMarkers = result.template ensure<"recentMarkers">();
         for (const auto& row : markerRows) {
             auto& marker = recentMarkers.emplace_back(c);
-            marker.set<"id">(row[0].value().value_or(""));
-            marker.set<"resourceType">(row[1].value().value_or(""));
-            marker.set<"resourceId">(row[2].value().value_or(""));
-            marker.set<"resourceName">(row[3].value().value_or(""));
-            marker.set<"operation">(row[4].value().value_or(""));
-            marker.set<"status">(row[5].value().value_or("pending"));
-            marker.set<"updatedAt">(row[7].value().value_or(""));
+            marker.template set<"id">(row[0].value().value_or(""));
+            marker.template set<"resourceType">(row[1].value().value_or(""));
+            marker.template set<"resourceId">(row[2].value().value_or(""));
+            marker.template set<"resourceName">(row[3].value().value_or(""));
+            marker.template set<"operation">(row[4].value().value_or(""));
+            marker.template set<"status">(row[5].value().value_or("pending"));
+            marker.template set<"updatedAt">(row[7].value().value_or(""));
             if (const auto& lastError = row[6].value()) {
-                marker.set<"lastError">(*lastError);
+                marker.template set<"lastError">(*lastError);
             }
         }
         co_return result;

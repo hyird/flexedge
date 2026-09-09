@@ -1,14 +1,6 @@
-import axios, {
-  type AxiosError,
-  type InternalAxiosRequestConfig,
-  type RawAxiosRequestHeaders,
-} from 'axios'
-
-export type ApiEnvelope<T> = {
-  code: number
-  message: string
-  data: T
-}
+import axios, { type RawAxiosRequestHeaders } from 'axios'
+import { createApiClient } from './api-client'
+import { requireResponseData, type ApiResponse } from './api-response'
 
 export type PageData<T> = {
   list: T[]
@@ -18,56 +10,37 @@ export type PageData<T> = {
   total_pages: number
 }
 
-type RetryableRequest = InternalAxiosRequestConfig & { _retried?: boolean }
-
-export const api = axios.create({
-  baseURL: '/api',
-  timeout: 20_000,
-  withCredentials: true,
-})
-
-let refreshRequest: Promise<void> | null = null
+export const api = createApiClient()
 
 export function normalizeApiPath(url: string) {
   const normalized = url.replace(/\/+((?:[?#].*)?)$/, '$1')
   return normalized || '/'
 }
 
-api.interceptors.response.use(undefined, async (error: AxiosError) => {
-  const request = error.config as RetryableRequest | undefined
-  const path = request?.url ?? ''
-  const canRefresh =
-    error.response?.status === 401 &&
-    request &&
-    !request._retried &&
-    !path.includes('/auth/login') &&
-    !path.includes('/auth/refresh')
-
-  if (!canRefresh) throw error
-
-  request._retried = true
-  refreshRequest ??= api
-    .post('/auth/refresh')
-    .then(() => undefined)
-    .finally(() => {
-      refreshRequest = null
-    })
-
-  await refreshRequest
-  return api(request)
-})
+export function streamPath(url: string, params?: Record<string, unknown>) {
+  const apiPath = normalizeApiPath(url).replace(/\/$/, '')
+  const path = (apiPath.startsWith('/api/') ? apiPath : `/api${apiPath}`) + '/stream'
+  if (!params) return path
+  const query = new URLSearchParams()
+  for (const [key, value] of Object.entries(params).sort(([left], [right]) => left.localeCompare(right)))
+    if (value !== undefined && value !== '') query.set(key, String(value))
+  const encoded = query.toString()
+  return encoded ? `${path}?${encoded}` : path
+}
 
 export async function getData<T>(
   url: string,
-  params?: Record<string, unknown>
+  params?: Record<string, unknown>,
+  signal?: AbortSignal
 ) {
-  const response = await api.get<ApiEnvelope<T>>(normalizeApiPath(url), {
+  const response = await api.get<ApiResponse<T>>(normalizeApiPath(url), {
     params,
+    signal,
   })
-  return response.data.data
+  return requireResponseData(response.data)
 }
 
-export async function sendData<T = unknown>(
+export async function sendData<T = never>(
   method: 'post' | 'put' | 'delete',
   url: string,
   data?: unknown,
@@ -75,7 +48,7 @@ export async function sendData<T = unknown>(
 ) {
   const headers: RawAxiosRequestHeaders | undefined =
     revision === undefined ? undefined : { 'If-Match': `"${revision}"` }
-  const response = await api.request<ApiEnvelope<T>>({
+  const response = await api.request<ApiResponse<T>>({
     method,
     url: normalizeApiPath(url),
     data,
@@ -85,9 +58,9 @@ export async function sendData<T = unknown>(
 }
 
 export function apiErrorMessage(error: unknown) {
-  if (axios.isAxiosError<ApiEnvelope<unknown>>(error)) {
+  if (axios.isAxiosError<ApiResponse>(error)) {
     const message = error.response?.data?.message
-    if (message) return message
+    if (typeof message === 'string' && message) return message
     if (error.code === 'ECONNABORTED') return '请求超时，请稍后重试'
     if (!error.response) return '无法连接 FlexEdge 服务'
     if (error.response.status === 401) return '登录状态已失效，请重新登录'

@@ -9,8 +9,8 @@
 #include <ruvia/web/ModelJson.h>
 
 #include "service/features/background/worker_pool.h"
-#include "service/features/website_config/model.h"
-#include "service/features/website_dns/model.h"
+#include "service/features/website_config/mapper.h"
+#include "service/features/website_dns/mapper.h"
 #include "service/features/website_dns/probe.h"
 #include "service/features/sync_runtime/state.h"
 
@@ -30,35 +30,32 @@ completeStaleWebsiteTask(service::background::WorkerContext& context,
     co_return;
 }
 
-inline ruvia::Task<WebsiteRuntimeOutput>
+inline ruvia::Task<WebsiteRuntimeData>
 probeWebsiteDomains(service::background::WorkerContext& context,
                     const service::website_config::WebsiteConfigData& config,
                     std::string_view expectedTarget, std::string_view checkedAt,
                     const service::sync_runtime::RunningMarkerLease& marker) {
-    WebsiteRuntimeOutput output({.resource = context.resource()});
-    auto& domainStates = output.ensure<"domainStates">();
+    WebsiteRuntimeData output;
+    auto& domainStates = output.domainStates;
     for (const auto& domain : config.domains) {
         if (!co_await service::sync_runtime::renewRunningLease(context.db(), marker)) {
             throw std::runtime_error("网站同步标记 lease 已失效");
         }
-        auto& state =
-            domainStates.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
-        state.set<"id">(domain.id);
-        state.set<"lastVerifiedAt">(checkedAt);
+        auto& state = domainStates.emplace_back();
+        state.id = domain.id;
+        state.lastVerifiedAt = std::string(checkedAt);
         try {
             const auto result =
                 co_await probeCname(context, domain.hostname, expectedTarget, domain.id);
-            state.set<"resolutionStatus">(result.matched ? std::string_view{"verified"}
-                                                         : std::string_view{"invalid"});
+            state.resolutionStatus = result.matched ? "verified" : "invalid";
             if (!result.matched) {
                 const auto observed =
                     result.observedTarget.empty() ? "未查询到 CNAME" : result.observedTarget;
-                state.set<"lastError">("期望 " + std::string(expectedTarget) + "，实际 " +
-                                       observed);
+                state.lastError = "期望 " + std::string(expectedTarget) + "，实际 " + observed;
             }
         } catch (const std::exception& error) {
-            state.set<"resolutionStatus">("unverified");
-            state.set<"lastError">(error.what());
+            state.resolutionStatus = "unverified";
+            state.lastError = error.what();
         }
     }
     co_return output;
@@ -103,7 +100,8 @@ inline ruvia::Task<void> probeWebsite(service::background::WorkerContext& contex
     const auto checkedAt = rows.front()[5].value().value_or("");
     auto output = co_await probeWebsiteDomains(context, *config, expectedTarget, checkedAt, marker);
 
-    const auto json = ruvia::toJson(output, {.resource = context.resource()});
+    const auto json = ruvia::toJson(toOutput(output, {.resource = context.resource()}),
+                                    {.resource = context.resource()});
     auto completion = co_await context.db().beginTransaction();
     const auto updated = co_await completion.execute(
         "UPDATE sys_website SET runtime = $2::jsonb WHERE id = $1 AND revision = $3 AND "

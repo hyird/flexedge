@@ -4,7 +4,7 @@
 #include <string_view>
 
 #ifndef FLEXEDGE_NODE_VERSION
-#define FLEXEDGE_NODE_VERSION "0.3.20"
+#error "Node version consumers must link flexedge_node_version"
 #endif
 
 namespace flexedge::node {

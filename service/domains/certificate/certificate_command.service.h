@@ -1,6 +1,6 @@
 #pragma once
 
-#include "service/features/sync_event/fanout.h"
+#include "service/features/live_resource/fanout.h"
 
 #include <algorithm>
 #include <cctype>
@@ -17,7 +17,7 @@
 #include "service/common/http.h"
 #include "service/domains/certificate/certificate.error.h"
 #include "service/domains/certificate/certificate.types.h"
-#include "service/features/certificate/model.h"
+#include "service/features/certificate/config_mapper.h"
 #include "service/features/certificate/dns_challenge.h"
 #include "service/features/certificate/queue.h"
 #include "service/features/dns/registry.h"
@@ -100,7 +100,9 @@ class CertificateCommandService final {
         (void)co_await service::certificate_issuance::enqueueCertificateRevision(
             transaction, tenantId, certificateId, 1, service::sync_runtime::MarkerOperation::issue);
         co_await transaction.commit();
-        service::sync_event::fanout::hub().publish(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::certificates,
+                                              certificateId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         co_return;
     }
 
@@ -133,7 +135,8 @@ class CertificateCommandService final {
             service::common::throwAppError(CertificateError::REVISION_CONFLICT);
         }
         co_await transaction.commit();
-        service::sync_event::fanout::hub().publish(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::certificates, id);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         co_return;
     }
 
@@ -166,7 +169,8 @@ class CertificateCommandService final {
             transaction, tenantId, id, issuanceRevision,
             service::sync_runtime::MarkerOperation::renew);
         co_await transaction.commit();
-        service::sync_event::fanout::hub().publish(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::certificates, id);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         co_return;
     }
 
@@ -205,7 +209,8 @@ class CertificateCommandService final {
         co_await service::sync_runtime::removeMarker(
             transaction, tenantId, service::sync_runtime::MarkerResourceType::certificate, id);
         co_await transaction.commit();
-        service::sync_event::fanout::hub().publish(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::certificates, id);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         co_return;
     }
 

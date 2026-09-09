@@ -36,6 +36,12 @@ set(EXPECTED_FILES
 if(EXPECT_WEB)
     list(APPEND EXPECTED_FILES "web/index.html")
 endif()
+if(EXPECT_XDB_V4)
+    list(APPEND EXPECTED_FILES "geo/ip2region_v4.xdb")
+endif()
+if(EXPECT_XDB_V6)
+    list(APPEND EXPECTED_FILES "geo/ip2region_v6.xdb")
+endif()
 list(SORT EXPECTED_FILES)
 
 file(GLOB_RECURSE ACTUAL_FILES

@@ -21,12 +21,7 @@ import { TabsContent } from '@/components/ui/tabs'
 import { originGroupLabel } from './website-display'
 import type { WebsiteFormValues } from './website-form'
 
-type OriginGroup = {
-  name: string
-  indexes: number[]
-  enabledCount: number
-  enabledPrimaryCount: number
-}
+import type { OriginGroup } from './origin-groups'
 
 export function WebsiteOriginsTab({
   form,

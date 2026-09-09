@@ -1,7 +1,5 @@
-import { useEffect, useState } from 'react'
-import { type ApiEnvelope } from '@/lib/api'
+import { useLiveLogs } from '@/features/logs/use-live-logs'
 import { formatDate } from '@/lib/format'
-import type { Node } from '@/lib/types'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
@@ -11,14 +9,10 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
+import type { Node } from '@/features/nodes/types'
 
-type NodeLog = {
-  id: string
-  occurred_at: string
-  level: string
-  category: string
-  message: string
-}
+import { parseNodeLogs } from './node-log-schema'
+import { LiveLogError } from '@/features/logs/live-log-error'
 
 function nodeLogLevelClass(level: string) {
   switch (level.toLocaleLowerCase()) {
@@ -42,32 +36,8 @@ export function NodeLogSheet({
   node: Node
   onOpenChange: (open: boolean) => void
 }) {
-  const [logs, setLogs] = useState<NodeLog[]>([])
-  const [connected, setConnected] = useState(false)
 
-  useEffect(() => {
-    const source = new EventSource(
-      `/api/nodes/${node.id}/logs/stream?limit=100`,
-      { withCredentials: true }
-    )
-    source.addEventListener('ready', () => setConnected(true))
-    source.addEventListener('logs', (event) => {
-      const payload = JSON.parse(
-        (event as MessageEvent<string>).data
-      ) as ApiEnvelope<{
-        list: NodeLog[]
-      }>
-      setLogs((current) => {
-        const merged = [...payload.data.list, ...current]
-        return Array.from(
-          new Map(merged.map((item) => [item.id, item])).values()
-        )
-          .sort((a, b) => b.occurred_at.localeCompare(a.occurred_at))
-      })
-    })
-    source.onerror = () => setConnected(false)
-    return () => source.close()
-  }, [node.id])
+  const { logs, connected, error } = useLiveLogs(`/api/nodes/${node.id}/logs/stream?limit=100`, parseNodeLogs)
 
   return (
     <Sheet open onOpenChange={onOpenChange}>
@@ -79,8 +49,9 @@ export function NodeLogSheet({
               {connected ? '已连接' : '正在重连'}
             </Badge>
           </div>
-          <SheetDescription>打开时载入最近 100 条，随后持续接收实时日志，按接收时间倒序。</SheetDescription>
+          <SheetDescription>打开时载入最近 100 条，随后持续接收实时日志，保留最近 1000 条并按时间倒序。</SheetDescription>
         </SheetHeader>
+        <LiveLogError error={error} />
         <ScrollArea className='min-h-0 flex-1 px-4'>
           <div className='font-mono text-xs' role='region' aria-label='节点实时日志列表'>
             {logs.map((log) => (

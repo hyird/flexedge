@@ -12,8 +12,9 @@
 #include <vector>
 
 #include "service/common/domain_name.h"
-#include "service/features/dns/driver.h"
-#include "service/features/dns_sync/snapshot.h"
+#include "service/features/dns/record_model.h"
+#include "service/features/dns/record_name_policy.h"
+#include "service/features/dns_sync/model.h"
 
 namespace service::dns_sync::detail {
 
@@ -41,12 +42,12 @@ inline std::string recordIdentity(const service::dns::ProviderRecord& record) {
 }
 
 inline service::dns::ProviderRecord toRemoteRecord(const ManagedRecord& record,
-                                                   const service::dns::DnsProviderDriver& driver,
+                                                   const service::dns::RecordNamePolicy& names,
                                                    std::string_view domain) {
     return {
         .id = {},
         .type = record.type,
-        .name = driver.remoteRecordName(record.name, domain),
+        .name = names.remoteRecordName(record.name, domain),
         .content = record.content,
         .ttl = record.ttl,
         .priority = record.priority,
@@ -56,8 +57,8 @@ inline service::dns::ProviderRecord toRemoteRecord(const ManagedRecord& record,
 }
 
 inline bool recordMatches(const ManagedRecord& local, const service::dns::ProviderRecord& remote,
-                          const service::dns::DnsProviderDriver& driver, std::string_view domain) {
-    const auto expected = toRemoteRecord(local, driver, domain);
+                          const service::dns::RecordNamePolicy& names, std::string_view domain) {
+    const auto expected = toRemoteRecord(local, names, domain);
     return expected.type == remote.type && expected.content == remote.content &&
            expected.ttl == remote.ttl &&
            (expected.type != "MX" || expected.priority == remote.priority) &&
@@ -67,10 +68,10 @@ inline bool recordMatches(const ManagedRecord& local, const service::dns::Provid
 }
 
 inline void applyRemoteRecord(ManagedRecord& target, const service::dns::ProviderRecord& source,
-                              const service::dns::DnsProviderDriver& driver,
+                              const service::dns::RecordNamePolicy& names,
                               std::string_view domain) {
     target.type = source.type;
-    target.name = driver.localRecordName(source.name, domain);
+    target.name = names.localRecordName(source.name, domain);
     target.content = source.content;
     target.ttl = source.ttl;
     target.priority = source.priority;
@@ -201,9 +202,9 @@ inline RecordConflict makeRecordConflict(const ManagedRecord& local,
 
 inline bool requiresManualResolution(const ManagedRecord& local,
                                      const service::dns::ProviderRecord& remote,
-                                     const service::dns::DnsProviderDriver& driver,
+                                     const service::dns::RecordNamePolicy& names,
                                      std::string_view domain) {
-    const auto expected = toRemoteRecord(local, driver, domain);
+    const auto expected = toRemoteRecord(local, names, domain);
     return expected.type != remote.type ||
            service::common::normalizeDomainName(expected.name) !=
                service::common::normalizeDomainName(remote.name) ||
@@ -214,8 +215,8 @@ inline const service::dns::ProviderRecord*
 findUnclaimedRemoteRecord(const ManagedRecord& local,
                           const std::unordered_set<std::string>& claimedRemoteIds,
                           const std::vector<service::dns::ProviderRecord>& remoteRecords,
-                          const service::dns::DnsProviderDriver& driver, std::string_view domain) {
-    const auto identity = recordIdentity(toRemoteRecord(local, driver, domain));
+                          const service::dns::RecordNamePolicy& names, std::string_view domain) {
+    const auto identity = recordIdentity(toRemoteRecord(local, names, domain));
     const service::dns::ProviderRecord* candidate = nullptr;
     for (const auto& remote : remoteRecords) {
         if (claimedRemoteIds.contains(remote.id) || recordIdentity(remote) != identity) {
@@ -235,7 +236,7 @@ inline std::vector<RecordConflict> collectSyncConflicts(
     const std::unordered_set<std::string>& configIds,
     const std::unordered_map<std::string, const service::dns::ProviderRecord*>& remoteById,
     const std::vector<service::dns::ProviderRecord>& remoteRecords,
-    const service::dns::DnsProviderDriver& driver, std::string_view domain) {
+    const service::dns::RecordNamePolicy& names, std::string_view domain) {
     std::unordered_set<std::string> claimedRemoteIds;
     claimedRemoteIds.reserve(remoteIdsByLocalId.size());
     for (const auto& [id, remoteId] : remoteIdsByLocalId) {
@@ -251,15 +252,15 @@ inline std::vector<RecordConflict> collectSyncConflicts(
             const auto remote = remoteById.find(known->second);
             if (remote == remoteById.end()) {
                 conflicts.push_back(makeRecordConflict(local, "（远端已删除）"));
-            } else if (requiresManualResolution(local, *remote->second, driver, domain)) {
+            } else if (requiresManualResolution(local, *remote->second, names, domain)) {
                 conflicts.push_back(makeRecordConflict(local, remote->second->content));
             }
             continue;
         }
 
         const auto* candidate =
-            findUnclaimedRemoteRecord(local, claimedRemoteIds, remoteRecords, driver, domain);
-        if (candidate && requiresManualResolution(local, *candidate, driver, domain)) {
+            findUnclaimedRemoteRecord(local, claimedRemoteIds, remoteRecords, names, domain);
+        if (candidate && requiresManualResolution(local, *candidate, names, domain)) {
             conflicts.push_back(makeRecordConflict(local, candidate->content));
         }
     }
@@ -297,7 +298,7 @@ inline bool mergeManagedRecord(
     std::unordered_set<std::string>& claimedRemoteIds,
     const std::unordered_map<std::string, const service::dns::ProviderRecord*>& remoteById,
     const std::vector<service::dns::ProviderRecord>& remoteRecords,
-    const service::dns::DnsProviderDriver& driver, std::string_view domain, bool remotePreferred) {
+    const service::dns::RecordNamePolicy& names, std::string_view domain, bool remotePreferred) {
     const auto known = remoteIdsByLocalId.find(local.id);
     if (known != remoteIdsByLocalId.end()) {
         const auto remote = remoteById.find(known->second);
@@ -309,22 +310,22 @@ inline bool mergeManagedRecord(
             remoteIdsByLocalId.erase(known);
             return true;
         }
-        if (remotePreferred && !recordMatches(local, *remote->second, driver, domain)) {
-            applyRemoteRecord(local, *remote->second, driver, domain);
+        if (remotePreferred && !recordMatches(local, *remote->second, names, domain)) {
+            applyRemoteRecord(local, *remote->second, names, domain);
             return true;
         }
         return false;
     }
 
     const auto* candidate =
-        findUnclaimedRemoteRecord(local, claimedRemoteIds, remoteRecords, driver, domain);
+        findUnclaimedRemoteRecord(local, claimedRemoteIds, remoteRecords, names, domain);
     if (!candidate) {
         return false;
     }
     remoteIdsByLocalId.emplace(local.id, candidate->id);
     claimedRemoteIds.emplace(candidate->id);
-    if (remotePreferred && !recordMatches(local, *candidate, driver, domain)) {
-        applyRemoteRecord(local, *candidate, driver, domain);
+    if (remotePreferred && !recordMatches(local, *candidate, names, domain)) {
+        applyRemoteRecord(local, *candidate, names, domain);
     }
     return true;
 }
@@ -332,7 +333,7 @@ inline bool mergeManagedRecord(
 inline void appendUnclaimedRemoteRecords(
     std::vector<ManagedRecord>& merged, const std::unordered_set<std::string>& claimedRemoteIds,
     const std::vector<service::dns::ProviderRecord>& remoteRecords,
-    const service::dns::DnsProviderDriver& driver, std::string_view domain, bool& changed) {
+    const service::dns::RecordNamePolicy& names, std::string_view domain, bool& changed) {
     std::erase_if(merged, [](const auto& record) { return record.id.empty(); });
     for (const auto& remote : remoteRecords) {
         if (claimedRemoteIds.contains(remote.id)) {
@@ -341,7 +342,7 @@ inline void appendUnclaimedRemoteRecords(
         merged.push_back(ManagedRecord{
             .id = {},
             .type = remote.type,
-            .name = driver.localRecordName(remote.name, domain),
+            .name = names.localRecordName(remote.name, domain),
             .content = remote.content,
             .ttl = remote.ttl,
             .priority = remote.priority,
@@ -356,7 +357,7 @@ inline void appendUnclaimedRemoteRecords(
 inline RemoteMergePlan
 planRemoteMerge(std::string_view operation, const ZoneConfigData& config,
                 const ZoneRuntimeData& runtime, const ZoneConfigData& desiredConfig,
-                std::string_view domain, const service::dns::DnsProviderDriver& driver,
+                std::string_view domain, const service::dns::RecordNamePolicy& names,
                 const std::vector<service::dns::ProviderRecord>& remoteRecords,
                 const std::vector<service::dns::ProviderLine>& lines) {
     const auto remoteById = indexRemoteRecords(remoteRecords, lines);
@@ -367,7 +368,7 @@ planRemoteMerge(std::string_view operation, const ZoneConfigData& config,
     RemoteMergePlan result;
     if (operation == "sync") {
         result.conflicts = collectSyncConflicts(managed.records, remoteIdsByLocalId, managed.ids,
-                                                remoteById, remoteRecords, driver, domain);
+                                                remoteById, remoteRecords, names, domain);
         if (!result.conflicts.empty()) {
             return result;
         }
@@ -379,11 +380,11 @@ planRemoteMerge(std::string_view operation, const ZoneConfigData& config,
                                                 remoteById, remotePreferred, result.changed);
     for (auto& local : managed.records) {
         if (mergeManagedRecord(local, remoteIdsByLocalId, claimedRemoteIds, remoteById,
-                               remoteRecords, driver, domain, remotePreferred)) {
+                               remoteRecords, names, domain, remotePreferred)) {
             result.changed = true;
         }
     }
-    appendUnclaimedRemoteRecords(managed.records, claimedRemoteIds, remoteRecords, driver, domain,
+    appendUnclaimedRemoteRecords(managed.records, claimedRemoteIds, remoteRecords, names, domain,
                                  result.changed);
     result.records = std::move(managed.records);
     result.remoteIdsByLocalId = std::move(remoteIdsByLocalId);

@@ -1,5 +1,4 @@
 import type { UseFormReturn } from 'react-hook-form'
-import type { Cluster } from '@/lib/types'
 import {
   FormControl,
   FormDescription,
@@ -17,6 +16,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { TabsContent } from '@/components/ui/tabs'
+import type { Cluster } from '@/features/clusters/types'
 import { originGroupLabel } from './website-display'
 import type { WebsiteFormValues } from './website-form'
 

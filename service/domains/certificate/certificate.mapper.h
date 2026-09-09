@@ -7,13 +7,13 @@
 #include <ruvia/web/Context.h>
 
 #include "service/domains/certificate/certificate.types.h"
-#include "service/features/certificate/model.h"
+#include "service/features/certificate/config_mapper.h"
 #include "service/features/certificate_material/model.h"
 
 namespace service::certificate {
 
 template <typename Row>
-inline void fillCertificate(ruvia::Context& c, CertificateDto& item, const Row& row) {
+inline void fillCertificate(auto& c, CertificateDto& item, const Row& row) {
     const auto config = service::certificate_issuance::parseConfigStored(
         row[2].value().value_or("{}"), {.resource = c.resource()});
     if (!config) {

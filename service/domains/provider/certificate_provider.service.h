@@ -1,6 +1,6 @@
 #pragma once
 
-#include "service/features/sync_event/fanout.h"
+#include "service/features/live_resource/fanout.h"
 
 #include <algorithm>
 #include <cctype>
@@ -18,7 +18,7 @@
 #include "service/domains/provider/certificate_provider.error.h"
 #include "service/domains/provider/certificate_provider_read.service.h"
 #include "service/domains/provider/certificate_provider.types.h"
-#include "service/features/certificate/provider_config.h"
+#include "service/features/certificate/provider_config_mapper.h"
 #include "service/features/provider_verification/queue.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
@@ -70,6 +70,10 @@ class CertificateProviderService final {
             }
             throw;
         }
+        service::live_resource::hub().publish(tenantId,
+                                              service::live_resource::Resource::providers);
+        service::live_resource::hub().publish(tenantId,
+                                              service::live_resource::Resource::tasks);
         co_return;
     }
 
@@ -142,7 +146,8 @@ class CertificateProviderService final {
             co_await service::provider_verification::remove(transaction, tenantId, id);
         }
         co_await transaction.commit();
-        service::sync_event::fanout::hub().publish(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::providers, id);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         co_return;
     }
 
@@ -161,7 +166,8 @@ class CertificateProviderService final {
             service::common::throwAppError(CertificateProviderError::REVISION_CONFLICT);
         }
         co_await transaction.commit();
-        service::sync_event::fanout::hub().publish(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::providers, id);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         co_return;
     }
 
@@ -192,7 +198,8 @@ class CertificateProviderService final {
             id, tenantId, expectedRevision);
         co_await service::provider_verification::remove(transaction, tenantId, id);
         co_await transaction.commit();
-        service::sync_event::fanout::hub().publish(tenantId);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::providers, id);
+        service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
         co_return;
     }
 
