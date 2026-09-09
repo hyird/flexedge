@@ -17,7 +17,16 @@ ruvia::Task<void> verify(ruvia::DbClient& client) {
     (void)co_await tx.execute("INSERT INTO sys_node VALUES ('n','t','c','agent',3,2,'registered','r','digest','{}',NULL,NULL,NULL,'enabled','QA',1)");
     (void)co_await tx.execute("INSERT INTO sys_cluster_release VALUES ('r','t','c','digest'),('foreign','t','other','digest')");
     const service::agent::AgentPrincipal principal{.nodeId="n",.clusterId="c",.tenantId="t",.agentId="agent"};
-    const service::agent::HeartbeatReport report{.nodeId="n",.appliedNodeSpecRevision=2,.activeReleaseId="r",.activeManifestDigest="digest"};
+    const service::agent::HeartbeatReport report{
+        .nodeId = "n",
+        .appliedNodeSpecRevision = 2,
+        .activeReleaseId = "r",
+        .activeManifestDigest = "digest",
+        .agentVersion = {},
+        .health = {},
+        .lastError = {},
+        .originHealth = {},
+    };
     for (int scenario=0; scenario<8; ++scenario) {
         auto identity = principal;
         auto input = report;
@@ -52,13 +61,9 @@ ruvia::Task<void> verify(ruvia::DbClient& client) {
     auto repeated = co_await service::agent::updateHeartbeat(tx, principal, repeatedReport,
                                                               "{\"health\":\"ok\"}");
     require(repeated.has_value() && !repeated->becameOnline);
-    require(!(co_await service::agent::updateHeartbeat(tx, principal,
-                                                       service::agent::HeartbeatReport{
-                                                           .nodeId = "n",
-                                                           .appliedNodeSpecRevision = 1,
-                                                           .activeReleaseId = "r",
-                                                           .activeManifestDigest = "digest"},
-                                                       "{}")));
+    auto staleReport = report;
+    staleReport.appliedNodeSpecRevision = 1;
+    require(!(co_await service::agent::updateHeartbeat(tx, principal, staleReport, "{}")));
     (void)co_await tx.execute("ALTER TABLE sys_node ADD COLUMN desired_release_id text DEFAULT 'r', ADD COLUMN last_apply_phase text DEFAULT 'qa', ADD COLUMN last_apply_error_code text DEFAULT 'qa', ADD COLUMN last_apply_error text DEFAULT 'qa', ADD COLUMN last_apply_retryable boolean DEFAULT true");
     (void)co_await tx.execute("UPDATE sys_node SET deleted_at=NOW()");
     const auto deletedBefore = co_await tx.query("SELECT row_to_json(n)::text FROM sys_node n");
