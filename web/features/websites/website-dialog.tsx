@@ -206,9 +206,12 @@ export function WebsiteDialog({
             selectedKey={section}
             onSelectionChange={(key) => setSection(String(key))}
             variant='secondary'
+            orientation='vertical'
+            align='start'
+            className='items-start gap-3 sm:gap-5'
           >
-            <Tabs.ListContainer>
-              <Tabs.List aria-label='网站配置分组'>
+            <Tabs.ListContainer className='sticky top-0 w-24 shrink-0 sm:w-36'>
+              <Tabs.List aria-label='网站配置分组' className='w-full'>
                 {sections.map(([id, label]) => (
                   <Tabs.Tab key={id} id={id}>
                     {label}
@@ -217,7 +220,7 @@ export function WebsiteDialog({
                 ))}
               </Tabs.List>
             </Tabs.ListContainer>
-            <Tabs.Panel id={section} className='pt-4'>
+            <Tabs.Panel id={section} className='min-w-0 flex-1'>
               <Notice>{failure}</Notice>
               <div className='min-h-64 space-y-5' inert={mutation.isPending}>
                 {section === 'basic' && (
