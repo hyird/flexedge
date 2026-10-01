@@ -6,13 +6,8 @@ import { apiErrorMessage } from '@/lib/api'
 import { formatBytes, formatDate } from '@/lib/format'
 import { queryKeys } from '@/lib/query-keys'
 import { Confirm } from '@/components/confirm'
-import {
-  Choice,
-  Dialog,
-  Field,
-  Notice,
-  TextAreaField,
-} from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Choice, Field, Notice, TextAreaField } from '@/components/forms'
 import { ResourceList } from '@/components/resource-list'
 import { RowMenu } from '@/components/row-menu'
 import { StatusChip } from '@/components/status-chip'
@@ -177,7 +172,7 @@ export function WebsiteCacheOperations({
   const detail = jobs.data?.list.find((job) => job.id === detailId)
   return (
     <>
-      <Dialog
+      <Drawer
         title={`${website.config.name || website.access_domain} · 缓存`}
         onClose={onClose}
         size='lg'
@@ -370,7 +365,7 @@ export function WebsiteCacheOperations({
             </Tabs.Panel>
           </Tabs>
         </div>
-      </Dialog>
+      </Drawer>
       {confirmation && (
         <Confirm
           title='确认刷新缓存'

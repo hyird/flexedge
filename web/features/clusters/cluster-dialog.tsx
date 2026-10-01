@@ -5,7 +5,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
-import { Choice, Dialog, Field, FormActions, Notice } from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Choice, Field, FormActions, Notice } from '@/components/forms'
 import { QueryNotice } from '@/components/page'
 import { dnsZoneOptionsQuery } from '@/features/dns-zones/data'
 import { saveCluster } from './data'
@@ -70,7 +71,7 @@ export function ClusterDialog({
   if (cluster && !zoneItems.some((zone) => zone.id === cluster.dns_zone_id))
     zoneItems.push({ id: cluster.dns_zone_id, label: cluster.dns_zone_domain })
   return (
-    <Dialog
+    <Drawer
       title={cluster ? '编辑集群' : '创建集群'}
       onClose={onClose}
       busy={mutation.isPending}
@@ -165,6 +166,6 @@ export function ClusterDialog({
           label={cluster ? '保存集群' : '创建集群'}
         />
       </form>
-    </Dialog>
+    </Drawer>
   )
 }

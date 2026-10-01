@@ -10,7 +10,8 @@ import { Accordion, Button, Tabs, toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { formatBytes, formatDate } from '@/lib/format'
 import { queryKeys } from '@/lib/query-keys'
-import { Choice, Dialog, Field, FormActions, Notice } from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Choice, Field, FormActions, Notice } from '@/components/forms'
 import { QueryNotice } from '@/components/page'
 import { StatusChip } from '@/components/status-chip'
 import type { Cluster } from '@/features/clusters/types'
@@ -85,7 +86,7 @@ export function NodeDialog({
   const endpointError =
     fieldErrors.endpoints?.root?.message ?? fieldErrors.endpoints?.message
   return (
-    <Dialog
+    <Drawer
       title={node ? '编辑节点' : '添加节点'}
       onClose={onClose}
       busy={mutation.isPending}
@@ -357,7 +358,7 @@ export function NodeDialog({
           </Tabs.Panel>
         )}
       </Tabs>
-    </Dialog>
+    </Drawer>
   )
 }
 

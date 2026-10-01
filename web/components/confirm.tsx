@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { Button } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
-import { Dialog, Notice } from './forms'
+import { Drawer } from '@/components/drawer'
+import { Notice } from './forms'
 
 export function Confirm({
   title,
@@ -33,7 +34,7 @@ export function Confirm({
     }
   }
   return (
-    <Dialog title={title} onClose={onClose} busy={working}>
+    <Drawer size='sm' title={title} onClose={onClose} busy={working}>
       <div className='flex flex-col gap-4'>
         <p className='text-sm leading-6'>{description}</p>
         <Notice>{error}</Notice>
@@ -56,6 +57,6 @@ export function Confirm({
           </Button>
         </div>
       </div>
-    </Dialog>
+    </Drawer>
   )
 }

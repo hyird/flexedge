@@ -47,8 +47,8 @@ export function ResourceList<T extends object>({
 }) {
   const refresh = onRefresh ?? query.refetch
   return (
-    <div className='flex min-w-0 flex-col gap-4'>
-      <div className='flex flex-wrap items-center gap-3'>
+    <div className='flex min-h-0 min-w-0 flex-col gap-4'>
+      <div className='flex shrink-0 flex-wrap items-center gap-3'>
         {filters}
         {toolbar}
         <div className='ml-auto flex items-center gap-2'>
@@ -89,13 +89,14 @@ export function ResourceList<T extends object>({
           data={data.list}
           columns={columns}
           getRowId={getRowId ?? ((item) => (item as { id: string }).id)}
+          className='min-h-0 min-w-0'
           contentClassName='min-w-[720px]'
         />
       ) : !query.isError ? (
         <EmptyState title={emptyTitle} description={emptyDescription} />
       ) : null}
       {data && (
-        <div className='flex flex-wrap items-center justify-between gap-3 text-xs text-muted'>
+        <div className='flex shrink-0 flex-wrap items-center justify-between gap-3 text-xs text-muted'>
           <span className='tabular-nums'>共 {data.total} 条</span>
           <div className='flex flex-wrap items-center gap-2'>
             {onPageSizeChange && (

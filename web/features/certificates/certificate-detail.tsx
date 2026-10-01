@@ -1,5 +1,6 @@
 import { formatDate } from '@/lib/format'
-import { Dialog, Notice } from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Notice } from '@/components/forms'
 import { StatusChip } from '@/components/status-chip'
 import type { Certificate } from './types'
 
@@ -11,7 +12,7 @@ export function CertificateDetailDialog({
   onClose: () => void
 }) {
   return (
-    <Dialog
+    <Drawer
       title={certificate.domains[0] || '证书详情'}
       onClose={onClose}
       size='md'
@@ -57,6 +58,6 @@ export function CertificateDetailDialog({
         )}
         {certificate.last_error && <Notice>{certificate.last_error}</Notice>}
       </div>
-    </Dialog>
+    </Drawer>
   )
 }

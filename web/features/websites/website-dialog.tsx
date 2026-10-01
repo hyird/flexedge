@@ -4,14 +4,8 @@ import { Button, Tabs, toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { Confirm } from '@/components/confirm'
-import {
-  Choice,
-  Dialog,
-  Field,
-  FormActions,
-  Notice,
-  Toggle,
-} from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Choice, Field, FormActions, Notice, Toggle } from '@/components/forms'
 import { QueryNotice } from '@/components/page'
 import { cachePolicyOptionsQuery } from '@/features/cache-policies/data'
 import { usableCertificateOptionsQuery } from '@/features/certificates/data'
@@ -194,7 +188,7 @@ export function WebsiteDialog({
   }
   return (
     <>
-      <Dialog
+      <Drawer
         title={
           website
             ? `编辑 ${website.config.name || website.access_domain}`
@@ -934,7 +928,7 @@ export function WebsiteDialog({
             label='保存并分发'
           />
         </form>
-      </Dialog>
+      </Drawer>
       {leaving && (
         <Confirm
           title='放弃未保存的配置？'

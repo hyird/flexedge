@@ -3,14 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
-import {
-  Choice,
-  Dialog,
-  Field,
-  FormActions,
-  Notice,
-  Toggle,
-} from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Choice, Field, FormActions, Notice, Toggle } from '@/components/forms'
 import { QueryNotice } from '@/components/page'
 import { dnsZoneOptionsQuery } from '@/features/dns-zones/data'
 import { certificateProvidersQuery } from '@/features/providers/data'
@@ -59,7 +53,7 @@ export function CertificateDialog({
     },
   })
   return (
-    <Dialog
+    <Drawer
       title={certificate ? '续期设置' : '申请证书'}
       onClose={onClose}
       busy={mutation.isPending}
@@ -159,6 +153,6 @@ export function CertificateDialog({
           label={certificate ? '保存' : '申请证书'}
         />
       </form>
-    </Dialog>
+    </Drawer>
   )
 }

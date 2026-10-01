@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { Button, toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
-import { Dialog, Notice } from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Notice } from '@/components/forms'
 import type { NodeCredentials } from './data'
 
 export function CredentialsDialog({
@@ -28,7 +29,7 @@ export function CredentialsDialog({
     }
   }
   return (
-    <Dialog title='节点接入凭据' onClose={onClose}>
+    <Drawer title='节点接入凭据' onClose={onClose}>
       <div className='grid gap-4'>
         <p className='text-sm text-muted'>在节点启动配置中填写以下凭据。</p>
         <dl className='grid gap-3'>
@@ -60,6 +61,6 @@ export function CredentialsDialog({
           </Button>
         </div>
       </div>
-    </Dialog>
+    </Drawer>
   )
 }

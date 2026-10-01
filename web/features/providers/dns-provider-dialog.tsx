@@ -3,7 +3,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
-import { Choice, Dialog, Field, FormActions, Notice } from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Choice, Field, FormActions, Notice } from '@/components/forms'
 import { saveDnsProvider } from './data'
 import {
   dnsProviderFormSchema,
@@ -40,7 +41,7 @@ export function DnsProviderDialog({
     },
   })
   return (
-    <Dialog
+    <Drawer
       title={provider ? '编辑 DNS 账号' : '添加 DNS 账号'}
       onClose={onClose}
       busy={mutation.isPending}
@@ -107,6 +108,6 @@ export function DnsProviderDialog({
         {mutation.isError && <Notice>{apiErrorMessage(mutation.error)}</Notice>}
         <FormActions onCancel={onClose} busy={mutation.isPending} />
       </form>
-    </Dialog>
+    </Drawer>
   )
 }

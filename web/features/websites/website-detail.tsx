@@ -6,7 +6,8 @@ import { KPI } from '@heroui-pro/react/kpi'
 import { Button, Card, Chip, Tabs, toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { formatBytes, formatBytesPerSecond, formatDate } from '@/lib/format'
-import { Dialog, Notice } from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Notice } from '@/components/forms'
 import { EmptyState, QueryNotice } from '@/components/page'
 import { StatusChip } from '@/components/status-chip'
 import type {
@@ -42,7 +43,7 @@ export function WebsiteDetail({
     onError: (error) => toast.danger(apiErrorMessage(error)),
   })
   return (
-    <Dialog
+    <Drawer
       title={website.config.name || website.access_domain}
       onClose={onClose}
       size='lg'
@@ -296,7 +297,7 @@ export function WebsiteDetail({
           </Tabs.Panel>
         </Tabs>
       </div>
-    </Dialog>
+    </Drawer>
   )
 }
 
