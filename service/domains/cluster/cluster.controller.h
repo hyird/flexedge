@@ -14,6 +14,7 @@
 #include "service/common/http.h"
 #include "service/common/types.h"
 #include "service/domains/cluster/cluster.schema.h"
+#include "ruvia/web/RequestValidation.h"
 #include "service/domains/cluster/cluster_command.service.h"
 #include "service/domains/cluster/cluster_read.service.h"
 #include "service/middleware/auth.h"
@@ -28,8 +29,8 @@ class ClusterController final : public ruvia::Controller<ClusterController> {
     RUVIA_ROUTES_BEGIN
     RUVIA_GET_SSE("/stream", list);
     RUVIA_GET_SSE("/options/stream", options);
-    RUVIA_POST("/", create, SaveClusterValidator);
-    RUVIA_PUT("/:id", update, SaveClusterValidator);
+    RUVIA_POST("/", create, ruvia::JsonBody<SaveClusterBody>, SaveClusterValidator);
+    RUVIA_PUT("/:id", update, ruvia::JsonBody<SaveClusterBody>, SaveClusterValidator);
     RUVIA_DELETE("/:id", remove);
     RUVIA_ROUTES_END
 
@@ -42,7 +43,7 @@ class ClusterController final : public ruvia::Controller<ClusterController> {
             service::live_resource::queryKey("options", keyword.value_or("")));
         co_await service::live_resource::streamSnapshot(
             c, std::move(sub), [tenant, keyword](auto& read) -> ruvia::Task<std::string> {
-                ruvia::Array<ClusterDto> data(read.resource());
+                ruvia::Array<ClusterDto> data({.resource = read.pool()});
                 for (std::int64_t pageNumber = 1;; ++pageNumber) {
                     auto page = co_await clusterReadService().list(read, tenant, pageNumber, 1000,
                                                                    (pageNumber - 1) * 1000, keyword,
@@ -55,7 +56,7 @@ class ClusterController final : public ruvia::Controller<ClusterController> {
                 }
                 co_return std::string(ruvia::toJson(
                     service::common::ok<ClusterOptionsResponse>(read, std::move(data)),
-                    {.resource = read.resource()}));
+                    {.resource = read.pool()}));
             });
     }
 
@@ -99,7 +100,7 @@ class ClusterController final : public ruvia::Controller<ClusterController> {
                                                                keyword, dnsZoneId, status);
                 co_return std::string(
                     ruvia::toJson(service::common::ok<ClusterPageResponse>(read, std::move(data)),
-                                  {.resource = read.resource()}));
+                                  {.resource = read.pool()}));
             });
     }
 

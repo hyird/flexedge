@@ -56,7 +56,7 @@ class CertificateProviderService final {
             accessKey ? std::optional<std::string>{service::utils::sealSecret(*accessKey)}
                       : std::nullopt,
             accessKey ? std::optional<std::string>{secretHint(*accessKey)} : std::nullopt,
-            c.resource());
+            c.pool());
         try {
             (void)co_await c.db().execute(
                 "INSERT INTO sys_provider (tenant_id, kind, provider, revision, config, "
@@ -92,7 +92,7 @@ class CertificateProviderService final {
         }
         const auto provider = std::string(rows.front()[0].value().value_or(""));
         const auto current = service::certificate_issuance::parseCertificateProviderConfig(
-            rows.front()[2].value().value_or("{}"), c.resource());
+            rows.front()[2].value().value_or("{}"), c.pool());
         const auto& credentialModeInput = body.get<"credentialMode">();
         if (!credentialModeInput) {
             service::common::throwAppError(service::common::kValidationErrorCode,
@@ -127,7 +127,7 @@ class CertificateProviderService final {
         const bool changed = credentialMode != current.credentialMode ||
                              accountEmail != current.accountEmail || submittedKey.has_value();
         const auto config = service::certificate_issuance::serializeCertificateProviderConfig(
-            credentialMode, accountEmail, envelope, hint, c.resource());
+            credentialMode, accountEmail, envelope, hint, c.pool());
         auto transaction = co_await c.db().beginTransaction();
         const auto result = co_await transaction.execute(
             "UPDATE sys_provider SET revision = revision + 1, config = $1::jsonb, runtime = CASE "

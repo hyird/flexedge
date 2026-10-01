@@ -41,6 +41,7 @@ class Hub final {
         std::string tenant;
         Resource resource;
         std::string id;
+        ruvia::WorkerId worker;
         std::weak_ptr<Mailbox> mailbox;
     };
     struct State final {
@@ -97,7 +98,7 @@ class Hub final {
         try {
             auto snapshots = state_->snapshots.subscribe(
                 {std::string(tenant), resource, std::string(id), std::move(query)});
-            state_->entries.push_back({std::string(tenant), resource, std::string(id), mailbox});
+            state_->entries.push_back({std::string(tenant), resource, std::string(id), worker.id(), mailbox});
             return Subscription(state_, std::move(mailbox), std::move(receiver), std::move(snapshots));
         } catch (const SnapshotCapacityError&) {
             throw ruvia::HttpError({.status = ruvia::http_status::kServiceUnavailable,
@@ -107,17 +108,34 @@ class Hub final {
     SnapshotCache::Stats cacheStats() const { return state_->snapshots.stats(); }
 
     void publish(std::string_view tenant, Resource resource, std::string_view id = {}) {
-        deliver(tenant, resource, id, {}, false);
+        publishImpl(std::nullopt, tenant, resource, id);
+    }
+    void publishForWorker(ruvia::WorkerId worker, std::string_view tenant,
+                          Resource resource, std::string_view id = {}) {
+        publishImpl(worker, tenant, resource, id);
+    }
+    void publishRuntime(std::string_view tenant, std::string_view id, std::string_view payload) {
+        deliver(tenant, Resource::nodes, id, payload, true);
+    }
+    void publishOrigins(std::string_view tenant, std::string_view websiteId,
+                        std::string_view nodeId, std::string_view payload) {
+        deliver(tenant, Resource::websites, websiteId, payload, false, nodeId);
+    }
+
+  private:
+    void publishImpl(std::optional<ruvia::WorkerId> worker, std::string_view tenant,
+                     Resource resource, std::string_view id) {
+        deliver(tenant, resource, id, {}, false, {}, worker);
         // The overview projects resource totals and task marker state. Runtime
         // reports bypass publish(), so ordinary heartbeats never reload it.
         if (resource != Resource::overview && resource != Resource::accessHistory)
-            deliver(tenant, Resource::overview, {}, {}, false);
+            deliver(tenant, Resource::overview, {}, {}, false, {}, worker);
         // Read projections join these resources. Dependent projections receive
         // a tenant-scoped wakeup because their IDs differ from the changed row.
         // Deliver directly rather than recursively publishing: reciprocal joins
         // (zone counts, website bindings) must not form notification loops.
         const auto dependent = [&](Resource projection) {
-            deliver(tenant, projection, {}, {}, false);
+            deliver(tenant, projection, {}, {}, false, {}, worker);
         };
         switch (resource) {
         case Resource::nodes:
@@ -152,17 +170,9 @@ class Hub final {
             break;
         }
     }
-    void publishRuntime(std::string_view tenant, std::string_view id, std::string_view payload) {
-        deliver(tenant, Resource::nodes, id, payload, true);
-    }
-    void publishOrigins(std::string_view tenant, std::string_view websiteId,
-                        std::string_view nodeId, std::string_view payload) {
-        deliver(tenant, Resource::websites, websiteId, payload, false, nodeId);
-    }
-
-  private:
     void deliver(std::string_view tenant, Resource resource, std::string_view id,
-                 std::string_view payload, bool runtime, std::string_view originNode = {}) {
+                 std::string_view payload, bool runtime, std::string_view originNode = {},
+                 std::optional<ruvia::WorkerId> worker = std::nullopt) {
         // Invalidate once per query group BEFORE waking any subscriber. Runtime
         // patches also invalidate cached rows for future joins, but do not turn
         // ordinary heartbeats into snapshot reads for existing subscribers.
@@ -173,6 +183,7 @@ class Hub final {
             const std::lock_guard lock(state_->mutex);
             for (const auto& entry : state_->entries) {
                 if (entry.tenant != tenant || entry.resource != resource ||
+                    (worker && entry.worker != *worker) ||
                     (!entry.id.empty() && !id.empty() && entry.id != id))
                     continue;
                 // Origin health is a detail-only projection; list rows do not

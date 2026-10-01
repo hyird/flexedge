@@ -1,15 +1,16 @@
 #pragma once
 
+#include "ruvia/web/Model.h"
+
 #include <optional>
 #include <string>
 #include <string_view>
 
-#include <ruvia/web/Model.h>
 #include <ruvia/web/ModelJson.h>
 
 namespace service::certificate_material {
 
-RUVIA_REQUEST_MODEL(
+RUVIA_MODEL(
     CertificateMaterialInput,
     RUVIA_OPTIONAL_FIELD_NAME("certificate_chain_pem", certificateChainPem, ruvia::String),
     RUVIA_OPTIONAL_FIELD_NAME("private_key_envelope", privateKeyEnvelope, ruvia::String),
@@ -17,7 +18,7 @@ RUVIA_REQUEST_MODEL(
     RUVIA_OPTIONAL_FIELD_NAME("serial_number", serialNumber, ruvia::String),
     RUVIA_OPTIONAL_FIELD_NAME("fingerprint_sha256", fingerprintSha256, ruvia::String),
     RUVIA_OPTIONAL_FIELD_NAME("last_issued_at", lastIssuedAt, ruvia::String));
-RUVIA_RESPONSE_MODEL(
+RUVIA_MODEL(
     CertificateMaterialOutput,
     RUVIA_REQUIRED_FIELD_NAME("certificate_chain_pem", certificateChainPem, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("private_key_envelope", privateKeyEnvelope, ruvia::String),

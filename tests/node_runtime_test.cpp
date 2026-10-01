@@ -1666,6 +1666,17 @@ int main(int argc, char* argv[]) {
         const std::weak_ptr stoppedLoopWeak(stoppedLoopListener);
         loops.stop();
         loops.join();
+        firstListener->requestStop();
+        secondListener->requestStop();
+        constrainedListener->requestStop();
+        reusableEdgeListener->requestStop();
+        bool restartAfterWorkerRetirementRejected = false;
+        try {
+            firstListener->requestStart();
+        } catch (const std::runtime_error&) {
+            restartAfterWorkerRetirementRejected = true;
+        }
+        REQUIRE(restartAfterWorkerRetirementRejected);
         stoppedLoopListener->requestStop();
         stoppedLoopListener.reset();
         REQUIRE(stoppedLoopWeak.expired());

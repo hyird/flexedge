@@ -34,7 +34,7 @@ inline WebsiteRuntimeDto toRuntime(auto& c,
                                    const std::vector<BoundCertificate>& certificates,
                                    std::int64_t targetCount, std::int64_t syncedCount,
                                    const std::vector<OriginRuntimeState>& originStates = {}) {
-    WebsiteRuntimeDto output(c);
+    WebsiteRuntimeDto output({.resource = c.pool()});
     const auto deployStatus = targetCount == 0             ? std::string_view{"no_nodes"}
                               : syncedCount == targetCount ? std::string_view{"applied"}
                               : syncedCount == 0           ? std::string_view{"pending"}
@@ -56,7 +56,7 @@ inline WebsiteRuntimeDto toRuntime(auto& c,
                                                                              domain.hostname);
                        });
             });
-        auto& item = domains.emplace_back(c);
+        auto& item = domains.emplace_back();
         const auto resolutionStatus = runtimeState && runtimeState->resolutionStatus
                                           ? std::string_view(*runtimeState->resolutionStatus)
                                           : std::string_view{"unverified"};
@@ -73,7 +73,7 @@ inline WebsiteRuntimeDto toRuntime(auto& c,
     auto& origins = output.template ensure<"originStates">();
     origins.reserve(originStates.size());
     for (const auto& state : originStates) {
-        auto& item = origins.emplace_back(c);
+        auto& item = origins.emplace_back();
         item.template set<"nodeId">(state.nodeId);
         item.template set<"nodeName">(state.nodeName);
         item.template set<"originId">(state.health.originId);

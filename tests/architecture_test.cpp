@@ -40,7 +40,7 @@
 #include "service/utils/sensitive_string.h"
 #include "node/data/origin_selection.h"
 #include "node/data/route_rules.h"
-#include "service/domains/website/website.schema.h"
+#include "service/features/website_config/validation.h"
 
 namespace {
 
@@ -458,6 +458,7 @@ int runArchitectureTests() {
     const auto websiteConfigModel = source("service/features/website_config/model.h");
     REQUIRE(!websiteConfigModel.contains("ruvia"));
     REQUIRE(!websiteConfigModel.contains("transport.h"));
+    REQUIRE(!websiteConfigModel.contains("service/domains/"));
     const auto websiteConfig = source("service/features/website_config/mapper.h");
     REQUIRE(websiteConfig.contains("!defaultOriginGroup"));
     REQUIRE(websiteConfig.contains("!healthCheckPath"));
@@ -465,10 +466,26 @@ int runArchitectureTests() {
     REQUIRE(websiteConfig.contains("!group || !protocol"));
     REQUIRE(!websiteConfig.contains("legacyRouteRules"));
     REQUIRE(websiteConfig.contains("website_config/transport.h"));
-    REQUIRE(!websiteConfig.contains("RUVIA_REQUEST_MODEL(WebsiteDomainInput"));
+    REQUIRE(!websiteConfig.contains("RUVIA_MODEL("));
+    REQUIRE(!websiteConfig.contains("service/domains/"));
     const auto websiteConfigTransport = source("service/features/website_config/transport.h");
-    REQUIRE(websiteConfigTransport.contains("RUVIA_REQUEST_MODEL(WebsiteDomainInput"));
+    REQUIRE(websiteConfigTransport.contains("RUVIA_MODEL(WebsiteDomainInput"));
+    REQUIRE(websiteConfigTransport.contains("WebsiteConfigInput, RUVIA_OPTIONAL_FIELD(name"));
+    REQUIRE(websiteConfigTransport.contains("RUVIA_MODEL(WebsiteDomainOutput"));
     REQUIRE(websiteConfigTransport.contains("WebsiteConfigOutput, RUVIA_OPTIONAL_FIELD(name"));
+    REQUIRE(!websiteConfigTransport.contains("RUVIA_REQUEST_MODEL("));
+    REQUIRE(!websiteConfigTransport.contains("RUVIA_RESPONSE_MODEL("));
+    REQUIRE(!websiteConfigTransport.contains("RUVIA_COMPAT"));
+    REQUIRE(!websiteConfigTransport.contains("RUVIA_DETAIL"));
+    REQUIRE(!websiteConfigTransport.contains("namespace detail"));
+    REQUIRE(!websiteConfigTransport.contains("service/domains/"));
+    REQUIRE(websiteConfigTransport.find("WebsiteConfigInput, RUVIA_OPTIONAL_FIELD(name") <
+            websiteConfigTransport.find("WebsiteConfigOutput, RUVIA_OPTIONAL_FIELD(name"));
+    const auto websiteConfigValidation = source("service/features/website_config/validation.h");
+    REQUIRE(websiteConfigValidation.contains("WebsiteDomainValidator"));
+    REQUIRE(websiteConfigValidation.contains("WebsiteConfigRules"));
+    REQUIRE(websiteConfigValidation.contains("ruvia/web/Validation.h"));
+    REQUIRE(!websiteConfigValidation.contains("service/domains/"));
     REQUIRE(!std::filesystem::exists(sourceRoot / "service/domains/website/website.service.h"));
     const auto websiteCommand = source("service/domains/website/website_command.service.h");
     REQUIRE(websiteCommand.contains("class WebsiteCommandService final"));
@@ -1443,7 +1460,7 @@ int runArchitectureTests() {
             std::vector<std::string> fields;
             void add(std::string field, std::string_view, std::string_view) { fields.push_back(std::move(field)); }
         } validation;
-        service::website::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
+        service::website_config::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
         REQUIRE(validation.fields.empty());
         const auto normalized = service::website_config::normalize(*input);
         REQUIRE(normalized && normalized->conditions.size() == 1);
@@ -1451,7 +1468,7 @@ int runArchitectureTests() {
         const auto json = ruvia::toJson(service::website_config::toOutput(outputConfig));
         REQUIRE(json.contains("\"conditions\":[{\"source\":\"query\""));
         input->set<"redirectUrl">("/new/${2}");
-        service::website::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
+        service::website_config::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
         REQUIRE(!validation.fields.empty());
         validation.fields.clear();
         input->set<"action">("rewrite");
@@ -1459,11 +1476,11 @@ int runArchitectureTests() {
         input->set<"redirectStatus">(0);
         input->set<"rewriteMode">("replace_path");
         input->set<"rewritePath">("/api/${1}");
-        service::website::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
+        service::website_config::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
         REQUIRE(validation.fields.empty());
         REQUIRE(service::website_config::normalize(*input)->action == "rewrite");
         input->set<"originGroup">("default");
-        service::website::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
+        service::website_config::WebsiteRouteRuleValidator{}.validateNested(*input, "route", validation);
         REQUIRE(!validation.fields.empty());
     }
     auto* invalidRoute = routeWebsite.add_route_rules();

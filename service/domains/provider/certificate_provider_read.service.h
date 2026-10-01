@@ -23,9 +23,9 @@ class CertificateProviderReadService final {
             "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') FROM sys_provider WHERE tenant_id = $1 AND "
             "kind = 'certificate' AND deleted_at IS NULL ORDER BY sort DESC",
             tenantId);
-        ruvia::Array<CertificateProviderDto> result(c.resource());
+        ruvia::Array<CertificateProviderDto> result({.resource = c.pool()});
         for (const auto& row : rows) {
-            fill(c, result.emplace_back(c), row);
+            fill(c, result.emplace_back(ruvia::ModelOptions{.resource = c.pool()}), row);
         }
         co_return result;
     }
@@ -34,7 +34,7 @@ class CertificateProviderReadService final {
     template <typename Row>
     static void fill(auto& c, CertificateProviderDto& item, const Row& row) {
         const auto config = service::certificate_issuance::parseCertificateProviderConfig(
-            row[3].value().value_or("{}"), c.resource());
+            row[3].value().value_or("{}"), c.pool());
         item.set<"id">(row[0].value().value_or(""));
         item.set<"revision">(row[1].template as<std::int64_t>().value_or(1));
         item.set<"provider">(row[2].value().value_or(""));

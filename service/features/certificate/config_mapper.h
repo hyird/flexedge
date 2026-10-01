@@ -18,8 +18,6 @@ normalize(const CertificateConfigInput& input) {
     return CertificateConfigData{.autoRenew = autoRenew->value};
 }
 
-inline bool complete(const CertificateConfigInput& config) { return normalize(config).has_value(); }
-
 [[nodiscard]] inline std::optional<CertificateConfigData>
 parseConfigStored(std::string_view json, ruvia::ModelParseOptions options = {}) {
     const std::optional<CertificateConfigInput> input =

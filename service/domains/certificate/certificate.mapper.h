@@ -15,16 +15,16 @@ namespace service::certificate {
 template <typename Row>
 inline void fillCertificate(auto& c, CertificateDto& item, const Row& row) {
     const auto config = service::certificate_issuance::parseConfigStored(
-        row[2].value().value_or("{}"), {.resource = c.resource()});
+        row[2].value().value_or("{}"), {.resource = c.pool()});
     if (!config) {
         throw std::runtime_error("stored certificate config is incomplete");
     }
     const auto material = service::certificate_material::parseStored(row[4].value().value_or("{}"),
-                                                                     {.resource = c.resource()});
+                                                                     {.resource = c.pool()});
     if (!material) {
         throw std::runtime_error("stored certificate material is invalid");
     }
-    auto configDto = service::certificate_issuance::toOutput(*config, {.resource = c.resource()});
+    auto configDto = service::certificate_issuance::toOutput(*config, {.resource = c.pool()});
     item.set<"id">(row[0].value().value_or(""));
     item.set<"revision">(row[1].template as<std::int64_t>().value_or(1));
     item.set<"issuer">(row[15].value().value_or("") == "zerossl" ? "ZeroSSL" : "Let's Encrypt");
@@ -58,10 +58,10 @@ inline void fillCertificate(auto& c, CertificateDto& item, const Row& row) {
         item.set<"syncCountFails">(row[17].template as<std::int64_t>().value_or(0));
     auto& domains = item.ensure<"domains">();
     if (const auto& primaryDomain = row[12].value()) {
-        domains.emplace_back(*primaryDomain, ruvia::ModelOptions{.resource = c.resource()});
+        domains.emplace_back(*primaryDomain, ruvia::ModelOptions{.resource = c.pool()});
     }
     if (const auto& secondaryDomain = row[13].value()) {
-        domains.emplace_back(*secondaryDomain, ruvia::ModelOptions{.resource = c.resource()});
+        domains.emplace_back(*secondaryDomain, ruvia::ModelOptions{.resource = c.pool()});
     }
 }
 

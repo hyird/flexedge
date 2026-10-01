@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <ranges>
 #include <stdexcept>
@@ -54,7 +55,15 @@ class DataPlane final {
               NodeLogBuffer& logs)
         : loops_(loops), owner_(std::move(owner)), runtime_(runtime), logs_(logs),
           healthSupervisor_(OriginHealthSupervisor::create(owner_, runtime_, health_, healthProbeTls_)),
-          stopRegistration_(owner_.onStop([this] { stopOnOwner(); })) {
+          stopRegistration_(owner_.onStop([this]() -> ruvia::Task<void> {
+              {
+                  std::lock_guard lock(stopMutex_);
+                  ownerStopping_ = true;
+                  stopQueued_ = true;
+              }
+              stopOnOwner();
+              co_await healthSupervisor_->stopAndWait();
+          })) {
         workers_.reserve(loops_.loopCount());
         for (std::size_t index = 0; index < loops_.loopCount(); ++index) {
             workers_.push_back(std::make_unique<WorkerState>(loops_.loop(index).executor(),
@@ -96,13 +105,13 @@ class DataPlane final {
     }
 
     void requestStopAccepting() noexcept {
+        std::lock_guard lock(stopMutex_);
+        if (ownerStopping_ || stopQueued_) return;
+        stopQueued_ = true;
         if (owner_.isCurrent()) {
             stopOnOwner();
             return;
         }
-        // The process owner joins both loop pools before destroying DataPlane
-        // (LoopShutdown in main). Never mutate listener maps from the caller
-        // thread when the bounded mailbox rejects a shutdown request.
         asio::post(owner_.executor(), [this] { stopOnOwner(); });
     }
 
@@ -279,6 +288,9 @@ class DataPlane final {
 
     ruvia::EventLoopPool& loops_;
     ruvia::EventLoop owner_;
+    std::mutex stopMutex_;
+    bool stopQueued_{};
+    bool ownerStopping_{};
     RuntimeState& runtime_;
     NodeLogBuffer& logs_;
     OriginHealthRegistry health_;

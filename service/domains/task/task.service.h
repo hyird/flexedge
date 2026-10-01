@@ -85,7 +85,7 @@ class TaskService final {
             version);
         if (rows.empty())
             service::common::throwAppError(TaskError::NOT_FOUND);
-        TaskDto item(c);
+        TaskDto item({.resource = c.pool()});
         assign(item, rows.front());
         co_return item;
     }
@@ -94,7 +94,7 @@ class TaskService final {
                                   std::int64_t pageSize, std::int64_t skip, const std::string& type,
                                   const std::string& status, const std::string& keyword,
                                   std::int64_t days) {
-        TaskPageDto data(c);
+        TaskPageDto data({.resource = c.pool()});
         // One snapshot keeps the totals and rows consistent during rapid results.
         auto tx = co_await c.db().beginTransaction();
         (void)co_await tx.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY");
@@ -117,7 +117,7 @@ class TaskService final {
                                             tenant, type, status, keyword, days, pageSize, skip);
         auto& list = data.template ensure<"list">();
         for (const auto& row : rows) {
-            auto& item = list.emplace_back(c);
+            auto& item = list.emplace_back(ruvia::ModelOptions{.resource = c.pool()});
             assign(item, row);
         }
         co_await tx.commit();
@@ -131,14 +131,14 @@ class TaskService final {
             "FROM sys_sync_event WHERE tenant_id = $1 AND task_id = $2 AND version = $3 "
             "ORDER BY id DESC LIMIT 101",
             tenant, id, version);
-        TaskHistoryDto data(c);
+        TaskHistoryDto data({.resource = c.pool()});
         data.template set<"truncated">(rows.size() > 100);
         auto& list = data.template ensure<"list">();
         std::size_t count = 0;
         for (const auto& row : rows) {
             if (count++ == 100)
                 break;
-            auto& item = list.emplace_back(c);
+            auto& item = list.emplace_back(ruvia::ModelOptions{.resource = c.pool()});
             item.template set<"outcome">(row[0].value().value_or(""));
             item.template set<"error">(row[1].value().value_or(""));
             item.template set<"emittedAt">(row[2].value().value_or(""));

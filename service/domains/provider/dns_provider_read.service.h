@@ -48,14 +48,14 @@ class DnsProviderReadService final {
                                       std::to_string(pageSize) + " OFFSET " + std::to_string(skip),
                                   params);
 
-        DnsProviderPageDataDto result(c);
+        DnsProviderPageDataDto result({.resource = c.pool()});
         result.template set<"total">(total);
         result.template set<"page">(page);
         result.template set<"pageSize">(pageSize);
         result.template set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
         auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
-            fill(items.emplace_back(c), parseRow(c, row));
+            fill(items.emplace_back(ruvia::ModelOptions{.resource = c.pool()}), parseRow(c, row));
         }
         co_return result;
     }
@@ -70,7 +70,7 @@ class DnsProviderReadService final {
         if (rows.empty()) {
             service::common::throwAppError(DnsProviderError::NOT_FOUND);
         }
-        DnsProviderDto result(c);
+        DnsProviderDto result({.resource = c.pool()});
         fill(result, parseRow(c, rows.front()));
         co_return result;
     }
@@ -105,7 +105,7 @@ class DnsProviderReadService final {
 
     template <typename Row> static StoredProvider parseRow(auto& c, const Row& row) {
         const auto config =
-            service::dns::parseDnsProviderConfig(row[5].value().value_or("{}"), c.resource());
+            service::dns::parseDnsProviderConfig(row[5].value().value_or("{}"), c.pool());
         return {
             .id = std::string(row[0].value().value_or("")),
             .provider = std::string(row[1].value().value_or("")),

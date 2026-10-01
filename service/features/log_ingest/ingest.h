@@ -58,7 +58,8 @@ inline ruvia::Task<bool> enqueue(ruvia::Context& c, std::string_view tenantId,
     }
 }
 
-inline ruvia::Task<void> insertEnvelope(ruvia::WebWorkerContext& context,
+template <typename ContextT>
+inline ruvia::Task<void> insertEnvelope(ContextT& context,
                                         const v2::QueuedLogDelivery& envelope) {
     if (!validEnvelope(envelope)) {
         throw std::runtime_error("invalid queued log delivery");
@@ -238,7 +239,8 @@ inline ruvia::Task<void> insertEnvelope(ruvia::WebWorkerContext& context,
     }
 }
 
-inline ruvia::Task<std::size_t> process(ruvia::WebWorkerContext& context, std::string_view consumer,
+template <typename ContextT>
+inline ruvia::Task<std::size_t> process(ContextT& context, std::string_view consumer,
                                         std::vector<queue::Entry> entries) {
     std::size_t processed{};
     for (const auto& entry : entries) {
@@ -273,7 +275,8 @@ inline ruvia::Task<std::size_t> process(ruvia::WebWorkerContext& context, std::s
     co_return processed;
 }
 
-inline ruvia::Task<void> recoverStale(ruvia::WebWorkerContext& context, std::string_view consumer) {
+template <typename ContextT>
+inline ruvia::Task<void> recoverStale(ContextT& context, std::string_view consumer) {
     std::string cursor{"0-0"};
     do {
         auto claimed = co_await queue::autoClaim(context.redis(), consumer, cursor);
@@ -284,7 +287,8 @@ inline ruvia::Task<void> recoverStale(ruvia::WebWorkerContext& context, std::str
     } while (cursor != "0-0");
 }
 
-inline ruvia::Task<void> runWorker(ruvia::WebWorkerContext& context, std::string consumer) {
+template <typename ContextT>
+inline ruvia::Task<void> runWorker(ContextT& context, std::string consumer) {
     if (consumer.empty()) {
         throw std::invalid_argument("log ingest consumer name cannot be empty");
     }

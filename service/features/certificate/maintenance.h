@@ -94,7 +94,7 @@ inline ruvia::Task<void> scheduleAutoRenewals(service::background::WorkerContext
             continue;
         }
         const auto config = parseConfigStored(locked.front()[1].value().value_or("{}"),
-                                              {.resource = context.resource()});
+                                              {.resource = context.pool()});
         if (!config || !config->autoRenew) {
             co_await transaction.commit();
             continue;

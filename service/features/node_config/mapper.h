@@ -16,9 +16,7 @@ namespace service::node_config {
     const auto& id = input.get<"id">();
     const auto& ipAddress = input.get<"ipAddress">();
     const auto& lineCode = input.get<"lineCode">();
-    if (!id || !ipAddress || !lineCode) {
-        return std::nullopt;
-    }
+    if (!id || !ipAddress || !lineCode) return std::nullopt;
     return NodeEndpointData{.id = std::string(id->view()),
                             .ipAddress = std::string(ipAddress->view()),
                             .lineCode = std::string(lineCode->view())};
@@ -26,10 +24,7 @@ namespace service::node_config {
 
 [[nodiscard]] inline std::optional<NodeConfigData> normalize(const NodeConfigInput& input) {
     const auto& endpoints = input.get<"endpoints">();
-    if (!endpoints) {
-        return std::nullopt;
-    }
-
+    if (!endpoints) return std::nullopt;
     NodeConfigData result;
     result.endpoints.reserve(endpoints->size());
     for (const auto& endpoint : *endpoints) {

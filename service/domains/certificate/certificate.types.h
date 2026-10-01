@@ -1,18 +1,19 @@
 #pragma once
 
-#include <ruvia/web/Model.h>
+#include "ruvia/web/Model.h"
 
 #include "service/features/certificate/config_transport.h"
 
 namespace service::certificate {
 
-RUVIA_REQUEST_MODEL(CreateCertificateBody, RUVIA_OPTIONAL_FIELD(domain, ruvia::String),
+RUVIA_MODEL(CreateCertificateBody,
+                    RUVIA_OPTIONAL_FIELD(domain, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("certificate_provider_id", certificateProviderId,
                                               ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("dns_zone_id", dnsZoneId, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(config,
                                          service::certificate_issuance::CertificateConfigInput));
-RUVIA_RESPONSE_MODEL(
+RUVIA_MODEL(
     CertificateDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
     RUVIA_REQUIRED_FIELD(revision, ruvia::Int64),
     RUVIA_REQUIRED_FIELD(domains, ruvia::Array<ruvia::String>),
@@ -36,19 +37,19 @@ RUVIA_RESPONSE_MODEL(
     RUVIA_REQUIRED_FIELD_NAME("website_count", websiteCount, ruvia::Int64),
     RUVIA_REQUIRED_FIELD_NAME("created_at", createdAt, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("updated_at", updatedAt, ruvia::String));
-RUVIA_RESPONSE_MODEL(CertificatePageDataDto,
+RUVIA_MODEL(CertificatePageDataDto,
                      RUVIA_REQUIRED_FIELD(list, ruvia::Array<CertificateDto>),
                      RUVIA_REQUIRED_FIELD(total, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(page, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("page_size", pageSize, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("total_pages", totalPages, ruvia::Int64));
-RUVIA_RESPONSE_MODEL(CertificatePageResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+RUVIA_MODEL(CertificatePageResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, CertificatePageDataDto));
-RUVIA_RESPONSE_MODEL(CertificateDetailResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+RUVIA_MODEL(CertificateDetailResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, CertificateDto));
-RUVIA_RESPONSE_MODEL(CertificateOptionsResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+RUVIA_MODEL(CertificateOptionsResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, ruvia::Array<CertificateDto>));
 } // namespace service::certificate

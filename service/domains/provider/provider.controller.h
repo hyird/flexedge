@@ -23,14 +23,18 @@ class ProviderController final : public ruvia::Controller<ProviderController> {
     RUVIA_ROUTES_BEGIN RUVIA_GET_SSE("/dns/:id/stream", getDns);
     RUVIA_GET_SSE("/dns/stream", listDns);
     RUVIA_GET_SSE("/dns/options/stream", optionsDns);
-    RUVIA_POST("/dns", createDns, CreateDnsProviderValidator);
-    RUVIA_PUT("/dns/:id", updateDns, UpdateDnsProviderValidator);
+    RUVIA_POST("/dns", createDns, ruvia::JsonBody<CreateDnsProviderBody>,
+               CreateDnsProviderValidator);
+    RUVIA_PUT("/dns/:id", updateDns, ruvia::JsonBody<UpdateDnsProviderBody>,
+              UpdateDnsProviderValidator);
     RUVIA_POST("/dns/:id/verify", verifyDns);
     RUVIA_DELETE("/dns/:id", removeDns);
     RUVIA_GET_SSE("/certificate/stream", listCertificates);
     RUVIA_GET_SSE("/certificate/options/stream", listCertificates);
-    RUVIA_POST("/certificate", createCertificate, CreateCertificateProviderValidator);
-    RUVIA_PUT("/certificate/:id", updateCertificate, UpdateCertificateProviderValidator);
+    RUVIA_POST("/certificate", createCertificate,
+               ruvia::JsonBody<CreateCertificateProviderBody>, CreateCertificateProviderValidator);
+    RUVIA_PUT("/certificate/:id", updateCertificate,
+              ruvia::JsonBody<UpdateCertificateProviderBody>, UpdateCertificateProviderValidator);
     RUVIA_POST("/certificate/:id/verify", verifyCertificate);
     RUVIA_DELETE("/certificate/:id", removeCertificate);
     RUVIA_ROUTES_END
@@ -59,19 +63,19 @@ class ProviderController final : public ruvia::Controller<ProviderController> {
             service::live_resource::queryKey("dns-options", keyword.value_or(""), status));
         co_await service::live_resource::streamSnapshot(
             c, std::move(sub),
-            [tenant, keyword, status](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
-                ruvia::Array<DnsProviderDto> values(read.resource());
+            [tenant, keyword, status](auto& read) -> ruvia::Task<std::string> {
+                ruvia::Array<DnsProviderDto> values({.resource = read.pool()});
                 for (std::int64_t pageNumber = 1;; ++pageNumber) {
                     auto page = co_await dnsProviderReadService().list(
                         read, tenant, pageNumber, 1000, (pageNumber - 1) * 1000, keyword, status);
-                    for (auto& item : page.ensure<"list">())
+                    for (auto& item : page.template ensure<"list">())
                         values.push_back(std::move(item));
-                    if (pageNumber >= page.get<"totalPages">().value)
+                    if (pageNumber >= page.template get<"totalPages">().value)
                         break;
                 }
                 auto response =
                     service::common::ok<DnsProviderOptionsResponse>(read, std::move(values));
-                const auto json = ruvia::toJson(response, {.resource = read.resource()});
+                const auto json = ruvia::toJson(response, {.resource = read.pool()});
                 co_return std::string(json.data(), json.size());
             });
     }
@@ -93,11 +97,11 @@ class ProviderController final : public ruvia::Controller<ProviderController> {
         co_await service::live_resource::streamSnapshot(
             c, std::move(sub),
             [tenant, page, size, skip, keyword,
-             status](ruvia::WebWorkerContext& r) -> ruvia::Task<std::string> {
+             status](auto& r) -> ruvia::Task<std::string> {
                 auto data = co_await dnsProviderReadService().list(r, tenant, page, size, skip,
                                                                    keyword, status);
                 auto response = service::common::ok<DnsProviderPageResponse>(r, std::move(data));
-                auto json = ruvia::toJson(response, {.resource = r.resource()});
+                auto json = ruvia::toJson(response, {.resource = r.pool()});
                 co_return std::string(json.data(), json.size());
             });
     }
@@ -109,10 +113,10 @@ class ProviderController final : public ruvia::Controller<ProviderController> {
             service::live_resource::queryKey("dns-detail"));
         co_await service::live_resource::streamSnapshot(
             c, std::move(sub),
-            [tenant, id](ruvia::WebWorkerContext& r) -> ruvia::Task<std::string> {
+            [tenant, id](auto& r) -> ruvia::Task<std::string> {
                 auto data = co_await dnsProviderReadService().get(r, tenant, id);
                 auto response = service::common::ok<DnsProviderDetailResponse>(r, std::move(data));
-                auto json = ruvia::toJson(response, {.resource = r.resource()});
+                auto json = ruvia::toJson(response, {.resource = r.pool()});
                 co_return std::string(json.data(), json.size());
             });
     }
@@ -122,11 +126,11 @@ class ProviderController final : public ruvia::Controller<ProviderController> {
             c.worker(), tenant, service::live_resource::Resource::providers, {},
             service::live_resource::queryKey("certificate-list"));
         co_await service::live_resource::streamSnapshot(
-            c, std::move(sub), [tenant](ruvia::WebWorkerContext& r) -> ruvia::Task<std::string> {
+            c, std::move(sub), [tenant](auto& r) -> ruvia::Task<std::string> {
                 auto data = co_await certificateProviderReadService().list(r, tenant);
                 auto response =
                     service::common::ok<CertificateProviderListResponse>(r, std::move(data));
-                auto json = ruvia::toJson(response, {.resource = r.resource()});
+                auto json = ruvia::toJson(response, {.resource = r.pool()});
                 co_return std::string(json.data(), json.size());
             });
     }

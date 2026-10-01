@@ -55,7 +55,7 @@ set(RUVIA_ENABLE_REDIS ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
     ruvia
     GIT_REPOSITORY https://github.com/hyird/Ruvia.git
-    GIT_TAG d7fa8d6dd14be4de204172de9bca0b76f7a3643f # main, 2026-09-09
+    GIT_TAG 8a14af03c65f593b8ddaa7eebc1c97d05d02fe2b # main, 2026-10-01
 )
 FetchContent_MakeAvailable(ruvia)
 find_package(asio CONFIG REQUIRED)
@@ -207,7 +207,7 @@ if(BUILD_TESTING)
 
     # Each test owns its dependencies; compilation policy is shared.
     function(flexedge_add_test name)
-        cmake_parse_arguments(TEST "BIG_OBJECT" "" "SOURCES;LIBRARIES;DEFINITIONS" ${ARGN})
+        cmake_parse_arguments(TEST "BIG_OBJECT" "DRIVER" "SOURCES;LIBRARIES;DEFINITIONS" ${ARGN})
         set(target "flexedge_${name}_test")
         add_executable(${target} ${TEST_SOURCES})
         target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -221,9 +221,43 @@ if(BUILD_TESTING)
         else()
             target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
         endif()
-        add_test(NAME flexedge_${name} COMMAND ${target})
+        if(TEST_DRIVER)
+            find_package(Python3 COMPONENTS Interpreter REQUIRED)
+            add_test(NAME flexedge_${name}
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/${TEST_DRIVER}"
+                        "$<TARGET_FILE:${target}>")
+        else()
+            add_test(NAME flexedge_${name} COMMAND ${target})
+        endif()
     endfunction()
 
+    flexedge_add_test(website_model_contract
+        SOURCES tests/website_model_contract_test.cpp
+        LIBRARIES flexedge_route_policy ruvia::web
+    )
+    flexedge_add_test(node_model_contract
+        SOURCES tests/node_model_contract_test.cpp
+        LIBRARIES ruvia::web
+    )
+    flexedge_add_test(resource_model_contract
+        SOURCES tests/resource_model_contract_test.cpp
+        LIBRARIES ruvia::web
+    )
+    flexedge_add_test(provider_model_contract
+        SOURCES tests/provider_model_contract_test.cpp
+        LIBRARIES ruvia::web
+    )
+    flexedge_add_test(background_shutdown
+        SOURCES tests/background_shutdown_test.cpp service/features/background/worker_pool.cpp
+        LIBRARIES ruvia::web OpenSSL::Crypto
+    )
+    set_tests_properties(flexedge_background_shutdown PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    flexedge_add_test(snapshot_read_budget
+        SOURCES tests/snapshot_read_budget_test.cpp
+        LIBRARIES ruvia::web
+        DRIVER tests/snapshot_read_budget_test.py
+    )
+    set_tests_properties(flexedge_snapshot_read_budget PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90)
     flexedge_add_test(dns_reconciliation
         SOURCES tests/dns_reconciliation_test.cpp
     )

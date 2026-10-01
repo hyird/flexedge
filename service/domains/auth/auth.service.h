@@ -55,7 +55,7 @@ class AuthService {
         }
 
         co_await authSessionService().start(c, user->id);
-        AuthSessionDto result(c);
+        AuthSessionDto result({.resource = c.pool()});
         result.set<"user">(authUserInfo(c, user->id, user->username,
                                       user->nickname, user->status));
         co_return result;

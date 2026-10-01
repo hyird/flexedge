@@ -46,9 +46,3 @@ export function formatBytesPerSecond(value?: number) {
   }
   return `${amount.toFixed(index === 0 ? 0 : 1)} ${units[index]}`
 }
-
-export function initials(value?: string) {
-  const text = value?.trim()
-  if (!text) return 'FE'
-  return text.slice(0, 2).toUpperCase()
-}

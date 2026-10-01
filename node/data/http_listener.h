@@ -9,8 +9,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -30,6 +32,7 @@
 #include <asio/write.hpp>
 
 #include <ruvia/core/EventLoop.h>
+#include <ruvia/core/WorkerNotification.h>
 #include <ruvia/http/Http1RequestParser.h>
 
 #if defined(SO_REUSEPORT) && !defined(_WIN32)
@@ -71,17 +74,21 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
                      OriginConnectionPool& originConnections, BufferedBytesBudget& requestBuffers,
                      BufferedBytesBudget& responseBuffers, std::uint64_t sequence,
                      std::shared_ptr<const void> transportState = nullptr, bool secure = false,
-                     std::string tlsFingerprint = {})
+                     std::string tlsFingerprint = {}, std::function<void()> onRetired = {})
         : stream_(std::move(stream)), originConnections_(originConnections),
           timer_(stream_.get_executor()), runtime_(runtime), health_(health), metrics_(metrics),
           logs_(logs), responseBuffers_(responseBuffers),
           requestReservation_(requestBuffers.lease()), tlsFingerprint_(std::move(tlsFingerprint)),
-          sequence_(sequence), transportState_(std::move(transportState)), secure_(secure) {
+          sequence_(sequence), transportState_(std::move(transportState)), secure_(secure),
+          onRetired_(std::move(onRetired)) {
         requestBytes_.reserve(8192);
         metrics_.connectionOpened();
     }
 
-    ~BasicHttpSession() { metrics_.connectionClosed(); }
+    ~BasicHttpSession() {
+        metrics_.connectionClosed();
+        if (onRetired_) onRetired_();
+    }
 
     void start() {
         captureClientAddress();
@@ -382,6 +389,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         });
     }
 
+  public:
     void close() noexcept {
         if (closed_) {
             return;
@@ -399,6 +407,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         ignored = clientSocket().close(ignored);
     }
 
+  private:
     void send(std::string bytes, BufferedBytesLease reservation = {}) {
         if (closed_ || responsePending_) {
             return;
@@ -1172,6 +1181,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
     std::uint64_t sequence_{};
     std::shared_ptr<const void> transportState_;
     bool secure_{};
+    std::function<void()> onRetired_;
     bool originSecure_{};
     bool bufferedOriginEnabled_{};
     bool reusedOriginTransport_{};
@@ -1196,8 +1206,9 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
     [[nodiscard]] static std::shared_ptr<HttpListener> create(Args&&... args) {
         auto listener = std::shared_ptr<HttpListener>(new HttpListener(std::forward<Args>(args)...));
         listener->stopRegistration_ = listener->owner_.onStop(
-            [weak = std::weak_ptr<HttpListener>(listener)] {
-                if (const auto self = weak.lock()) self->stop();
+            [weak = std::weak_ptr<HttpListener>(listener)]() -> ruvia::Task<void> {
+                if (const auto self = weak.lock()) co_await self->stopAndWait();
+                co_return;
             });
         return listener;
     }
@@ -1210,7 +1221,7 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
         : owner_(std::move(owner)), runtime_(runtime), health_(health), metrics_(metrics),
           logs_(logs), originConnections_(originConnections), requestBuffers_(requestBuffers),
           responseBuffers_(responseBuffers), acceptor_(owner_.ioContext()),
-          activationTimer_(owner_.ioContext()) {
+          activationTimer_(owner_.ioContext()), stopNotification_(owner_) {
         std::error_code error;
         error = acceptor_.open(endpoint.protocol(), error);
         if (!error) {
@@ -1239,21 +1250,34 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
     }
 
   public:
-    ~HttpListener() { stop(); }
+    ~HttpListener() {
+        std::lock_guard lock(lifecycleMutex_);
+        if (loopStopComplete_ || startRequested_) return;
+        stopping_ = true;
+        std::error_code ignored;
+        ignored = acceptor_.close(ignored);
+    }
 
   private:
     void start() {
-        if (!acceptor_.is_open()) {
+        if (stopping_ || !acceptor_.is_open()) {
             return;
         }
         if (activationGate_ && !activationGate_->active()) {
-            activationTimer_.expires_after(std::chrono::milliseconds(1));
             const auto self = shared_from_this();
-            activationTimer_.async_wait([self](const std::error_code& error) {
-                if (!error) {
-                    self->start();
-                }
-            });
+            bool operationStarted = false;
+            try {
+                activationTimer_.expires_after(std::chrono::milliseconds(1));
+                ++pendingOperations_;
+                operationStarted = true;
+                activationTimer_.async_wait([self](const std::error_code& error) {
+                    self->operationCompleted();
+                    if (!error) self->start();
+                });
+            } catch (...) {
+                if (operationStarted) operationCompleted();
+                stop();
+            }
             return;
         }
         accept();
@@ -1261,14 +1285,22 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
 
   public:
     void requestStart(std::shared_ptr<const ListenerActivationGate> activationGate = nullptr) {
+        std::lock_guard lock(lifecycleMutex_);
+        if (loopStopComplete_) throw std::runtime_error("edge HTTP listener worker is stopping");
+        startRequested_ = true;
         const auto self = shared_from_this();
-        if (!owner_.post([self, gate = std::move(activationGate)] {
-                if (self->started_) return;
-                self->started_ = true;
-                self->activationGate_ = gate;
-                self->start();
-            }).accepted()) {
-            throw std::runtime_error("edge HTTP listener worker is stopping");
+        try {
+            if (!owner_.post([self, gate = std::move(activationGate)] {
+                    if (self->started_) return;
+                    self->started_ = true;
+                    self->activationGate_ = gate;
+                    self->start();
+                }).accepted()) {
+                throw std::runtime_error("edge HTTP listener worker is stopping");
+            }
+        } catch (...) {
+            startRequested_ = false;
+            throw;
         }
     }
 
@@ -1278,53 +1310,111 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
 
   private:
     // Socket cancellation and accept initiation must stay on the owning loop.
+    ruvia::Task<void> stopAndWait() {
+        {
+            std::lock_guard lock(lifecycleMutex_);
+            stop();
+        }
+        while (pendingOperations_ != 0 || activeSessions_ != 0)
+            co_await stopNotification_.wait();
+        stopNotification_.close();
+        std::lock_guard lock(lifecycleMutex_);
+        loopStopComplete_ = true;
+    }
+
     void stop() noexcept {
+        stopping_ = true;
         std::error_code ignored;
         activationTimer_.cancel(ignored);
         ignored = acceptor_.cancel(ignored);
         ignored = acceptor_.close(ignored);
+        for (const auto& weak : sessions_) {
+            if (const auto session = weak.lock()) session->close();
+        }
     }
 
   public:
     void requestStop() noexcept {
+        std::lock_guard lock(lifecycleMutex_);
+        if (loopStopComplete_) return;
+        if (!startRequested_) {
+            stopping_ = true;
+            std::error_code ignored;
+            ignored = acceptor_.close(ignored);
+            loopStopComplete_ = true;
+            return;
+        }
         if (owner_.isCurrent()) {
             stop();
             return;
         }
-        // Cleanup must not fall back to the caller thread when the bounded
-        // worker mailbox is full or stopping. The loop's onStop hook also
-        // closes the socket; a weak capture cannot retain a stopped loop.
         asio::post(owner_.executor(), [weak = weak_from_this()] {
-            if (const auto self = weak.lock()) {
-                self->stop();
-            }
+            if (const auto self = weak.lock()) self->stop();
         });
     }
 
   private:
+    void operationCompleted() noexcept {
+        --pendingOperations_;
+        static_cast<void>(stopNotification_.notify());
+    }
+
+    void sessionRetired() noexcept {
+        --activeSessions_;
+        static_cast<void>(stopNotification_.notify());
+    }
+
     void accept() {
-        if (!acceptor_.is_open()) {
+        if (stopping_ || !acceptor_.is_open()) {
             return;
         }
-        auto socket = std::make_shared<asio::ip::tcp::socket>(owner_.ioContext());
-        const auto self = shared_from_this();
-        acceptor_.async_accept(
-            *socket,
-            asio::bind_executor(owner_.executor(), [self, socket](const std::error_code& error) {
-                if (!error) {
-                    std::make_shared<BasicHttpSession<asio::ip::tcp::socket>>(
-                        std::move(*socket), self->runtime_, self->health_, self->metrics_,
-                        self->logs_, self->originConnections_, self->requestBuffers_,
-                        self->responseBuffers_, ++self->sequence_)
-                        ->start();
+        std::shared_ptr<asio::ip::tcp::socket> socket;
+        std::shared_ptr<HttpListener> self;
+        try {
+            socket = std::make_shared<asio::ip::tcp::socket>(owner_.ioContext());
+            self = shared_from_this();
+        } catch (...) {
+            stop();
+            return;
+        }
+        ++pendingOperations_;
+        try {
+            acceptor_.async_accept(
+                *socket,
+                asio::bind_executor(owner_.executor(), [self, socket](const std::error_code& error) {
+                self->operationCompleted();
+                if (!error && !self->stopping_) {
+                    try {
+                        auto session = std::make_shared<BasicHttpSession<asio::ip::tcp::socket>>(
+                            std::move(*socket), self->runtime_, self->health_, self->metrics_,
+                            self->logs_, self->originConnections_, self->requestBuffers_,
+                            self->responseBuffers_, ++self->sequence_, nullptr, false,
+                            std::string{}, [weak = self->weak_from_this()] {
+                                if (const auto listener = weak.lock()) listener->sessionRetired();
+                            });
+                        ++self->activeSessions_;
+                        std::erase_if(self->sessions_, [](const auto& active) {
+                            return active.expired();
+                        });
+                        self->sessions_.push_back(session);
+                        try { session->start(); } catch (...) { session->close(); }
+                    } catch (...) {
+                    }
                 }
                 if (self->acceptor_.is_open()) {
                     self->accept();
                 }
-            }));
+                }));
+        } catch (...) {
+            operationCompleted();
+            stop();
+        }
     }
 
     ruvia::EventLoop owner_;
+    std::mutex lifecycleMutex_;
+    bool startRequested_{};
+    bool loopStopComplete_{};
     RuntimeState& runtime_;
     OriginHealthRegistry& health_;
     RuntimeMetrics& metrics_;
@@ -1335,6 +1425,11 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
     asio::ip::tcp::acceptor acceptor_;
     asio::steady_timer activationTimer_;
     ruvia::EventLoopStopRegistration stopRegistration_;
+    ruvia::WorkerNotification stopNotification_;
+    std::size_t pendingOperations_{};
+    std::size_t activeSessions_{};
+    std::vector<std::weak_ptr<BasicHttpSession<asio::ip::tcp::socket>>> sessions_;
+    bool stopping_{};
     std::shared_ptr<const ListenerActivationGate> activationGate_;
     std::uint64_t sequence_{};
     bool started_{}; // Accessed only by the owning event loop.

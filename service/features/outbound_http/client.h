@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cctype>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -70,8 +71,12 @@ ruvia::Task<BufferedResponse> sendBuffered(Client& client,
         headers.push_back({std::string(header.name()), std::string(header.value())});
     }
     const auto bufferedBody = co_await response.body().readAll();
-    co_return BufferedResponse(response.status(), std::move(headers),
-                               std::string(bufferedBody.data(), bufferedBody.size()));
+    const auto bytes = bufferedBody.bytes();
+    std::string body(bytes.size(), '\0');
+    if (!bytes.empty()) {
+        std::memcpy(body.data(), bytes.data(), bytes.size());
+    }
+    co_return BufferedResponse(response.status(), std::move(headers), std::move(body));
 }
 
 } // namespace service::outbound_http

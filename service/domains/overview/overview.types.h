@@ -1,16 +1,17 @@
 #pragma once
 
-#include <ruvia/web/Model.h>
+#include "ruvia/web/Model.h"
+
 
 namespace service::overview {
 
-RUVIA_RESPONSE_MODEL(OverviewResourceCountsDto,
+RUVIA_MODEL(OverviewResourceCountsDto,
                      RUVIA_REQUIRED_FIELD_NAME("website_count", websiteCount, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("domain_count", domainCount, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("certificate_count", certificateCount, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("cluster_count", clusterCount, ruvia::Int64));
 
-RUVIA_RESPONSE_MODEL(
+RUVIA_MODEL(
     OverviewIssueCountsDto,
     RUVIA_REQUIRED_FIELD_NAME("dns_zone_issue_count", dnsZoneIssueCount, ruvia::Int64),
     RUVIA_REQUIRED_FIELD_NAME("certificate_expiring_count", certificateExpiringCount, ruvia::Int64),
@@ -18,7 +19,7 @@ RUVIA_RESPONSE_MODEL(
     RUVIA_REQUIRED_FIELD_NAME("active_marker_count", activeMarkerCount, ruvia::Int64),
     RUVIA_REQUIRED_FIELD_NAME("retry_marker_count", retryMarkerCount, ruvia::Int64));
 
-RUVIA_RESPONSE_MODEL(OverviewMarkerDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
+RUVIA_MODEL(OverviewMarkerDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("resource_type", resourceType, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("resource_id", resourceId, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("resource_name", resourceName, ruvia::String),
@@ -28,12 +29,12 @@ RUVIA_RESPONSE_MODEL(OverviewMarkerDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
                                                RUVIA_OMIT_EMPTY),
                      RUVIA_REQUIRED_FIELD_NAME("updated_at", updatedAt, ruvia::String));
 
-RUVIA_RESPONSE_MODEL(OverviewDataDto, RUVIA_REQUIRED_FIELD(resources, OverviewResourceCountsDto),
+RUVIA_MODEL(OverviewDataDto, RUVIA_REQUIRED_FIELD(resources, OverviewResourceCountsDto),
                      RUVIA_REQUIRED_FIELD(issues, OverviewIssueCountsDto),
                      RUVIA_REQUIRED_FIELD_NAME("recent_markers", recentMarkers,
                                                ruvia::Array<OverviewMarkerDto>));
 
-RUVIA_RESPONSE_MODEL(OverviewResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+RUVIA_MODEL(OverviewResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, OverviewDataDto));
 

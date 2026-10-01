@@ -56,13 +56,13 @@ class WebsiteAccessLogService final {
             service::common::throwAppError(WebsiteError::NOT_FOUND);
         }
 
-        WebsiteAccessLogTailDataDto result(c);
+        WebsiteAccessLogTailDataDto result({.resource = c.pool()});
         auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
             if (!row[0].value()) {
                 continue;
             }
-            fillWebsiteAccessLog(items.emplace_back(c), row);
+            fillWebsiteAccessLog(items.emplace_back(), row);
         }
         if (!items.empty()) {
             result.template set<"cursor">(service::log_ingest::encodeTailCursor(
@@ -124,11 +124,11 @@ class WebsiteAccessLogService final {
                 where + " ORDER BY access.created_at DESC, access.id DESC LIMIT " +
                 std::to_string(pageSize) + " OFFSET " + std::to_string(skip),
             params);
-        WebsiteAccessLogPageDataDto result(c);
+        WebsiteAccessLogPageDataDto result({.resource = c.pool()});
         auto& items = result.template ensure<"list">();
         items.reserve(rows.size());
         for (const auto& row : rows) {
-            fillWebsiteAccessLog(items.emplace_back(c), row);
+            fillWebsiteAccessLog(items.emplace_back(), row);
         }
         result.template set<"total">(total);
         result.template set<"page">(page);

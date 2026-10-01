@@ -22,7 +22,7 @@ inline const std::string& currentTenantId(ruvia::Context& c) {
     return currentPrincipal(c).system_tenant_id;
 }
 
-class AuthMiddleware final : public ruvia::Middleware<AuthMiddleware> {
+class AuthMiddleware final : public ruvia::Middleware {
   public:
     ruvia::Task<void> handle(ruvia::Context& c, ruvia::Next& next) {
         const auto presented = service::auth::readSessionCookie(c);

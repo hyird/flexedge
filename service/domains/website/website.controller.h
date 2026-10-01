@@ -36,8 +36,8 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
     RUVIA_GET_SSE("/:id/dashboard/stream", dashboardStream);
     RUVIA_GET_SSE("/:id/stream", detail);
     RUVIA_POST("/:id/dns-probe", requestDnsProbe);
-    RUVIA_POST("/", create, WebsiteConfigValidator);
-    RUVIA_PUT("/:id", update, WebsiteConfigValidator);
+    RUVIA_POST("/", create, ruvia::JsonBody<WebsiteSaveInput>, WebsiteConfigValidator);
+    RUVIA_PUT("/:id", update, ruvia::JsonBody<WebsiteSaveInput>, WebsiteConfigValidator);
     RUVIA_DELETE("/:id", remove);
     RUVIA_ROUTES_END
 
@@ -88,11 +88,11 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
             service::live_resource::queryKey("list", page, pageSize, keyword.value_or(""),
                                              clusterId, status));
         co_await service::live_resource::streamSnapshot(
-            c, std::move(sub), [tenant, page, pageSize, skip, keyword, clusterId, status](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+            c, std::move(sub), [tenant, page, pageSize, skip, keyword, clusterId, status](auto& read) -> ruvia::Task<std::string> {
                 auto data = co_await websiteReadService().list(read, tenant, page, pageSize, skip, keyword, clusterId, status);
                 co_return std::string(ruvia::toJson(
                     service::common::ok<WebsitePageResponse>(read, std::move(data)),
-                    {.resource = read.resource()}));
+                    {.resource = read.pool()}));
             });
     }
 
@@ -103,11 +103,11 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
             service::live_resource::Resource::websites, id,
             service::live_resource::queryKey("detail"));
         co_await service::live_resource::streamSnapshot(
-            c, std::move(sub), [tenant, id](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+            c, std::move(sub), [tenant, id](auto& read) -> ruvia::Task<std::string> {
                 auto data = co_await websiteReadService().detail(read, tenant, id);
                 co_return std::string(ruvia::toJson(
                     service::common::ok<WebsiteDetailResponse>(read, std::move(data)),
-                    {.resource = read.resource()}));
+                    {.resource = read.pool()}));
             });
     }
 
@@ -144,11 +144,11 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
             service::live_resource::queryKey("history", page, pageSize, keyword.value_or(""),
                                              method, statusClass));
         co_await service::live_resource::streamSnapshot(
-            c, std::move(sub), [tenant, id, page, pageSize, skip, keyword, method, statusClass](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+            c, std::move(sub), [tenant, id, page, pageSize, skip, keyword, method, statusClass](auto& read) -> ruvia::Task<std::string> {
                 auto data = co_await websiteAccessLogService().history(read, tenant, id, page, pageSize, skip, keyword, method, statusClass);
                 co_return std::string(ruvia::toJson(
                     service::common::ok<WebsiteAccessLogPageResponse>(read, std::move(data)),
-                    {.resource = read.resource()}));
+                    {.resource = read.pool()}));
             });
     }
 
@@ -167,7 +167,7 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
                 auto data = co_await websiteAccessLogService().tail(read, tenant, id, limit, after);
                 auto cursor = service::log_ingest::tailResponseCursor(data);
                 auto json = ruvia::toJson(service::common::ok<WebsiteAccessLogTailResponse>(read, std::move(data)),
-                                          {.resource = read.resource()});
+                                          {.resource = read.pool()});
                 co_return service::log_ingest::TailBatch{.payload = std::string(json.data(), json.size()),
                                                          .cursor = std::move(cursor)};
             });
@@ -184,7 +184,7 @@ class WebsiteController final : public ruvia::Controller<WebsiteController> {
             [tenant, id](auto& read) -> ruvia::Task<std::string> {
                 auto data = co_await websiteDashboardService().dashboard(read, tenant, id);
                 auto json = ruvia::toJson(service::common::ok<WebsiteDashboardResponse>(read, std::move(data)),
-                                          {.resource = read.resource()});
+                                          {.resource = read.pool()});
                 co_return std::string(json.data(), json.size());
             }, "dashboard");
     }

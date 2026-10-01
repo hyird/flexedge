@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -61,6 +62,8 @@ class SnapshotCache final {
         std::uint64_t version{1};
         std::uint64_t patchEpoch{};
         bool loading{};
+        std::uint64_t nextFlightGeneration{};
+        std::uint64_t flightGeneration{};
         std::shared_ptr<const Snapshot> snapshot;
         Clock::time_point expires{}, used{};
         std::vector<std::weak_ptr<Waiter>> waiters;
@@ -83,28 +86,39 @@ class SnapshotCache final {
   public:
     class Ticket final {
       public:
-        // Called once by the detached worker, including when posting fails.
         void complete(std::shared_ptr<const Snapshot> snapshot) const {
-            std::vector<std::shared_ptr<Waiter>> waiters;
+            finish(std::move(snapshot));
+        }
+
+        // Release an interrupted flight without publishing a snapshot.
+        void cancel() const {
+            finish({});
+        }
+
+      private:
+        friend class SnapshotCache;
+        Ticket(std::shared_ptr<State> state, std::shared_ptr<Entry> entry, std::uint64_t version,
+               std::uint64_t patchEpoch, std::uint64_t flightGeneration)
+            : state_(std::move(state)), entry_(std::move(entry)), version_(version),
+              patchEpoch_(patchEpoch), flightGeneration_(flightGeneration) {}
+
+        void finish(std::shared_ptr<const Snapshot> snapshot) const {
+            std::vector<std::weak_ptr<Waiter>> waiters;
             Result result;
             {
                 const std::lock_guard lock(state_->mutex);
-                if (!entry_->loading)
+                if (!entry_->loading || entry_->flightGeneration != flightGeneration_)
                     return;
                 entry_->loading = false;
                 --state_->flights;
-                for (auto& weak : entry_->waiters)
-                    if (auto waiter = weak.lock())
-                        waiters.push_back(std::move(waiter));
-                entry_->waiters.clear();
+                waiters.swap(entry_->waiters);
                 // A business commit invalidated this read, or everyone
                 // disconnected. Never install or distribute its old result.
-                if (entry_->version == version_ && entry_->subscribers != 0) {
+                if (snapshot && entry_->version == version_ && entry_->subscribers != 0) {
                     result = {std::move(snapshot), version_, patchEpoch_};
                     const auto bytes = result.snapshot->data.size();
                     if (entry_->patchEpoch == patchEpoch_ && !result.snapshot->failure &&
-                        bytes <= state_->limits.snapshotBytes &&
-                        bytes <= state_->limits.bytes) {
+                        bytes <= state_->limits.snapshotBytes && bytes <= state_->limits.bytes) {
                         while (state_->bytes > state_->limits.bytes - bytes) {
                             std::shared_ptr<Entry> oldest;
                             for (const auto& [key, value] : state_->entries) {
@@ -112,8 +126,7 @@ class SnapshotCache final {
                                 if (value->snapshot && (!oldest || value->used < oldest->used))
                                     oldest = value;
                             }
-                            if (!oldest)
-                                break;
+                            if (!oldest) break;
                             state_->clear(*oldest);
                             ++oldest->version;
                         }
@@ -125,20 +138,18 @@ class SnapshotCache final {
                     }
                 }
             }
-            // Empty results ask readers to join one new-generation read.
-            for (const auto& waiter : waiters)
-                (void)waiter->sender.send(result);
+            // Do not allocate while releasing a generation: an old ticket must
+            // never strand or accidentally release the next flight.
+            for (const auto& weak : waiters)
+                if (auto waiter = weak.lock())
+                    (void)waiter->sender.send(result);
         }
 
-      private:
-        friend class SnapshotCache;
-        Ticket(std::shared_ptr<State> state, std::shared_ptr<Entry> entry, std::uint64_t version,
-               std::uint64_t patchEpoch)
-            : state_(std::move(state)), entry_(std::move(entry)), version_(version), patchEpoch_(patchEpoch) {}
         std::shared_ptr<State> state_;
         std::shared_ptr<Entry> entry_;
         std::uint64_t version_;
         std::uint64_t patchEpoch_;
+        std::uint64_t flightGeneration_;
     };
 
     struct Read final {
@@ -183,11 +194,16 @@ class SnapshotCache final {
             }
             if (!entry_->loading && state_->flights >= state_->limits.flights)
                 throw SnapshotCapacityError();
+            if (!entry_->loading && entry_->nextFlightGeneration ==
+                                        (std::numeric_limits<std::uint64_t>::max)())
+                throw std::overflow_error("snapshot flight generation exhausted");
             result.waiter = std::make_shared<Waiter>(std::move(sender));
             std::erase_if(entry_->waiters, [](const auto& weak) { return weak.expired(); });
             entry_->waiters.push_back(result.waiter);
             if (!entry_->loading) {
-                result.ticket = Ticket(state_, entry_, entry_->version, entry_->patchEpoch);
+                const auto generation = ++entry_->nextFlightGeneration;
+                result.ticket = Ticket(state_, entry_, entry_->version, entry_->patchEpoch, generation);
+                entry_->flightGeneration = generation;
                 entry_->loading = true;
                 ++state_->flights;
             }

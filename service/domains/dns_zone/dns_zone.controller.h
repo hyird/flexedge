@@ -8,6 +8,7 @@
 #include <ruvia/core/Task.h>
 #include <ruvia/web/Context.h>
 #include <ruvia/web/ModelJson.h>
+#include <ruvia/web/RequestValidation.h>
 #include <ruvia/web/Controller.h>
 
 #include "service/common/domain_name.h"
@@ -31,8 +32,8 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
     RUVIA_GET_SSE("/collection/stream", collection);
     RUVIA_POST("/:id/sync", sync);
     RUVIA_GET_SSE("/:id/stream", get);
-    RUVIA_PUT("/:id", update, DnsZoneConfigValidator);
-    RUVIA_POST("/", create, CreateDnsZoneValidator);
+    RUVIA_PUT("/:id", update, ruvia::JsonBody<service::dns_sync::ZoneConfigInput>, DnsZoneConfigValidator);
+    RUVIA_POST("/", create, ruvia::JsonBody<CreateDnsZoneBody>, CreateDnsZoneValidator);
     RUVIA_DELETE("/:id", remove);
     RUVIA_ROUTES_END
 
@@ -44,11 +45,11 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
             service::live_resource::Resource::dnsZones, {},
             service::live_resource::queryKey("collection", keyword.value_or("")));
         co_await service::live_resource::streamSnapshot(
-            c, std::move(sub), [tenant, keyword](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+            c, std::move(sub), [tenant, keyword](auto& read) -> ruvia::Task<std::string> {
                 auto data = co_await dnsZoneReadService().options(read, tenant, keyword, std::nullopt, std::nullopt, true);
                 co_return std::string(ruvia::toJson(
-                    service::common::ok<DnsZoneCollectionResponse>(read, std::move(data.ensure<"list">())),
-                    {.resource = read.resource()}));
+                    service::common::ok<DnsZoneCollectionResponse>(read, std::move(data.template ensure<"list">())),
+                    {.resource = read.pool()}));
             });
     }
 
@@ -75,11 +76,11 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
             service::live_resource::Resource::dnsZones, {},
             service::live_resource::queryKey("available", *providerId));
         co_await service::live_resource::streamSnapshot(
-            c, std::move(sub), [tenant, providerId](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+            c, std::move(sub), [tenant, providerId](auto& read) -> ruvia::Task<std::string> {
                 auto data = co_await dnsZoneReadService().available(read, tenant, *providerId);
                 co_return std::string(ruvia::toJson(
                     service::common::ok<AvailableDnsZoneListResponse>(read, std::move(data)),
-                    {.resource = read.resource()}));
+                    {.resource = read.pool()}));
             });
     }
 
@@ -100,11 +101,11 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
             service::live_resource::queryKey("list", page, pageSize, keyword.value_or(""),
                                              providerId));
         co_await service::live_resource::streamSnapshot(
-            c, std::move(sub), [tenant, page, pageSize, skip, keyword, providerId](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+            c, std::move(sub), [tenant, page, pageSize, skip, keyword, providerId](auto& read) -> ruvia::Task<std::string> {
                 auto data = co_await dnsZoneReadService().list(read, tenant, page, pageSize, skip, keyword, providerId);
                 co_return std::string(ruvia::toJson(
                     service::common::ok<DnsZonePageResponse>(read, std::move(data)),
-                    {.resource = read.resource()}));
+                    {.resource = read.pool()}));
             });
     }
 
@@ -132,11 +133,11 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
             service::live_resource::queryKey("options", keyword.value_or(""), ownerOf,
                                              available));
         co_await service::live_resource::streamSnapshot(
-            c, std::move(sub), [tenant, keyword, ownerOf, available](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+            c, std::move(sub), [tenant, keyword, ownerOf, available](auto& read) -> ruvia::Task<std::string> {
                 auto data = co_await dnsZoneReadService().options(read, tenant, keyword, ownerOf, available);
                 co_return std::string(ruvia::toJson(
                     service::common::ok<DnsZoneOptionListResponse>(read, std::move(data)),
-                    {.resource = read.resource()}));
+                    {.resource = read.pool()}));
             });
     }
 
@@ -154,11 +155,11 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
             service::live_resource::Resource::dnsZones, id,
             service::live_resource::queryKey("detail"));
         co_await service::live_resource::streamSnapshot(
-            c, std::move(sub), [tenant, id](ruvia::WebWorkerContext& read) -> ruvia::Task<std::string> {
+            c, std::move(sub), [tenant, id](auto& read) -> ruvia::Task<std::string> {
                 auto data = co_await dnsZoneReadService().get(read, tenant, id);
                 co_return std::string(ruvia::toJson(
                     service::common::ok<DnsZoneDetailResponse>(read, std::move(data)),
-                    {.resource = read.resource()}));
+                    {.resource = read.pool()}));
             });
     }
 
@@ -174,9 +175,9 @@ class DnsZoneController final : public ruvia::Controller<DnsZoneController> {
     ruvia::Task<ruvia::HttpResponse> sync(ruvia::Context& c) {
         std::string_view conflictPolicy;
         if (auto body = co_await c.req().jsonIf<DnsZoneSyncBody>()) {
-            ruvia::Validator validator({.resource = c.resource()});
+            ruvia::Validator validator({.resource = c.pool()});
             validateDnsZoneSync(*body, validator);
-            validator.throwIfInvalid({.resource = c.resource()});
+            std::move(validator).throwIfInvalid();
             if (const auto& value = body->get<"conflictPolicy">()) {
                 conflictPolicy = value->view();
             }

@@ -67,14 +67,14 @@ class CertificateReadService final {
             co_await c.db().query(certificateColumns() + where + " ORDER BY cert.sort DESC LIMIT " +
                                       std::to_string(pageSize) + " OFFSET " + std::to_string(skip),
                                   params);
-        CertificatePageDataDto result(c);
+        CertificatePageDataDto result({.resource = c.pool()});
         result.template set<"total">(total);
         result.template set<"page">(page);
         result.template set<"pageSize">(pageSize);
         result.template set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
         auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
-            fillCertificate(c, items.emplace_back(c), row);
+            fillCertificate(c, items.emplace_back(), row);
         }
         co_return result;
     }
@@ -102,7 +102,7 @@ class CertificateReadService final {
         if (rows.empty()) {
             service::common::throwAppError(CertificateError::NOT_FOUND);
         }
-        CertificateDto result(c);
+        CertificateDto result({.resource = c.pool()});
         fillCertificate(c, result, rows.front());
         co_return result;
     }
@@ -121,7 +121,7 @@ class CertificateReadService final {
             service::common::throwAppError(CertificateError::CERTIFICATE_UNAVAILABLE);
         }
         const auto material = service::certificate_material::parseStored(
-            rows.front()[1].value().value_or("{}"), {.resource = c.resource()});
+            rows.front()[1].value().value_or("{}"), {.resource = c.pool()});
         if (!material) {
             throw std::runtime_error("stored certificate material is invalid");
         }

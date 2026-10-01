@@ -48,14 +48,14 @@ persistIssuedCertificate(service::background::WorkerContext& context, const Cert
     const auto nowRows =
         co_await context.db().query("SELECT TO_CHAR(NOW(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')");
     service::certificate_material::CertificateMaterialOutput material(
-        {.resource = context.resource()});
+        {.resource = context.pool()});
     material.set<"certificateChainPem">(issued.certificateChainPem);
     material.set<"privateKeyEnvelope">(service::utils::sealSecret(issued.privateKeyPem.view()));
     material.set<"notBefore">(issued.notBefore);
     material.set<"serialNumber">(issued.serialNumber);
     material.set<"fingerprintSha256">(issued.fingerprintSha256);
     material.set<"lastIssuedAt">(nowRows.front()[0].value().value_or(""));
-    const auto materialJson = ruvia::toJson(material, {.resource = context.resource()});
+    const auto materialJson = ruvia::toJson(material, {.resource = context.pool()});
 
     auto transaction = co_await context.db().beginTransaction();
     const auto updated = co_await transaction.execute(

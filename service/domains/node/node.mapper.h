@@ -19,8 +19,8 @@ namespace service::node {
 
 inline std::string serializeNodeConfig(auto& c,
                                        const service::node_config::NodeConfigData& input) {
-    const auto output = service::node_config::toOutput(input, {.resource = c.resource()});
-    const auto json = ruvia::toJson(output, {.resource = c.resource()});
+    const auto output = service::node_config::toOutput(input, {.resource = c.pool()});
+    const auto json = ruvia::toJson(output, {.resource = c.pool()});
     return std::string(json.data(), json.size());
 }
 
@@ -28,7 +28,7 @@ template <typename Row>
 inline NodeRuntimeDto nodeRuntimeDto(auto& c,
                                      const service::node_runtime::NodeRuntimeData& input,
                                      const Row& row) {
-    NodeRuntimeDto output(c);
+    NodeRuntimeDto output(ruvia::ModelOptions{.resource = c.pool()});
     output.set<"registrationStatus">(row[7].value().value_or("pending"));
     output.set<"connectionStatus">(row[8].value().value_or("unregistered"));
     output.set<"appliedNodeSpecRevision">(row[10].template as<std::int64_t>().value_or(0));
@@ -76,9 +76,9 @@ inline NodeRuntimeDto nodeRuntimeDto(auto& c,
 
 template <typename Row> inline void fillNode(auto& c, NodeDto& item, const Row& row) {
     const auto config = service::node_config::parseStored(row[5].value().value_or("{}"),
-                                                          {.resource = c.resource()});
+                                                          {.resource = c.pool()});
     const auto runtime = service::node_runtime::parseStored(row[6].value().value_or("{}"),
-                                                            {.resource = c.resource()});
+                                                            {.resource = c.pool()});
     if (!config || !runtime) {
         throwCorruptNodeConfig();
     }
@@ -90,7 +90,7 @@ template <typename Row> inline void fillNode(auto& c, NodeDto& item, const Row& 
     item.set<"status">(row[14].value().value_or(""));
     item.set<"revision">(row[3].template as<std::int64_t>().value_or(1));
     item.set<"nodeSpecRevision">(row[4].template as<std::int64_t>().value_or(1));
-    item.set<"config">(service::node_config::toOutput(*config, {.resource = c.resource()}));
+    item.set<"config">(service::node_config::toOutput(*config, {.resource = c.pool()}));
     item.set<"runtime">(nodeRuntimeDto(c, *runtime, row));
     item.set<"createdAt">(row[11].value().value_or(""));
     item.set<"updatedAt">(row[12].value().value_or(""));

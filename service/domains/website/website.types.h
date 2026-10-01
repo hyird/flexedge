@@ -1,16 +1,17 @@
 #pragma once
 
+#include "ruvia/web/Model.h"
+
 #include <optional>
 #include <string>
 #include <utility>
 
-#include <ruvia/web/Model.h>
 
 #include "service/features/website_config/mapper.h"
 
 namespace service::website {
 
-RUVIA_REQUEST_MODEL(WebsiteSaveInput, RUVIA_OPTIONAL_FIELD(status, ruvia::String),
+RUVIA_MODEL(WebsiteSaveInput, RUVIA_OPTIONAL_FIELD(status, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(config, service::website_config::WebsiteConfigInput));
 
 struct WebsiteSaveData final {
@@ -32,13 +33,13 @@ struct WebsiteSaveData final {
                            .config = std::move(*normalizedConfig)};
 }
 
-RUVIA_RESPONSE_MODEL(
+RUVIA_MODEL(
     WebsiteDomainRuntimeDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("access_protocol", accessProtocol, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("resolution_status", resolutionStatus, ruvia::String),
     RUVIA_OPTIONAL_FIELD_NAME("last_verified_at", lastVerifiedAt, ruvia::String, RUVIA_OMIT_EMPTY),
     RUVIA_OPTIONAL_FIELD_NAME("last_error", lastError, ruvia::String, RUVIA_OMIT_EMPTY));
-RUVIA_RESPONSE_MODEL(
+RUVIA_MODEL(
     WebsiteOriginRuntimeDto, RUVIA_REQUIRED_FIELD_NAME("node_id", nodeId, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("node_name", nodeName, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("origin_id", originId, ruvia::String),
@@ -47,11 +48,11 @@ RUVIA_RESPONSE_MODEL(
     RUVIA_REQUIRED_FIELD_NAME("latency_millis", latencyMillis, ruvia::Int64),
     RUVIA_OPTIONAL_FIELD_NAME("last_error", lastError, ruvia::String, RUVIA_OMIT_EMPTY));
 
-RUVIA_RESPONSE_MODEL(WebsiteOriginSourceDto,
+RUVIA_MODEL(WebsiteOriginSourceDto,
                      RUVIA_REQUIRED_FIELD_NAME("node_id", nodeId, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("node_revision", nodeRevision, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("reported_at", reportedAt, ruvia::String));
-RUVIA_RESPONSE_MODEL(WebsiteRuntimeDto,
+RUVIA_MODEL(WebsiteRuntimeDto,
                      RUVIA_OPTIONAL_FIELD_NAME("origin_sources", originSources,
                                                ruvia::Array<WebsiteOriginSourceDto>, RUVIA_OMIT_EMPTY),
                      RUVIA_REQUIRED_FIELD_NAME("domain_states", domainStates,
@@ -62,11 +63,11 @@ RUVIA_RESPONSE_MODEL(WebsiteRuntimeDto,
                      RUVIA_REQUIRED_FIELD_NAME("target_node_count", targetNodeCount, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("synced_node_count", syncedNodeCount, ruvia::Int64));
 
-RUVIA_RESPONSE_MODEL(WebsiteCertificateDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
+RUVIA_MODEL(WebsiteCertificateDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
                      RUVIA_REQUIRED_FIELD(domains, ruvia::Array<ruvia::String>),
                      RUVIA_REQUIRED_FIELD(usable, ruvia::Bool));
 
-RUVIA_RESPONSE_MODEL(WebsiteDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
+RUVIA_MODEL(WebsiteDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("cluster_id", clusterId, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("cluster_name", clusterName, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("access_domain", accessDomain, ruvia::String),
@@ -78,19 +79,19 @@ RUVIA_RESPONSE_MODEL(WebsiteDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("created_at", createdAt, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("updated_at", updatedAt, ruvia::String));
 
-RUVIA_RESPONSE_MODEL(WebsitePageDataDto, RUVIA_REQUIRED_FIELD(list, ruvia::Array<WebsiteDto>),
+RUVIA_MODEL(WebsitePageDataDto, RUVIA_REQUIRED_FIELD(list, ruvia::Array<WebsiteDto>),
                      RUVIA_REQUIRED_FIELD(total, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(page, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("page_size", pageSize, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("total_pages", totalPages, ruvia::Int64));
-RUVIA_RESPONSE_MODEL(WebsitePageResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+RUVIA_MODEL(WebsitePageResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, WebsitePageDataDto));
-RUVIA_RESPONSE_MODEL(WebsiteDetailResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+RUVIA_MODEL(WebsiteDetailResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, WebsiteDto));
 
-RUVIA_RESPONSE_MODEL(
+RUVIA_MODEL(
     WebsiteDashboardSummaryDto,
     RUVIA_REQUIRED_FIELD_NAME("previous_month_peak_bps", previousMonthPeakBps, ruvia::Int64),
     RUVIA_REQUIRED_FIELD_NAME("current_month_peak_bps", currentMonthPeakBps, ruvia::Int64),
@@ -98,21 +99,21 @@ RUVIA_RESPONSE_MODEL(
     RUVIA_REQUIRED_FIELD_NAME("current_bandwidth_bps", currentBandwidthBps, ruvia::Int64),
     RUVIA_REQUIRED_FIELD_NAME("today_unique_ips", todayUniqueIps, ruvia::Int64),
     RUVIA_REQUIRED_FIELD_NAME("today_response_bytes", todayResponseBytes, ruvia::Int64));
-RUVIA_RESPONSE_MODEL(WebsiteDashboardSeriesPointDto,
+RUVIA_MODEL(WebsiteDashboardSeriesPointDto,
                      RUVIA_REQUIRED_FIELD(timestamp, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("request_count", requestCount, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("response_bytes", responseBytes, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("bandwidth_bps", bandwidthBps, ruvia::Int64));
-RUVIA_RESPONSE_MODEL(WebsiteDashboardRankingDto, RUVIA_REQUIRED_FIELD(label, ruvia::String),
+RUVIA_MODEL(WebsiteDashboardRankingDto, RUVIA_REQUIRED_FIELD(label, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("request_count", requestCount, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("response_bytes", responseBytes, ruvia::Int64));
-RUVIA_RESPONSE_MODEL(
+RUVIA_MODEL(
     WebsiteDashboardClientIpRankingDto, RUVIA_REQUIRED_FIELD(label, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("request_count", requestCount, ruvia::Int64),
     RUVIA_REQUIRED_FIELD_NAME("response_bytes", responseBytes, ruvia::Int64),
     RUVIA_REQUIRED_FIELD(asn, ruvia::String), RUVIA_REQUIRED_FIELD_NAME("as_name", asName,
                                                                         ruvia::String));
-RUVIA_RESPONSE_MODEL(
+RUVIA_MODEL(
     WebsiteDashboardDto, RUVIA_REQUIRED_FIELD(summary, WebsiteDashboardSummaryDto),
     RUVIA_REQUIRED_FIELD(hourly, ruvia::Array<WebsiteDashboardSeriesPointDto>),
     RUVIA_REQUIRED_FIELD(daily, ruvia::Array<WebsiteDashboardSeriesPointDto>),
@@ -127,11 +128,11 @@ RUVIA_RESPONSE_MODEL(
                               ruvia::Array<WebsiteDashboardClientIpRankingDto>),
     RUVIA_REQUIRED_FIELD_NAME("client_ips_by_requests", clientIpsByRequests,
                               ruvia::Array<WebsiteDashboardClientIpRankingDto>));
-RUVIA_RESPONSE_MODEL(WebsiteDashboardResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+RUVIA_MODEL(WebsiteDashboardResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, WebsiteDashboardDto));
 
-RUVIA_RESPONSE_MODEL(
+RUVIA_MODEL(
     WebsiteAccessLogDto, RUVIA_REQUIRED_FIELD(id, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("occurred_at", occurredAt, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("node_id", nodeId, ruvia::String),
@@ -154,19 +155,19 @@ RUVIA_RESPONSE_MODEL(
     RUVIA_OPTIONAL_FIELD_NAME("response_headers", responseHeaders, ruvia::String, RUVIA_OMIT_EMPTY),
     RUVIA_OPTIONAL_FIELD_NAME("query_string", queryString, ruvia::String, RUVIA_OMIT_EMPTY),
     RUVIA_OPTIONAL_FIELD(cookies, ruvia::String, RUVIA_OMIT_EMPTY));
-RUVIA_RESPONSE_MODEL(WebsiteAccessLogTailDataDto,
+RUVIA_MODEL(WebsiteAccessLogTailDataDto,
                      RUVIA_REQUIRED_FIELD(list, ruvia::Array<WebsiteAccessLogDto>),
                      RUVIA_OPTIONAL_FIELD(cursor, ruvia::String, RUVIA_OMIT_EMPTY));
-RUVIA_RESPONSE_MODEL(WebsiteAccessLogTailResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+RUVIA_MODEL(WebsiteAccessLogTailResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, WebsiteAccessLogTailDataDto));
-RUVIA_RESPONSE_MODEL(WebsiteAccessLogPageDataDto,
+RUVIA_MODEL(WebsiteAccessLogPageDataDto,
                      RUVIA_REQUIRED_FIELD(list, ruvia::Array<WebsiteAccessLogDto>),
                      RUVIA_REQUIRED_FIELD(total, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(page, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("page_size", pageSize, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD_NAME("total_pages", totalPages, ruvia::Int64));
-RUVIA_RESPONSE_MODEL(WebsiteAccessLogPageResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
+RUVIA_MODEL(WebsiteAccessLogPageResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(message, ruvia::String),
                      RUVIA_REQUIRED_FIELD(data, WebsiteAccessLogPageDataDto));
 

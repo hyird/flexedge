@@ -371,25 +371,25 @@ int main(int argc, char* argv[]) {
                if (logWorkers.empty()) {
                    throw std::runtime_error("log fanout requires a web worker");
                }
-               const auto deadlinesPosted = logWorkers.front().post(
-                   [](ruvia::WebWorkerContext& context) -> ruvia::Task<void> {
-                       co_await service::live_resource::seedNodeDeadlines(context);
-                   });
-               if (!deadlinesPosted.accepted()) {
-                   throw std::runtime_error("node deadline initialization could not start");
-               }
-               const auto fanoutPosted = logWorkers.front().post(
-                   [](ruvia::WebWorkerContext& context) -> ruvia::Task<void> {
-                       co_await service::log_ingest::fanout::run(context);
-                   });
-               if (!fanoutPosted.accepted()) {
-                   throw std::runtime_error("log notification fanout could not start");
-               }
                for (auto& worker : logWorkers) {
+                   const auto deadlinesPosted = worker.post(
+                       [](ruvia::WebWorkerContext& context) -> ruvia::Task<void> {
+                           co_await service::live_resource::seedNodeDeadlines(context);
+                       });
+                   if (!deadlinesPosted.accepted()) {
+                       throw std::runtime_error("node deadline initialization could not start");
+                   }
+                   const auto fanoutPosted = worker.post(
+                       [](ruvia::WebWorkerContext& context) -> ruvia::Task<void> {
+                           co_await service::log_ingest::fanout::run(context);
+                       });
+                   if (!fanoutPosted.accepted()) {
+                       throw std::runtime_error("log notification fanout could not start");
+                   }
                    auto consumer = logConsumerInstance + "-" + std::to_string(worker.id());
-                   const auto posted =
-                       worker.post([consumer = std::move(consumer)](
-                                       ruvia::WebWorkerContext& context) -> ruvia::Task<void> {
+                   const auto posted = worker.post(
+                       [consumer = std::move(consumer)](ruvia::WebWorkerContext& context)
+                           -> ruvia::Task<void> {
                            co_await service::log_ingest::runWorker(context, consumer);
                        });
                    if (!posted.accepted()) {

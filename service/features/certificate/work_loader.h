@@ -65,7 +65,7 @@ inline ruvia::Task<CertificateWork> loadWork(service::background::WorkerContext&
     CertificateProviderConfigData providerConfig;
     try {
         providerConfig =
-            parseCertificateProviderConfig(row[8].value().value_or("{}"), context.resource());
+            parseCertificateProviderConfig(row[8].value().value_or("{}"), context.pool());
     } catch (const std::runtime_error&) {
         throw AcmeError("证书供应商配置损坏", true);
     }
@@ -75,7 +75,7 @@ inline ruvia::Task<CertificateWork> loadWork(service::background::WorkerContext&
     const auto provider = std::string(row[5].value().value_or(""));
     if (provider == "zerossl") {
         const auto runtime = parseCertificateProviderRuntime(row[9].value().value_or("{}"),
-                                                             {.resource = context.resource()});
+                                                             {.resource = context.pool()});
         if (!runtime) {
             throw AcmeError("ZeroSSL EAB 凭据不存在，请重新检测证书供应商", true);
         }

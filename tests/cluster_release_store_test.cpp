@@ -63,8 +63,12 @@ ruvia::Task<void> verify(ruvia::DbClient& client) {
     (void)co_await tx.execute("INSERT INTO sys_certificate VALUES ('cert','t',NOW()-INTERVAL '1 day'),('cert','other',NOW())");
     (void)co_await tx.execute("INSERT INTO sys_website VALUES ('w1','t','c',NULL),('w2','t','c',NULL),('w3','t','d',NULL),('gone','t','deleted',NOW()),('foreign','other','foreign',NULL)");
     (void)co_await tx.execute("INSERT INTO sys_website_certificate_binding VALUES ('w1','cert','t'),('w2','cert','t'),('w3','cert','t'),('gone','cert','t'),('foreign','cert','other')");
-    require((co_await service::node_dispatch::findCertificateConsumerClusters(tx,"t","cert")) == std::vector<std::string>{"c","d"});
-    require((co_await service::node_dispatch::findCertificateConsumerClusters(tx,"other","cert")) == std::vector<std::string>{"foreign"});
+    const auto tenantClusters = co_await service::node_dispatch::findCertificateConsumerClusters(tx,"t","cert");
+    const std::vector<std::string> expectedTenantClusters{"c","d"};
+    require(tenantClusters == expectedTenantClusters);
+    const auto otherTenantClusters = co_await service::node_dispatch::findCertificateConsumerClusters(tx,"other","cert");
+    const std::vector<std::string> expectedOtherTenantClusters{"foreign"};
+    require(otherTenantClusters == expectedOtherTenantClusters);
     require((co_await service::node_dispatch::findCertificateConsumerClusters(tx,"t","missing")).empty());
     require((co_await service::node_dispatch::findCertificateConsumerClusters(tx,"missing","cert")).empty());
     co_await tx.rollback();

@@ -80,14 +80,14 @@ class NodeReadService final {
                 std::to_string(skip),
             params);
 
-        NodePageDataDto result(c);
+        NodePageDataDto result(ruvia::ModelOptions{.resource = c.pool()});
         result.template set<"total">(total);
         result.template set<"page">(page);
         result.template set<"pageSize">(pageSize);
         result.template set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
         auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
-            fillNode(c, items.emplace_back(c), row);
+            fillNode(c, items.emplace_back(ruvia::ModelOptions{.resource = c.pool()}), row);
         }
         co_return result;
     }
@@ -106,7 +106,7 @@ class NodeReadService final {
             service::common::throwAppError(NodeError::CREDENTIALS_UNAVAILABLE);
         }
         service::utils::SensitiveString secret(service::utils::openSecret(*envelope));
-        NodeCredentialsDto result(c);
+        NodeCredentialsDto result(ruvia::ModelOptions{.resource = c.pool()});
         result.template set<"nodeId">(rows.front()[1].value().value_or(""));
         result.template set<"secret">(secret.view());
         result.template set<"revision">(rows.front()[0].template as<std::int64_t>().value_or(1));
@@ -142,13 +142,13 @@ class NodeReadService final {
             service::common::throwAppError(NodeError::NOT_FOUND);
         }
 
-        NodeLogTailDataDto result(c);
+        NodeLogTailDataDto result(ruvia::ModelOptions{.resource = c.pool()});
         auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
             if (!row[0].value()) {
                 continue;
             }
-            auto& item = items.emplace_back(c);
+            auto& item = items.emplace_back(ruvia::ModelOptions{.resource = c.pool()});
             item.template set<"id">(row[0].value().value_or(""));
             item.template set<"occurredAt">(row[1].value().value_or(""));
             item.template set<"level">(row[2].value().value_or(""));

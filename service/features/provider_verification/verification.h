@@ -84,7 +84,7 @@ fetchZeroSslEab(Runtime& context,
 
 inline ruvia::Task<VerificationResult> verifyDns(service::background::WorkerContext& context,
                                                  const VerificationTask& task) {
-    const auto config = service::dns::parseDnsProviderConfig(task.configJson, context.resource());
+    const auto config = service::dns::parseDnsProviderConfig(task.configJson, context.pool());
     service::utils::SensitiveString secret([&] {
         try {
             return service::utils::openSecret(config.credentialEnvelope);
@@ -100,7 +100,7 @@ inline ruvia::Task<VerificationResult> verifyDns(service::background::WorkerCont
         runtimeZones.push_back({.domain = zone.name, .status = zone.status});
     }
     co_return VerificationResult{
-        .dnsRuntime = service::dns::serializeDnsProviderRuntime(runtimeZones, context.resource()),
+        .dnsRuntime = service::dns::serializeDnsProviderRuntime(runtimeZones, context.pool()),
     };
 }
 
@@ -108,14 +108,14 @@ inline ruvia::Task<VerificationResult>
 verifyCertificate(service::background::WorkerContext& context, const VerificationTask& task,
                   std::string_view currentRuntimeJson) {
     const auto config = service::certificate_issuance::parseCertificateProviderConfig(
-        task.configJson, context.resource());
+        task.configJson, context.pool());
     const auto settings = service::certificate_issuance::settingsForProvider(task.provider);
     if (!settings) {
         throw VerificationError("不支持的证书供应商", true);
     }
     std::optional<service::certificate_issuance::EabCredentials> eab;
     if (task.provider == "zerossl") {
-        eab = parseRuntimeEab(currentRuntimeJson, context.resource());
+        eab = parseRuntimeEab(currentRuntimeJson, context.pool());
         if (!eab) {
             eab = co_await fetchZeroSslEab(context, config, config.credentialMode);
         }
