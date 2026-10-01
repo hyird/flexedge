@@ -119,3 +119,14 @@ python3 /opt/flexedge/.deploy-heroui-20261001-ccad2d6/release.py rollback
 前端 lint 和测试已通过，完整 CI 在后端编译失败：网站统计存在未使用参数，
 GCC 14 还报告 DNS model optional 的 `maybe-uninitialized`。本次发布仅使用经过
 本地验证的前端制品，没有发布该 CI 的后端程序，也未把完整 CI 描述为通过。
+
+## 网站设置纵向标签
+
+网站新建和编辑抽屉使用左侧纵向分组、右侧配置面板。桌面分组宽度为 9rem，
+窄屏为 6rem；长表单在抽屉内容区滚动时分组导航保持可见。使用 HeroUI 原生
+vertical Tabs，保留上下方向键切换、选中指示与表单草稿。
+
+lint、typecheck、Vitest 和 Bun 两个入口的 35 文件 / 161 项测试以及生产构建通过。
+浏览器 mock 验证十个分组切换、草稿保留、上下方向键、长表单滚动，以及
+1440×960、390×844 和明暗主题；窄屏抽屉与路由面板没有横向溢出。
+截图位于 `build/website-tabs-qa/`。这些检查没有提交生产业务配置。
