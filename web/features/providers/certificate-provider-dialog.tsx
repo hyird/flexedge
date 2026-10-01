@@ -3,7 +3,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
-import { Choice, Dialog, Field, FormActions, Notice } from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Choice, Field, FormActions, Notice } from '@/components/forms'
 import {
   certificateProviderFormSchema,
   type CertificateProviderFormValues,
@@ -41,7 +42,7 @@ export function CertificateProviderDialog({
     },
   })
   return (
-    <Dialog
+    <Drawer
       title={provider ? '编辑证书供应商' : '添加证书供应商'}
       onClose={onClose}
       busy={mutation.isPending}
@@ -125,6 +126,6 @@ export function CertificateProviderDialog({
         {mutation.isError && <Notice>{apiErrorMessage(mutation.error)}</Notice>}
         <FormActions onCancel={onClose} busy={mutation.isPending} />
       </form>
-    </Dialog>
+    </Drawer>
   )
 }

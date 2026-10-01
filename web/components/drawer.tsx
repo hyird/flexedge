@@ -6,12 +6,14 @@ export function Drawer({
   title,
   children,
   onClose,
+  busy = false,
   size = 'md',
 }: {
   title: string
   children: ReactNode
   onClose: () => void
-  size?: 'md' | 'lg'
+  busy?: boolean
+  size?: 'sm' | 'md' | 'lg'
 }) {
   return (
     <Sheet
@@ -19,19 +21,24 @@ export function Drawer({
       placement='right'
       isHandleOnly
       shouldAutoFocus
+      isDismissable={!busy}
       onOpenChange={(open) => {
-        if (!open) onClose()
+        if (!open && !busy) onClose()
       }}
     >
-      <Sheet.Backdrop>
+      <Sheet.Backdrop isKeyboardDismissDisabled={busy}>
         <Sheet.Content
           className={cn(
             'w-full max-w-full',
-            size === 'lg' ? 'sm:max-w-5xl' : 'sm:max-w-2xl'
+            size === 'lg'
+              ? 'sm:max-w-5xl'
+              : size === 'sm'
+                ? 'sm:max-w-lg'
+                : 'sm:max-w-2xl'
           )}
         >
           <Sheet.Dialog>
-            <Sheet.CloseTrigger aria-label='关闭日志抽屉' />
+            <Sheet.CloseTrigger aria-label='关闭抽屉' isDisabled={busy} />
             <Sheet.Header className='pr-14'>
               <Sheet.Heading>{title}</Sheet.Heading>
             </Sheet.Header>

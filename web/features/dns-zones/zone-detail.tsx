@@ -1,7 +1,8 @@
 import { DataGrid, type DataGridColumn } from '@heroui-pro/react'
 import { Tabs } from '@heroui/react'
 import { formatDate } from '@/lib/format'
-import { Dialog, Notice } from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Notice } from '@/components/forms'
 import { StatusChip } from '@/components/status-chip'
 import { dnsLinePath } from './dns-lines'
 import { displaySyncStatus } from './dns-zone-display'
@@ -57,7 +58,7 @@ export function ZoneDetailDialog({
       : []),
   ]
   return (
-    <Dialog title={`${zone.domain} · DNS 详情`} onClose={onClose} size='lg'>
+    <Drawer title={`${zone.domain} · DNS 详情`} onClose={onClose} size='lg'>
       <Tabs defaultSelectedKey='overview'>
         <Tabs.ListContainer>
           <Tabs.List aria-label='DNS 详情'>
@@ -153,6 +154,6 @@ export function ZoneDetailDialog({
           )}
         </Tabs.Panel>
       </Tabs>
-    </Dialog>
+    </Drawer>
   )
 }

@@ -5,9 +5,9 @@ import { Button, toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { Confirm } from '@/components/confirm'
+import { Drawer } from '@/components/drawer'
 import {
   Choice,
-  Dialog,
   Field,
   FormActions,
   Notice,
@@ -181,7 +181,7 @@ export function CachePolicyDialog({
   ]
   return (
     <>
-      <Dialog
+      <Drawer
         title={
           rule
             ? `编辑条件 · ${rule.name}`
@@ -355,7 +355,7 @@ export function CachePolicyDialog({
             )}
           </form>
         )}
-      </Dialog>
+      </Drawer>
       {remove && (
         <Confirm
           title='删除缓存条件'

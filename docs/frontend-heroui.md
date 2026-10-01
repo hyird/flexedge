@@ -87,3 +87,35 @@ python3 /opt/flexedge/.deploy-heroui-20261001-ccad2d6/release.py rollback
 打开日志只持有一条对应日志 SSE；关闭后释放日志并恢复列表 SSE；
 切换历史日志取得一次快照后没有活跃 SSE。mock 证据和截图存放于
 `build/log-drawer-qa/`，不代表真实日志联调。
+
+日志修正在 2026-10-01 21:13（Asia/Taipei）以 `d264d82` 上线。
+实际公网入口 SHA-256 为
+`b38499ec420cb70197dedda75850baac87dc8eb9ef7a03d28486aa0a128e257a`。
+线上节点日志抽屉取得真实记录，运行程序摘要、迁移账本及节点版本保持一致；
+两个节点均上报切换后的心跳。发布证据位于 `build/deploy-log-drawers-20261001/`。
+
+## 全部业务抽屉与表格滚动
+
+新建、编辑、详情、复制、日志和危险操作确认统一使用共享 Pro `Sheet` 抽屉。
+公共 `Dialog` / `Modal` 封装已移除；页面搜索保留 Pro `Command` 的输入、过滤和
+键盘导航，置于右侧抽屉中，Escape 先关闭抽屉，Ctrl/Cmd+K 和 Enter 导航保留。
+提交期间禁用关闭按钮、Escape 与遮罩关闭。未保存的网站配置确认仍保留草稿并
+允许取消关闭，删除确认显示具体对象。
+
+所有 Pro DataGrid 使用自身滚动容器约束高度，数据区在内部滚动，列标题固定在顶部，
+分页位于容器外；横向滚动时标题与单元格共用列宽。继续使用可变行高的原生表格，
+没有将 tbody 改成独立布局或引入另一套表格实现。
+
+- lint、typecheck、Vitest 及 Bun 两个入口的 35 文件 / 161 项测试、生产构建通过。
+- 浏览器 mock 验证网站表单错误与未保存确认、节点表单选择器、集群、DNS、证书、
+  两类供应商、缓存策略、任务详情、删除取消和页面搜索键盘行为，覆盖桌面与窄屏、
+  明暗主题。
+- 31 个 mock 节点与 30 条访问日志用于长表格验证。桌面列表滚动前后表头 y=213，
+  页面 scrollY=0，内部 scrollTop 从 0 增至 752.67。窄屏日志横向滚动 390px 时，
+  缓存列标题与单元格的 x 坐标一致。
+- mock 截图与坐标记录位于 `build/log-drawer-qa/`。这些验证不包含生产业务写入。
+
+`d264d82` 的 [CI 运行](https://github.com/hyird/flexedge/actions/runs/36867032933)
+前端 lint 和测试已通过，完整 CI 在后端编译失败：网站统计存在未使用参数，
+GCC 14 还报告 DNS model optional 的 `maybe-uninitialized`。本次发布仅使用经过
+本地验证的前端制品，没有发布该 CI 的后端程序，也未把完整 CI 描述为通过。

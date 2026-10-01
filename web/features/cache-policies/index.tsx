@@ -6,7 +6,8 @@ import { apiErrorMessage } from '@/lib/api'
 import { formatDate } from '@/lib/format'
 import { queryKeys } from '@/lib/query-keys'
 import { Confirm } from '@/components/confirm'
-import { Choice, Dialog, Field, FormActions, Notice } from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Choice, Field, FormActions, Notice } from '@/components/forms'
 import { Page } from '@/components/page'
 import { ResourceList, ResourceSearch } from '@/components/resource-list'
 import { RowMenu } from '@/components/row-menu'
@@ -271,7 +272,7 @@ function CopyPolicyDialog({
     },
   })
   return (
-    <Dialog title='复制缓存策略' onClose={onClose} busy={mutation.isPending}>
+    <Drawer title='复制缓存策略' onClose={onClose} busy={mutation.isPending}>
       <form
         className='grid gap-4'
         onSubmit={(event) => {
@@ -293,6 +294,6 @@ function CopyPolicyDialog({
           label='复制'
         />
       </form>
-    </Dialog>
+    </Drawer>
   )
 }

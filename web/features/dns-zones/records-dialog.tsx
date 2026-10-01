@@ -4,9 +4,9 @@ import { Button, toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { Confirm } from '@/components/confirm'
+import { Drawer } from '@/components/drawer'
 import {
   Choice,
-  Dialog,
   Field,
   FormActions,
   Notice,
@@ -47,7 +47,7 @@ export function RecordsDialog({
     )
   return (
     <>
-      <Dialog
+      <Drawer
         title={`${zone.domain} · 编辑记录`}
         size='lg'
         onClose={onClose}
@@ -232,7 +232,7 @@ export function RecordsDialog({
             label='保存并同步'
           />
         </form>
-      </Dialog>
+      </Drawer>
       {remove && (
         <Confirm
           title='删除 DNS 记录'

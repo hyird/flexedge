@@ -3,7 +3,8 @@ import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { Button, Tabs } from '@heroui/react'
 import { formatDate } from '@/lib/format'
-import { Dialog, Notice } from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Notice } from '@/components/forms'
 import { QueryNotice } from '@/components/page'
 import { StatusChip } from '@/components/status-chip'
 import { taskDetailQuery, taskHistoryQuery } from './data'
@@ -29,7 +30,7 @@ export function TaskDetail({
   const navigate = useNavigate()
   const current = query.data ?? task
   return (
-    <Dialog
+    <Drawer
       title={`${taskTitle(current)} · ${current.name}`}
       onClose={onClose}
       size='md'
@@ -146,6 +147,6 @@ export function TaskDetail({
           </Tabs.Panel>
         )}
       </Tabs>
-    </Dialog>
+    </Drawer>
   )
 }

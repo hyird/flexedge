@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
-import { Choice, Dialog, Notice } from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Choice, Notice } from '@/components/forms'
 import { QueryNotice } from '@/components/page'
 import type { DnsProvider } from '@/features/providers/types'
 import { availableDnsZonesQuery, createDnsZone } from './data'
@@ -30,7 +31,7 @@ export function CreateZoneDialog({
   const selectable =
     !!provider && !!available.data?.some((zone) => zone.domain === domain)
   return (
-    <Dialog title='添加托管域名' onClose={onClose} busy={mutation.isPending}>
+    <Drawer title='添加托管域名' onClose={onClose} busy={mutation.isPending}>
       <form
         className='grid gap-4'
         onSubmit={(event) => {
@@ -104,6 +105,6 @@ export function CreateZoneDialog({
           </Button>
         </div>
       </form>
-    </Dialog>
+    </Drawer>
   )
 }

@@ -7,7 +7,6 @@ import {
   Input,
   Label,
   ListBox,
-  Modal,
   Select,
   Switch,
   TextArea,
@@ -205,50 +204,6 @@ export function Notice({
         <Alert.Description>{children}</Alert.Description>
       </Alert.Content>
     </Alert>
-  )
-}
-
-export function Dialog({
-  title,
-  children,
-  onClose,
-  busy = false,
-  size = 'sm',
-}: {
-  title: string
-  children: ReactNode
-  onClose: () => void
-  busy?: boolean
-  size?: 'sm' | 'md' | 'lg'
-}) {
-  return (
-    <Modal.Backdrop
-      isOpen
-      onOpenChange={(open) => {
-        if (!open && !busy) onClose()
-      }}
-      isDismissable={!busy}
-      isKeyboardDismissDisabled={busy}
-    >
-      <Modal.Container size={size} placement='center' scroll='inside'>
-        <Modal.Dialog
-          aria-label={title}
-          className={cn(
-            size === 'lg'
-              ? 'sm:max-w-5xl'
-              : size === 'md'
-                ? 'sm:max-w-2xl'
-                : 'sm:max-w-lg'
-          )}
-        >
-          <Modal.CloseTrigger aria-label='关闭对话框' isDisabled={busy} />
-          <Modal.Header>
-            <Modal.Heading>{title}</Modal.Heading>
-          </Modal.Header>
-          <Modal.Body className='pb-5'>{children}</Modal.Body>
-        </Modal.Dialog>
-      </Modal.Container>
-    </Modal.Backdrop>
   )
 }
 

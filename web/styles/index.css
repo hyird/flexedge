@@ -34,6 +34,26 @@ textarea {
 .button--sm {
   font-size: 0.875rem;
 }
+/* Keep table rows in one scroll area so headers and cells retain the same column widths. */
+.data-grid {
+  min-width: 0;
+  min-height: 0;
+}
+.data-grid .table__scroll-container {
+  max-height: clamp(12rem, calc(100dvh - 24rem), 42rem);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scroll-padding-block-start: 2.5rem;
+}
+.data-grid .table__column {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--color-surface-secondary);
+}
+.data-grid .table__column[data-pinned] {
+  z-index: 4;
+}
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
