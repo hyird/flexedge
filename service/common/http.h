@@ -218,14 +218,14 @@ inline std::string requireUuidParam(ruvia::Context& c, std::string_view name) {
 }
 
 inline OperationResponse operation(ruvia::Context& c, std::string_view message) {
-    OperationResponse response(c);
+    OperationResponse response({.resource = c.pool()});
     response.set<"code">(0);
     response.set<"message">(message);
     return response;
 }
 
 template <typename ResponseT, typename DataT> inline ResponseT ok(auto& c, DataT&& data) {
-    ResponseT response(c);
+    ResponseT response({.resource = c.pool()});
     response.template set<"code">(0);
     response.template set<"message">("ok");
     response.template set<"data">(std::forward<DataT>(data));
@@ -233,9 +233,9 @@ template <typename ResponseT, typename DataT> inline ResponseT ok(auto& c, DataT
 }
 
 inline HealthResponse health(ruvia::Context& c) {
-    HealthData data(c);
+    HealthData data({.resource = c.pool()});
     data.set<"status">("ok");
-    HealthResponse response(c);
+    HealthResponse response({.resource = c.pool()});
     response.set<"code">(0);
     response.set<"message">("ok");
     response.set<"data">(std::move(data));
@@ -243,9 +243,9 @@ inline HealthResponse health(ruvia::Context& c) {
 }
 
 inline CountResponse count(ruvia::Context& c, std::int64_t createdCount, std::string_view message) {
-    CountData data(c);
+    CountData data({.resource = c.pool()});
     data.set<"createdCount">(static_cast<ruvia::Int64>(createdCount));
-    CountResponse response(c);
+    CountResponse response({.resource = c.pool()});
     response.set<"code">(0);
     response.set<"message">(message);
     response.set<"data">(std::move(data));
@@ -253,7 +253,7 @@ inline CountResponse count(ruvia::Context& c, std::int64_t createdCount, std::st
 }
 
 inline ErrorResponse error(ruvia::Context& c, std::int64_t code, std::string_view message) {
-    ErrorResponse response(c);
+    ErrorResponse response({.resource = c.pool()});
     response.set<"code">(code);
     response.set<"message">(message);
     return response;

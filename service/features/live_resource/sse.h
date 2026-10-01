@@ -40,7 +40,7 @@ ruvia::Task<void> streamSnapshot(ruvia::Context& c, Hub::Subscription subscripti
                 const auto principal =
                     co_await readOnce<std::optional<service::auth::AuthenticatedPrincipal>>(
                         c,
-                        [credential](ruvia::WebWorkerContext& read)
+                        [credential](auto& read)
                             -> ruvia::Task<std::optional<service::auth::AuthenticatedPrincipal>> {
                             if (!*credential)
                                 co_return std::nullopt;

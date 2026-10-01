@@ -68,14 +68,14 @@ class ClusterReadService final {
                 " OFFSET " + std::to_string(skip),
             params);
 
-        ClusterPageDataDto result(c);
+        ClusterPageDataDto result({.resource = c.pool()});
         result.template set<"total">(total);
         result.template set<"page">(page);
         result.template set<"pageSize">(pageSize);
         result.template set<"totalPages">(pageSize > 0 ? (total + pageSize - 1) / pageSize : 0);
         auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
-            auto& item = items.emplace_back(c);
+            auto& item = items.emplace_back();
             item.template set<"id">(row[0].value().value_or(""));
             item.template set<"name">(row[1].value().value_or(""));
             item.template set<"dnsZoneId">(row[2].value().value_or(""));

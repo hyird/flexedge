@@ -2,39 +2,59 @@
 
 #include <ruvia/web/Controller.h>
 
-#include "service/common/types.h"
+#include "service/common/domain_name.h"
+#include "service/common/uuid.h"
 #include "service/features/certificate/config_mapper.h"
 #include "service/domains/certificate/certificate.types.h"
 
 namespace service::certificate {
 
-inline bool
-validCertificateConfig(const service::certificate_issuance::CertificateConfigInput& config) {
-    return service::certificate_issuance::normalize(config).has_value();
-}
+class CreateCertificateValidator final : public ruvia::Middleware {
+public:
+    ruvia::Task<void> handle(ruvia::Context& context, ruvia::Next& next) {
+        const auto& body = context.req().validatedJson<CreateCertificateBody>().value();
+        ruvia::Validator validator({.resource = context.pool()});
+        const auto& domain = body.get<"domain">();
+        validator.required(domain, "domain", "域名不能为空");
+        if (domain) {
+            validator.minLength(domain, "domain", 1, "域名不能为空");
+            validator.maxLength(domain, "domain", 253, "域名最多253个字符");
+            if (!service::common::isHostname(domain->view())) {
+                validator.add("domain", "regex", "域名格式不正确");
+            }
+        }
 
-class CreateCertificateValidator final : public ruvia::Middleware<CreateCertificateValidator> {
-    RUVIA_VALIDATE_JSON(
-        CreateCertificateBody,
-        RUVIA_RULE(
-            domain, RUVIA_REQUIRED("域名不能为空"), RUVIA_MIN(1, "域名不能为空"),
-            RUVIA_MAX(253, "域名最多253个字符"),
-            RUVIA_REGEX(
-                "域名格式不正确",
-                R"(^(?:\*\.)?([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$)")),
-        RUVIA_RULE_NAME("certificate_provider_id", certificateProviderId,
-                        RUVIA_REQUIRED("请选择证书供应商"),
-                        RUVIA_REGEX("证书供应商不正确", service::common::kUuidPattern)),
-        RUVIA_RULE_NAME("dns_zone_id", dnsZoneId, RUVIA_REQUIRED("请选择托管域名"),
-                        RUVIA_REGEX("托管域名不正确", service::common::kUuidPattern)),
-        RUVIA_RULE(config, RUVIA_REQUIRED("证书配置不能为空"),
-                   RUVIA_CUSTOM("证书配置不正确", validCertificateConfig)))
+        const auto& providerId = body.get<"certificateProviderId">();
+        validator.required(providerId, "certificate_provider_id", "请选择证书供应商");
+        if (providerId && !service::common::parseUuid(std::optional<std::string_view>{providerId->view()})) {
+            validator.add("certificate_provider_id", "regex", "证书供应商不正确");
+        }
+
+        const auto& dnsZoneId = body.get<"dnsZoneId">();
+        validator.required(dnsZoneId, "dns_zone_id", "请选择托管域名");
+        if (dnsZoneId && !service::common::parseUuid(std::optional<std::string_view>{dnsZoneId->view()})) {
+            validator.add("dns_zone_id", "regex", "托管域名不正确");
+        }
+
+        const auto& config = body.get<"config">();
+        validator.required(config, "config", "证书配置不能为空");
+        if (config && !service::certificate_issuance::normalize(*config).has_value()) {
+            validator.add("config", "custom", "证书配置不正确");
+        }
+        std::move(validator).throwIfInvalid();
+        co_await next();
+    }
 };
 
-class CertificateConfigValidator final : public ruvia::Middleware<CertificateConfigValidator> {
-    RUVIA_VALIDATE_JSON(service::certificate_issuance::CertificateConfigInput,
-                        RUVIA_RULE_NAME("auto_renew", autoRenew,
-                                        RUVIA_REQUIRED("自动续签设置不能为空")))
+class CertificateConfigValidator final : public ruvia::Middleware {
+public:
+    ruvia::Task<void> handle(ruvia::Context& context, ruvia::Next& next) {
+        const auto& body = context.req().validatedJson<service::certificate_issuance::CertificateConfigInput>().value();
+        ruvia::Validator validator({.resource = context.pool()});
+        service::certificate_issuance::validateCertificateConfig(body, validator);
+        std::move(validator).throwIfInvalid();
+        co_await next();
+    }
 };
 
 } // namespace service::certificate

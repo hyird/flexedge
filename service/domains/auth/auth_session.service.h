@@ -35,7 +35,7 @@ class AuthSessionService final {
                 ? AuthError::USER_DISABLED : AuthError::SESSION_INVALID);
         }
         setSessionCookie(c, rotated->credential);
-        AuthSessionDto result(c);
+        AuthSessionDto result({.resource = c.pool()});
         result.set<"user">(authUserInfo(c, rotated->user.id, rotated->user.username,
                                       rotated->user.nickname, rotated->user.status));
         co_return result;

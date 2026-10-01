@@ -49,7 +49,7 @@ class TaskController final : public ruvia::Controller<TaskController> {
         co_await service::live_resource::streamSnapshot(c, std::move(sub),
             [tenant, page, size, skip, type, status, keyword = keyword.value_or(""), days = daysValue](auto& read) -> ruvia::Task<std::string> {
                 auto data = co_await taskService().list(read, tenant, page, size, skip, type, status, keyword, days);
-                co_return std::string(ruvia::toJson(service::common::ok<TaskPageResponse>(read, std::move(data)), {.resource = read.resource()}));
+                co_return std::string(ruvia::toJson(service::common::ok<TaskPageResponse>(read, std::move(data)), {.resource = read.pool()}));
             });
     }
     ruvia::Task<void> history(ruvia::Context& c) {
@@ -66,7 +66,7 @@ class TaskController final : public ruvia::Controller<TaskController> {
         co_await service::live_resource::streamSnapshot(c, std::move(sub),
             [tenant, id, version = *version](auto& read) -> ruvia::Task<std::string> {
                 auto data = co_await taskService().history(read, tenant, id, version);
-                co_return std::string(ruvia::toJson(service::common::ok<TaskHistoryResponse>(read, std::move(data)), {.resource = read.resource()}));
+                co_return std::string(ruvia::toJson(service::common::ok<TaskHistoryResponse>(read, std::move(data)), {.resource = read.pool()}));
             });
     }
     ruvia::Task<void> detail(ruvia::Context& c) {
@@ -85,7 +85,7 @@ class TaskController final : public ruvia::Controller<TaskController> {
         co_await service::live_resource::streamSnapshot(c, std::move(sub),
             [tenant, id, resourceId = *resourceId, version = *version](auto& read) -> ruvia::Task<std::string> {
                 auto data = co_await taskService().detail(read, tenant, id, resourceId, version);
-                co_return std::string(ruvia::toJson(service::common::ok<TaskResponse>(read, std::move(data)), {.resource = read.resource()}));
+                co_return std::string(ruvia::toJson(service::common::ok<TaskResponse>(read, std::move(data)), {.resource = read.pool()}));
             });
     }
 };

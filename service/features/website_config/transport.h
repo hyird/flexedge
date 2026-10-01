@@ -1,13 +1,14 @@
 #pragma once
 
-#include <ruvia/web/Model.h>
+#include "ruvia/web/Model.h"
+
 
 namespace service::website_config {
 
-RUVIA_REQUEST_MODEL(WebsiteDomainInput, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
+RUVIA_MODEL(WebsiteDomainInput, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(hostname, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("dns_mode", dnsMode, ruvia::String));
-RUVIA_REQUEST_MODEL(WebsiteOriginInput, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
+RUVIA_MODEL(WebsiteOriginInput, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("group", group, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(protocol, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(host, ruvia::String),
@@ -15,13 +16,13 @@ RUVIA_REQUEST_MODEL(WebsiteOriginInput, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(role, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(weight, ruvia::Int64),
                     RUVIA_OPTIONAL_FIELD(status, ruvia::String));
-RUVIA_REQUEST_MODEL(WebsiteRouteHeaderInput, RUVIA_OPTIONAL_FIELD(name, ruvia::String),
+RUVIA_MODEL(WebsiteRouteHeaderInput, RUVIA_OPTIONAL_FIELD(name, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(value, ruvia::String));
-RUVIA_REQUEST_MODEL(WebsiteRouteConditionInput, RUVIA_OPTIONAL_FIELD(source, ruvia::String),
+RUVIA_MODEL(WebsiteRouteConditionInput, RUVIA_OPTIONAL_FIELD(source, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(name, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(op, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(value, ruvia::String));
-RUVIA_REQUEST_MODEL(WebsiteRouteRuleInput, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
+RUVIA_MODEL(WebsiteRouteRuleInput, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(name, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(description, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(hostnames, ruvia::Array<ruvia::String>),
@@ -42,7 +43,7 @@ RUVIA_REQUEST_MODEL(WebsiteRouteRuleInput, RUVIA_OPTIONAL_FIELD(id, ruvia::Strin
                                               ruvia::Array<WebsiteRouteHeaderInput>),
                     RUVIA_OPTIONAL_FIELD_NAME("response_headers", responseHeaders,
                                               ruvia::Array<WebsiteRouteHeaderInput>));
-RUVIA_REQUEST_MODEL(
+RUVIA_MODEL(
     WebsiteConfigInput, RUVIA_OPTIONAL_FIELD(name, ruvia::String),
     RUVIA_OPTIONAL_FIELD(domains, ruvia::Array<WebsiteDomainInput>),
     RUVIA_OPTIONAL_FIELD(origins, ruvia::Array<WebsiteOriginInput>),
@@ -96,10 +97,10 @@ RUVIA_REQUEST_MODEL(
                               responseCompressionExcludedExtensions, ruvia::Array<ruvia::String>),
     RUVIA_OPTIONAL_FIELD_NAME("route_rules", routeRules, ruvia::Array<WebsiteRouteRuleInput>));
 
-RUVIA_RESPONSE_MODEL(WebsiteDomainOutput, RUVIA_REQUIRED_FIELD(id, ruvia::String),
+RUVIA_MODEL(WebsiteDomainOutput, RUVIA_REQUIRED_FIELD(id, ruvia::String),
                      RUVIA_REQUIRED_FIELD(hostname, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("dns_mode", dnsMode, ruvia::String));
-RUVIA_RESPONSE_MODEL(WebsiteOriginOutput, RUVIA_REQUIRED_FIELD(id, ruvia::String),
+RUVIA_MODEL(WebsiteOriginOutput, RUVIA_REQUIRED_FIELD(id, ruvia::String),
                      RUVIA_REQUIRED_FIELD_NAME("group", group, ruvia::String),
                      RUVIA_REQUIRED_FIELD(protocol, ruvia::String),
                      RUVIA_REQUIRED_FIELD(host, ruvia::String),
@@ -107,13 +108,13 @@ RUVIA_RESPONSE_MODEL(WebsiteOriginOutput, RUVIA_REQUIRED_FIELD(id, ruvia::String
                      RUVIA_REQUIRED_FIELD(role, ruvia::String),
                      RUVIA_REQUIRED_FIELD(weight, ruvia::Int64),
                      RUVIA_REQUIRED_FIELD(status, ruvia::String));
-RUVIA_RESPONSE_MODEL(WebsiteRouteHeaderOutput, RUVIA_REQUIRED_FIELD(name, ruvia::String),
+RUVIA_MODEL(WebsiteRouteHeaderOutput, RUVIA_REQUIRED_FIELD(name, ruvia::String),
                      RUVIA_REQUIRED_FIELD(value, ruvia::String));
-RUVIA_RESPONSE_MODEL(WebsiteRouteConditionOutput, RUVIA_REQUIRED_FIELD(source, ruvia::String),
+RUVIA_MODEL(WebsiteRouteConditionOutput, RUVIA_REQUIRED_FIELD(source, ruvia::String),
                      RUVIA_REQUIRED_FIELD(name, ruvia::String),
                      RUVIA_REQUIRED_FIELD(op, ruvia::String),
                      RUVIA_REQUIRED_FIELD(value, ruvia::String));
-RUVIA_RESPONSE_MODEL(WebsiteRouteRuleOutput, RUVIA_REQUIRED_FIELD(id, ruvia::String),
+RUVIA_MODEL(WebsiteRouteRuleOutput, RUVIA_REQUIRED_FIELD(id, ruvia::String),
                      RUVIA_REQUIRED_FIELD(name, ruvia::String),
                      RUVIA_REQUIRED_FIELD(description, ruvia::String),
                      RUVIA_REQUIRED_FIELD(hostnames, ruvia::Array<ruvia::String>),
@@ -134,7 +135,7 @@ RUVIA_RESPONSE_MODEL(WebsiteRouteRuleOutput, RUVIA_REQUIRED_FIELD(id, ruvia::Str
                                                ruvia::Array<WebsiteRouteHeaderOutput>),
                      RUVIA_REQUIRED_FIELD_NAME("response_headers", responseHeaders,
                                                ruvia::Array<WebsiteRouteHeaderOutput>));
-RUVIA_RESPONSE_MODEL(
+RUVIA_MODEL(
     WebsiteConfigOutput, RUVIA_OPTIONAL_FIELD(name, ruvia::String),
     RUVIA_REQUIRED_FIELD(domains, ruvia::Array<WebsiteDomainOutput>),
     RUVIA_REQUIRED_FIELD(origins, ruvia::Array<WebsiteOriginOutput>),

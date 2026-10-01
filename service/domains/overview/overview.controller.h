@@ -31,7 +31,7 @@ class OverviewController final : public ruvia::Controller<OverviewController> {
             [tenant](auto& read) -> ruvia::Task<std::string> {
                 auto data = co_await service::overview::overviewService().get(read, tenant);
                 co_return std::string(ruvia::toJson(service::common::ok<OverviewResponse>(
-                    read, std::move(data)), {.resource = read.resource()}));
+                    read, std::move(data)), {.resource = read.pool()}));
             });
     }
 };

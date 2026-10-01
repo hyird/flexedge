@@ -56,7 +56,7 @@ class WebsiteDashboardService final {
             "access.occurred_at >= bounds.today_start), 0)::bigint FROM bounds",
             tenantId, id);
 
-        WebsiteDashboardDto result(c);
+        WebsiteDashboardDto result({.resource = c.pool()});
         auto& summary = result.template ensure<"summary">();
         const auto& summaryRow = summaryRows.front();
         summary.template set<"previousMonthPeakBps">(summaryRow[0].template as<std::int64_t>().value_or(0));
@@ -161,7 +161,7 @@ class WebsiteDashboardService final {
     template <typename Output, typename Rows>
     static void appendBuckets(auto& c, Output& output, const Rows& rows) {
         for (const auto& row : rows) {
-            auto& item = output.emplace_back(c);
+            auto& item = output.emplace_back();
             item.template set<"timestamp">(row[0].value().value_or(""));
             item.template set<"requestCount">(row[1].template as<std::int64_t>().value_or(0));
             item.template set<"responseBytes">(row[2].template as<std::int64_t>().value_or(0));
@@ -172,7 +172,7 @@ class WebsiteDashboardService final {
     template <typename Output, typename Rows>
     static void appendRankings(auto& c, Output& output, const Rows& rows) {
         for (const auto& row : rows) {
-            auto& item = output.emplace_back(c);
+            auto& item = output.emplace_back();
             item.template set<"label">(row[0].value().value_or(""));
             item.template set<"requestCount">(row[1].template as<std::int64_t>().value_or(0));
             item.template set<"responseBytes">(row[2].template as<std::int64_t>().value_or(0));
@@ -202,7 +202,7 @@ class WebsiteDashboardService final {
             } else if (label != "未知 IP") {
                 label += " · 未知地区";
             }
-            auto& item = output.emplace_back(c);
+            auto& item = output.emplace_back();
             item.template set<"label">(label);
             item.template set<"requestCount">(row[1].template as<std::int64_t>().value_or(0));
             item.template set<"responseBytes">(row[2].template as<std::int64_t>().value_or(0));
@@ -250,7 +250,7 @@ class WebsiteDashboardService final {
         const auto count = std::min<std::size_t>(orderedCountries.size(), 10);
         for (std::size_t index = 0; index < count; ++index) {
             const auto& country = orderedCountries[index];
-            auto& item = output.emplace_back(c);
+            auto& item = output.emplace_back();
             item.template set<"label">(country.first);
             item.template set<"requestCount">(country.second.requestCount);
             item.template set<"responseBytes">(country.second.responseBytes);

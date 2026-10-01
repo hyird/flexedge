@@ -1,7 +1,7 @@
 #include <iostream>
 #include <string>
 #include <ruvia/web/ModelJson.h>
-#include "service/domains/website/website.schema.h"
+#include "service/features/website_config/validation.h"
 #include "service/domains/dns_zone/dns_zone.schema.h"
 
 int main() {
@@ -21,9 +21,9 @@ int main() {
         const auto config = ruvia::fromJson<service::website_config::WebsiteConfigInput>(json);
         if (!config || !config->get<"domains">() || !config->get<"origins">() ||
             !config->get<"routeRules">() ||
-            service::website::validDomainSet(*config->get<"domains">()) != distinct ||
-            service::website::validOriginSet(*config->get<"origins">()) != distinct ||
-            service::website::validRouteRuleSet(*config->get<"routeRules">()) != distinct) {
+            service::website_config::validDomainSet(*config->get<"domains">()) != distinct ||
+            service::website_config::validOriginSet(*config->get<"origins">()) != distinct ||
+            service::website_config::validRouteRuleSet(*config->get<"routeRules">()) != distinct) {
             std::cerr << "Website UUID set validation mismatch\n";
             return 1;
         }
@@ -39,8 +39,8 @@ int main() {
         std::cerr << "Invalid UUID collection fixtures\n";
         return 1;
     }
-    if (service::website::hasUniqueCertificateIds(*website->get<"certificateIds">()) ||
-        service::dns_zone::hasUniqueRecordIds(*dns->get<"records">())) {
+    if (service::website_config::hasUniqueCertificateIds(*website->get<"certificateIds">()) ||
+        service::dns_sync::hasUniqueRecordIds(*dns->get<"records">())) {
         std::cerr << "Equivalent UUID collection entries admitted\n";
         return 1;
     }
@@ -52,8 +52,8 @@ int main() {
                    {"id":"AAAAAAAA-0000-0000-0000-000000000002"}]})");
     if (!distinctWebsite || !distinctWebsite->get<"certificateIds">() ||
         !distinctDns || !distinctDns->get<"records">() ||
-        !service::website::hasUniqueCertificateIds(*distinctWebsite->get<"certificateIds">()) ||
-        !service::dns_zone::hasUniqueRecordIds(*distinctDns->get<"records">())) {
+        !service::website_config::hasUniqueCertificateIds(*distinctWebsite->get<"certificateIds">()) ||
+        !service::dns_sync::hasUniqueRecordIds(*distinctDns->get<"records">())) {
         std::cerr << "Distinct UUID collection entries rejected\n";
         return 1;
     }

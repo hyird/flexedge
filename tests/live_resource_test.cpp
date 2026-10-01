@@ -401,6 +401,44 @@ int main() {
         node.reset();
         fanout.publish("tenant-a", Resource::nodes, "node-a");
 
+        // Same-class readers receive only notifications published by their own worker.
+        std::optional<Hub::Subscription> workerA;
+        workerA.emplace(fanout.subscribe(firstLoop.handle(), "tenant-a", Resource::tasks,
+                                         "worker-filter-probe"));
+        auto workerB = fanout.subscribe(secondLoop.handle(), "tenant-a", Resource::tasks,
+                                        "worker-filter-probe");
+        const auto workerAId = firstLoop.handle().id();
+        const auto workerBId = secondLoop.handle().id();
+        fanout.publishForWorker(workerAId, "tenant-a", Resource::tasks, "worker-filter-probe");
+        REQUIRE(firstLoop.start(receive(*workerA, std::chrono::seconds(1))).get().hasValue());
+        REQUIRE(workerA->drain().snapshot);
+        REQUIRE(secondLoop.start(receive(workerB, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+
+        fanout.publishForWorker(workerAId, "tenant-a", Resource::tasks, "worker-filter-probe");
+        fanout.publishForWorker(workerAId, "tenant-a", Resource::tasks, "worker-filter-probe");
+        REQUIRE(firstLoop.start(receive(*workerA, std::chrono::seconds(1))).get().hasValue());
+        REQUIRE(workerA->drain().snapshot);
+        REQUIRE(firstLoop.start(receive(*workerA, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+        REQUIRE(secondLoop.start(receive(workerB, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+
+        fanout.publishForWorker(workerBId, "tenant-a", Resource::tasks, "worker-filter-probe");
+        REQUIRE(secondLoop.start(receive(workerB, std::chrono::seconds(1))).get().hasValue());
+        REQUIRE(workerB.drain().snapshot);
+        REQUIRE(firstLoop.start(receive(*workerA, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+
+        // Releasing one worker's subscription prevents later targeted events from leaving stale work.
+        workerA.reset();
+        fanout.publishForWorker(workerAId, "tenant-a", Resource::tasks, "worker-filter-probe");
+        REQUIRE(secondLoop.start(receive(workerB, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+        fanout.publishForWorker(workerBId, "tenant-a", Resource::tasks, "worker-filter-probe");
+        REQUIRE(secondLoop.start(receive(workerB, std::chrono::seconds(1))).get().hasValue());
+        REQUIRE(workerB.drain().snapshot);
+
         runQueryKeyTests();
         runSnapshotCacheTests();
 

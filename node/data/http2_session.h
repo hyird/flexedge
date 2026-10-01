@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -43,16 +44,20 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
                  RuntimeMetrics& metrics, NodeLogBuffer::Producer& logs,
                  OriginConnectionPool& originConnections, BufferedBytesBudget& requestBuffers,
                  BufferedBytesBudget& responseBuffers, std::uint64_t sequence,
-                 std::shared_ptr<const void> transportState, std::string tlsFingerprint = {})
+                 std::shared_ptr<const void> transportState, std::string tlsFingerprint = {},
+                 std::function<void()> onRetired = {})
         : stream_(std::move(stream)), runtime_(runtime), health_(health), metrics_(metrics),
           logs_(logs), originConnections_(originConnections), requestBuffers_(requestBuffers),
           responseBuffers_(responseBuffers), sequence_(sequence),
           transportState_(std::move(transportState)), tlsFingerprint_(std::move(tlsFingerprint)),
-          connection_(ruvia::Http2Connection::server()) {
+          onRetired_(std::move(onRetired)), connection_(ruvia::Http2Connection::server()) {
         metrics_.connectionOpened();
     }
 
-    ~Http2Session() { metrics_.connectionClosed(); }
+    ~Http2Session() {
+        metrics_.connectionClosed();
+        if (onRetired_) onRetired_();
+    }
 
     void start() {
         flush();
@@ -227,6 +232,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
         return addressError ? std::string("unknown") : value;
     }
 
+  public:
     void close() noexcept {
         if (closed_) {
             return;
@@ -244,6 +250,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
         ignored = stream_.lowest_layer().close(ignored);
     }
 
+  private:
     void read() {
         if (closed_ || reading_) {
             return;
@@ -835,6 +842,7 @@ class Http2Session final : public std::enable_shared_from_this<Http2Session> {
     std::uint64_t sequence_{};
     std::shared_ptr<const void> transportState_;
     std::string tlsFingerprint_;
+    std::function<void()> onRetired_;
     ruvia::Http2Connection connection_;
     std::unordered_map<std::uint32_t, RequestState> requests_;
     std::array<char, 16384> readBuffer_{};

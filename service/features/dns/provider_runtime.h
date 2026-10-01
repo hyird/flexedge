@@ -1,12 +1,13 @@
 #pragma once
 
+#include "ruvia/web/Model.h"
+
 #include <memory_resource>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include <ruvia/web/Model.h>
 #include <ruvia/web/ModelJson.h>
 
 namespace service::dns {
@@ -16,13 +17,13 @@ struct DnsProviderZoneRuntimeData final {
     std::string status;
 };
 
-RUVIA_REQUEST_MODEL(ProviderZoneRuntimeInput, RUVIA_OPTIONAL_FIELD(domain, ruvia::String),
+RUVIA_MODEL(ProviderZoneRuntimeInput, RUVIA_OPTIONAL_FIELD(domain, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(status, ruvia::String));
-RUVIA_REQUEST_MODEL(DnsProviderRuntimeInput,
+RUVIA_MODEL(DnsProviderRuntimeInput,
                     RUVIA_OPTIONAL_FIELD(zones, ruvia::Array<ProviderZoneRuntimeInput>));
-RUVIA_RESPONSE_MODEL(ProviderZoneRuntimeOutput, RUVIA_REQUIRED_FIELD(domain, ruvia::String),
+RUVIA_MODEL(ProviderZoneRuntimeOutput, RUVIA_REQUIRED_FIELD(domain, ruvia::String),
                      RUVIA_REQUIRED_FIELD(status, ruvia::String));
-RUVIA_RESPONSE_MODEL(DnsProviderRuntimeOutput,
+RUVIA_MODEL(DnsProviderRuntimeOutput,
                      RUVIA_REQUIRED_FIELD(zones, ruvia::Array<ProviderZoneRuntimeOutput>));
 
 inline std::string serializeDnsProviderRuntime(const std::vector<DnsProviderZoneRuntimeData>& zones,

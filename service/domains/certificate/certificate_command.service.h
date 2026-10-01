@@ -219,8 +219,8 @@ class CertificateCommandService final {
     serializeCertificateConfig(ruvia::Context& c,
                                const service::certificate_issuance::CertificateConfigData& config) {
         const auto output =
-            service::certificate_issuance::toOutput(config, {.resource = c.resource()});
-        const auto json = ruvia::toJson(output, {.resource = c.resource()});
+            service::certificate_issuance::toOutput(config, {.resource = c.pool()});
+        const auto json = ruvia::toJson(output, {.resource = c.pool()});
         return std::string(json.data(), json.size());
     }
 

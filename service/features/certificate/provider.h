@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ruvia/web/Model.h"
+
 #include <array>
 #include <chrono>
 #include <cctype>
@@ -13,7 +15,6 @@
 #include <ruvia/core/Task.h>
 #include <ruvia/http/HttpKnownMethod.h>
 #include <ruvia/web/HttpClientHandle.h>
-#include <ruvia/web/Model.h>
 
 #include "service/config/outbound.h"
 #include "service/features/certificate/acme_transport.h"
@@ -22,7 +23,7 @@
 
 namespace service::certificate_issuance {
 
-RUVIA_REQUEST_MODEL(ZeroSslEabInput, RUVIA_OPTIONAL_FIELD_NAME("eab_kid", eabKid, ruvia::String),
+RUVIA_MODEL(ZeroSslEabInput, RUVIA_OPTIONAL_FIELD_NAME("eab_kid", eabKid, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("eab_hmac_key", eabHmacKey, ruvia::String));
 
 class CertificateProviderClientError final : public std::runtime_error {
@@ -94,7 +95,7 @@ ruvia::Task<void> verifyAcmeDirectory(Runtime& context, const AcmeSettings& sett
         context, service::config::acmeOrigin(settings.host), ruvia::HttpKnownMethod::kGet,
         settings.directoryTarget, headers);
     const std::optional<AcmeDirectoryInput> parsed =
-        ruvia::fromJson<AcmeDirectoryInput>(response.body(), {.resource = context.resource()});
+        ruvia::fromJson<AcmeDirectoryInput>(response.body(), {.resource = context.pool()});
     if (!response.status().isSuccessful() || !parsed || !parsed->get<"newNonce">() ||
         !parsed->get<"newAccount">() || !parsed->get<"newOrder">()) {
         throw CertificateProviderClientError("ACME Directory 检测失败", true);
@@ -107,7 +108,7 @@ ruvia::Task<EabCredentials>
 parseZeroSslEab(Runtime& context, const service::outbound_http::BufferedResponse& response,
                 std::string_view failureMessage) {
     const std::optional<ZeroSslEabInput> parsed =
-        ruvia::fromJson<ZeroSslEabInput>(response.body(), {.resource = context.resource()});
+        ruvia::fromJson<ZeroSslEabInput>(response.body(), {.resource = context.pool()});
     if (!response.status().isSuccessful() || !parsed) {
         throw CertificateProviderClientError(std::string(failureMessage), false);
     }

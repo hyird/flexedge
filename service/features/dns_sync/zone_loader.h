@@ -67,7 +67,7 @@ loadZoneSyncState(service::background::WorkerContext& context, const DnsTask& ta
     }
 
     const auto runtime =
-        parseStoredRuntime(row[2].value().value_or("{}"), {.resource = context.resource()});
+        parseStoredRuntime(row[2].value().value_or("{}"), {.resource = context.pool()});
     if (!runtime) {
         throw std::runtime_error("DNS runtime 损坏");
     }
@@ -76,13 +76,13 @@ loadZoneSyncState(service::background::WorkerContext& context, const DnsTask& ta
     const std::string provider = std::string(row[4].value().value_or(""));
     const std::string accountId = std::string(row[5].value().value_or(""));
     auto providerConfig =
-        service::dns::parseDnsProviderConfig(row[6].value().value_or("{}"), context.resource());
+        service::dns::parseDnsProviderConfig(row[6].value().value_or("{}"), context.pool());
     if (row[7].value().value_or("") != "verified") {
         throw std::runtime_error("DNS 服务商账号尚未通过检测");
     }
 
     const std::optional<ZoneConfigData> config =
-        parseStored(row[8].value().value_or("{}"), {.resource = context.resource()});
+        parseStored(row[8].value().value_or("{}"), {.resource = context.pool()});
     if (!config) {
         throw std::runtime_error("DNS 聚合配置损坏");
     }

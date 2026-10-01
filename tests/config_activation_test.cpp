@@ -116,6 +116,8 @@ int main() {
             REQUIRE(request(candidatePort, "unknown.example.invalid").starts_with(
                 "HTTP/1.1 421 Misdirected Request\r\n"));
             shutdown.stopAndJoin();
+            plane.requestStopAccepting();
+            plane.requestStopAccepting();
         }
 
 }

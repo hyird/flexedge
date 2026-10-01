@@ -110,12 +110,12 @@ inline ruvia::Task<ZoneRuntimeDto> reconcileZoneRecords(
     const std::unordered_map<std::string, std::string>& knownRemoteIds,
     std::vector<service::dns::ProviderRecord>& remoteRecords,
     const std::vector<service::dns::ProviderLine>& lines, std::int64_t revision, bool deleted) {
-    ZoneRuntimeDto nextRuntime({.resource = context.resource()});
+    ZoneRuntimeDto nextRuntime({.resource = context.pool()});
     nextRuntime.set<"recordsImported">(true);
     auto& runtimeLines = nextRuntime.ensure<"lines">();
     for (const auto& line : lines) {
         auto& outputLine =
-            runtimeLines.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
+            runtimeLines.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
         outputLine.set<"code">(line.code);
         outputLine.set<"name">(line.name);
         outputLine.set<"displayName">(line.displayName);
@@ -136,7 +136,7 @@ inline ruvia::Task<ZoneRuntimeDto> reconcileZoneRecords(
                                               : std::string_view{known->second},
                 managed.type, managed.name, managed.content, managed.ttl, managed.priority,
                 managed.proxied, managed.lineCode, remoteRecords);
-            auto& state = states.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
+            auto& state = states.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
             state.set<"id">(managed.id);
             state.set<"remoteRecordId">(remoteId);
             state.set<"syncStatus">("synced");

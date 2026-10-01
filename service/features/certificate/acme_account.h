@@ -30,7 +30,7 @@ ensureAcmeAccount(Runtime& context, std::string_view tenantId, std::string_view 
         throw AcmeError("证书供应商配置已变更", false);
     }
     const auto runtime = parseCertificateProviderRuntime(rows.front()[1].value().value_or("{}"),
-                                                         {.resource = context.resource()});
+                                                         {.resource = context.pool()});
     if (!runtime) {
         throw AcmeError("证书供应商运行状态损坏", true);
     }
@@ -69,7 +69,7 @@ ensureAcmeAccount(Runtime& context, std::string_view tenantId, std::string_view 
         throw AcmeError("证书供应商配置已变更", false);
     }
     const auto current = parseCertificateProviderRuntime(
-        currentRows.front()[1].value().value_or("{}"), {.resource = context.resource()});
+        currentRows.front()[1].value().value_or("{}"), {.resource = context.pool()});
     if (!current) {
         throw AcmeError("证书供应商运行状态损坏", true);
     }
@@ -83,11 +83,11 @@ ensureAcmeAccount(Runtime& context, std::string_view tenantId, std::string_view 
         co_await transaction.commit();
         co_return persisted;
     }
-    CertificateProviderRuntimeOutput output = toOutput(*current, {.resource = context.resource()});
+    CertificateProviderRuntimeOutput output = toOutput(*current, {.resource = context.pool()});
     auto& acmeAccount = output.ensure<"acmeAccount">();
     acmeAccount.set<"privateKeyEnvelope">(privateKeyEnvelope);
     acmeAccount.set<"accountUrl">(account.accountUrl);
-    const auto runtimeJson = ruvia::toJson(output, {.resource = context.resource()});
+    const auto runtimeJson = ruvia::toJson(output, {.resource = context.pool()});
     const auto updated = co_await transaction.execute(
         "UPDATE sys_provider SET runtime = $1::jsonb, updated_at = NOW() WHERE tenant_id = "
         "$2 AND id = $3 AND kind = 'certificate' AND revision = $4 AND deleted_at IS NULL",

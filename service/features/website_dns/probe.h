@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ruvia/web/Model.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -9,7 +11,6 @@
 #include <string_view>
 
 #include <ruvia/http/HttpKnownMethod.h>
-#include <ruvia/web/Model.h>
 
 #include "service/config/outbound.h"
 #include "service/features/background/worker_pool.h"
@@ -17,9 +18,9 @@
 
 namespace service::website_dns {
 
-RUVIA_REQUEST_MODEL(DnsDohAnswerInput, RUVIA_OPTIONAL_FIELD(type, ruvia::Int64),
+RUVIA_MODEL(DnsDohAnswerInput, RUVIA_OPTIONAL_FIELD(type, ruvia::Int64),
                     RUVIA_OPTIONAL_FIELD(data, ruvia::String));
-RUVIA_REQUEST_MODEL(DnsDohEnvelopeInput, RUVIA_OPTIONAL_FIELD_NAME("Status", status, ruvia::Int64),
+RUVIA_MODEL(DnsDohEnvelopeInput, RUVIA_OPTIONAL_FIELD_NAME("Status", status, ruvia::Int64),
                     RUVIA_OPTIONAL_FIELD_NAME("Answer", answer, ruvia::Array<DnsDohAnswerInput>));
 
 struct ProbeResult final {
@@ -78,7 +79,7 @@ inline ruvia::Task<ProbeResult> probeCname(service::background::WorkerContext& c
         throw std::runtime_error("公共 DNS 探测服务返回异常");
     }
     const std::optional<DnsDohEnvelopeInput> parsed =
-        ruvia::fromJson<DnsDohEnvelopeInput>(response.body(), {.resource = context.resource()});
+        ruvia::fromJson<DnsDohEnvelopeInput>(response.body(), {.resource = context.pool()});
     if (!parsed || !parsed->get<"status">()) {
         throw std::runtime_error("公共 DNS 探测响应无效");
     }

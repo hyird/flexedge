@@ -18,7 +18,7 @@ class AuthController final : public ruvia::Controller<AuthController> {
   public:
     RUVIA_CONTROLLER_GROUP("/api/auth")
     RUVIA_ROUTES_BEGIN
-    RUVIA_POST("/login", login, LoginValidator);
+    RUVIA_POST("/login", login, ruvia::JsonBody<LoginBody>, LoginValidator);
     RUVIA_POST("/refresh", refresh);
     RUVIA_POST("/logout", logout);
     RUVIA_GET("/me", me, service::middleware::AuthMiddleware);

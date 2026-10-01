@@ -71,12 +71,12 @@ class WebsiteReadService final {
         }
         const auto certificates = co_await loadBoundCertificatesByWebsite(c, tenantId, websiteIds);
 
-        WebsitePageDataDto result(c);
+        WebsitePageDataDto result({.resource = c.pool()});
         auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
             const auto config = parseConfig(c, row[5].value().value_or("{}"));
             const auto available = certificates.find(std::string(row[0].value().value_or("")));
-            fillWebsite(c, items.emplace_back(c), row, config,
+            fillWebsite(c, items.emplace_back(), row, config,
                         available == certificates.end() ? emptyCertificates() : available->second);
         }
         result.template set<"total">(total);
@@ -103,10 +103,10 @@ class WebsiteReadService final {
         }
         const auto config = parseConfig(c, rows.front()[5].value().value_or("{}"));
         const auto certificates = co_await loadBoundCertificatesByWebsite(c, tenantId, {id});
-        ruvia::Array<WebsiteOriginSourceDto> sources(c.resource());
+        ruvia::Array<WebsiteOriginSourceDto> sources({.resource = c.pool()});
         const auto originStates =
             co_await loadOriginRuntime(c, tenantId, rows.front()[1].value().value_or(""), id, sources);
-        WebsiteDto result(c);
+        WebsiteDto result({.resource = c.pool()});
         const auto available = certificates.find(id);
         fillWebsite(c, result, rows.front(), config,
                     available == certificates.end() ? emptyCertificates() : available->second,
@@ -139,7 +139,7 @@ class WebsiteReadService final {
 
     static service::website_config::WebsiteConfigData parseConfig(auto& c,
                                                                   std::string_view json) {
-        auto config = service::website_config::parseStored(json, {.resource = c.resource()});
+        auto config = service::website_config::parseStored(json, {.resource = c.pool()});
         if (!config) {
             throwCorruptConfig();
         }
@@ -207,12 +207,12 @@ class WebsiteReadService final {
             tenantId, clusterId);
         std::vector<OriginRuntimeState> result;
         for (const auto& row : rows) {
-            auto& source = sources.emplace_back(c);
+            auto& source = sources.emplace_back();
             source.template set<"nodeId">(row[0].value().value_or(""));
             source.template set<"nodeRevision">(row[3].template as<std::int64_t>().value_or(0));
             source.template set<"reportedAt">(row[4].value().value_or(""));
             const auto runtime = service::node_runtime::parseStored(row[2].value().value_or("{}"),
-                                                                    {.resource = c.resource()});
+                                                                    {.resource = c.pool()});
             if (!runtime) {
                 continue;
             }
@@ -233,7 +233,7 @@ class WebsiteReadService final {
                             const std::vector<BoundCertificate>& certificates,
                             const std::vector<OriginRuntimeState>& originStates = {}) {
         const auto runtime = service::website_dns::parseStored(row[6].value().value_or("{}"),
-                                                               {.resource = c.resource()});
+                                                               {.resource = c.pool()});
         if (!runtime) {
             throwCorruptConfig();
         }
@@ -245,15 +245,15 @@ class WebsiteReadService final {
         item.template set<"accessDomain">(row[3].value().value_or(""));
         item.template set<"status">(row[11].value().value_or(""));
         item.template set<"revision">(row[4].template as<std::int64_t>().value_or(1));
-        item.template set<"config">(service::website_config::toOutput(config, {.resource = c.resource()}));
+        item.template set<"config">(service::website_config::toOutput(config, {.resource = c.pool()}));
         auto& certificateDtos = item.template ensure<"certificates">();
         for (const auto& certificate : certificates) {
-            auto& output = certificateDtos.emplace_back(c);
+            auto& output = certificateDtos.emplace_back();
             output.template set<"id">(certificate.id);
             output.template set<"usable">(certificate.usable);
             auto& domains = output.template ensure<"domains">();
             for (const auto& domain : certificate.domains) {
-                domains.emplace_back(domain, ruvia::ModelOptions{.resource = c.resource()});
+                domains.emplace_back(domain, ruvia::ModelOptions{.resource = c.pool()});
             }
         }
         item.template set<"runtime">(detail::toRuntime(c, config, *runtime, certificates, targetCount,

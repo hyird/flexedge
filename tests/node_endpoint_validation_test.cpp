@@ -2,16 +2,18 @@
 #include <iostream>
 #include <string>
 #include <ruvia/web/ModelJson.h>
-#include "service/domains/node/node.schema.h"
+#include "service/common/ip_address.h"
+#include "service/features/node_config/transport.h"
 
 bool unique(std::string first, std::string second,
             std::string firstId = "aaaaaaaa-0000-0000-0000-000000000001",
             std::string secondId = "aaaaaaaa-0000-0000-0000-000000000002") {
     const auto input = ruvia::fromJson<service::node_config::NodeConfigInput>(
         "{\"endpoints\":[{\"id\":\"" + firstId + "\",\"ip_address\":\"" + first +
-        "\"},{\"id\":\"" + secondId + "\",\"ip_address\":\"" + second + "\"}]}");
+        "\",\"line_code\":\"default\"},{\"id\":\"" + secondId + "\",\"ip_address\":\"" + second +
+        "\",\"line_code\":\"default\"}]}");
     if (!input || !input->get<"endpoints">()) throw std::runtime_error("invalid fixture");
-    return service::node::hasUniqueEndpoints(*input->get<"endpoints">());
+    return service::node_config::hasUniqueEndpoints(*input->get<"endpoints">());
 }
 
 int main() try {

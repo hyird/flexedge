@@ -1,10 +1,11 @@
 #pragma once
 
-#include <ruvia/web/Model.h>
+#include "ruvia/web/Model.h"
+
 
 namespace service::node_runtime {
 
-RUVIA_REQUEST_MODEL(OriginHealthInput,
+RUVIA_MODEL(OriginHealthInput,
                     RUVIA_OPTIONAL_FIELD_NAME("website_id", websiteId, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("origin_id", originId, ruvia::String),
                     RUVIA_OPTIONAL_FIELD(status, ruvia::String),
@@ -12,7 +13,7 @@ RUVIA_REQUEST_MODEL(OriginHealthInput,
                                               ruvia::Int64),
                     RUVIA_OPTIONAL_FIELD_NAME("latency_millis", latencyMillis, ruvia::Int64),
                     RUVIA_OPTIONAL_FIELD_NAME("last_error", lastError, ruvia::String));
-RUVIA_RESPONSE_MODEL(
+RUVIA_MODEL(
     OriginHealthOutput, RUVIA_REQUIRED_FIELD_NAME("website_id", websiteId, ruvia::String),
     RUVIA_REQUIRED_FIELD_NAME("origin_id", originId, ruvia::String),
     RUVIA_REQUIRED_FIELD(status, ruvia::String),
@@ -20,7 +21,7 @@ RUVIA_RESPONSE_MODEL(
     RUVIA_REQUIRED_FIELD_NAME("latency_millis", latencyMillis, ruvia::Int64),
     RUVIA_OPTIONAL_FIELD_NAME("last_error", lastError, ruvia::String, RUVIA_OMIT_EMPTY));
 
-RUVIA_REQUEST_MODEL(NodeRuntimeInput,
+RUVIA_MODEL(NodeRuntimeInput,
                     RUVIA_OPTIONAL_FIELD_NAME("agent_version", agentVersion, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("cpu_usage", cpuUsage, ruvia::Double),
                     RUVIA_OPTIONAL_FIELD_NAME("memory_usage", memoryUsage, ruvia::Double),
@@ -34,7 +35,7 @@ RUVIA_REQUEST_MODEL(NodeRuntimeInput,
                     RUVIA_OPTIONAL_FIELD(health, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("last_error", lastError, ruvia::String));
 
-RUVIA_RESPONSE_MODEL(
+RUVIA_MODEL(
     NodeRuntimeOutput,
     RUVIA_OPTIONAL_FIELD_NAME("agent_version", agentVersion, ruvia::String, RUVIA_OMIT_EMPTY),
     RUVIA_OPTIONAL_FIELD_NAME("cpu_usage", cpuUsage, ruvia::Double, RUVIA_OMIT_EMPTY),

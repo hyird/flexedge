@@ -89,12 +89,12 @@ inline ruvia::Task<void> completeVerification(service::background::WorkerContext
         runtimeJson = std::move(*result.dnsRuntime);
     } else {
         const auto runtime = service::certificate_issuance::parseCertificateProviderRuntime(
-            rows.front()[0].value().value_or("{}"), {.resource = context.resource()});
+            rows.front()[0].value().value_or("{}"), {.resource = context.pool()});
         if (!runtime) {
             throw VerificationError("证书供应商 runtime 损坏", true);
         }
         runtimeJson = service::certificate_issuance::serializeCertificateProviderRuntime(
-            runtime, result.eab, context.resource());
+            runtime, result.eab, context.pool());
     }
     const auto updated = co_await transaction.execute(
         "UPDATE sys_provider SET runtime = $1::jsonb, status = 'verified', last_verified_at = "

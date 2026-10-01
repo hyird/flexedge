@@ -48,7 +48,7 @@ class NodeCommandService final {
         const auto& storedConfig = normalized->config;
         const auto configJson = serializeNodeConfig(c, storedConfig);
 
-        NodeCredentialsDto result(c);
+        NodeCredentialsDto result(ruvia::ModelOptions{.resource = c.pool()});
         try {
             auto transaction = co_await c.db().beginTransaction();
             const auto agentId = service::utils::randomToken().substr(0, 32);
@@ -250,7 +250,7 @@ class NodeCommandService final {
         service::live_resource::hub().publish(tenantId, service::live_resource::Resource::nodes, id);
         service::live_resource::hub().publish(tenantId, service::live_resource::Resource::clusters, clusterId);
         service::live_resource::hub().publish(tenantId, service::live_resource::Resource::tasks);
-        NodeCredentialsDto result(c);
+        NodeCredentialsDto result(ruvia::ModelOptions{.resource = c.pool()});
         result.set<"nodeId">(agentId);
         result.set<"secret">(secret.view());
         result.set<"revision">(rows.front()[0].as<std::int64_t>().value_or(expectedRevision + 1));

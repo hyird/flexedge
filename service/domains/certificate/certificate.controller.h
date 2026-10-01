@@ -6,6 +6,7 @@
 #include <ruvia/core/Task.h>
 #include <ruvia/web/Context.h>
 #include <ruvia/web/ModelJson.h>
+#include <ruvia/web/RequestValidation.h>
 #include <ruvia/web/Controller.h>
 #include "service/common/http.h"
 #include "service/common/types.h"
@@ -22,11 +23,11 @@ class CertificateController final : public ruvia::Controller<CertificateControll
     RUVIA_ROUTES_BEGIN
     RUVIA_GET_SSE("/stream", list);
     RUVIA_GET_SSE("/options/stream", options);
-    RUVIA_POST("/", create, CreateCertificateValidator);
+    RUVIA_POST("/", create, ruvia::JsonBody<CreateCertificateBody>, CreateCertificateValidator);
     RUVIA_POST("/:id/renew", renew);
     RUVIA_GET("/:id/download", download);
     RUVIA_GET_SSE("/:id/stream", get);
-    RUVIA_PUT("/:id", update, CertificateConfigValidator);
+    RUVIA_PUT("/:id", update, ruvia::JsonBody<service::certificate_issuance::CertificateConfigInput>, CertificateConfigValidator);
     RUVIA_DELETE("/:id", remove);
     RUVIA_ROUTES_END
   private:
@@ -68,19 +69,19 @@ class CertificateController final : public ruvia::Controller<CertificateControll
         co_await service::live_resource::streamSnapshot(
             c, std::move(sub),
             [tenant, keyword, status,
-             usable](ruvia::WebWorkerContext& r) -> ruvia::Task<std::string> {
-                ruvia::Array<CertificateDto> data(r.resource());
+             usable](auto& r) -> ruvia::Task<std::string> {
+                ruvia::Array<CertificateDto> data({.resource = r.pool()});
                 for (std::int64_t pageNumber = 1;; ++pageNumber) {
                     auto page = co_await certificateReadService().list(r, tenant, pageNumber, 1000,
                                                                        (pageNumber - 1) * 1000,
                                                                        keyword, status, usable);
-                    for (auto& item : page.ensure<"list">())
+                    for (auto& item : page.template ensure<"list">())
                         data.push_back(std::move(item));
-                    if (pageNumber >= page.get<"totalPages">().value)
+                    if (pageNumber >= page.template get<"totalPages">().value)
                         break;
                 }
                 auto response = service::common::ok<CertificateOptionsResponse>(r, std::move(data));
-                auto json = ruvia::toJson(response, {.resource = r.resource()});
+                auto json = ruvia::toJson(response, {.resource = r.pool()});
                 co_return std::string(json.data(), json.size());
             });
     }
@@ -97,11 +98,11 @@ class CertificateController final : public ruvia::Controller<CertificateControll
         co_await service::live_resource::streamSnapshot(
             c, std::move(sub),
             [tenant, page, size, skip, keyword, status,
-             usable](ruvia::WebWorkerContext& r) -> ruvia::Task<std::string> {
+             usable](auto& r) -> ruvia::Task<std::string> {
                 auto data = co_await certificateReadService().list(r, tenant, page, size, skip,
                                                                    keyword, status, usable);
                 auto response = service::common::ok<CertificatePageResponse>(r, std::move(data));
-                auto json = ruvia::toJson(response, {.resource = r.resource()});
+                auto json = ruvia::toJson(response, {.resource = r.pool()});
                 co_return std::string(json.data(), json.size());
             });
     }
@@ -113,10 +114,10 @@ class CertificateController final : public ruvia::Controller<CertificateControll
             service::live_resource::queryKey("detail"));
         co_await service::live_resource::streamSnapshot(
             c, std::move(sub),
-            [tenant, id](ruvia::WebWorkerContext& r) -> ruvia::Task<std::string> {
+            [tenant, id](auto& r) -> ruvia::Task<std::string> {
                 auto data = co_await certificateReadService().get(r, tenant, id);
                 auto response = service::common::ok<CertificateDetailResponse>(r, std::move(data));
-                auto json = ruvia::toJson(response, {.resource = r.resource()});
+                auto json = ruvia::toJson(response, {.resource = r.pool()});
                 co_return std::string(json.data(), json.size());
             });
     }

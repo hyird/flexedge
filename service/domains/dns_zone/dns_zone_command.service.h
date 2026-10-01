@@ -39,12 +39,12 @@ class DnsZoneCommandService final {
         const auto domain = normalizeDomain(domainInput->view());
         const std::string configJson{R"json({"records":[]})json"};
 
-        service::dns_sync::ZoneRuntimeDto runtime({.resource = c.resource()});
+        service::dns_sync::ZoneRuntimeDto runtime({.resource = c.pool()});
         runtime.set<"recordsImported">(false);
         (void)runtime.ensure<"lines">();
         (void)runtime.ensure<"recordStates">();
         (void)runtime.ensure<"conflicts">();
-        const auto runtimeJson = ruvia::toJson(runtime, {.resource = c.resource()});
+        const auto runtimeJson = ruvia::toJson(runtime, {.resource = c.pool()});
 
         try {
             auto transaction = co_await c.db().beginTransaction();
@@ -194,7 +194,7 @@ class DnsZoneCommandService final {
                                     const service::dns_sync::ZoneConfigData& config,
                                     std::string_view runtimeJson) {
         const auto runtime =
-            service::dns_sync::parseStoredRuntime(runtimeJson, {.resource = c.resource()});
+            service::dns_sync::parseStoredRuntime(runtimeJson, {.resource = c.pool()});
         if (!runtime) {
             throwCorruptConfig();
         }
@@ -271,8 +271,8 @@ class DnsZoneCommandService final {
     static std::string serializeConfig(ruvia::Context& c,
                                        const service::dns_sync::ZoneConfigData& input) {
         return std::string{
-            ruvia::toJson(service::dns_sync::toOutput(input, {.resource = c.resource()}),
-                          {.resource = c.resource()})};
+            ruvia::toJson(service::dns_sync::toOutput(input, {.resource = c.pool()}),
+                          {.resource = c.pool()})};
     }
 
     [[noreturn]] static void throwCorruptConfig() {

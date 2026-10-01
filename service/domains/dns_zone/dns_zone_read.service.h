@@ -63,10 +63,10 @@ class DnsZoneReadService final {
                                : " ORDER BY length(zone.domain) DESC, zone.sort DESC LIMIT 20")
                          : (all ? " ORDER BY zone.sort DESC" : " ORDER BY zone.sort DESC LIMIT 20")),
             params);
-        DnsZoneOptionListDataDto result(c);
+        DnsZoneOptionListDataDto result({.resource = c.pool()});
         auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
-            auto& item = items.emplace_back(c);
+            auto& item = items.emplace_back();
             item.template set<"id">(row[0].value().value_or(""));
             item.template set<"domain">(row[1].value().value_or(""));
             item.template set<"dnsProvider">(row[2].value().value_or(""));
@@ -88,7 +88,7 @@ class DnsZoneReadService final {
         }
 
         const auto zones = service::dns::parseDnsProviderRuntime(
-            providerRows.front()[0].value().value_or("{}"), c.resource());
+            providerRows.front()[0].value().value_or("{}"), c.pool());
         const auto localRows = co_await c.db().query(
             "SELECT domain FROM sys_dns_zone WHERE tenant_id = $1 AND deleted_at IS NULL",
             tenantId);
@@ -98,13 +98,13 @@ class DnsZoneReadService final {
             managed.emplace(row[0].value().value_or(""));
         }
 
-        AvailableDnsZoneListDataDto result(c);
+        AvailableDnsZoneListDataDto result({.resource = c.pool()});
         auto& items = result.template ensure<"list">();
         for (const auto& zone : zones) {
             if (managed.contains(zone.domain)) {
                 continue;
             }
-            auto& item = items.emplace_back(c);
+            auto& item = items.emplace_back();
             item.template set<"domain">(zone.domain);
             item.template set<"status">(zone.status);
         }
@@ -140,7 +140,7 @@ class DnsZoneReadService final {
             co_await c.db().query(selectColumns() + where + " ORDER BY zone.sort DESC LIMIT " +
                                       std::to_string(pageSize) + " OFFSET " + std::to_string(skip),
                                   params);
-        DnsZonePageDataDto result(c);
+        DnsZonePageDataDto result({.resource = c.pool()});
         result.template set<"total">(total);
         result.template set<"page">(page);
         result.template set<"pageSize">(pageSize);
@@ -156,7 +156,7 @@ class DnsZoneReadService final {
             co_await service::dns_sync::loadProjectedRecordsByZone(db, tenantId, zoneIds);
         for (const auto& row : rows) {
             const auto& projected = projectedByZone.at(std::string(row[0].value().value_or("")));
-            fillDnsZone(c, items.emplace_back(c), row, projected);
+            fillDnsZone(c, items.emplace_back(), row, projected);
         }
         co_return result;
     }
@@ -176,7 +176,7 @@ class DnsZoneReadService final {
         }
         auto db = c.db();
         const auto projected = co_await service::dns_sync::loadProjectedRecords(db, tenantId, id);
-        DnsZoneDto result(c);
+        DnsZoneDto result({.resource = c.pool()});
         fillDnsZone(c, result, rows.front(), projected);
         co_return result;
     }
@@ -201,9 +201,9 @@ class DnsZoneReadService final {
     static void fillDnsZone(auto& c, Dto& item, const Row& row,
                             const std::vector<service::dns_sync::SnapshotRecord>& projected) {
         const auto config = service::dns_sync::parseStored(row[9].value().value_or("{}"),
-                                                           {.resource = c.resource()});
+                                                           {.resource = c.pool()});
         const auto runtime = service::dns_sync::parseStoredRuntime(row[10].value().value_or("{}"),
-                                                                   {.resource = c.resource()});
+                                                                   {.resource = c.pool()});
         if (!config || !runtime) {
             throwCorruptConfig();
         }
@@ -232,17 +232,17 @@ class DnsZoneReadService final {
 
     static service::dns_sync::ZoneConfigOutput
     toConfig(auto& c, const service::dns_sync::ZoneConfigData& input) {
-        return service::dns_sync::toOutput(input, {.resource = c.resource()});
+        return service::dns_sync::toOutput(input, {.resource = c.pool()});
     }
 
-    static void fillRuntimeLines(auto& c, DnsZoneRuntimeDto& output,
+    static void fillRuntimeLines(DnsZoneRuntimeDto& output,
                                  const service::dns_sync::ZoneRuntimeData& input) {
         auto& lines = output.template ensure<"lines">();
         for (const auto& line : input.lines) {
             if (!line.code || !line.name) {
                 continue;
             }
-            auto& item = lines.emplace_back(c);
+            auto& item = lines.emplace_back();
             item.template set<"code">(*line.code);
             item.template set<"name">(*line.name);
             item.template set<"displayName">(line.displayName ? *line.displayName : *line.name);
@@ -251,11 +251,11 @@ class DnsZoneReadService final {
     }
 
     static void
-    fillProjectedRecords(auto& c, DnsZoneRuntimeDto& output,
+    fillProjectedRecords(DnsZoneRuntimeDto& output,
                          const std::vector<service::dns_sync::SnapshotRecord>& projected) {
         auto& projectedRecords = output.template ensure<"projectedRecords">();
         for (const auto& record : projected) {
-            auto& item = projectedRecords.emplace_back(c);
+            auto& item = projectedRecords.emplace_back();
             item.template set<"id">(record.id);
             item.template set<"type">(record.type);
             item.template set<"name">(record.name);
@@ -269,14 +269,14 @@ class DnsZoneReadService final {
         }
     }
 
-    static void fillRecordStates(auto& c, DnsZoneRuntimeDto& output,
+    static void fillRecordStates(DnsZoneRuntimeDto& output,
                                  const service::dns_sync::ZoneRuntimeData& input) {
         auto& states = output.template ensure<"recordStates">();
         for (const auto& state : input.recordStates) {
             if (!state.id) {
                 continue;
             }
-            auto& item = states.emplace_back(c);
+            auto& item = states.emplace_back();
             item.template set<"id">(*state.id);
             item.template set<"syncStatus">(state.syncStatus ? *state.syncStatus
                                                     : std::string_view{"pending"});
@@ -287,7 +287,7 @@ class DnsZoneReadService final {
         }
     }
 
-    static void fillConflicts(auto& c, DnsZoneRuntimeDto& output,
+    static void fillConflicts(DnsZoneRuntimeDto& output,
                               const service::dns_sync::ZoneRuntimeData& input) {
         auto& conflicts = output.template ensure<"conflicts">();
         for (const auto& conflict : input.conflicts) {
@@ -295,7 +295,7 @@ class DnsZoneReadService final {
                 !conflict.localContent || !conflict.remoteContent) {
                 continue;
             }
-            auto& item = conflicts.emplace_back(c);
+            auto& item = conflicts.emplace_back();
             item.template set<"id">(*conflict.id);
             item.template set<"type">(*conflict.type);
             item.template set<"name">(*conflict.name);
@@ -308,15 +308,15 @@ class DnsZoneReadService final {
     static DnsZoneRuntimeDto
     toPublicRuntime(auto& c, const service::dns_sync::ZoneRuntimeData& input,
                     const std::vector<service::dns_sync::SnapshotRecord>& projected) {
-        DnsZoneRuntimeDto output(c);
+        DnsZoneRuntimeDto output({.resource = c.pool()});
         output.template set<"recordsImported">(input.recordsImported);
         if (input.linesSyncedAt) {
             output.template set<"linesSyncedAt">(*input.linesSyncedAt);
         }
-        fillRuntimeLines(c, output, input);
-        fillProjectedRecords(c, output, projected);
-        fillRecordStates(c, output, input);
-        fillConflicts(c, output, input);
+        fillRuntimeLines(output, input);
+        fillProjectedRecords(output, projected);
+        fillRecordStates(output, input);
+        fillConflicts(output, input);
         return output;
     }
 

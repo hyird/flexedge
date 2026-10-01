@@ -14,7 +14,7 @@
 #include <ruvia/core/Task.h>
 #include <ruvia/web/Context.h>
 #include <ruvia/web/Controller.h>
-#include <ruvia/web/Model.h>
+#include "ruvia/web/Model.h"
 #include <ruvia/web/WebSocket.h>
 
 #include "node/proto/artifact.h"
@@ -34,7 +34,7 @@
 
 namespace service::agent {
 
-class ControlProtocolMiddleware final : public ruvia::Middleware<ControlProtocolMiddleware> {
+class ControlProtocolMiddleware final : public ruvia::Middleware {
   public:
     ruvia::Task<void> handle(ruvia::Context& c, ruvia::Next& next) {
         if (c.req().header("Sec-WebSocket-Protocol").value_or("") !=

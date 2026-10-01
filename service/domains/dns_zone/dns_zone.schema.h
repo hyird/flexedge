@@ -1,105 +1,50 @@
 #pragma once
 
-#include <optional>
-#include <string>
-#include <string_view>
-#include <unordered_set>
-
 #include <ruvia/web/Controller.h>
 
-#include "service/common/types.h"
-#include "service/common/uuid.h"
 #include "service/domains/dns_zone/dns_zone.types.h"
 
 namespace service::dns_zone {
 
-class CreateDnsZoneValidator final : public ruvia::Middleware<CreateDnsZoneValidator> {
-    RUVIA_VALIDATE_JSON(
-        CreateDnsZoneBody,
-        RUVIA_RULE_NAME("dns_provider_id", dnsProviderId, RUVIA_REQUIRED("请选择 DNS 服务商账号"),
-                        RUVIA_REGEX("DNS 服务商账号不正确", service::common::kUuidPattern)),
-        RUVIA_RULE(
-            domain, RUVIA_REQUIRED("域名不能为空"), RUVIA_MIN(1, "域名不能为空"),
-            RUVIA_MAX(253, "域名最多253个字符"),
-            RUVIA_REGEX("域名格式不正确",
-                        R"(^([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$)")))
-};
-
-struct DnsRecordConfigValidator final {
-    template <typename ValidatorT>
-    void validateNested(const service::dns_sync::ZoneRecordInput& value, std::string_view path,
-                        ValidatorT& validator) const {
-        const auto requireString = [&](std::string_view field, const auto& input,
-                                       std::size_t maximum, std::string_view message) {
-            const auto fieldPath = std::string(path) + "." + std::string(field);
-            if (!input || input->empty()) {
-                validator.add(fieldPath, "required", message);
-                return false;
-            }
-            if (input->size() > maximum) {
-                validator.add(fieldPath, "too_big", message);
-                return false;
-            }
-            return true;
-        };
-
-        const auto& id = value.get<"id">();
-        const bool validId = requireString("id", id, 36, "记录 ID 不正确");
-        if (validId && id &&
-            !service::common::parseUuid(std::optional<std::string_view>{id->view()})) {
-            validator.add(std::string(path) + ".id", "format", "记录 ID 不正确");
+class CreateDnsZoneValidator final : public ruvia::Middleware {
+public:
+    ruvia::Task<void> handle(ruvia::Context& context, ruvia::Next& next) {
+        const auto& body = context.req().validatedJson<CreateDnsZoneBody>().value();
+        ruvia::Validator validator({.resource = context.pool()});
+        const auto& providerId = body.get<"dnsProviderId">();
+        validator.required(providerId, "dns_provider_id", "请选择 DNS 服务商账号");
+        if (providerId && !isValidUuid(*providerId)) {
+            validator.add("dns_provider_id", "regex", "DNS 服务商账号不正确");
         }
 
-        const auto& type = value.get<"type">();
-        const bool validType = requireString("type", type, 8, "记录类型不能为空");
-        if (validType && type) {
-            const auto typeView = type->view();
-            if (typeView != "A" && typeView != "AAAA" && typeView != "CNAME" && typeView != "TXT" &&
-                typeView != "MX") {
-                validator.add(std::string(path) + ".type", "enum", "记录类型不支持");
-            }
+        const auto& domain = body.get<"domain">();
+        validator.required(domain, "domain", "域名不能为空");
+        if (domain) {
+            validator.minLength(domain, "domain", 1, "域名不能为空");
+            validator.maxLength(domain, "domain", 253, "域名最多253个字符");
+            if (!isValidZoneDomain(*domain)) validator.add("domain", "regex", "域名格式不正确");
         }
-
-        (void)requireString("name", value.get<"name">(), 253, "主机记录不能为空");
-        (void)requireString("content", value.get<"content">(), 4096, "记录值不能为空");
-        if (const auto& ttl = value.get<"ttl">(); !ttl || ttl->value < 1 || ttl->value > 86400) {
-            validator.add(std::string(path) + ".ttl", "range", "TTL 不正确");
-        }
-        if (const auto& priority = value.get<"priority">();
-            priority && (priority->value < 0 || priority->value > 65535)) {
-            validator.add(std::string(path) + ".priority", "range", "优先级不正确");
-        }
-        if (!value.get<"proxied">()) {
-            validator.add(std::string(path) + ".proxied", "required", "代理状态不能为空");
-        }
-        (void)requireString("line_code", value.get<"lineCode">(), 64, "请选择 DNS 线路");
+        std::move(validator).throwIfInvalid();
+        co_await next();
     }
 };
 
-inline bool hasUniqueRecordIds(const ruvia::Array<service::dns_sync::ZoneRecordInput>& records) {
-    std::unordered_set<std::string> ids;
-    ids.reserve(records.size());
-    for (const auto& record : records) {
-        const auto& id = record.get<"id">();
-        const auto parsedId = service::common::parseUuid(
-            id ? std::optional<std::string_view>{id->view()} : std::nullopt);
-        if (!parsedId || !ids.insert(*parsedId).second) {
-            return false;
-        }
+class DnsZoneConfigValidator final : public ruvia::Middleware {
+public:
+    ruvia::Task<void> handle(ruvia::Context& context, ruvia::Next& next) {
+        const auto& body = context.req().validatedJson<service::dns_sync::ZoneConfigInput>().value();
+        ruvia::Validator validator({.resource = context.pool()});
+        service::dns_sync::validateZoneConfig(body, validator);
+        std::move(validator).throwIfInvalid();
+        co_await next();
     }
-    return true;
-}
-
-class DnsZoneConfigValidator final : public ruvia::Middleware<DnsZoneConfigValidator> {
-    RUVIA_VALIDATE_JSON(service::dns_sync::ZoneConfigInput,
-                        RUVIA_RULE(records, RUVIA_MAX(10000, "单个域名最多保存10000条记录"),
-                                   RUVIA_CUSTOM("记录 ID 不能重复", hasUniqueRecordIds),
-                                   RUVIA_EACH(DnsRecordConfigValidator)))
 };
 
 inline void validateDnsZoneSync(const DnsZoneSyncBody& body, ruvia::Validator& validator) {
-    validator.oneOf(body.get<"conflictPolicy">(), "conflict_policy", {"local", "remote"},
-                    "冲突处理方式不正确");
+    const auto& policy = body.get<"conflictPolicy">();
+    if (policy && policy->view() != "local" && policy->view() != "remote") {
+        validator.add("conflict_policy", "one_of", "冲突处理方式不正确");
+    }
 }
 
 } // namespace service::dns_zone

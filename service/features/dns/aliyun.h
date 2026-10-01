@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ruvia/web/Model.h"
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -23,7 +25,6 @@
 #include <ruvia/http/HttpKnownMethod.h>
 #include <ruvia/web/Context.h>
 #include <ruvia/web/HttpClientHandle.h>
-#include <ruvia/web/Model.h>
 
 #include "service/config/outbound.h"
 #include "service/features/outbound_http/client.h"
@@ -31,29 +32,29 @@
 
 namespace service::dns {
 
-RUVIA_REQUEST_MODEL(AliyunErrorEnvelope, RUVIA_OPTIONAL_FIELD_NAME("Code", code, ruvia::String),
+RUVIA_MODEL(AliyunErrorEnvelope, RUVIA_OPTIONAL_FIELD_NAME("Code", code, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("Message", message, ruvia::String));
 
-RUVIA_REQUEST_MODEL(AliyunDomainPayload,
+RUVIA_MODEL(AliyunDomainPayload,
                     RUVIA_OPTIONAL_FIELD_NAME("DomainId", domainId, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("DomainName", domainName, ruvia::String));
-RUVIA_REQUEST_MODEL(AliyunDomainListPayload,
+RUVIA_MODEL(AliyunDomainListPayload,
                     RUVIA_OPTIONAL_FIELD_NAME("Domain", domain, ruvia::Array<AliyunDomainPayload>));
-RUVIA_REQUEST_MODEL(AliyunDomainListEnvelope,
+RUVIA_MODEL(AliyunDomainListEnvelope,
                     RUVIA_OPTIONAL_FIELD_NAME("Domains", domains, AliyunDomainListPayload),
                     RUVIA_OPTIONAL_FIELD_NAME("TotalCount", totalCount, ruvia::Int64));
 
-RUVIA_REQUEST_MODEL(AliyunLinePayload,
+RUVIA_MODEL(AliyunLinePayload,
                     RUVIA_OPTIONAL_FIELD_NAME("LineCode", lineCode, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("LineName", lineName, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("LineDisplayName", lineDisplayName, ruvia::String));
-RUVIA_REQUEST_MODEL(AliyunLineListPayload,
+RUVIA_MODEL(AliyunLineListPayload,
                     RUVIA_OPTIONAL_FIELD_NAME("RecordLine", recordLine,
                                               ruvia::Array<AliyunLinePayload>));
-RUVIA_REQUEST_MODEL(AliyunLineListEnvelope,
+RUVIA_MODEL(AliyunLineListEnvelope,
                     RUVIA_OPTIONAL_FIELD_NAME("RecordLines", recordLines, AliyunLineListPayload));
 
-RUVIA_REQUEST_MODEL(AliyunRecordPayload,
+RUVIA_MODEL(AliyunRecordPayload,
                     RUVIA_OPTIONAL_FIELD_NAME("RecordId", recordId, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("RR", rr, ruvia::String),
                     RUVIA_OPTIONAL_FIELD_NAME("Type", type, ruvia::String),
@@ -61,13 +62,13 @@ RUVIA_REQUEST_MODEL(AliyunRecordPayload,
                     RUVIA_OPTIONAL_FIELD_NAME("TTL", ttl, ruvia::Int64),
                     RUVIA_OPTIONAL_FIELD_NAME("Priority", priority, ruvia::Int64),
                     RUVIA_OPTIONAL_FIELD_NAME("Line", line, ruvia::String));
-RUVIA_REQUEST_MODEL(AliyunRecordListPayload,
+RUVIA_MODEL(AliyunRecordListPayload,
                     RUVIA_OPTIONAL_FIELD_NAME("Record", record, ruvia::Array<AliyunRecordPayload>));
-RUVIA_REQUEST_MODEL(AliyunRecordListEnvelope,
+RUVIA_MODEL(AliyunRecordListEnvelope,
                     RUVIA_OPTIONAL_FIELD_NAME("DomainRecords", domainRecords,
                                               AliyunRecordListPayload),
                     RUVIA_OPTIONAL_FIELD_NAME("TotalCount", totalCount, ruvia::Int64));
-RUVIA_REQUEST_MODEL(AliyunRecordIdEnvelope,
+RUVIA_MODEL(AliyunRecordIdEnvelope,
                     RUVIA_OPTIONAL_FIELD_NAME("RecordId", recordId, ruvia::String));
 
 enum class AliyunErrorCode {
@@ -242,7 +243,7 @@ class AliyunClient final {
                 co_await send(c, "DescribeDomains", params, accessKeyId, accessKeySecret);
             const std::optional<AliyunDomainListEnvelope> parsed =
                 ruvia::fromJson<AliyunDomainListEnvelope>(response.body(),
-                                                          {.resource = c.resource()});
+                                                          {.resource = c.pool()});
             if (!response.status().isSuccessful() || !parsed) {
                 fail(c, response.body(), AliyunErrorCode::upstreamFailed,
                      "阿里云 DNS 域名查询失败");
@@ -265,7 +266,7 @@ class AliyunClient final {
         const auto response =
             co_await send(c, "DescribeSupportLines", params, accessKeyId, accessKeySecret);
         const std::optional<AliyunLineListEnvelope> parsed =
-            ruvia::fromJson<AliyunLineListEnvelope>(response.body(), {.resource = c.resource()});
+            ruvia::fromJson<AliyunLineListEnvelope>(response.body(), {.resource = c.pool()});
         if (!response.status().isSuccessful() || !parsed) {
             fail(c, response.body(), AliyunErrorCode::upstreamFailed, "阿里云 DNS 线路查询失败");
         }
@@ -290,7 +291,7 @@ class AliyunClient final {
                 co_await send(c, "DescribeDomainRecords", params, accessKeyId, accessKeySecret);
             const std::optional<AliyunRecordListEnvelope> parsed =
                 ruvia::fromJson<AliyunRecordListEnvelope>(response.body(),
-                                                          {.resource = c.resource()});
+                                                          {.resource = c.pool()});
             if (!response.status().isSuccessful() || !parsed) {
                 fail(c, response.body(), AliyunErrorCode::dnsFailed, "阿里云 DNS 记录查询失败");
             }
@@ -311,7 +312,7 @@ class AliyunClient final {
         const auto response =
             co_await send(c, "AddDomainRecord", params, accessKeyId, accessKeySecret);
         const std::optional<AliyunRecordIdEnvelope> parsed =
-            ruvia::fromJson<AliyunRecordIdEnvelope>(response.body(), {.resource = c.resource()});
+            ruvia::fromJson<AliyunRecordIdEnvelope>(response.body(), {.resource = c.pool()});
         if (!response.status().isSuccessful() || !parsed) {
             fail(c, response.body(), AliyunErrorCode::dnsFailed, "阿里云 DNS 记录创建失败");
         }
@@ -333,7 +334,7 @@ class AliyunClient final {
         const auto response =
             co_await send(c, "UpdateDomainRecord", params, accessKeyId, accessKeySecret);
         const std::optional<AliyunRecordIdEnvelope> parsed =
-            ruvia::fromJson<AliyunRecordIdEnvelope>(response.body(), {.resource = c.resource()});
+            ruvia::fromJson<AliyunRecordIdEnvelope>(response.body(), {.resource = c.pool()});
         if (!response.status().isSuccessful() || !parsed) {
             fail(c, response.body(), AliyunErrorCode::dnsFailed, "阿里云 DNS 记录更新失败");
         }
@@ -541,7 +542,7 @@ class AliyunClient final {
         auto code = fallbackCode;
         auto message = std::string(fallbackMessage);
         const std::optional<AliyunErrorEnvelope> parsed =
-            ruvia::fromJson<AliyunErrorEnvelope>(body, {.resource = c.resource()});
+            ruvia::fromJson<AliyunErrorEnvelope>(body, {.resource = c.pool()});
         if (parsed) {
             const auto& remoteCode = parsed->get<"code">();
             const auto& remoteMessage = parsed->get<"message">();

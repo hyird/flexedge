@@ -82,7 +82,7 @@ ruvia::Task<std::string> persistDnsChallenges(
         throw std::runtime_error("DNS-01 托管域名不存在");
     }
     const auto runtime = service::dns_sync::parseStoredRuntime(
-        rows.front()[0].value().value_or("{}"), {.resource = context.resource()});
+        rows.front()[0].value().value_or("{}"), {.resource = context.pool()});
     if (!runtime) {
         throw std::runtime_error("DNS runtime 损坏");
     }
@@ -107,8 +107,8 @@ ruvia::Task<std::string> persistDnsChallenges(
         });
     }
     const auto runtimeOutput =
-        service::dns_sync::toOutput(nextRuntime, {.resource = context.resource()});
-    const auto runtimeJson = ruvia::toJson(runtimeOutput, {.resource = context.resource()});
+        service::dns_sync::toOutput(nextRuntime, {.resource = context.pool()});
+    const auto runtimeJson = ruvia::toJson(runtimeOutput, {.resource = context.pool()});
     const auto updated = co_await transaction.query(
         "UPDATE sys_dns_zone SET runtime = $1::jsonb, desired_revision = desired_revision + 1, "
         "sync_status = 'pending', last_error = NULL, updated_at = NOW() WHERE tenant_id = $2 "
@@ -141,7 +141,7 @@ retireDnsChallenges(Runtime& context, std::string_view dnsZoneId, std::string_vi
         throw std::runtime_error("DNS-01 托管域名不存在");
     }
     const auto runtime = service::dns_sync::parseStoredRuntime(
-        rows.front()[0].value().value_or("{}"), {.resource = context.resource()});
+        rows.front()[0].value().value_or("{}"), {.resource = context.pool()});
     if (!runtime) {
         throw std::runtime_error("DNS runtime 损坏");
     }
@@ -154,8 +154,8 @@ retireDnsChallenges(Runtime& context, std::string_view dnsZoneId, std::string_vi
         co_return std::string{};
     }
     const auto runtimeOutput =
-        service::dns_sync::toOutput(nextRuntime, {.resource = context.resource()});
-    const auto runtimeJson = ruvia::toJson(runtimeOutput, {.resource = context.resource()});
+        service::dns_sync::toOutput(nextRuntime, {.resource = context.pool()});
+    const auto runtimeJson = ruvia::toJson(runtimeOutput, {.resource = context.pool()});
     const auto updated = co_await transaction.query(
         "UPDATE sys_dns_zone SET runtime = $1::jsonb, desired_revision = desired_revision + 1, "
         "sync_status = 'pending', last_error = NULL, updated_at = NOW() WHERE tenant_id = $2 "

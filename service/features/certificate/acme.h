@@ -16,7 +16,7 @@
 #include <ruvia/http/HttpKnownMethod.h>
 #include <ruvia/http/HttpStatus.h>
 #include <ruvia/web/HttpClientHandle.h>
-#include <ruvia/web/Model.h>
+#include "ruvia/web/Model.h"
 
 #include "service/config/outbound.h"
 #include "service/features/certificate/acme_jws.h"
@@ -115,12 +115,12 @@ class AcmeClient final {
                                              const std::optional<EabCredentials>& eab) const {
         auto key = detail::loadPrivateKey(privateKeyPem);
         const auto directory = co_await loadDirectory(context);
-        AcmeAccountPayloadOutput payload({.resource = context.resource()});
+        AcmeAccountPayloadOutput payload({.resource = context.pool()});
         payload.set<"termsAgreed">(true);
         if (accountEmail && !accountEmail->empty()) {
             const auto contact = "mailto:" + std::string(*accountEmail);
             payload.ensure<"contact">().emplace_back(
-                contact, ruvia::ModelOptions{.resource = context.resource()});
+                contact, ruvia::ModelOptions{.resource = context.pool()});
         }
         if (eab) {
             payload.set<"externalAccountBinding">(
@@ -128,7 +128,7 @@ class AcmeClient final {
         }
         const auto response =
             co_await signedPost(context, directory, directory.newAccount, key.get(), std::nullopt,
-                                detail::jsonString(std::move(payload), context.resource()));
+                                detail::jsonString(std::move(payload), context.pool()));
         const auto location = response.header("location");
         if (!location || location->empty()) {
             throw AcmeError("ACME 账户响应缺少 Location", true);
@@ -283,11 +283,11 @@ class AcmeClient final {
                   std::string_view accountUrl, const std::vector<std::string>& domains,
                   const service::sync_runtime::RunningMarkerLease& certificateTask) const {
         auto certificateRequest = detail::createCertificateRequest(domains);
-        AcmeFinalizePayloadOutput finalizePayload({.resource = context.resource()});
+        AcmeFinalizePayloadOutput finalizePayload({.resource = context.pool()});
         finalizePayload.set<"csr">(certificateRequest.csr);
         (void)co_await signedPost(
             context, orderSession.directory, orderSession.order.finalize, accountKey, accountUrl,
-            detail::jsonString(std::move(finalizePayload), context.resource()));
+            detail::jsonString(std::move(finalizePayload), context.pool()));
         const auto order = co_await waitForOrder(context, orderSession.directory, orderSession.url,
                                                  accountKey, accountUrl, certificateTask);
         if (order.certificate.empty()) {
@@ -316,7 +316,7 @@ class AcmeClient final {
             throwHttpProblem(context, response, "ACME Directory 查询失败");
         }
         const std::optional<AcmeDirectoryInput> parsed =
-            ruvia::fromJson<AcmeDirectoryInput>(response.body(), {.resource = context.resource()});
+            ruvia::fromJson<AcmeDirectoryInput>(response.body(), {.resource = context.pool()});
         if (!parsed) {
             throw AcmeError("ACME Directory 响应不完整", false);
         }
@@ -416,33 +416,33 @@ class AcmeClient final {
                          std::string_view payload) const {
         std::string protectedJson;
         if (accountUrl) {
-            AcmeProtectedKidOutput protectedValue({.resource = context.resource()});
+            AcmeProtectedKidOutput protectedValue({.resource = context.pool()});
             protectedValue.set<"alg">("RS256");
             protectedValue.set<"kid">(*accountUrl);
             protectedValue.set<"nonce">(nonce);
             protectedValue.set<"url">(url);
-            protectedJson = detail::jsonString(std::move(protectedValue), context.resource());
+            protectedJson = detail::jsonString(std::move(protectedValue), context.pool());
         } else {
             const auto keyData = detail::jwk(key);
-            AcmeJwkOutput jwkValue({.resource = context.resource()});
+            AcmeJwkOutput jwkValue({.resource = context.pool()});
             jwkValue.set<"e">(keyData.exponent);
             jwkValue.set<"kty">("RSA");
             jwkValue.set<"n">(keyData.modulus);
-            AcmeProtectedJwkOutput protectedValue({.resource = context.resource()});
+            AcmeProtectedJwkOutput protectedValue({.resource = context.pool()});
             protectedValue.set<"alg">("RS256");
             protectedValue.set<"jwk">(std::move(jwkValue));
             protectedValue.set<"nonce">(nonce);
             protectedValue.set<"url">(url);
-            protectedJson = detail::jsonString(std::move(protectedValue), context.resource());
+            protectedJson = detail::jsonString(std::move(protectedValue), context.pool());
         }
         const auto protectedEncoded = detail::base64Url(protectedJson);
         const auto payloadEncoded = detail::base64Url(payload);
         const auto signature = detail::sign(key, protectedEncoded + "." + payloadEncoded);
-        AcmeJwsOutput jws({.resource = context.resource()});
+        AcmeJwsOutput jws({.resource = context.pool()});
         jws.set<"protectedValue">(protectedEncoded);
         jws.set<"payload">(payloadEncoded);
         jws.set<"signature">(signature);
-        return detail::jsonString(std::move(jws), context.resource());
+        return detail::jsonString(std::move(jws), context.pool());
     }
 
     template <typename Runtime>
@@ -450,22 +450,22 @@ class AcmeClient final {
                                               std::string_view newAccountUrl,
                                               const EabCredentials& credentials) const {
         const auto keyData = detail::jwk(key);
-        AcmeJwkOutput accountJwk({.resource = context.resource()});
+        AcmeJwkOutput accountJwk({.resource = context.pool()});
         accountJwk.set<"e">(keyData.exponent);
         accountJwk.set<"kty">("RSA");
         accountJwk.set<"n">(keyData.modulus);
-        const auto payload = detail::jsonString(std::move(accountJwk), context.resource());
+        const auto payload = detail::jsonString(std::move(accountJwk), context.pool());
 
-        AcmeEabProtectedOutput protectedValue({.resource = context.resource()});
+        AcmeEabProtectedOutput protectedValue({.resource = context.pool()});
         protectedValue.set<"alg">("HS256");
         protectedValue.set<"kid">(credentials.keyId);
         protectedValue.set<"url">(newAccountUrl);
         const auto protectedJson =
-            detail::jsonString(std::move(protectedValue), context.resource());
+            detail::jsonString(std::move(protectedValue), context.pool());
         const auto protectedEncoded = detail::base64Url(protectedJson);
         const auto payloadEncoded = detail::base64Url(payload);
 
-        AcmeJwsOutput result({.resource = context.resource()});
+        AcmeJwsOutput result({.resource = context.pool()});
         result.set<"protectedValue">(protectedEncoded);
         result.set<"payload">(payloadEncoded);
         result.set<"signature">(detail::hmacSha256(credentials.hmacKey.view(),
@@ -475,26 +475,26 @@ class AcmeClient final {
 
     template <typename Runtime>
     std::string buildOrderPayload(Runtime& context, const std::vector<std::string>& domains) const {
-        AcmeOrderPayloadOutput payload({.resource = context.resource()});
+        AcmeOrderPayloadOutput payload({.resource = context.pool()});
         auto& identifiers = payload.ensure<"identifiers">();
         for (const auto& domain : domains) {
             auto& identifier =
-                identifiers.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
+                identifiers.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
             identifier.set<"type">("dns");
             identifier.set<"value">(domain);
         }
-        return detail::jsonString(std::move(payload), context.resource());
+        return detail::jsonString(std::move(payload), context.pool());
     }
 
     template <typename Runtime> std::string buildEmptyPayload(Runtime& context) const {
-        AcmeEmptyPayloadOutput payload({.resource = context.resource()});
-        return detail::jsonString(std::move(payload), context.resource());
+        AcmeEmptyPayloadOutput payload({.resource = context.pool()});
+        return detail::jsonString(std::move(payload), context.pool());
     }
 
     template <typename Runtime>
     detail::Order parseOrder(Runtime& context, std::string_view body) const {
         const std::optional<AcmeOrderInput> parsed =
-            ruvia::fromJson<AcmeOrderInput>(body, {.resource = context.resource()});
+            ruvia::fromJson<AcmeOrderInput>(body, {.resource = context.pool()});
         if (!parsed) {
             throw AcmeError("ACME 订单响应格式无效", false);
         }
@@ -515,7 +515,7 @@ class AcmeClient final {
     template <typename Runtime>
     detail::Authorization parseAuthorization(Runtime& context, std::string_view body) const {
         const std::optional<AcmeAuthorizationInput> parsed =
-            ruvia::fromJson<AcmeAuthorizationInput>(body, {.resource = context.resource()});
+            ruvia::fromJson<AcmeAuthorizationInput>(body, {.resource = context.pool()});
         if (!parsed) {
             throw AcmeError("ACME 授权响应格式无效", false);
         }
@@ -644,7 +644,7 @@ class AcmeClient final {
     static bool isBadNonce(Runtime& context,
                            const service::outbound_http::BufferedResponse& response) {
         const std::optional<AcmeProblemInput> parsed =
-            ruvia::fromJson<AcmeProblemInput>(response.body(), {.resource = context.resource()});
+            ruvia::fromJson<AcmeProblemInput>(response.body(), {.resource = context.pool()});
         if (!parsed) {
             return false;
         }
@@ -657,7 +657,7 @@ class AcmeClient final {
     throwHttpProblem(Runtime& context, const service::outbound_http::BufferedResponse& response,
                      std::string_view fallback) {
         const std::optional<AcmeProblemInput> parsed =
-            ruvia::fromJson<AcmeProblemInput>(response.body(), {.resource = context.resource()});
+            ruvia::fromJson<AcmeProblemInput>(response.body(), {.resource = context.pool()});
         std::string type;
         std::string message(fallback);
         if (parsed) {

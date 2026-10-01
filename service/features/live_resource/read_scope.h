@@ -5,53 +5,104 @@
 #include <optional>
 #include <stdexcept>
 #include <utility>
-#include <ruvia/core/Channel.h>
-#include <ruvia/web/App.h>
+
+#include <ruvia/core/OperationOptions.h>
+#include <ruvia/core/TaskScope.h>
+#include <ruvia/core/Timer.h>
 #include <ruvia/web/Context.h>
-#include <ruvia/web/WebWorker.h>
 
 namespace service::live_resource {
 
-template <typename T> struct ReadOutcome final {
-    std::optional<T> value;
-    std::exception_ptr failure;
+class SnapshotReadScope final {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    SnapshotReadScope(ruvia::Context& context, Clock::time_point deadline)
+        : context_(context), deadline_(deadline),
+          operationStopToken_(ruvia::combineStopTokens(context.stopToken(), budgetStop_.token())),
+          watchdog_(context.worker()) {
+        watchdog_.spawn(watchDeadline());
+    }
+    ~SnapshotReadScope() = default;
+
+    SnapshotReadScope(const SnapshotReadScope&) = delete;
+    SnapshotReadScope& operator=(const SnapshotReadScope&) = delete;
+    SnapshotReadScope(SnapshotReadScope&&) = delete;
+    SnapshotReadScope& operator=(SnapshotReadScope&&) = delete;
+
+    [[nodiscard]] std::pmr::memory_resource* pool() const noexcept { return context_.pool(); }
+    [[nodiscard]] const ruvia::WorkerHandle& worker() const noexcept { return context_.worker(); }
+    [[nodiscard]] bool deadlineExceeded() const noexcept {
+        return Clock::now() >= deadline_ || context_.deadlineExceeded() || budgetStop_.stopRequested();
+    }
+    [[nodiscard]] bool stopRequested() const noexcept {
+        return context_.stopToken().stopRequested() || budgetStop_.stopRequested();
+    }
+    [[nodiscard]] ruvia::StopToken stopToken() const noexcept { return operationStopToken_; }
+
+#ifdef RUVIA_ENABLE_DATABASE
+    [[nodiscard]] ruvia::DbHandle db() const {
+        return context_.db().withOptions({.stopToken = stopToken()});
+    }
+#endif
+
+    ruvia::Task<void> stopAndJoin() {
+        watchdog_.requestStop();
+        co_await watchdog_.join();
+    }
+
+private:
+    ruvia::Task<void> watchDeadline() {
+        try {
+            const auto now = Clock::now();
+            if (now < deadline_) {
+                const auto result = co_await ruvia::sleepFor(
+                    context_.worker(), deadline_ - now, watchdog_.stopToken());
+                if (result == ruvia::TimerSleepResult::kElapsed) budgetStop_.requestStop();
+            } else {
+                budgetStop_.requestStop();
+            }
+        } catch (...) {
+            budgetStop_.requestStop();
+            throw;
+        }
+    }
+
+    ruvia::Context& context_;
+    const Clock::time_point deadline_;
+    ruvia::StopSource budgetStop_;
+    const ruvia::StopToken operationStopToken_;
+    ruvia::TaskScope watchdog_;
 };
 
-// RequestMemory is monotonic, so repeatedly reading through an SSE Context
-// retains every row/DTO until disconnection. A worker callback uses the worker's
-// reclaiming pool and its own capability scope. Execute on the SAME worker to
-// keep pooled DTO destruction and HTTP stream writes on their owning thread.
-// Fetch owns all inputs; no request references survive an aborted receive.
-template <typename T, typename Fetch> ruvia::Task<T> readOnce(ruvia::Context& c, Fetch fetch) {
-    auto [sender, receiver] = ruvia::makeChannel<ReadOutcome<T>>(c.worker(), {.capacity = 1});
-    bool posted{};
-    for (const auto& worker : ruvia::app().workers()) {
-        if (worker.id() != c.worker().id())
-            continue;
-        posted = worker
-                     .post([sender = std::move(sender), fetch = std::move(fetch)](
-                               ruvia::WebWorkerContext& read) mutable -> ruvia::Task<void> {
-                         ReadOutcome<T> outcome;
-                         try {
-                             outcome.value.emplace(co_await fetch(read));
-                         } catch (...) {
-                             outcome.failure = std::current_exception();
-                         }
-                         (void)sender.send(std::move(outcome));
-                         co_return;
-                     })
-                     .accepted();
-        break;
+// SSE tail reads retain the original aggregate wait budget while binding all
+// dependency operations to the request and budget stop tokens.
+template <typename T, typename Fetch>
+ruvia::Task<T> readOnce(ruvia::Context& context, Fetch fetch) {
+    using Clock = SnapshotReadScope::Clock;
+    const auto deadline = Clock::now() + std::chrono::seconds(30);
+    SnapshotReadScope scope(context, deadline);
+    std::optional<T> result;
+    std::exception_ptr readFailure;
+    try {
+        result.emplace(co_await fetch(scope));
+    } catch (...) {
+        readFailure = std::current_exception();
     }
-    if (!posted)
-        throw std::runtime_error("live resource read worker is unavailable");
-    auto outcome = co_await receiver.receiveFor(std::chrono::seconds(30), c.stopToken());
-    if (!outcome.hasValue())
-        throw std::runtime_error("live resource read interrupted or timed out");
-    auto result = std::move(outcome).takeValue();
-    if (result.failure)
-        std::rethrow_exception(result.failure);
-    co_return std::move(*result.value);
+
+    std::exception_ptr joinFailure;
+    try {
+        co_await scope.stopAndJoin();
+    } catch (...) {
+        joinFailure = std::current_exception();
+    }
+    if (joinFailure) std::rethrow_exception(joinFailure);
+    if (context.stopToken().stopRequested())
+        throw std::runtime_error("live resource read interrupted");
+    if (scope.deadlineExceeded())
+        throw std::runtime_error("live resource read timed out");
+    if (readFailure) std::rethrow_exception(readFailure);
+    co_return std::move(*result);
 }
 
-} // namespace service::live_resource
+}  // namespace service::live_resource

@@ -95,9 +95,9 @@ class Hub final {
                                        .resourceId = std::string(resourceId)});
     }
 
-    void publish(const notifications::Notification& notification) {
+    void publish(const notifications::Notification& notification, ruvia::WorkerId worker) {
         if (notification.resourceType == notifications::LogResourceType::access) {
-            service::live_resource::hub().publish(notification.tenantId,
+            service::live_resource::hub().publishForWorker(worker, notification.tenantId,
                 service::live_resource::Resource::accessHistory, notification.resourceId);
         }
         const auto topic = topicFor(notification);
@@ -112,7 +112,10 @@ class Hub final {
             if (found == subscribers_.end()) {
                 return;
             }
-            subscribers = found->second;
+            for (const auto& subscriber : found->second) {
+                if (subscriber.worker == worker)
+                    subscribers.push_back(subscriber);
+            }
         }
 
         const auto signal = nextSignal_.fetch_add(1, std::memory_order_relaxed);
@@ -160,6 +163,7 @@ class Hub final {
 
     struct Subscriber final {
         std::uint64_t id;
+        ruvia::WorkerId worker;
         ruvia::ChannelSender<std::uint64_t> sender;
     };
 
@@ -181,7 +185,7 @@ class Hub final {
             ruvia::makeChannel<std::uint64_t>(worker, {.capacity = kSubscriberSignalCapacity});
         const std::lock_guard lock(mutex_);
         const auto id = nextSubscriptionId_++;
-        subscribers_[topic].push_back({.id = id, .sender = std::move(sender)});
+        subscribers_[topic].push_back({.id = id, .worker = worker.id(), .sender = std::move(sender)});
         return Subscription(*this, std::move(topic), id, std::move(receiver));
     }
 
@@ -225,7 +229,8 @@ inline Hub& hub() {
     return value;
 }
 
-inline ruvia::Task<void> run(ruvia::WebWorkerContext& context) {
+template <typename ContextT>
+inline ruvia::Task<void> run(ContextT& context) {
     std::string cursor;
     bool initialized{};
     while (!context.stopToken().stopRequested()) {
@@ -241,7 +246,7 @@ inline ruvia::Task<void> run(ruvia::WebWorkerContext& context) {
                 cursor = *batch.cursor;
             }
             for (const auto& notification : batch.notifications) {
-                hub().publish(notification);
+                hub().publish(notification, context.worker().id());
             }
         } catch (const std::exception& error) {
             if (!context.stopToken().stopRequested()) {

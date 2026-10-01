@@ -4,7 +4,6 @@ import {
   formatBytes,
   formatBytesPerSecond,
   formatDate,
-  initials,
 } from './format'
 
 describe('format helpers', () => {
@@ -31,11 +30,6 @@ describe('format helpers', () => {
     expect(formatDate('2026-09-05T00:25:10.869203+08')).toBe(
       '2026-09-05 00:25:10'
     )
-  })
-
-  it('derives compact avatar initials', () => {
-    expect(initials(' flexedge ')).toBe('FL')
-    expect(initials()).toBe('FE')
   })
 })
 

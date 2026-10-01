@@ -31,32 +31,61 @@ int main() {
     try {
         ruvia::EventLoopPool loops({.loopCount = 2});
         const auto accessLoop = loops.loop(0);
-        const auto nodeLoop = loops.loop(1);
+        const auto peerLoop = loops.loop(1);
+        const auto accessWorker = accessLoop.handle().id();
+        const auto peerWorker = peerLoop.handle().id();
         service::log_ingest::fanout::Hub fanout;
         REQUIRE(service::log_ingest::notifications::resourceTypeName(LogResourceType::access) ==
                 "access");
         REQUIRE(service::log_ingest::notifications::resourceTypeName(LogResourceType::node) ==
                 "node");
         REQUIRE(service::log_ingest::notifications::parseResourceType("invalid") == std::nullopt);
-        auto access =
-            fanout.subscribe(accessLoop.handle(), LogResourceType::access, "tenant-a", "website-a");
-        auto node =
-            fanout.subscribe(nodeLoop.handle(), LogResourceType::node, "tenant-a", "node-a");
+
+        // Same-type workers subscribe to the same topic; each reader owns its own signal.
+        auto access = fanout.subscribe(accessLoop.handle(), LogResourceType::access,
+                                       "tenant-a", "website-a");
+        auto peerAccess = fanout.subscribe(peerLoop.handle(), LogResourceType::access,
+                                           "tenant-a", "website-a");
+        auto otherTenant = fanout.subscribe(peerLoop.handle(), LogResourceType::access,
+                                            "tenant-b", "website-a");
+        auto otherTopic = fanout.subscribe(accessLoop.handle(), LogResourceType::access,
+                                           "tenant-a", "website-b");
+        auto node = fanout.subscribe(peerLoop.handle(), LogResourceType::node,
+                                     "tenant-a", "node-a");
         loops.start();
 
         fanout.markReady();
-        const auto accessReady = accessLoop.start(receive(access, std::chrono::seconds(1))).get();
-        REQUIRE(accessReady.hasValue());
-        const auto nodeReady = nodeLoop.start(receive(node, std::chrono::seconds(1))).get();
-        REQUIRE(nodeReady.hasValue());
+        REQUIRE(accessLoop.start(receive(access, std::chrono::seconds(1))).get().hasValue());
+        REQUIRE(peerLoop.start(receive(peerAccess, std::chrono::seconds(1))).get().hasValue());
+        REQUIRE(peerLoop.start(receive(otherTenant, std::chrono::seconds(1))).get().hasValue());
+        REQUIRE(accessLoop.start(receive(otherTopic, std::chrono::seconds(1))).get().hasValue());
+        REQUIRE(peerLoop.start(receive(node, std::chrono::seconds(1))).get().hasValue());
 
-        fanout.publish({.id = "1-0",
-                        .tenantId = "tenant-a",
-                        .resourceType = LogResourceType::access,
-                        .resourceId = "website-b"});
-        const auto unrelated =
-            accessLoop.start(receive(access, std::chrono::milliseconds(20))).get();
-        REQUIRE(unrelated.status() == ruvia::WorkerWaitStatus::kTimedOut);
+        const Notification wrongTopic{
+            .id = "1-0",
+            .tenantId = "tenant-a",
+            .resourceType = LogResourceType::access,
+            .resourceId = "website-b",
+        };
+        fanout.publish(wrongTopic, accessWorker);
+        REQUIRE(accessLoop.start(receive(access, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+        REQUIRE(peerLoop.start(receive(peerAccess, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+        REQUIRE(accessLoop.start(receive(otherTopic, std::chrono::seconds(1))).get().hasValue());
+
+        const Notification wrongTenant{
+            .id = "1-1",
+            .tenantId = "tenant-b",
+            .resourceType = LogResourceType::access,
+            .resourceId = "website-a",
+        };
+        fanout.publish(wrongTenant, peerWorker);
+        REQUIRE(accessLoop.start(receive(access, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+        REQUIRE(peerLoop.start(receive(peerAccess, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+        REQUIRE(peerLoop.start(receive(otherTenant, std::chrono::seconds(1))).get().hasValue());
 
         const Notification accessNotification{
             .id = "2-0",
@@ -64,23 +93,65 @@ int main() {
             .resourceType = LogResourceType::access,
             .resourceId = "website-a",
         };
-        fanout.publish(accessNotification);
-        fanout.publish(accessNotification);
-        fanout.publish(accessNotification);
-        const auto accessSignal = accessLoop.start(receive(access, std::chrono::seconds(1))).get();
-        REQUIRE(accessSignal.hasValue());
-        const auto coalesced =
-            accessLoop.start(receive(access, std::chrono::milliseconds(20))).get();
-        REQUIRE(coalesced.status() == ruvia::WorkerWaitStatus::kTimedOut);
+        fanout.publish(accessNotification, accessWorker);
+        fanout.publish(accessNotification, accessWorker);
+        fanout.publish(accessNotification, accessWorker);
+        REQUIRE(accessLoop.start(receive(access, std::chrono::seconds(1))).get().hasValue());
+        REQUIRE(peerLoop.start(receive(peerAccess, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+        REQUIRE(accessLoop.start(receive(access, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
 
-        fanout.publish({.id = "3-0",
-                        .tenantId = "tenant-a",
-                        .resourceType = LogResourceType::node,
-                        .resourceId = "node-a"});
-        const auto nodeSignal = nodeLoop.start(receive(node, std::chrono::seconds(1))).get();
-        REQUIRE(nodeSignal.hasValue());
+        // The peer reader independently sees its own publication of the same event once.
+        fanout.publish(accessNotification, peerWorker);
+        fanout.publish(accessNotification, peerWorker);
+        fanout.publish(accessNotification, peerWorker);
+        REQUIRE(peerLoop.start(receive(peerAccess, std::chrono::seconds(1))).get().hasValue());
+        REQUIRE(accessLoop.start(receive(access, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+        REQUIRE(peerLoop.start(receive(peerAccess, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
 
+        const Notification nodeNotification{
+            .id = "3-0",
+            .tenantId = "tenant-a",
+            .resourceType = LogResourceType::node,
+            .resourceId = "node-a",
+        };
+        fanout.publish(nodeNotification, accessWorker);
+        REQUIRE(peerLoop.start(receive(node, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+        fanout.publish(nodeNotification, peerWorker);
+        REQUIRE(peerLoop.start(receive(node, std::chrono::seconds(1))).get().hasValue());
+
+        // Closing a subscriber removes its receiver; later events reach only a new lease.
+        const Notification closingNotification{
+            .id = "4-0",
+            .tenantId = "tenant-a",
+            .resourceType = LogResourceType::access,
+            .resourceId = "website-close",
+        };
+        {
+            auto closing = fanout.subscribe(accessLoop.handle(), LogResourceType::access,
+                                             "tenant-a", "website-close");
+            fanout.publish(closingNotification, accessWorker);
+            REQUIRE(accessLoop.start(receive(closing, std::chrono::seconds(1))).get().hasValue());
+        }
+        fanout.publish(closingNotification, accessWorker);
+        auto reopened = fanout.subscribe(accessLoop.handle(), LogResourceType::access,
+                                         "tenant-a", "website-close");
+        REQUIRE(accessLoop.start(receive(reopened, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+        fanout.publish(closingNotification, accessWorker);
+        REQUIRE(accessLoop.start(receive(reopened, std::chrono::seconds(1))).get().hasValue());
+        REQUIRE(accessLoop.start(receive(reopened, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::WorkerWaitStatus::kTimedOut);
+
+        // A publisher racing pool shutdown must retire worker-stopping receivers.
         loops.stop();
+        fanout.publish(accessNotification, accessWorker);
+        fanout.publish(accessNotification, peerWorker);
+        fanout.publish(nodeNotification, peerWorker);
         loops.join();
         return 0;
     } catch (const std::exception&) {

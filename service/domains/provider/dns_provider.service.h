@@ -56,7 +56,7 @@ class DnsProviderService final {
         const auto token = tokenInput->view();
         validateCredentialShape(provider, accountId, token);
         const auto config = service::dns::serializeDnsProviderConfig(
-            service::utils::sealSecret(token), secretHint(token), c.resource());
+            service::utils::sealSecret(token), secretHint(token), c.pool());
         try {
             auto transaction = co_await c.db().beginTransaction();
             const auto inserted = co_await transaction.query(
@@ -98,7 +98,7 @@ class DnsProviderService final {
         const auto provider = std::string(rows.front()[0].value().value_or(""));
         const auto accountId = std::string(rows.front()[2].value().value_or(""));
         const auto current = service::dns::parseDnsProviderConfig(
-            rows.front()[3].value().value_or("{}"), c.resource());
+            rows.front()[3].value().value_or("{}"), c.pool());
         const auto& nameInput = body.get<"name">();
         if (!nameInput) {
             service::common::throwAppError(service::common::kValidationErrorCode,
@@ -116,7 +116,7 @@ class DnsProviderService final {
             hint = secretHint(token->view());
             credentialsChanged = true;
         }
-        const auto config = service::dns::serializeDnsProviderConfig(envelope, hint, c.resource());
+        const auto config = service::dns::serializeDnsProviderConfig(envelope, hint, c.pool());
         try {
             auto transaction = co_await c.db().beginTransaction();
             const auto result = co_await transaction.execute(

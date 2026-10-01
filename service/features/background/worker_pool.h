@@ -34,7 +34,7 @@ class WorkerContext final {
     [[nodiscard]] ruvia::DbClient& db() const noexcept;
     [[nodiscard]] ruvia::HttpClient& httpClient(std::string_view alias) const;
     [[nodiscard]] const ruvia::WorkerHandle& worker() const noexcept;
-    [[nodiscard]] std::pmr::memory_resource* resource() const noexcept;
+    [[nodiscard]] std::pmr::memory_resource* pool() const noexcept;
     [[nodiscard]] ruvia::StopToken stopToken() const noexcept;
     [[nodiscard]] std::string_view leaseOwner() const noexcept;
 

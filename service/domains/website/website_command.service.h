@@ -172,8 +172,8 @@ class WebsiteCommandService final {
   private:
     static std::string serializeConfig(ruvia::Context& c,
                                        const service::website_config::WebsiteConfigData& input) {
-        const auto output = service::website_config::toOutput(input, {.resource = c.resource()});
-        const auto json = ruvia::toJson(output, {.resource = c.resource()});
+        const auto output = service::website_config::toOutput(input, {.resource = c.pool()});
+        const auto json = ruvia::toJson(output, {.resource = c.pool()});
         return std::string(json.data(), json.size());
     }
 

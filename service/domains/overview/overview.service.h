@@ -42,9 +42,9 @@ class OverviewService final {
             "NOT marker.is_done AND marker.count_fails > 0)",
             tenantId);
 
-        OverviewDataDto result(c);
-        OverviewResourceCountsDto resources(c);
-        OverviewIssueCountsDto issues(c);
+        OverviewDataDto result({.resource = c.pool()});
+        OverviewResourceCountsDto resources({.resource = c.pool()});
+        OverviewIssueCountsDto issues({.resource = c.pool()});
         if (summaryRows.empty()) {
             resources.template set<"websiteCount">(0);
             resources.template set<"domainCount">(0);
@@ -97,7 +97,7 @@ class OverviewService final {
             tenantId);
         auto& recentMarkers = result.template ensure<"recentMarkers">();
         for (const auto& row : markerRows) {
-            auto& marker = recentMarkers.emplace_back(c);
+            auto& marker = recentMarkers.emplace_back(ruvia::ModelOptions{.resource = c.pool()});
             marker.template set<"id">(row[0].value().value_or(""));
             marker.template set<"resourceType">(row[1].value().value_or(""));
             marker.template set<"resourceId">(row[2].value().value_or(""));

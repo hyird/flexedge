@@ -17,7 +17,6 @@
 #include <ruvia/web/Streaming.h>
 
 #include "service/common/http.h"
-#include "service/domains/node/node.schema.h"
 #include "service/domains/node/node_command.service.h"
 #include "service/domains/node/node_read.service.h"
 #include "service/features/log_ingest/fanout.h"
@@ -34,8 +33,8 @@ class NodeController final : public ruvia::Controller<NodeController> {
     RUVIA_CONTROLLER_GROUP("/api/nodes", service::middleware::AuthMiddleware)
     RUVIA_ROUTES_BEGIN
     RUVIA_GET_SSE("/stream", list);
-    RUVIA_POST("/", create, NodeConfigValidator);
-    RUVIA_PUT("/:id", update, NodeConfigValidator);
+    RUVIA_POST("/", create, ruvia::JsonBody<NodeSaveInput>);
+    RUVIA_PUT("/:id", update, ruvia::JsonBody<NodeSaveInput>);
     RUVIA_GET_SSE("/:id/logs/stream", logStream);
     RUVIA_POST("/:id/credentials/reveal", credentials);
     RUVIA_POST("/:id/credentials", resetCredentials);
@@ -99,22 +98,28 @@ class NodeController final : public ruvia::Controller<NodeController> {
                 auto data = co_await nodeReadService().list(read, tenant, page, pageSize, skip,
                     keyword, clusterId, status, registrationStatus, connectionStatus);
                 co_return std::string(ruvia::toJson(service::common::ok<NodePageResponse>(read,
-                    std::move(data)), {.resource = read.resource()}));
+                    std::move(data)), {.resource = read.pool()}));
             });
     }
 
     ruvia::Task<ruvia::HttpResponse> create(ruvia::Context& c) {
         c.header("cache-control", "no-store");
-        auto data = co_await nodeCommandService().create(c, tenantId(c),
-                                                         c.req().validatedJson<NodeSaveInput>());
+        const auto body = c.req().validatedJson<NodeSaveInput>();
+        ruvia::Validator validator({.resource = c.arena()});
+        validateNodeSaveInput(body.value(), validator);
+        std::move(validator).throwIfInvalid();
+        auto data = co_await nodeCommandService().create(c, tenantId(c), body);
         service::common::setRevisionEtag(c, data.get<"revision">().value);
         co_return c.json(service::common::ok<NodeCredentialsResponse>(c, std::move(data)));
     }
 
     ruvia::Task<ruvia::HttpResponse> update(ruvia::Context& c) {
         const auto revision = expectedRevision(c);
-        co_await nodeCommandService().update(c, tenantId(c), requireId(c), revision,
-                                             c.req().validatedJson<NodeSaveInput>());
+        const auto body = c.req().validatedJson<NodeSaveInput>();
+        ruvia::Validator validator({.resource = c.arena()});
+        validateNodeSaveInput(body.value(), validator);
+        std::move(validator).throwIfInvalid();
+        co_await nodeCommandService().update(c, tenantId(c), requireId(c), revision, body);
         service::common::setRevisionEtag(c, revision + 1);
         co_return c.json(service::common::operation(c, "节点配置已更新"));
     }
@@ -157,7 +162,7 @@ class NodeController final : public ruvia::Controller<NodeController> {
                 auto data = co_await nodeReadService().logs(read, tenant, id, limit, after);
                 auto cursor = service::log_ingest::tailResponseCursor(data);
                 auto json = ruvia::toJson(service::common::ok<NodeLogTailResponse>(read, std::move(data)),
-                                          {.resource = read.resource()});
+                                          {.resource = read.pool()});
                 co_return service::log_ingest::TailBatch{.payload = std::string(json.data(), json.size()),
                                                          .cursor = std::move(cursor)};
             });

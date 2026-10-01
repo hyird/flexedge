@@ -69,14 +69,14 @@ importInitialRemoteRecords(service::background::WorkerContext& context, const Dn
         throw std::runtime_error("远程 DNS 记录本地 ID 生成失败");
     }
 
-    ZoneConfigOutput importedConfig({.resource = context.resource()});
+    ZoneConfigOutput importedConfig({.resource = context.pool()});
     auto& configRecords = importedConfig.ensure<"records">();
-    ZoneRuntimeDto importedRuntime({.resource = context.resource()});
+    ZoneRuntimeDto importedRuntime({.resource = context.pool()});
     importedRuntime.set<"recordsImported">(true);
     auto& runtimeLines = importedRuntime.ensure<"lines">();
     for (const auto& line : lines) {
         auto& outputLine =
-            runtimeLines.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
+            runtimeLines.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
         outputLine.set<"code">(line.code);
         outputLine.set<"name">(line.name);
         outputLine.set<"displayName">(line.displayName);
@@ -92,7 +92,7 @@ importInitialRemoteRecords(service::background::WorkerContext& context, const Dn
             throw std::runtime_error("远程 DNS 记录本地 ID 为空");
         }
         auto& record =
-            configRecords.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
+            configRecords.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
         record.set<"id">(id);
         record.set<"type">(remote.type);
         record.set<"name">(driver.recordNames().localRecordName(remote.name, domain));
@@ -103,15 +103,15 @@ importInitialRemoteRecords(service::background::WorkerContext& context, const Dn
         if (remote.priority) {
             record.set<"priority">(*remote.priority);
         }
-        auto& state = states.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
+        auto& state = states.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
         state.set<"id">(id);
         state.set<"remoteRecordId">(remote.id);
         state.set<"syncStatus">("pending");
         state.set<"syncedRevision">(0);
     }
 
-    const auto configJson = ruvia::toJson(importedConfig, {.resource = context.resource()});
-    const auto runtimeJson = ruvia::toJson(importedRuntime, {.resource = context.resource()});
+    const auto configJson = ruvia::toJson(importedConfig, {.resource = context.pool()});
+    const auto runtimeJson = ruvia::toJson(importedRuntime, {.resource = context.pool()});
     const auto updated = co_await transaction.query(
         "UPDATE sys_dns_zone SET config = $1::jsonb, runtime = $2::jsonb, revision = revision + "
         "1, desired_revision = desired_revision + 1, sync_status = 'pending', last_error = NULL, "
@@ -139,12 +139,12 @@ storeConflicts(service::background::WorkerContext& context, const DnsTask& task,
                const service::sync_runtime::RunningMarkerLease& lease, std::int64_t desiredRevision,
                const ZoneRuntimeData& runtime, const std::vector<service::dns::ProviderLine>& lines,
                const std::vector<RecordConflict>& conflicts) {
-    ZoneRuntimeDto nextRuntime({.resource = context.resource()});
+    ZoneRuntimeDto nextRuntime({.resource = context.pool()});
     nextRuntime.set<"recordsImported">(true);
     auto& runtimeLines = nextRuntime.ensure<"lines">();
     for (const auto& line : lines) {
         auto& outputLine =
-            runtimeLines.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
+            runtimeLines.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
         outputLine.set<"code">(line.code);
         outputLine.set<"name">(line.name);
         outputLine.set<"displayName">(line.displayName);
@@ -156,7 +156,7 @@ storeConflicts(service::background::WorkerContext& context, const DnsTask& task,
         if (!state.id) {
             continue;
         }
-        auto& output = states.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
+        auto& output = states.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
         output.set<"id">(*state.id);
         output.set<"syncStatus">(state.syncStatus ? *state.syncStatus
                                                   : std::string_view{"pending"});
@@ -171,7 +171,7 @@ storeConflicts(service::background::WorkerContext& context, const DnsTask& task,
     auto& outputConflicts = nextRuntime.ensure<"conflicts">();
     for (const auto& conflict : conflicts) {
         auto& outputConflict =
-            outputConflicts.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
+            outputConflicts.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
         outputConflict.set<"id">(conflict.id);
         outputConflict.set<"type">(conflict.type);
         outputConflict.set<"name">(conflict.name);
@@ -181,7 +181,7 @@ storeConflicts(service::background::WorkerContext& context, const DnsTask& task,
     }
     appendChallengeRecords(nextRuntime, runtime);
 
-    const auto runtimeJson = ruvia::toJson(nextRuntime, {.resource = context.resource()});
+    const auto runtimeJson = ruvia::toJson(nextRuntime, {.resource = context.pool()});
     auto transaction = co_await context.db().beginTransaction();
     const auto updated = co_await transaction.execute(
         "UPDATE sys_dns_zone SET runtime = $1::jsonb, sync_status = 'conflict', last_error = "
@@ -238,11 +238,11 @@ inline ruvia::Task<bool> persistRemoteMerge(service::background::WorkerContext& 
         remoteIdsByLocalId.emplace(record.id, record.remoteId);
     }
 
-    ZoneConfigOutput mergedConfig({.resource = context.resource()});
+    ZoneConfigOutput mergedConfig({.resource = context.pool()});
     auto& configRecords = mergedConfig.ensure<"records">();
     for (const auto& record : merged) {
         auto& output =
-            configRecords.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
+            configRecords.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
         output.set<"id">(record.id);
         output.set<"type">(record.type);
         output.set<"name">(record.name);
@@ -255,12 +255,12 @@ inline ruvia::Task<bool> persistRemoteMerge(service::background::WorkerContext& 
         }
     }
 
-    ZoneRuntimeDto mergedRuntime({.resource = context.resource()});
+    ZoneRuntimeDto mergedRuntime({.resource = context.pool()});
     mergedRuntime.set<"recordsImported">(true);
     auto& runtimeLines = mergedRuntime.ensure<"lines">();
     for (const auto& line : lines) {
         auto& outputLine =
-            runtimeLines.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
+            runtimeLines.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
         outputLine.set<"code">(line.code);
         outputLine.set<"name">(line.name);
         outputLine.set<"displayName">(line.displayName);
@@ -269,7 +269,7 @@ inline ruvia::Task<bool> persistRemoteMerge(service::background::WorkerContext& 
     auto& states = mergedRuntime.ensure<"recordStates">();
     (void)mergedRuntime.ensure<"conflicts">();
     for (const auto& [id, remoteId] : remoteIdsByLocalId) {
-        auto& state = states.emplace_back(ruvia::ModelOptions{.resource = context.resource()});
+        auto& state = states.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
         state.set<"id">(id);
         state.set<"remoteRecordId">(remoteId);
         state.set<"syncStatus">("pending");
@@ -277,8 +277,8 @@ inline ruvia::Task<bool> persistRemoteMerge(service::background::WorkerContext& 
     }
     appendChallengeRecords(mergedRuntime, runtime);
 
-    const auto configJson = ruvia::toJson(mergedConfig, {.resource = context.resource()});
-    const auto runtimeJson = ruvia::toJson(mergedRuntime, {.resource = context.resource()});
+    const auto configJson = ruvia::toJson(mergedConfig, {.resource = context.pool()});
+    const auto runtimeJson = ruvia::toJson(mergedRuntime, {.resource = context.pool()});
     const auto updated = co_await transaction.query(
         "UPDATE sys_dns_zone SET config = $1::jsonb, runtime = $2::jsonb, revision = revision + "
         "1, desired_revision = desired_revision + 1, sync_status = 'pending', last_error = NULL, "
@@ -306,7 +306,7 @@ inline ruvia::Task<void> persistSyncedZone(service::background::WorkerContext& c
                                            const DnsTask& task,
                                            const service::sync_runtime::RunningMarkerLease& lease,
                                            const ZoneRuntimeDto& runtime, std::int64_t revision) {
-    const auto runtimeJson = ruvia::toJson(runtime, {.resource = context.resource()});
+    const auto runtimeJson = ruvia::toJson(runtime, {.resource = context.pool()});
     auto transaction = co_await context.db().beginTransaction();
     const auto updated = co_await transaction.execute(
         "UPDATE sys_dns_zone SET runtime = $2::jsonb, synced_revision = GREATEST("

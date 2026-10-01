@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -18,6 +19,7 @@
 #include <asio/buffer.hpp>
 #include <asio/connect.hpp>
 #include <asio/ip/tcp.hpp>
+#include <asio/post.hpp>
 #include <asio/ssl/error.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/write.hpp>
@@ -45,10 +47,25 @@ struct OriginProbeConfig final {
 class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealthProbe> {
   public:
     OriginHealthProbe(ruvia::EventLoop loop, OriginHealthRegistry::Target target,
-                      OriginTlsContext& tlsContext, OriginProbeConfig config)
+                      OriginTlsContext& tlsContext, OriginProbeConfig config,
+                      std::function<void()> onRetired = {})
         : loop_(std::move(loop)), target_(std::move(target)), tlsContext_(tlsContext),
-          config_(std::move(config)), resolver_(loop_.ioContext()), socket_(loop_.ioContext()),
-          timer_(loop_.ioContext()) {}
+          config_(std::move(config)), onRetired_(std::move(onRetired)),
+          resolver_(loop_.ioContext()), socket_(loop_.ioContext()), timer_(loop_.ioContext()) {}
+
+    void setOnRetired(std::function<void()> callback) {
+        onRetired_ = std::move(callback);
+    }
+
+    void cancel() noexcept {
+        completed_ = true;
+        std::error_code ignored;
+        timer_.cancel(ignored);
+        resolver_.cancel();
+        if (tlsStream_) ignored = tlsStream_->lowest_layer().close(ignored);
+        ignored = socket_.close(ignored);
+        notifyRetiredIfReady();
+    }
 
     void start() {
         try {
@@ -62,25 +79,90 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
             complete(false, "request preparation failed");
             return;
         }
-        timer_.expires_after(config_.timeout);
         const auto self = shared_from_this();
-        timer_.async_wait([self](const std::error_code& error) {
-            if (!error) {
-                self->complete(false, "timeout");
+        try {
+            timer_.expires_after(config_.timeout);
+            operationStarted();
+            try {
+                timer_.async_wait([self](const std::error_code& error) {
+                    Completion completion{self};
+                    if (!error) self->complete(false, "timeout");
+                });
+            } catch (...) {
+                operationCompleted();
+                throw;
             }
-        });
-        resolver_.async_resolve(config_.host, std::to_string(config_.port),
-                                [self](const std::error_code& error,
-                                       const asio::ip::tcp::resolver::results_type& endpoints) {
-                                    if (error) {
-                                        self->complete(false, "dns lookup failed");
-                                        return;
-                                    }
-                                    self->connect(endpoints);
-                                });
+            operationStarted();
+            try {
+                resolver_.async_resolve(config_.host, std::to_string(config_.port),
+                                        [self](const std::error_code& error,
+                                               const asio::ip::tcp::resolver::results_type& endpoints) {
+                                            Completion completion{self};
+                                            if (self->completed_) return;
+                                            if (error) {
+                                                self->complete(false, "dns lookup failed");
+                                                return;
+                                            }
+                                            self->connect(endpoints);
+                                        });
+            } catch (...) {
+                operationCompleted();
+                throw;
+            }
+        } catch (const std::exception& error) {
+            log("async probe startup failed", error);
+            complete(false, "async probe startup failed");
+        } catch (...) {
+            log("async probe startup failed with unknown exception");
+            complete(false, "async probe startup failed");
+        }
     }
 
   private:
+    struct Completion final {
+        std::shared_ptr<OriginHealthProbe> probe;
+        ~Completion() {
+            try {
+                asio::post(probe->loop_.executor(), [keepAlive = probe] {
+                    keepAlive->operationCompleted();
+                });
+            } catch (...) {
+                probe->operationCompleted();
+            }
+        }
+    };
+
+    void operationStarted() noexcept { ++pendingOperations_; }
+
+    template <typename Initiation>
+    void initiateOperation(Initiation&& initiation, std::string_view failure) noexcept {
+        operationStarted();
+        try {
+            std::forward<Initiation>(initiation)();
+        } catch (const std::exception& error) {
+            operationCompleted();
+            log(failure, error);
+            complete(false, failure);
+        } catch (...) {
+            operationCompleted();
+            log(failure);
+            complete(false, failure);
+        }
+    }
+
+    void operationCompleted() noexcept {
+        --pendingOperations_;
+        notifyRetiredIfReady();
+    }
+
+    void notifyRetiredIfReady() noexcept {
+        if (!completed_ || pendingOperations_ != 0 || retiredNotified_) return;
+        retiredNotified_ = true;
+        if (onRetired_) {
+            try { onRetired_(); } catch (...) {}
+        }
+    }
+
     void prepareRequest() {
         const auto origin =
             config_.protocol == "https"
@@ -102,18 +184,25 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
 
     void connect(const asio::ip::tcp::resolver::results_type& endpoints) {
         const auto self = shared_from_this();
-        asio::async_connect(socket_, endpoints,
-                            [self](const std::error_code& error, const asio::ip::tcp::endpoint&) {
-                                if (error) {
-                                    self->complete(false, "connection failed");
-                                    return;
-                                }
-                                if (self->config_.protocol == "https") {
-                                    self->handshake();
-                                } else {
-                                    self->write();
-                                }
-                            });
+        initiateOperation(
+            [&] {
+                asio::async_connect(socket_, endpoints,
+                                    [self](const std::error_code& error,
+                                           const asio::ip::tcp::endpoint&) {
+                                        Completion completion{self};
+                                        if (self->completed_) return;
+                                        if (error) {
+                                            self->complete(false, "connection failed");
+                                            return;
+                                        }
+                                        if (self->config_.protocol == "https") {
+                                            self->handshake();
+                                        } else {
+                                            self->write();
+                                        }
+                                    });
+            },
+            "connection initiation failed");
     }
 
     void handshake() {
@@ -129,47 +218,67 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
             return;
         }
         const auto self = shared_from_this();
-        tlsStream_->async_handshake(asio::ssl::stream_base::client,
-                                    [self](const std::error_code& error) {
-                                        if (error) {
-                                            self->complete(false, "TLS handshake failed");
-                                            return;
-                                        }
-                                        self->write();
-                                    });
+        initiateOperation(
+            [&] {
+                tlsStream_->async_handshake(asio::ssl::stream_base::client,
+                                            [self](const std::error_code& error) {
+                                                Completion completion{self};
+                                                if (self->completed_) return;
+                                                if (error) {
+                                                    self->complete(false, "TLS handshake failed");
+                                                    return;
+                                                }
+                                                self->write();
+                                            });
+            },
+            "TLS handshake initiation failed");
     }
 
     void write() {
         const auto self = shared_from_this();
-        auto completion = [self](const std::error_code& error, std::size_t) {
-            if (error) {
-                self->complete(false, "request write failed");
-                return;
-            }
-            self->read();
-        };
-        if (tlsStream_) {
-            asio::async_write(*tlsStream_, asio::buffer(requestBytes_), std::move(completion));
-        } else {
-            asio::async_write(socket_, asio::buffer(requestBytes_), std::move(completion));
-        }
+        initiateOperation(
+            [&] {
+                auto completion = [self](const std::error_code& error, std::size_t) {
+                    Completion operation{self};
+                    if (self->completed_) return;
+                    if (error) {
+                        self->complete(false, "request write failed");
+                        return;
+                    }
+                    self->read();
+                };
+                if (tlsStream_) {
+                    asio::async_write(*tlsStream_, asio::buffer(requestBytes_),
+                                      std::move(completion));
+                } else {
+                    asio::async_write(socket_, asio::buffer(requestBytes_),
+                                      std::move(completion));
+                }
+            },
+            "request write initiation failed");
     }
 
     void read() {
         const auto self = shared_from_this();
-        auto completion = [self](const std::error_code& error, std::size_t size) {
-            if (error) {
-                self->complete(false, "response read failed");
-                return;
-            }
-            self->responseBytes_.append(self->buffer_.data(), size);
-            self->parse();
-        };
-        if (tlsStream_) {
-            tlsStream_->async_read_some(asio::buffer(buffer_), std::move(completion));
-        } else {
-            socket_.async_read_some(asio::buffer(buffer_), std::move(completion));
-        }
+        initiateOperation(
+            [&] {
+                auto completion = [self](const std::error_code& error, std::size_t size) {
+                    Completion operation{self};
+                    if (self->completed_) return;
+                    if (error) {
+                        self->complete(false, "response read failed");
+                        return;
+                    }
+                    self->responseBytes_.append(self->buffer_.data(), size);
+                    self->parse();
+                };
+                if (tlsStream_) {
+                    tlsStream_->async_read_some(asio::buffer(buffer_), std::move(completion));
+                } else {
+                    socket_.async_read_some(asio::buffer(buffer_), std::move(completion));
+                }
+            },
+            "response read initiation failed");
     }
 
     void parse() {
@@ -220,6 +329,7 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
             healthy,
             healthy ? config_.healthyThreshold : config_.unhealthyThreshold,
             static_cast<std::uint32_t>((std::min)(elapsed.count(), std::int64_t{600000})), error);
+        notifyRetiredIfReady();
     }
 
     void log(std::string_view message) const noexcept {
@@ -242,6 +352,7 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
     OriginHealthRegistry::Target target_;
     OriginTlsContext& tlsContext_;
     OriginProbeConfig config_;
+    std::function<void()> onRetired_;
     asio::ip::tcp::resolver resolver_;
     asio::ip::tcp::socket socket_;
     std::optional<OriginTlsContext::Stream> tlsStream_;
@@ -252,7 +363,9 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
     std::string responseBytes_;
     std::size_t responseOffset_{};
     std::chrono::steady_clock::time_point startedAt_{std::chrono::steady_clock::now()};
+    std::size_t pendingOperations_{};
     bool completed_{};
+    bool retiredNotified_{};
 };
 
 } // namespace flexedge::node

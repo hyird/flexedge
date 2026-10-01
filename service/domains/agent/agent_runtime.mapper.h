@@ -11,7 +11,7 @@
 namespace service::agent {
 
 inline std::string heartbeatRuntimeJson(ruvia::Context& c, const HeartbeatReport& report) {
-    service::node_runtime::NodeRuntimeOutput runtime(c);
+    service::node_runtime::NodeRuntimeOutput runtime({.resource = c.pool()});
     runtime.set<"agentVersion">(report.agentVersion);
     runtime.set<"cpuUsage">(report.cpuUsage);
     runtime.set<"memoryUsage">(report.memoryUsage);
@@ -25,7 +25,7 @@ inline std::string heartbeatRuntimeJson(ruvia::Context& c, const HeartbeatReport
     auto& originHealth = runtime.ensure<"originHealth">();
     originHealth.reserve(report.originHealth.size());
     for (const auto& reportItem : report.originHealth) {
-        auto& item = originHealth.emplace_back(c);
+        auto& item = originHealth.emplace_back(ruvia::ModelOptions{.resource = c.pool()});
         item.set<"websiteId">(reportItem.websiteId);
         item.set<"originId">(reportItem.originId);
         item.set<"status">(reportItem.status);
@@ -35,7 +35,7 @@ inline std::string heartbeatRuntimeJson(ruvia::Context& c, const HeartbeatReport
             item.set<"lastError">(reportItem.lastError);
         }
     }
-    const auto json = ruvia::toJson(runtime, {.resource = c.resource()});
+    const auto json = ruvia::toJson(runtime, {.resource = c.pool()});
     return std::string(json.data(), json.size());
 }
 

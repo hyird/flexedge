@@ -89,9 +89,9 @@ inline ruvia::Task<void> probeWebsite(service::background::WorkerContext& contex
     }
 
     const auto config = service::website_config::parseStored(rows.front()[0].value().value_or("{}"),
-                                                             {.resource = context.resource()});
+                                                             {.resource = context.pool()});
     const auto runtime =
-        parseStored(rows.front()[1].value().value_or("{}"), {.resource = context.resource()});
+        parseStored(rows.front()[1].value().value_or("{}"), {.resource = context.pool()});
     if (!config || !runtime) {
         throw std::runtime_error("网站运行状态损坏");
     }
@@ -100,8 +100,8 @@ inline ruvia::Task<void> probeWebsite(service::background::WorkerContext& contex
     const auto checkedAt = rows.front()[5].value().value_or("");
     auto output = co_await probeWebsiteDomains(context, *config, expectedTarget, checkedAt, marker);
 
-    const auto json = ruvia::toJson(toOutput(output, {.resource = context.resource()}),
-                                    {.resource = context.resource()});
+    const auto json = ruvia::toJson(toOutput(output, {.resource = context.pool()}),
+                                    {.resource = context.pool()});
     auto completion = co_await context.db().beginTransaction();
     const auto updated = co_await completion.execute(
         "UPDATE sys_website SET runtime = $2::jsonb WHERE id = $1 AND revision = $3 AND "
