@@ -66,12 +66,23 @@ export function createLiveLogStore<T extends LogEntry>(
     })
     connection.addEventListener('session-expired', () => {
       if (source !== connection) return
-      update({ logs: [], connected: false, error: '登录状态已失效，正在恢复会话。' })
+      update({
+        logs: [],
+        connected: false,
+        error: '登录状态已失效，正在恢复会话。',
+      })
       onSessionExpired()
     })
   }
   return {
-    reconnect() { if (listeners.size && !source) connect() },
+    reconnect() {
+      if (!listeners.size) return
+      const retired = source
+      source = undefined
+      retired?.close()
+      update({ ...snapshot, connected: false, error: null })
+      connect()
+    },
     getSnapshot: () => snapshot,
     subscribe(listener: () => void) {
       // Each subscription has independent ownership even for the same callback.

@@ -1,4 +1,4 @@
-import { QueryClient } from '@tanstack/react-query'
+import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { afterEach, expect, test } from 'vitest'
 import { api } from '@/lib/api'
 import { setLiveQueryQueryClient } from '@/lib/live-query'
@@ -6,24 +6,37 @@ import {
   dnsProviderOptionsQuery,
   dnsProvidersQuery,
   certificateProvidersQuery,
+  certificateProvidersListQuery,
 } from './data'
 
 const adapter = api.defaults.adapter
 const clients: QueryClient[] = []
 let nextSnapshot: unknown
-class Source extends EventTarget { close() {} }
+class Source extends EventTarget {
+  closed = false
+  close() {
+    this.closed = true
+  }
+}
 function install(client: QueryClient) {
   setLiveQueryQueryClient(client, undefined, () => {
     const source = new Source()
-    queueMicrotask(() => source.dispatchEvent(new MessageEvent('snapshot', {
-      data: JSON.stringify({ code: 0, message: 'ok', data: nextSnapshot }),
-    })))
+    queueMicrotask(() =>
+      source.dispatchEvent(
+        new MessageEvent('snapshot', {
+          data: JSON.stringify({ code: 0, message: 'ok', data: nextSnapshot }),
+        })
+      )
+    )
     return source as never
   })
 }
 afterEach(() => {
   api.defaults.adapter = adapter
-  clients.splice(0).forEach((client) => { setLiveQueryQueryClient(client); client.clear() })
+  clients.splice(0).forEach((client) => {
+    setLiveQueryQueryClient(client)
+    client.clear()
+  })
 })
 function client() {
   const value = new QueryClient({
@@ -35,20 +48,90 @@ function client() {
 test('DNS provider options use one full collection snapshot', async () => {
   const value = Array.from({ length: 1001 }, (_, i) => ({ id: String(i) }))
   nextSnapshot = value
-  const current = client(); install(current)
+  const current = client()
+  install(current)
   const options = await current.fetchQuery(dnsProviderOptionsQuery)
   expect(options).toHaveLength(1001)
 })
-test('table queries retain filters and certificate queries use their shared endpoint', async () => {
+test('table queries retain filters and use keys distinct from picker snapshots', async () => {
   nextSnapshot = { list: [], total: 0, page: 2, page_size: 10, total_pages: 0 }
   const params = { page: 2, page_size: 10, keyword: 'cloud' }
-  const current = client(); install(current)
+  const current = client()
+  install(current)
   await current.fetchQuery(dnsProvidersQuery(params))
   nextSnapshot = []
   await current.fetchQuery(certificateProvidersQuery)
   expect(dnsProvidersQuery(params).queryKey).not.toEqual(
     dnsProviderOptionsQuery.queryKey
   )
+  expect(certificateProvidersListQuery.queryKey).toEqual([
+    'providers',
+    'certificate',
+    'list',
+  ])
+  expect(certificateProvidersQuery.queryKey).toEqual([
+    'providers',
+    'certificate',
+    'options',
+  ])
+})
+
+test('certificate provider tables receive background verification while pickers release after one snapshot', async () => {
+  const current = client()
+  const sources = new Map<string, Source>()
+  setLiveQueryQueryClient(current, undefined, (url) => {
+    const source = new Source()
+    sources.set(url, source)
+    queueMicrotask(() =>
+      source.dispatchEvent(
+        new MessageEvent('snapshot', {
+          data: JSON.stringify({
+            code: 0,
+            message: 'ok',
+            data: [{ id: 'provider', status: 'unverified' }],
+          }),
+        })
+      )
+    )
+    return source as never
+  })
+  const observer = new QueryObserver(current, certificateProvidersListQuery)
+  const unsubscribe = observer.subscribe(() => undefined)
+  try {
+    await expect(observer.refetch()).resolves.toMatchObject({
+      data: [{ status: 'unverified' }],
+    })
+    const listSource = sources.get('/api/providers/certificate/stream')!
+    expect(listSource.closed).toBe(false)
+    await current.fetchQuery(certificateProvidersQuery)
+    const optionsSource = sources.get(
+      '/api/providers/certificate/options/stream'
+    )!
+    expect(optionsSource.closed).toBe(true)
+    for (const source of [listSource, optionsSource])
+      source.dispatchEvent(
+        new MessageEvent('snapshot', {
+          data: JSON.stringify({
+            code: 0,
+            message: 'ok',
+            data: [{ id: 'provider', status: 'verified' }],
+          }),
+        })
+      )
+    await new Promise<void>((resolve) => queueMicrotask(resolve))
+    expect(
+      current.getQueryData(certificateProvidersListQuery.queryKey)
+    ).toEqual([{ id: 'provider', status: 'verified' }])
+    expect(current.getQueryData(certificateProvidersQuery.queryKey)).toEqual([
+      { id: 'provider', status: 'unverified' },
+    ])
+    unsubscribe()
+    await new Promise<void>((resolve) => queueMicrotask(resolve))
+    expect(listSource.closed).toBe(true)
+  } finally {
+    unsubscribe()
+    observer.destroy()
+  }
 })
 
 test('provider writes own immutable fields, credential mode and revision headers', async () => {

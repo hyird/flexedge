@@ -1,62 +1,65 @@
-import { Clipboard } from 'lucide-react'
-import { toast } from 'sonner'
-import { Button } from '@/components/ui/button'
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet'
+import { useState } from 'react'
+import { Button, toast } from '@heroui/react'
+import { apiErrorMessage } from '@/lib/api'
+import { Dialog, Notice } from '@/components/forms'
 import type { NodeCredentials } from './data'
 
 export function CredentialsDialog({
   credentials,
-  onOpenChange,
+  onClose,
 }: {
-  credentials: NodeCredentials | null
-  onOpenChange: (open: boolean) => void
+  credentials: NodeCredentials
+  onClose: () => void
 }) {
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  async function copy() {
+    setBusy(true)
+    setError('')
+    try {
+      await navigator.clipboard.writeText(
+        `NODE_ID=${credentials.node_id}\nNODE_SECRET=${credentials.secret}`
+      )
+      toast.success('接入凭据已复制')
+    } catch (error) {
+      setError(apiErrorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
   return (
-    <Sheet open={!!credentials} onOpenChange={onOpenChange}>
-      <SheetContent>
-        <SheetHeader>
-          <SheetTitle>节点接入凭据</SheetTitle>
-          <SheetDescription>
-            请安全保存密钥，不要通过公开渠道传输。
-          </SheetDescription>
-        </SheetHeader>
-        <div className='space-y-3 px-4'>
+    <Dialog title='节点接入凭据' onClose={onClose}>
+      <div className='grid gap-4'>
+        <p className='text-sm text-muted'>在节点启动配置中填写以下凭据。</p>
+        <dl className='grid gap-3'>
           <div>
-            <div className='mb-1 text-xs text-muted-foreground'>Node ID</div>
-            <code className='block rounded-md bg-muted p-3 text-xs break-all'>
-              {credentials?.node_id}
-            </code>
+            <dt className='mb-1 text-xs text-muted'>Node ID</dt>
+            <dd className='rounded-lg bg-surface-secondary p-3 font-mono text-xs break-all'>
+              {credentials.node_id}
+            </dd>
           </div>
           <div>
-            <div className='mb-1 text-xs text-muted-foreground'>Secret</div>
-            <code className='block rounded-md bg-muted p-3 text-xs break-all'>
-              {credentials?.secret}
-            </code>
+            <dt className='mb-1 text-xs text-muted'>Secret</dt>
+            <dd className='rounded-lg bg-surface-secondary p-3 font-mono text-xs break-all'>
+              {credentials.secret}
+            </dd>
           </div>
-        </div>
-        <SheetFooter>
+        </dl>
+        {error && <Notice>{error}</Notice>}
+        <div className='flex justify-end gap-2'>
           <Button
-            variant='outline'
-            onClick={async () => {
-              if (!credentials) return
-              await navigator.clipboard.writeText(
-                `NODE_ID=${credentials.node_id}\nNODE_SECRET=${credentials.secret}`
-              )
-              toast.success('凭据已复制')
-            }}
+            size='sm'
+            variant='secondary'
+            isPending={busy}
+            onPress={() => void copy()}
           >
-            <Clipboard /> 复制凭据
+            复制凭据
           </Button>
-          <Button onClick={() => onOpenChange(false)}>完成</Button>
-        </SheetFooter>
-      </SheetContent>
-    </Sheet>
+          <Button size='sm' onPress={onClose}>
+            完成
+          </Button>
+        </div>
+      </div>
+    </Dialog>
   )
 }

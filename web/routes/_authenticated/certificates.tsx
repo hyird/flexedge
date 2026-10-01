@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { Certificates } from '@/features/certificates'
+import { CertificatesPage } from '@/features/certificates'
 
 export const Route = createFileRoute('/_authenticated/certificates')({
-  component: Certificates,
+  validateSearch: (search: Record<string, unknown>) => search,
+  component: CertificatesPage,
 })

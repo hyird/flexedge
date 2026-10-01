@@ -59,3 +59,60 @@ test('node endpoints reject duplicate ids or addresses at the offending row', ()
     }).success
   ).toBe(false)
 })
+
+test('node cache resources enforce byte bounds and relative directory components', () => {
+  const cache = {
+    memory_bytes: 0,
+    disk_bytes: 0,
+    max_object_bytes: 1,
+    directory: 'cache/v1',
+  }
+  expect(nodeFormSchema.safeParse({ ...values, cache }).success).toBe(true)
+  expect(
+    nodeFormSchema.safeParse({
+      ...values,
+      cache: {
+        ...cache,
+        memory_bytes: 1099511627776,
+        disk_bytes: 1125899906842624,
+        max_object_bytes: 1099511627776,
+      },
+    }).success
+  ).toBe(true)
+  for (const directory of [
+    '',
+    '/',
+    '/cache',
+    'cache/',
+    'cache//v1',
+    'cache/./v1',
+    'cache/../v1',
+    'cache\\v1',
+    'C:cache',
+    'cache ',
+    'cache/.',
+    'cache/\u0001v1',
+  ])
+    expect(
+      nodeFormSchema.safeParse({ ...values, cache: { ...cache, directory } })
+        .success
+    ).toBe(false)
+  expect(
+    nodeFormSchema.safeParse({
+      ...values,
+      cache: { ...cache, max_object_bytes: 0 },
+    }).success
+  ).toBe(false)
+  expect(
+    nodeFormSchema.safeParse({
+      ...values,
+      cache: { ...cache, memory_bytes: 1099511627777 },
+    }).success
+  ).toBe(false)
+  expect(
+    nodeFormSchema.safeParse({
+      ...values,
+      cache: { ...cache, disk_bytes: 1125899906842625 },
+    }).success
+  ).toBe(false)
+})

@@ -1,167 +1,112 @@
-import { useForm } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation } from '@tanstack/react-query'
-import { toast } from 'sonner'
-import { Button } from '@/components/ui/button'
-import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from '@/components/ui/form'
-import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet'
-import type { DnsProvider } from '@/features/providers/types'
+import { useState } from 'react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from '@heroui/react'
+import { apiErrorMessage } from '@/lib/api'
+import { queryKeys } from '@/lib/query-keys'
+import { Choice, Dialog, Field, FormActions, Notice } from '@/components/forms'
 import { saveDnsProvider } from './data'
 import {
   dnsProviderFormSchema,
-  type DnsProviderFormValues as DnsValues,
+  type DnsProviderFormValues,
 } from './dns-provider-form'
+import type { DnsProvider } from './types'
 
 export function DnsProviderDialog({
   provider,
-  open,
-  onOpenChange,
+  onClose,
 }: {
   provider?: DnsProvider
-  open: boolean
-  onOpenChange: (open: boolean) => void
+  onClose: () => void
 }) {
-  const form = useForm<DnsValues>({
-    resolver: zodResolver(dnsProviderFormSchema(!!provider)),
-    defaultValues: {
-      name: provider?.name ?? '',
-      provider: (provider?.provider as DnsValues['provider']) ?? 'cloudflare',
-      account_id: provider?.account_id ?? '',
-      api_token: '',
-    },
+  const client = useQueryClient()
+  const [values, setValues] = useState<DnsProviderFormValues>({
+    name: provider?.name ?? '',
+    provider: provider?.provider === 'aliyun' ? 'aliyun' : 'cloudflare',
+    account_id: provider?.account_id ?? '',
+    api_token: '',
   })
+  const [errors, setErrors] = useState<Record<string, string>>({})
+  const update = (name: keyof DnsProviderFormValues, value: string) =>
+    setValues((current) => ({ ...current, [name]: value }))
   const mutation = useMutation({
-    mutationFn: (values: DnsValues) => saveDnsProvider(values, provider),
-    onSuccess: async (response) => {
-      toast.success(response.message)
-      onOpenChange(false)
+    mutationFn: (input: DnsProviderFormValues) =>
+      saveDnsProvider(input, provider),
+    onSuccess: (response) => {
+      toast.success(response.message || '已保存')
+      void client.invalidateQueries({
+        queryKey: [...queryKeys.providers, 'dns'],
+      })
+      onClose()
     },
   })
-
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className='overflow-y-auto'>
-        <SheetHeader>
-          <SheetTitle>
-            {provider ? '编辑 DNS 账号' : '添加 DNS 账号'}
-          </SheetTitle>
-          <SheetDescription>
-            凭据只会提交给 FlexEdge 服务端，保存后仅显示脱敏提示。
-          </SheetDescription>
-        </SheetHeader>
-        <Form {...form}>
-          <form
-            id='dns-provider-form'
-            className='grid gap-4 px-4'
-            onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
-          >
-            <FormField
-              control={form.control}
-              name='name'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>账号名称</FormLabel>
-                  <FormControl>
-                    <Input placeholder='生产 DNS' {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name='provider'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>服务商</FormLabel>
-                  <Select
-                    disabled={!!provider}
-                    value={field.value}
-                    onValueChange={field.onChange}
-                  >
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      <SelectItem value='cloudflare'>Cloudflare</SelectItem>
-                      <SelectItem value='aliyun'>阿里云 DNS</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name='account_id'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>账户标识</FormLabel>
-                  <FormControl>
-                    <Input disabled={!!provider} {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name='api_token'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>
-                    API Token {provider ? '（留空保持不变）' : ''}
-                  </FormLabel>
-                  <FormControl>
-                    <Input
-                      type='password'
-                      autoComplete='new-password'
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-          </form>
-        </Form>
-        <SheetFooter>
-          <Button variant='outline' onClick={() => onOpenChange(false)}>
-            取消
-          </Button>
-          <Button
-            type='submit'
-            form='dns-provider-form'
-            disabled={mutation.isPending}
-          >
-            {mutation.isPending ? '正在保存…' : '保存'}
-          </Button>
-        </SheetFooter>
-      </SheetContent>
-    </Sheet>
+    <Dialog
+      title={provider ? '编辑 DNS 账号' : '添加 DNS 账号'}
+      onClose={onClose}
+      busy={mutation.isPending}
+    >
+      <form
+        className='grid gap-4'
+        onSubmit={(event) => {
+          event.preventDefault()
+          const result = dnsProviderFormSchema(!!provider).safeParse(values)
+          if (!result.success) {
+            setErrors(
+              Object.fromEntries(
+                result.error.issues.map((issue) => [
+                  String(issue.path[0]),
+                  issue.message,
+                ])
+              )
+            )
+            return
+          }
+          setErrors({})
+          mutation.mutate(result.data)
+        }}
+      >
+        <Field
+          label='账号名称'
+          value={values.name}
+          onChange={(value) => update('name', value)}
+          required
+          error={errors.name}
+          disabled={mutation.isPending}
+        />
+        <Choice
+          label='平台'
+          value={values.provider}
+          onChange={(value) => update('provider', value)}
+          items={[
+            { id: 'cloudflare', label: 'Cloudflare' },
+            { id: 'aliyun', label: '阿里云' },
+          ]}
+          disabled={!!provider || mutation.isPending}
+        />
+        <Field
+          label={values.provider === 'aliyun' ? 'AccessKey ID' : '账户标识'}
+          value={values.account_id}
+          onChange={(value) => update('account_id', value)}
+          required
+          error={errors.account_id}
+          disabled={!!provider || mutation.isPending}
+        />
+        <Field
+          label={
+            values.provider === 'aliyun' ? 'AccessKey Secret' : 'API Token'
+          }
+          type='password'
+          value={values.api_token}
+          onChange={(value) => update('api_token', value)}
+          error={errors.api_token}
+          disabled={mutation.isPending}
+          hint={provider ? '留空保留当前凭据。' : '密钥至少 16 个字符。'}
+          autoComplete='new-password'
+        />
+        {provider?.last_error && <Notice>{provider.last_error}</Notice>}
+        {mutation.isError && <Notice>{apiErrorMessage(mutation.error)}</Notice>}
+        <FormActions onCancel={onClose} busy={mutation.isPending} />
+      </form>
+    </Dialog>
   )
 }

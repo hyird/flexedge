@@ -19,10 +19,13 @@ export function normalizeApiPath(url: string) {
 
 export function streamPath(url: string, params?: Record<string, unknown>) {
   const apiPath = normalizeApiPath(url).replace(/\/$/, '')
-  const path = (apiPath.startsWith('/api/') ? apiPath : `/api${apiPath}`) + '/stream'
+  const path =
+    (apiPath.startsWith('/api/') ? apiPath : `/api${apiPath}`) + '/stream'
   if (!params) return path
   const query = new URLSearchParams()
-  for (const [key, value] of Object.entries(params).sort(([left], [right]) => left.localeCompare(right)))
+  for (const [key, value] of Object.entries(params).sort(([left], [right]) =>
+    left.localeCompare(right)
+  ))
     if (value !== undefined && value !== '') query.set(key, String(value))
   const encoded = query.toString()
   return encoded ? `${path}?${encoded}` : path

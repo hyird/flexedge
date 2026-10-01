@@ -1,7 +1,6 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { createRootRouteWithContext, Outlet } from '@tanstack/react-router'
-import { Toaster } from '@/components/ui/sonner'
-import { NavigationProgress } from '@/components/navigation-progress'
+import { Toast } from '@heroui/react'
 import { GeneralError } from '@/features/errors/general-error'
 import { NotFoundError } from '@/features/errors/not-found-error'
 
@@ -9,22 +8,11 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
   {
     component: () => (
       <>
-        <NavigationProgress />
         <Outlet />
-        <Toaster
-          position='top-center'
-          visibleToasts={Infinity}
-          gap={12}
-          expand
-          offset={{ top: 16 }}
-          mobileOffset={{ top: 12 }}
-          richColors
-          closeButton={false}
-          duration={4500}
-        />
+        <Toast.Provider placement='top end' width={340} gap={8} />
       </>
     ),
-    notFoundComponent: NotFoundError,
     errorComponent: GeneralError,
+    notFoundComponent: NotFoundError,
   }
 )

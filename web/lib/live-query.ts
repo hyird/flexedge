@@ -1,18 +1,27 @@
 import { hashKey, type QueryClient, type QueryKey } from '@tanstack/react-query'
 import { getData } from './api'
-import { ApiProtocolError, parseApiResponse, requireResponseData } from './api-response'
+import {
+  ApiProtocolError,
+  parseApiResponse,
+  requireResponseData,
+} from './api-response'
 import { reconnectingEventSource } from './event-stream'
 
 type Source = ReturnType<typeof reconnectingEventSource>
 type Parse = (value: unknown) => unknown
 type Patch = (current: unknown, value: unknown) => unknown
-type Waiter = { resolve: (value: unknown) => void; reject: (error: unknown) => void; dispose: () => void }
+type Waiter = {
+  resolve: (value: unknown) => void
+  reject: (error: unknown) => void
+  dispose: () => void
+}
 type Binding = {
   key: QueryKey
   hash: string
   url: string
   parse: Parse
   patch?: Patch
+  snapshotOnly: boolean
   waiters: Set<Waiter>
 }
 type Entry = {
@@ -37,7 +46,10 @@ export class LiveQueryManager {
 
   constructor(
     private client: QueryClient,
-    private createSource: (url: string) => Source = reconnectingEventSource,
+    // Comment heartbeats are invisible to EventSource. Native transport errors
+    // own reconnects; silence must not trigger repeated snapshot queries.
+    private createSource: (url: string) => Source = (url) =>
+      reconnectingEventSource(url, { idleTimeoutMs: null }),
     private recoverSession: () => Promise<unknown> = () => getData('/auth/me'),
     private onSessionError: (error: unknown) => void = () => undefined
   ) {
@@ -49,28 +61,58 @@ export class LiveQueryManager {
         this.definitions.delete(binding.hash)
         return
       }
-      if (event.type === 'observerRemoved' || event.type === 'observerOptionsUpdated') {
+      if (
+        event.type === 'observerRemoved' ||
+        event.type === 'observerOptionsUpdated'
+      ) {
         // StrictMode may detach and reattach in one turn; avoid extra streams.
         queueMicrotask(() => this.releaseInactive(binding))
       }
-      if (event.type === 'observerAdded' || event.type === 'observerOptionsUpdated') {
-        if (event.query.isActive() && !this.entries.get(binding.url)?.bindings.has(binding.hash)) {
+      if (
+        event.type === 'observerAdded' ||
+        event.type === 'observerOptionsUpdated'
+      ) {
+        if (
+          !binding.snapshotOnly &&
+          event.query.isActive() &&
+          !this.entries.get(binding.url)?.bindings.has(binding.hash)
+        ) {
           void event.query.fetch().catch(() => undefined)
         }
       }
     })
   }
 
-  read<T>(url: string, key: QueryKey, signal?: AbortSignal,
-          parse: (value: unknown) => T = (value) => value as T,
-          patch?: (current: T | undefined, value: unknown) => T | undefined): Promise<T> {
+  read<T>(
+    url: string,
+    key: QueryKey,
+    signal?: AbortSignal,
+    parse: (value: unknown) => T = (value) => value as T,
+    patch?: (current: T | undefined, value: unknown) => T | undefined
+  ): Promise<T> {
     if (signal?.aborted) return Promise.reject(signal.reason)
     const hash = hashKey(key)
     const previous = this.definitions.get(hash)
     if (previous && previous.url !== url) this.detach(previous)
-    const binding: Binding = previous?.url === url ? previous : {
-      key, hash, url, parse, patch: patch as Patch | undefined, waiters: new Set(),
-    }
+    const binding: Binding =
+      previous?.url === url
+        ? previous
+        : {
+            key,
+            hash,
+            url,
+            parse,
+            patch: patch as Patch | undefined,
+            waiters: new Set(),
+            // Configuration pickers use the existing snapshot endpoint once. They
+            // have no realtime requirement and must not keep extra subscriptions.
+            snapshotOnly:
+              /\/(options|collection|available|history)\/stream(?:\?|$)/.test(
+                url
+              ) ||
+              key.includes('lines') ||
+              key.includes('history'),
+          }
     binding.parse = parse
     binding.patch = patch as Patch | undefined
     this.definitions.set(hash, binding)
@@ -83,7 +125,8 @@ export class LiveQueryManager {
     entry.bindings.set(hash, binding)
     const pending = new Promise<T>((resolve, reject) => {
       const waiter: Waiter = {
-        resolve: (value) => resolve(value as T), reject,
+        resolve: (value) => resolve(value as T),
+        reject,
         dispose: () => signal?.removeEventListener('abort', abort),
       }
       const abort = () => {
@@ -95,22 +138,36 @@ export class LiveQueryManager {
       binding.waiters.add(waiter)
       signal?.addEventListener('abort', abort, { once: true })
     })
-    if (!entry.source || (alreadyAttached && entry.hasSnapshot)) this.connect(entry)
-    else if (entry.hasSnapshot) this.apply(binding, entry.latest)
+    if (!entry.source || (alreadyAttached && entry.hasSnapshot))
+      this.connect(entry)
+    else if (entry.hasSnapshot) {
+      this.apply(binding, entry.latest)
+      if (binding.snapshotOnly) this.detach(binding)
+    }
     return pending
   }
 
   private active(binding: Binding) {
-    return this.client.getQueryCache().find({ queryKey: binding.key, exact: true })?.isActive() ?? false
+    return (
+      this.client
+        .getQueryCache()
+        .find({ queryKey: binding.key, exact: true })
+        ?.isActive() ?? false
+    )
   }
 
   private releaseInactive(binding: Binding) {
-    if (this.definitions.get(binding.hash) !== binding || this.active(binding)) return
+    if (this.definitions.get(binding.hash) !== binding || this.active(binding))
+      return
     this.detach(binding)
   }
 
   private detach(binding: Binding) {
-    this.settle(binding, undefined, new DOMException('订阅已结束', 'AbortError'))
+    this.settle(
+      binding,
+      undefined,
+      new DOMException('订阅已结束', 'AbortError')
+    )
     const entry = this.entries.get(binding.url)
     entry?.bindings.delete(binding.hash)
     if (entry && entry.bindings.size === 0) {
@@ -129,10 +186,17 @@ export class LiveQueryManager {
   }
 
   private fail(binding: Binding, error: unknown) {
-    const query = this.client.getQueryCache().find({ queryKey: binding.key, exact: true })
-    query?.setState({ error: error instanceof Error ? error : new ApiProtocolError(),
-      status: 'error', fetchStatus: 'idle', errorUpdatedAt: Date.now() })
+    const query = this.client
+      .getQueryCache()
+      .find({ queryKey: binding.key, exact: true })
+    query?.setState({
+      error: error instanceof Error ? error : new ApiProtocolError(),
+      status: 'error',
+      fetchStatus: 'idle',
+      errorUpdatedAt: Date.now(),
+    })
     this.settle(binding, undefined, error)
+    if (binding.snapshotOnly) this.detach(binding)
   }
 
   private apply(binding: Binding, value: unknown) {
@@ -160,7 +224,11 @@ export class LiveQueryManager {
     entry.source = source
     const listen = (name: string, action: (event: Event) => void) => {
       source.addEventListener(name, (event) => {
-        if (entry.generation !== generation || this.entries.get(entry.url) !== entry) return
+        if (
+          entry.generation !== generation ||
+          this.entries.get(entry.url) !== entry
+        )
+          return
         action(event)
       })
     }
@@ -170,6 +238,9 @@ export class LiveQueryManager {
         entry.latest = data
         entry.hasSnapshot = true
         for (const binding of entry.bindings.values()) this.apply(binding, data)
+        for (const binding of [...entry.bindings.values()]) {
+          if (binding.snapshotOnly) this.detach(binding)
+        }
       } catch (error) {
         for (const binding of entry.bindings.values()) this.fail(binding, error)
       }
@@ -177,7 +248,9 @@ export class LiveQueryManager {
     listen('node-runtime', (event) => {
       if (!entry.hasSnapshot) return
       try {
-        const patch = [...entry.bindings.values()].find((binding) => binding.patch)?.patch
+        const patch = [...entry.bindings.values()].find(
+          (binding) => binding.patch
+        )?.patch
         if (!patch) return
         const next = patch(entry.latest, this.payload(event))
         if (next === undefined || next === entry.latest) return
@@ -190,7 +263,9 @@ export class LiveQueryManager {
     listen('origin-runtime', (event) => {
       if (!entry.hasSnapshot) return
       try {
-        const patch = [...entry.bindings.values()].find((binding) => binding.patch)?.patch
+        const patch = [...entry.bindings.values()].find(
+          (binding) => binding.patch
+        )?.patch
         if (!patch) return
         const next = patch(entry.latest, this.payload(event))
         if (next === undefined || next === entry.latest) return
@@ -202,7 +277,11 @@ export class LiveQueryManager {
     })
     listen('resource-error', (event) => {
       let failure: unknown = new ApiProtocolError()
-      try { parseApiResponse(this.payload(event)) } catch (error) { failure = error }
+      try {
+        parseApiResponse(this.payload(event))
+      } catch (error) {
+        failure = error
+      }
       for (const binding of entry.bindings.values()) this.fail(binding, failure)
     })
     listen('error', () => {
@@ -219,27 +298,35 @@ export class LiveQueryManager {
   }
 
   private payload(event: Event): unknown {
-    if (!(event instanceof MessageEvent) || typeof event.data !== 'string') throw new ApiProtocolError()
-    try { return JSON.parse(event.data) } catch { throw new ApiProtocolError() }
+    if (!(event instanceof MessageEvent) || typeof event.data !== 'string')
+      throw new ApiProtocolError()
+    try {
+      return JSON.parse(event.data)
+    } catch {
+      throw new ApiProtocolError()
+    }
   }
 
   private checkSession(reconnect = false) {
     if (this.recovering) return
     const epoch = this.epoch
-    const recovery = this.recoverSession().then(() => {
-      if (this.epoch !== epoch) return
-      for (const entry of this.entries.values())
-        if (reconnect || !entry.source) this.connect(entry)
-    }).catch((error: unknown) => {
-      if (this.epoch !== epoch) return
-      this.onSessionError(error)
-      if (this.epoch === epoch) {
+    const recovery = this.recoverSession()
+      .then(() => {
+        if (this.epoch !== epoch) return
         for (const entry of this.entries.values())
-          if (!entry.source) this.connect(entry)
-      }
-    }).finally(() => {
-      if (this.recovering === recovery) this.recovering = undefined
-    })
+          if (reconnect || !entry.source) this.connect(entry)
+      })
+      .catch((error: unknown) => {
+        if (this.epoch !== epoch) return
+        this.onSessionError(error)
+        if (this.epoch === epoch) {
+          for (const entry of this.entries.values())
+            if (!entry.source) this.connect(entry)
+        }
+      })
+      .finally(() => {
+        if (this.recovering === recovery) this.recovering = undefined
+      })
     this.recovering = recovery
   }
 
@@ -249,27 +336,49 @@ export class LiveQueryManager {
     for (const entry of this.entries.values()) {
       this.retire(entry)
       for (const binding of entry.bindings.values())
-        this.settle(binding, undefined, new DOMException('会话已结束', 'AbortError'))
+        this.settle(
+          binding,
+          undefined,
+          new DOMException('会话已结束', 'AbortError')
+        )
     }
     this.entries.clear()
     this.definitions.clear()
   }
 
-  dispose() { this.close(); this.unsubscribe() }
+  dispose() {
+    this.close()
+    this.unsubscribe()
+  }
 }
 
 let manager: LiveQueryManager | undefined
 
-export function setLiveQueryQueryClient(client: QueryClient, onSessionError?: (error: unknown) => void,
-  createSource?: (url: string) => Source) {
+export function setLiveQueryQueryClient(
+  client: QueryClient,
+  onSessionError?: (error: unknown) => void,
+  createSource?: (url: string) => Source
+) {
   manager?.dispose()
-  manager = new LiveQueryManager(client, createSource, undefined, onSessionError)
+  manager = new LiveQueryManager(
+    client,
+    createSource,
+    undefined,
+    onSessionError
+  )
 }
 
-export function readLiveQuery<T>(url: string, key: QueryKey, signal?: AbortSignal,
-  parse?: (value: unknown) => T, patch?: (current: T | undefined, value: unknown) => T | undefined) {
+export function readLiveQuery<T>(
+  url: string,
+  key: QueryKey,
+  signal?: AbortSignal,
+  parse?: (value: unknown) => T,
+  patch?: (current: T | undefined, value: unknown) => T | undefined
+) {
   if (!manager) throw new Error('实时查询客户端尚未初始化')
   return manager.read(url, key, signal, parse, patch)
 }
 
-export function closeLiveQueries() { manager?.close() }
+export function closeLiveQueries() {
+  manager?.close()
+}

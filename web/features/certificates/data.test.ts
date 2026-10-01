@@ -13,10 +13,15 @@ import {
 } from './data'
 
 class Source extends EventTarget {
-  close() {}
+  closed = false
+  close() {
+    this.closed = true
+  }
 }
 
-const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+const client = new QueryClient({
+  defaultOptions: { queries: { retry: false } },
+})
 
 const adapter = api.defaults.adapter
 afterEach(() => {
@@ -25,33 +30,83 @@ afterEach(() => {
   client.clear()
 })
 
-test('certificate snapshots replace option and filtered list caches', async () => {
+test('certificate options release after the first snapshot while lists stay live', async () => {
   const source = new Source()
   setLiveQueryQueryClient(client, undefined, () => source as never)
   const options = new QueryObserver(client, usableCertificateOptionsQuery)
   const stop = options.subscribe(() => undefined)
   const pending = options.refetch()
-  source.dispatchEvent(new MessageEvent('snapshot', {
-    data: JSON.stringify({ code: 0, message: 'ok', data: [{ id: 'first' }] }),
-  }))
+  source.dispatchEvent(
+    new MessageEvent('snapshot', {
+      data: JSON.stringify({ code: 0, message: 'ok', data: [{ id: 'first' }] }),
+    })
+  )
   await expect(pending).resolves.toMatchObject({ data: [{ id: 'first' }] })
-  source.dispatchEvent(new MessageEvent('snapshot', {
-    data: JSON.stringify({ code: 0, message: 'ok', data: [{ id: 'replacement' }] }),
-  }))
+  expect(source.closed).toBe(true)
+  source.dispatchEvent(
+    new MessageEvent('snapshot', {
+      data: JSON.stringify({
+        code: 0,
+        message: 'ok',
+        data: [{ id: 'replacement' }],
+      }),
+    })
+  )
   await new Promise<void>((resolve) => queueMicrotask(resolve))
-  expect(client.getQueryData(usableCertificateOptionsQuery.queryKey)).toEqual([{ id: 'replacement' }])
+  expect(client.getQueryData(usableCertificateOptionsQuery.queryKey)).toEqual([
+    { id: 'first' },
+  ])
   stop()
   options.destroy()
 
   const listSource = new Source()
   setLiveQueryQueryClient(client, undefined, () => listSource as never)
-  const query = new QueryObserver(client, certificatesQuery({ page: 2, page_size: 10, keyword: 'example' }))
+  const query = new QueryObserver(
+    client,
+    certificatesQuery({ page: 2, page_size: 10, keyword: 'example' })
+  )
   const unsubscribe = query.subscribe(() => undefined)
   const listPending = query.refetch()
-  listSource.dispatchEvent(new MessageEvent('snapshot', {
-    data: JSON.stringify({ code: 0, message: 'ok', data: { list: [{ id: 'certificate' }], total: 1, page: 2, page_size: 10, total_pages: 1 } }),
-  }))
-  await expect(listPending).resolves.toMatchObject({ data: { list: [{ id: 'certificate' }] } })
+  listSource.dispatchEvent(
+    new MessageEvent('snapshot', {
+      data: JSON.stringify({
+        code: 0,
+        message: 'ok',
+        data: {
+          list: [{ id: 'certificate' }],
+          total: 1,
+          page: 2,
+          page_size: 10,
+          total_pages: 1,
+        },
+      }),
+    })
+  )
+  await expect(listPending).resolves.toMatchObject({
+    data: { list: [{ id: 'certificate' }] },
+  })
+  expect(listSource.closed).toBe(false)
+  listSource.dispatchEvent(
+    new MessageEvent('snapshot', {
+      data: JSON.stringify({
+        code: 0,
+        message: 'ok',
+        data: {
+          list: [{ id: 'replacement' }],
+          total: 1,
+          page: 2,
+          page_size: 10,
+          total_pages: 1,
+        },
+      }),
+    })
+  )
+  await new Promise<void>((resolve) => queueMicrotask(resolve))
+  expect(
+    client.getQueryData(
+      certificatesQuery({ page: 2, page_size: 10, keyword: 'example' }).queryKey
+    )
+  ).toMatchObject({ list: [{ id: 'replacement' }] })
   unsubscribe()
   query.destroy()
 })

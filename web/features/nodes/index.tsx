@@ -1,46 +1,49 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import {
   keepPreviousData,
   useMutation,
   useQuery,
+  useQueryClient,
 } from '@tanstack/react-query'
-import type { ColumnDef } from '@tanstack/react-table'
-import { FileTerminal, KeyRound, Pencil, Trash2 } from 'lucide-react'
-import { toast } from 'sonner'
+import type { DataGridColumn } from '@heroui-pro/react'
+import { Button, toast } from '@heroui/react'
+import { apiErrorMessage } from '@/lib/api'
 import { formatBytesPerSecond, formatDate } from '@/lib/format'
-import { DEFAULT_PAGE_SIZE } from '@/lib/page-size'
-import { useResourceFilters } from '@/hooks/use-resource-filters'
-import {
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-} from '@/components/ui/dropdown-menu'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { ConfirmDialog } from '@/components/confirm-dialog'
-import { DataTableColumnHeader } from '@/components/data-table'
-import { DataTableCellContent } from '@/components/data-table/cell-content'
-import { ResourceTable } from '@/components/resource-table'
-import { ResourceToolbar } from '@/components/resource-toolbar'
-import { RowActions } from '@/components/row-actions'
-import { StatusBadge } from '@/components/status-badge'
+import { queryKeys } from '@/lib/query-keys'
+import { Confirm } from '@/components/confirm'
+import { Choice, Field, Notice } from '@/components/forms'
+import { Page, QueryNotice } from '@/components/page'
+import { ResourceList } from '@/components/resource-list'
+import { RowMenu } from '@/components/row-menu'
+import { StatusChip } from '@/components/status-chip'
 import { clusterOptionsQuery } from '@/features/clusters/data'
-import { dnsLinePath } from '@/features/dns-zones/dns-lines'
-import type { Node } from '@/features/nodes/types'
 import { CredentialsDialog } from './credentials-dialog'
 import {
+  getNodeCredentials,
   nodesQuery,
   removeNode,
-  getNodeCredentials,
   type NodeCredentials,
 } from './data'
 import { NodeDialog } from './node-dialog'
-import { NodeLogSheet } from './node-log-sheet'
-import { useClusterDnsLines } from './use-cluster-dns-lines'
+import { NodeLogDialog } from './node-log-dialog'
+import type { Node } from './types'
+
+export function NodesPage() {
+  const [createOpen, setCreateOpen] = useState(false)
+  return (
+    <Page
+      title='节点管理'
+      description='管理边缘节点、接入配置与实时运行状态。'
+      actions={
+        <Button size='sm' onPress={() => setCreateOpen(true)}>
+          添加节点
+        </Button>
+      }
+    >
+      <NodesPanel createOpen={createOpen} onCreateOpenChange={setCreateOpen} />
+    </Page>
+  )
+}
 
 export function NodesPanel({
   initialClusterId,
@@ -53,22 +56,18 @@ export function NodesPanel({
   onCreateOpenChange?: (open: boolean) => void
   showClusterFilter?: boolean
 }) {
+  const client = useQueryClient()
   const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
-  const filter = useResourceFilters({
-    keyword: '',
-    clusterId: initialClusterId ?? 'all',
-    status: 'all',
-  })
-  const { keyword, clusterId, status } = filter.filters
-  const [dialog, setDialog] = useState<Node | 'new' | null>(null)
+  const [pageSize, setPageSize] = useState(20)
+  const [draft, setDraft] = useState('')
+  const [keyword, setKeyword] = useState('')
+  const [clusterId, setClusterId] = useState(initialClusterId ?? 'all')
+  const [status, setStatus] = useState('all')
+  const [dialog, setDialog] = useState<Node | null>(null)
   const [removeTarget, setRemoveTarget] = useState<Node | null>(null)
   const [credentials, setCredentials] = useState<NodeCredentials | null>(null)
   const [logNode, setLogNode] = useState<Node | null>(null)
-
-  const clustersQuery = useQuery(clusterOptionsQuery)
-  const clusters = useMemo(() => clustersQuery.data ?? [], [clustersQuery.data])
-  const linesByCluster = useClusterDnsLines(clusters)
+  const clusters = useQuery(clusterOptionsQuery)
   const query = useQuery({
     ...nodesQuery({
       page,
@@ -78,268 +77,257 @@ export function NodesPanel({
       status: status === 'all' ? undefined : status,
     }),
     placeholderData: keepPreviousData,
+    enabled: !logNode,
   })
   const remove = useMutation({
     mutationFn: removeNode,
     onSuccess: (response) => {
       toast.success(response.message)
       setRemoveTarget(null)
+      void client.invalidateQueries({ queryKey: queryKeys.nodes })
+      void client.invalidateQueries({ queryKey: queryKeys.clusters })
     },
   })
-  const { mutate: loadNodeCredentials } = useMutation({
-    mutationFn: (item: Node) => getNodeCredentials(item.id),
+  const reveal = useMutation({
+    mutationFn: (node: Node) => getNodeCredentials(node.id),
     onSuccess: setCredentials,
   })
-
-  const columns = useMemo<ColumnDef<Node>[]>(
-    () => [
-      {
-        accessorKey: 'name',
-        size: 155,
-        header: ({ column }) => (
-          <DataTableColumnHeader column={column} title='节点' />
-        ),
-        cell: ({ row }) => (
-          <DataTableCellContent>
-            <span className='font-medium' title={row.original.name}>
-              {row.original.name}
-            </span>
-            <span className='text-xs text-muted-foreground'>
-              {row.original.runtime.agent_version || '未注册'}
-            </span>
-          </DataTableCellContent>
-        ),
-      },
-      {
-        id: 'cluster',
-        size: 125,
-        header: '集群',
-        cell: ({ row }) => (
-          <span className='font-medium' title={row.original.cluster_name}>
-            {row.original.cluster_name}
+  const columns: DataGridColumn<Node>[] = [
+    {
+      id: 'name',
+      header: '节点',
+      isRowHeader: true,
+      minWidth: 160,
+      cell: (node) => (
+        <div>
+          <strong className='block text-sm font-medium'>{node.name}</strong>
+          <span className='text-xs text-muted'>
+            {node.runtime.agent_version || '等待接入'}
           </span>
-        ),
-      },
-      {
-        id: 'connection',
-        size: 100,
-        header: '连接',
-        cell: ({ row }) => (
-          <StatusBadge status={row.original.runtime.connection_status} />
-        ),
-      },
-      {
-        id: 'heartbeat',
-        size: 185,
-        header: '心跳',
-        cell: ({ row }) => (
-          <time
-            className='text-xs text-muted-foreground tabular-nums'
-            dateTime={row.original.runtime.last_heartbeat_at}
-            title={row.original.runtime.last_heartbeat_at}
-          >
-            {formatDate(row.original.runtime.last_heartbeat_at)}
-          </time>
-        ),
-      },
-      {
-        id: 'ip',
-        size: 175,
-        header: '节点 IP',
-        cell: ({ row }) => {
-          const endpoints = row.original.config.endpoints
-          return (
-            <div className='grid gap-1 font-mono text-sm'>
-              {endpoints.map((endpoint) => (
-                <code key={endpoint.id} title={endpoint.ip_address}>
-                  {endpoint.ip_address}
-                </code>
-              ))}
+        </div>
+      ),
+    },
+    {
+      id: 'cluster',
+      header: '集群',
+      minWidth: 130,
+      cell: (node) => node.cluster_name,
+    },
+    {
+      id: 'connection',
+      header: '连接',
+      minWidth: 100,
+      cell: (node) => <StatusChip status={node.runtime.connection_status} />,
+    },
+    {
+      id: 'endpoint',
+      header: '服务端点',
+      minWidth: 220,
+      cell: (node) => (
+        <div className='grid gap-1'>
+          {node.config.endpoints.map((endpoint) => (
+            <div key={endpoint.id} className='flex flex-wrap gap-x-3 gap-y-0.5'>
+              <code className='text-xs'>{endpoint.ip_address}</code>
+              <span className='text-xs text-muted'>{endpoint.line_code}</span>
             </div>
-          )
-        },
-      },
-      {
-        id: 'line',
-        size: 130,
-        header: 'DNS 线路',
-        cell: ({ row }) => {
-          const endpoints = row.original.config.endpoints
-          const lines = linesByCluster?.[row.original.cluster_id] ?? []
-          return (
-            <div className='grid gap-1 text-sm'>
-              {endpoints.map((endpoint) => {
-                const line = dnsLinePath(lines, endpoint.line_code)
-                return (
-                  <span key={endpoint.id} title={line}>
-                    {line}
-                  </span>
-                )
-              })}
-            </div>
-          )
-        },
-      },
-      {
-        id: 'metrics',
-        size: 300,
-        header: '实时负载',
-        cell: ({ row }) => (
-          <div className='text-xs whitespace-nowrap text-muted-foreground'>
-            CPU {row.original.runtime.cpu_usage?.toFixed(1) ?? '—'}% · 内存{' '}
-            {row.original.runtime.memory_usage?.toFixed(1) ?? '—'}% ·{' '}
-            {formatBytesPerSecond(row.original.runtime.traffic_out_bps)} ·{' '}
-            {row.original.runtime.connection_count ?? '—'} 连接
-          </div>
-        ),
-      },
-      {
-        accessorKey: 'status',
-        size: 120,
-        header: '启用状态',
-        cell: ({ row }) => <StatusBadge status={row.original.status} />,
-      },
-      {
-        id: 'actions',
-        size: 52,
-        header: () => <span className='sr-only'>操作</span>,
-        cell: ({ row }) => (
-          <div className='flex justify-end'>
-            <RowActions>
-              <DropdownMenuItem onSelect={() => setDialog(row.original)}>
-                <Pencil /> 编辑
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onSelect={() => loadNodeCredentials(row.original)}
-              >
-                <KeyRound /> 接入凭据
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => setLogNode(row.original)}>
-                <FileTerminal /> 实时日志
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                variant='destructive'
-                onSelect={() => setRemoveTarget(row.original)}
-              >
-                <Trash2 /> 删除
-              </DropdownMenuItem>
-            </RowActions>
-          </div>
-        ),
-      },
-    ],
-    [linesByCluster, loadNodeCredentials]
-  )
-
+          ))}
+        </div>
+      ),
+    },
+    {
+      id: 'metrics',
+      header: '运行指标',
+      minWidth: 235,
+      cell: (node) => (
+        <div className='grid gap-0.5 text-xs tabular-nums'>
+          <span>
+            CPU {node.runtime.cpu_usage?.toFixed(1) ?? '—'}% · 内存{' '}
+            {node.runtime.memory_usage?.toFixed(1) ?? '—'}%
+          </span>
+          <span className='text-muted'>
+            {formatBytesPerSecond(node.runtime.traffic_out_bps)} ·{' '}
+            {node.runtime.connection_count?.toLocaleString() ?? '—'} 连接
+          </span>
+        </div>
+      ),
+    },
+    {
+      id: 'heartbeat',
+      header: '最近心跳',
+      minWidth: 175,
+      cell: (node) => (
+        <time
+          className='text-xs text-muted tabular-nums'
+          dateTime={node.runtime.last_heartbeat_at}
+        >
+          {formatDate(node.runtime.last_heartbeat_at)}
+        </time>
+      ),
+    },
+    {
+      id: 'status',
+      header: '状态',
+      minWidth: 100,
+      cell: (node) => <StatusChip status={node.status} />,
+    },
+    {
+      id: 'actions',
+      header: '操作',
+      minWidth: 70,
+      cell: (node) => (
+        <RowMenu
+          label={`管理节点 ${node.name}`}
+          actions={[
+            { id: 'edit', label: '编辑配置', onAction: () => setDialog(node) },
+            {
+              id: 'credentials',
+              label: '接入凭据',
+              onAction: () => reveal.mutate(node),
+              disabled: reveal.isPending,
+            },
+            { id: 'logs', label: '实时日志', onAction: () => setLogNode(node) },
+            {
+              id: 'remove',
+              label: '删除节点',
+              onAction: () => {
+                remove.reset()
+                setRemoveTarget(node)
+              },
+              danger: true,
+            },
+          ]}
+        />
+      ),
+    },
+  ]
   return (
     <>
-      <ResourceToolbar
-        value={filter.draft.keyword}
-        onChange={(value) => filter.setField('keyword', value)}
-        onSearch={() => {
-          const changed = filter.apply()
-          setPage(1)
-          if (!changed && page === 1) void query.refetch()
-        }}
-        onReset={() => {
-          const changed = filter.reset()
-          setPage(1)
-          if (!changed && page === 1) void query.refetch()
-        }}
-        refreshing={query.isFetching}
-        placeholder='搜索节点名称…'
-        filters={
-          <>
-            {showClusterFilter && (
-              <Select
-                value={filter.draft.clusterId}
-                onValueChange={(value) => filter.setField('clusterId', value)}
-              >
-                <SelectTrigger className='w-44'>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value='all'>全部集群</SelectItem>
-                  {clustersQuery.data?.map((cluster) => (
-                    <SelectItem key={cluster.id} value={cluster.id}>
-                      {cluster.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-            <Select
-              value={filter.draft.status}
-              onValueChange={(value) => filter.setField('status', value)}
-            >
-              <SelectTrigger className='w-36'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value='all'>全部状态</SelectItem>
-                <SelectItem value='enabled'>已启用</SelectItem>
-                <SelectItem value='disabled'>已停用</SelectItem>
-              </SelectContent>
-            </Select>
-          </>
-        }
-      />
-      <ResourceTable
+      <QueryNotice query={clusters} onRetry={() => void clusters.refetch()} />
+      {reveal.isError && <Notice>{apiErrorMessage(reveal.error)}</Notice>}
+      <ResourceList
+        label='节点列表'
+        query={query}
+        data={query.data}
         columns={columns}
-        data={query.data?.list ?? []}
-        fixedLayout
-        loading={query.isLoading}
-        error={query.isError}
-        onRetry={() => void query.refetch()}
         page={page}
+        onPageChange={setPage}
         pageSize={pageSize}
-        totalPages={query.data?.total_pages ?? 1}
-        onPaginationChange={(nextPage, nextSize) => {
-          setPage(nextPage)
-          setPageSize(nextSize)
+        onPageSizeChange={(value) => {
+          setPageSize(value)
+          setPage(1)
         }}
-        emptyTitle='暂无节点'
-        emptyDescription='添加节点后会生成一次性接入凭据。'
+        onRefresh={() => void query.refetch()}
+        emptyTitle='暂无边缘节点'
+        emptyDescription='添加节点并使用接入凭据启动节点程序。'
+        filters={
+          <form
+            className='flex flex-wrap items-end gap-2'
+            onSubmit={(event) => {
+              event.preventDefault()
+              setKeyword(draft.trim())
+              setPage(1)
+              if (keyword === draft.trim() && page === 1) void query.refetch()
+            }}
+          >
+            {showClusterFilter && (
+              <Choice
+                compact
+                label='所属集群'
+                value={clusterId}
+                onChange={(value) => {
+                  setClusterId(value)
+                  setPage(1)
+                }}
+                items={[
+                  { id: 'all', label: '全部集群' },
+                  ...(clusters.data ?? []).map((cluster) => ({
+                    id: cluster.id,
+                    label: cluster.name,
+                  })),
+                ]}
+              />
+            )}
+            <Choice
+              compact
+              label='节点状态'
+              value={status}
+              onChange={(value) => {
+                setStatus(value)
+                setPage(1)
+              }}
+              items={[
+                { id: 'all', label: '全部状态' },
+                { id: 'enabled', label: '已启用' },
+                { id: 'disabled', label: '已停用' },
+              ]}
+            />
+            <div className='w-52 max-w-full'>
+              <Field
+                label='搜索节点'
+                value={draft}
+                onChange={setDraft}
+                placeholder='节点名称'
+              />
+            </div>
+            <Button size='sm' variant='secondary' type='submit'>
+              搜索
+            </Button>
+            {(keyword ||
+              status !== 'all' ||
+              (showClusterFilter && clusterId !== 'all')) && (
+              <Button
+                size='sm'
+                variant='tertiary'
+                onPress={() => {
+                  setDraft('')
+                  setKeyword('')
+                  setStatus('all')
+                  setClusterId(initialClusterId ?? 'all')
+                  setPage(1)
+                }}
+              >
+                重置
+              </Button>
+            )}
+          </form>
+        }
       />
       {(dialog || createOpen) && (
         <NodeDialog
-          key={!dialog || dialog === 'new' ? 'new' : dialog.id}
-          node={!dialog || dialog === 'new' ? undefined : dialog}
-          clusters={clustersQuery.data ?? []}
+          key={dialog?.id ?? 'new'}
+          node={
+            dialog
+              ? (query.data?.list.find((node) => node.id === dialog.id) ??
+                dialog)
+              : undefined
+          }
+          clusters={clusters.data ?? []}
           initialClusterId={clusterId === 'all' ? undefined : clusterId}
-          open
           onCredentials={setCredentials}
-          onOpenChange={(open) => {
-            if (!open) {
-              setDialog(null)
-              onCreateOpenChange?.(false)
-            }
+          onClose={() => {
+            setDialog(null)
+            onCreateOpenChange?.(false)
           }}
         />
       )}
-      <CredentialsDialog
-        credentials={credentials}
-        onOpenChange={(open) => !open && setCredentials(null)}
-      />
-      {logNode && (
-        <NodeLogSheet
-          key={logNode.id}
-          node={logNode}
-          onOpenChange={(open) => !open && setLogNode(null)}
+      {credentials && (
+        <CredentialsDialog
+          credentials={credentials}
+          onClose={() => setCredentials(null)}
         />
       )}
-      <ConfirmDialog
-        open={!!removeTarget}
-        onOpenChange={(open) => !open && setRemoveTarget(null)}
-        title='删除节点'
-        desc={`确定删除“${removeTarget?.name ?? ''}”吗？该节点的接入凭据将立即失效。`}
-        confirmText={remove.isPending ? '正在删除…' : '确认删除'}
-        cancelBtnText='取消'
-        destructive
-        isLoading={remove.isPending}
-        handleConfirm={() => removeTarget && remove.mutate(removeTarget)}
-      />
+      {logNode && (
+        <NodeLogDialog node={logNode} onClose={() => setLogNode(null)} />
+      )}
+      {removeTarget && (
+        <Confirm
+          title='删除节点'
+          description={`确定删除“${removeTarget.name}”吗？该节点将无法继续接入控制面。`}
+          onClose={() => setRemoveTarget(null)}
+          busy={remove.isPending}
+          onConfirm={() => remove.mutateAsync(removeTarget)}
+        />
+      )}
     </>
   )
 }

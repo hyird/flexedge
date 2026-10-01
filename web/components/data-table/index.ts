@@ -1,5 +1,0 @@
-export { DataTablePagination } from './pagination'
-export { PageSizeSelect } from './page-size-select'
-export { DataTableColumnHeader } from './column-header'
-export { DataTableToolbar } from './toolbar'
-export { DataTableBulkActions } from './bulk-actions'

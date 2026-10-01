@@ -9,8 +9,7 @@ const eslint = new ESLint({
 test('the actual lint config rejects business dependencies in shared layers', async () => {
   for (const filePath of [
     'web/lib/boundary-probe.ts',
-    'web/components/ui/boundary-probe.tsx',
-    'web/components/data-table/boundary-probe.tsx',
+    'web/components/boundary-probe.tsx',
   ]) {
     for (const module of [
       '@/features/tasks/types',
@@ -32,7 +31,7 @@ test('the actual lint config rejects business dependencies in shared layers', as
 
 test('UI files remain linted and can reuse shared primitives', async () => {
   const [result] = await eslint.lintText("export { cn } from '@/lib/utils'", {
-    filePath: 'web/components/ui/boundary-probe.tsx',
+    filePath: 'web/components/boundary-probe.tsx',
   })
   expect(result.messages).toEqual([])
 })

@@ -1,6 +1,6 @@
 import type { QueryClient } from '@tanstack/react-query'
-import { queryKeys } from '@/lib/query-keys'
 import { closeLiveQueries } from '@/lib/live-query'
+import { queryKeys } from '@/lib/query-keys'
 import type { AuthUser } from './types'
 
 type Lifetime = { active: boolean; version: number; cleanups: Set<() => void> }

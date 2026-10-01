@@ -12,8 +12,26 @@ export type Node = Revisioned & {
   name: string
   status: string
   node_spec_revision: number
-  config: { endpoints: NodeEndpoint[] }
+  config: { endpoints: NodeEndpoint[]; cache?: NodeCacheConfig }
   runtime: {
+    cache_statistics?: {
+      memory_hits: number
+      disk_hits: number
+      misses: number
+      bypasses: number
+      stale_hits: number
+      revalidations: number
+      origin_bytes: number
+      cache_bytes: number
+      coalesced: number
+      active_waiters: number
+      memory_bytes: number
+      disk_bytes: number
+      entries: number
+      writes: number
+      write_errors: number
+      evictions: number
+    } | null
     registration_status: string
     connection_status: string
     last_heartbeat_at?: string
@@ -31,4 +49,10 @@ export type Node = Revisioned & {
     health?: string
     last_error?: string
   }
+}
+export type NodeCacheConfig = {
+  memory_bytes: number
+  disk_bytes: number
+  max_object_bytes: number
+  directory: string
 }

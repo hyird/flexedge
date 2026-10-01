@@ -1,8 +1,8 @@
 import type { z } from 'zod'
 import { queryOptions, skipToken, useQuery } from '@tanstack/react-query'
 import { streamPath } from '@/lib/api'
-import { readLiveQuery } from '@/lib/live-query'
 import { ApiProtocolError } from '@/lib/api-response'
+import { readLiveQuery } from '@/lib/live-query'
 import { validateCollectionPage } from '@/lib/pagination'
 import { queryKeys } from '@/lib/query-keys'
 import {
@@ -29,10 +29,10 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
 
 export function tasksQuery(params: TaskFilters = {}) {
   return queryOptions({
-  retry: false,
+    retry: false,
     queryKey: [...queryKeys.tasks, 'list', params],
-    queryFn: ({ queryKey, signal }) => readLiveQuery(streamPath('/tasks', params), queryKey, signal,
-      (data) => {
+    queryFn: ({ queryKey, signal }) =>
+      readLiveQuery(streamPath('/tasks', params), queryKey, signal, (data) => {
         const page = parse(taskPageSchema, data)
         validateCollectionPage(page, params.page ?? 1)
         return page
@@ -46,7 +46,7 @@ export function useTasks(params: TaskFilters = {}) {
 
 export function taskDetailQuery(task: Task | null) {
   return queryOptions({
-  retry: false,
+    retry: false,
     queryKey: [
       ...queryKeys.tasks,
       'detail',
@@ -56,23 +56,34 @@ export function taskDetailQuery(task: Task | null) {
     ],
     queryFn: task
       ? ({ queryKey, signal }) =>
-          readLiveQuery(streamPath(`/tasks/${task.id}`, {
+          readLiveQuery(
+            streamPath(`/tasks/${task.id}`, {
               resource_id: task.resource_id,
               version: task.version,
-            }), queryKey, signal, (data) => parse(taskSchema, data))
+            }),
+            queryKey,
+            signal,
+            (data) => parse(taskSchema, data)
+          )
       : skipToken,
   })
 }
 
 export function taskHistoryQuery(task: Task | null) {
   return queryOptions({
-  retry: false,
+    retry: false,
     queryKey: [...queryKeys.tasks, 'history', task?.id, task?.version],
     queryFn:
       task && task.resource_type !== 'node'
         ? ({ queryKey, signal }) =>
-            readLiveQuery(streamPath(`/tasks/${task.id}/history`, { version: task.version }),
-              queryKey, signal, (data) => parse(taskHistorySchema, data))
+            readLiveQuery(
+              streamPath(`/tasks/${task.id}/history`, {
+                version: task.version,
+              }),
+              queryKey,
+              signal,
+              (data) => parse(taskHistorySchema, data)
+            )
         : skipToken,
   })
 }

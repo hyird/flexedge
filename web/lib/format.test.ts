@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { apiErrorMessage } from './api'
-import { formatBytes, formatBytesPerSecond, formatDate, initials } from './format'
+import {
+  formatBytes,
+  formatBytesPerSecond,
+  formatDate,
+  initials,
+} from './format'
 
 describe('format helpers', () => {
   it('formats transfer rates with binary units', () => {

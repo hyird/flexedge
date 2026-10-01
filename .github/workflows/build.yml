@@ -39,6 +39,8 @@ jobs:
           bun-version: 1.4.0
 
       - name: Install frontend dependencies
+        env:
+          HEROUI_AUTH_TOKEN: ${{ secrets.HEROUI_AUTH_TOKEN }}
         run: bun install --frozen-lockfile
 
       - name: Frontend lint

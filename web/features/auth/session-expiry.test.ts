@@ -1,10 +1,13 @@
 import { AxiosError, AxiosHeaders } from 'axios'
 import { afterEach, expect, test } from 'vitest'
+import { api } from '@/lib/api'
 import { createAppQueryClient } from '@/lib/query-client'
 import { queryKeys } from '@/lib/query-keys'
-import { createSessionExpiryHandler, recoverStreamSession } from './session-expiry'
+import {
+  createSessionExpiryHandler,
+  recoverStreamSession,
+} from './session-expiry'
 import { registerSessionCleanup } from './session-lifecycle'
-import { api } from '@/lib/api'
 
 const clients: ReturnType<typeof createAppQueryClient>[] = []
 afterEach(() => clients.splice(0).forEach((client) => client.clear()))
@@ -25,11 +28,15 @@ test('stream recovery keeps the session on transient transport failure', async (
   clients.push(client)
   client.setQueryData(queryKeys.session, { id: 'admin' })
   const original = api.defaults.adapter
-  api.defaults.adapter = async () => { throw new Error('network down') }
+  api.defaults.adapter = async () => {
+    throw new Error('network down')
+  }
   try {
     await expect(recoverStreamSession(client)).resolves.toBe(true)
     expect(client.getQueryData(queryKeys.session)).toEqual({ id: 'admin' })
-  } finally { api.defaults.adapter = original }
+  } finally {
+    api.defaults.adapter = original
+  }
 })
 
 test('a final query 401 tears down cached resources and streams before navigation', async () => {

@@ -17,25 +17,48 @@ export function patchWebsiteOriginRuntime(
     reported_at?: string
     origin_states?: Website['runtime']['origin_states']
   }
-  if (patch.id !== current.id || !patch.node_id || patch.node_revision === undefined ||
-      !patch.reported_at || !Array.isArray(patch.origin_states))
+  if (
+    patch.id !== current.id ||
+    !patch.node_id ||
+    patch.node_revision === undefined ||
+    !patch.reported_at ||
+    !Array.isArray(patch.origin_states)
+  )
     return current
-  const source = current.runtime.origin_sources?.find((item) => item.node_id === patch.node_id)
-  if (!source || source.node_revision !== patch.node_revision ||
-      Date.parse(patch.reported_at) <= Date.parse(source.reported_at)) return current
-  const existing = current.runtime.origin_states.filter((state) => state.node_id === patch.node_id)
-  const incomingLatest = Math.max(0, ...patch.origin_states.map((state) => state.checked_at_unix_millis))
-  const existingLatest = Math.max(0, ...existing.map((state) => state.checked_at_unix_millis))
+  const source = current.runtime.origin_sources?.find(
+    (item) => item.node_id === patch.node_id
+  )
+  if (
+    !source ||
+    source.node_revision !== patch.node_revision ||
+    Date.parse(patch.reported_at) <= Date.parse(source.reported_at)
+  )
+    return current
+  const existing = current.runtime.origin_states.filter(
+    (state) => state.node_id === patch.node_id
+  )
+  const incomingLatest = Math.max(
+    0,
+    ...patch.origin_states.map((state) => state.checked_at_unix_millis)
+  )
+  const existingLatest = Math.max(
+    0,
+    ...existing.map((state) => state.checked_at_unix_millis)
+  )
   if (incomingLatest > 0 && incomingLatest < existingLatest) return current
   return {
     ...current,
     runtime: {
       ...current.runtime,
       origin_sources: (current.runtime.origin_sources ?? []).map((item) =>
-        item.node_id === patch.node_id ? { ...item, reported_at: patch.reported_at! } : item
+        item.node_id === patch.node_id
+          ? { ...item, reported_at: patch.reported_at! }
+          : item
       ),
       origin_states: [
-        ...current.runtime.origin_states.filter((state) => state.node_id !== patch.node_id),
+        ...current.runtime.origin_states.filter(
+          (state) => state.node_id !== patch.node_id
+        ),
         ...patch.origin_states,
       ],
     },
@@ -66,9 +89,14 @@ export function websitesQuery(params: {
   status?: string
 }) {
   return queryOptions({
-  retry: false,
+    retry: false,
     queryKey: [...queryKeys.websites, 'list', params],
-    queryFn: ({ queryKey, signal }) => readLiveQuery<PageData<Website>>(streamPath('/websites', params), queryKey, signal),
+    queryFn: ({ queryKey, signal }) =>
+      readLiveQuery<PageData<Website>>(
+        streamPath('/websites', params),
+        queryKey,
+        signal
+      ),
   })
 }
 export function removeWebsite(target: Pick<Website, 'id' | 'revision'>) {
@@ -81,13 +109,16 @@ export function removeWebsite(target: Pick<Website, 'id' | 'revision'>) {
 }
 export function websiteDetailQuery(id: string | undefined) {
   return queryOptions({
-  retry: false,
+    retry: false,
     queryKey: [...queryKeys.websites, id, 'detail'],
     enabled: !!id,
     queryFn: ({ queryKey, signal }) => {
       if (!id) throw new Error('网站不存在')
       return readLiveQuery<Website>(
-        streamPath('/websites/' + id), queryKey, signal, undefined,
+        streamPath('/websites/' + id),
+        queryKey,
+        signal,
+        undefined,
         patchWebsiteOriginRuntime
       )
     },
@@ -108,10 +139,14 @@ export function websiteAccessLogHistoryQuery(
   }
 ) {
   return queryOptions({
-  retry: false,
+    retry: false,
     queryKey: [...queryKeys.websites, id, 'access-logs', params],
     queryFn: ({ queryKey, signal }) =>
-      readLiveQuery(streamPath('/websites/' + id + '/access-logs/history', params), queryKey, signal,
-        (page) => accessLogPageSchema.parse(page)),
+      readLiveQuery(
+        streamPath('/websites/' + id + '/access-logs/history', params),
+        queryKey,
+        signal,
+        (page) => accessLogPageSchema.parse(page)
+      ),
   })
 }

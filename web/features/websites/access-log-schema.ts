@@ -26,6 +26,10 @@ export const accessLogSchema = z.object({
   query_string: z.string().optional(),
   cookies: z.string().optional(),
   tls_fingerprint: z.string().optional(),
+  cache_status: z.string().optional(),
+  cache_layer: z.string().optional(),
+  origin_bytes: z.number().int().optional(),
+  cache_bytes: z.number().int().optional(),
 })
 export type AccessLog = z.infer<typeof accessLogSchema>
 export const parseAccessLogs = createLogEventParser(accessLogSchema)

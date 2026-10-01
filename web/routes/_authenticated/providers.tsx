@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { Providers } from '@/features/providers'
+import { ProvidersPage } from '@/features/providers'
 
 export const Route = createFileRoute('/_authenticated/providers')({
-  component: Providers,
+  validateSearch: (search: Record<string, unknown>) => search,
+  component: ProvidersPage,
 })

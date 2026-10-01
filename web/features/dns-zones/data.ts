@@ -7,7 +7,12 @@ import type { DnsZoneOption, DnsZone, DnsRecord } from './types'
 export const dnsZoneOptionsQuery = queryOptions({
   retry: false,
   queryKey: [...queryKeys.dnsZones, 'options'],
-  queryFn: ({ queryKey, signal }) => readLiveQuery<DnsZoneOption[]>(streamPath('/dns-zones/collection'), queryKey, signal),
+  queryFn: ({ queryKey, signal }) =>
+    readLiveQuery<DnsZoneOption[]>(
+      streamPath('/dns-zones/collection'),
+      queryKey,
+      signal
+    ),
 })
 
 export function dnsZonesQuery(params: {
@@ -17,19 +22,29 @@ export function dnsZonesQuery(params: {
   dns_provider_id?: string
 }) {
   return queryOptions({
-  retry: false,
+    retry: false,
     queryKey: [...queryKeys.dnsZones, 'list', params],
-    queryFn: ({ queryKey, signal }) => readLiveQuery<PageData<DnsZone>>(streamPath('/dns-zones', params), queryKey, signal),
+    queryFn: ({ queryKey, signal }) =>
+      readLiveQuery<PageData<DnsZone>>(
+        streamPath('/dns-zones', params),
+        queryKey,
+        signal
+      ),
   })
 }
 
 export function availableDnsZonesQuery(providerId: string) {
   return queryOptions({
-  retry: false,
+    retry: false,
     queryKey: [...queryKeys.dnsZones, 'available', providerId],
-    queryFn: ({ queryKey, signal }) => readLiveQuery(
-      streamPath('/dns-zones/available', { dns_provider_id: providerId }), queryKey, signal,
-      (data) => (data as { list: Array<{ domain: string; status: string }> }).list),
+    queryFn: ({ queryKey, signal }) =>
+      readLiveQuery(
+        streamPath('/dns-zones/available', { dns_provider_id: providerId }),
+        queryKey,
+        signal,
+        (data) =>
+          (data as { list: Array<{ domain: string; status: string }> }).list
+      ),
     enabled: !!providerId,
   })
 }
@@ -78,10 +93,15 @@ export function saveDnsRecords(
 
 export function dnsZoneLinesQuery(zoneId: string | undefined) {
   return queryOptions({
-  retry: false,
+    retry: false,
     queryKey: [...queryKeys.dnsZones, 'lines', zoneId],
-    queryFn: ({ queryKey, signal }) => readLiveQuery(streamPath('/dns-zones/' + zoneId), queryKey, signal,
-      (zone) => (zone as DnsZone).runtime.lines),
+    queryFn: ({ queryKey, signal }) =>
+      readLiveQuery(
+        streamPath('/dns-zones/' + zoneId),
+        queryKey,
+        signal,
+        (zone) => (zone as DnsZone).runtime.lines
+      ),
     enabled: !!zoneId,
   })
 }
