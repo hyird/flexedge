@@ -1,6 +1,7 @@
 import { Button, Chip } from '@heroui/react'
 import { formatDate } from '@/lib/format'
-import { Dialog, Notice } from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Notice } from '@/components/forms'
 import { useLiveLogs } from '@/features/logs/use-live-logs'
 import { parseNodeLogs } from './node-log-schema'
 import type { Node } from './types'
@@ -17,8 +18,8 @@ export function NodeLogDialog({
     parseNodeLogs
   )
   return (
-    <Dialog title={`${node.name} · 实时日志`} onClose={onClose} size='lg'>
-      <div className='grid gap-3'>
+    <Drawer title={`${node.name} · 实时日志`} onClose={onClose}>
+      <div className='flex h-full min-h-0 flex-col gap-3'>
         <div className='flex flex-wrap items-center gap-3'>
           <Chip
             size='sm'
@@ -38,7 +39,7 @@ export function NodeLogDialog({
         </div>
         {error && <Notice>{error}</Notice>}
         <div
-          className='max-h-[60vh] min-h-48 overflow-auto rounded-lg bg-surface-secondary p-3 font-mono text-xs'
+          className='min-h-0 flex-1 overflow-auto rounded-lg bg-surface-secondary p-3 font-mono text-xs'
           role='region'
           aria-label='节点实时日志列表'
         >
@@ -73,6 +74,6 @@ export function NodeLogDialog({
           )}
         </div>
       </div>
-    </Dialog>
+    </Drawer>
   )
 }

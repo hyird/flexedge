@@ -3,7 +3,8 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button, Chip, Tabs } from '@heroui/react'
 import { formatBytes, formatDate } from '@/lib/format'
-import { Choice, Dialog, Field, Notice } from '@/components/forms'
+import { Drawer } from '@/components/drawer'
+import { Choice, Field, Notice } from '@/components/forms'
 import { ResourceList } from '@/components/resource-list'
 import { useLiveLogs } from '@/features/logs/use-live-logs'
 import { parseAccessLogs, type AccessLog } from './access-log-schema'
@@ -170,7 +171,7 @@ export function AccessLogs({
     },
   ]
   return (
-    <Dialog
+    <Drawer
       title={`${website.config.name || website.access_domain} · 访问日志`}
       onClose={onClose}
       size='lg'
@@ -302,7 +303,7 @@ export function AccessLogs({
           )}
         </Tabs.Panel>
       </Tabs>
-    </Dialog>
+    </Drawer>
   )
 }
 
