@@ -14,22 +14,48 @@ type DnsProviderFilters = { page: number; page_size: number; keyword?: string }
 
 export function dnsProvidersQuery(params: DnsProviderFilters) {
   return queryOptions({
-  retry: false,
+    retry: false,
     queryKey: [...queryKeys.providers, 'dns', 'list', params],
-    queryFn: ({ queryKey, signal }) => readLiveQuery<PageData<DnsProvider>>(streamPath('/providers/dns', params), queryKey, signal),
+    queryFn: ({ queryKey, signal }) =>
+      readLiveQuery<PageData<DnsProvider>>(
+        streamPath('/providers/dns', params),
+        queryKey,
+        signal
+      ),
   })
 }
 
 export const dnsProviderOptionsQuery = queryOptions({
   retry: false,
   queryKey: [...queryKeys.providers, 'dns', 'options'],
-  queryFn: ({ queryKey, signal }) => readLiveQuery<DnsProvider[]>(streamPath('/providers/dns/options'), queryKey, signal),
+  queryFn: ({ queryKey, signal }) =>
+    readLiveQuery<DnsProvider[]>(
+      streamPath('/providers/dns/options'),
+      queryKey,
+      signal
+    ),
 })
 
 export const certificateProvidersQuery = queryOptions({
   retry: false,
-  queryKey: [...queryKeys.providers, 'certificate'],
-  queryFn: ({ queryKey, signal }) => readLiveQuery<CertificateProvider[]>(streamPath('/providers/certificate/options'), queryKey, signal),
+  queryKey: [...queryKeys.providers, 'certificate', 'options'],
+  queryFn: ({ queryKey, signal }) =>
+    readLiveQuery<CertificateProvider[]>(
+      streamPath('/providers/certificate/options'),
+      queryKey,
+      signal
+    ),
+})
+
+export const certificateProvidersListQuery = queryOptions({
+  retry: false,
+  queryKey: [...queryKeys.providers, 'certificate', 'list'],
+  queryFn: ({ queryKey, signal }) =>
+    readLiveQuery<CertificateProvider[]>(
+      streamPath('/providers/certificate'),
+      queryKey,
+      signal
+    ),
 })
 
 export function saveDnsProvider(

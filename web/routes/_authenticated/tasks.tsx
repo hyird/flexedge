@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { Tasks } from '@/features/tasks'
+import { TasksPage } from '@/features/tasks'
 
 export const Route = createFileRoute('/_authenticated/tasks')({
-  component: Tasks,
+  validateSearch: (search: Record<string, unknown>) => search,
+  component: TasksPage,
 })

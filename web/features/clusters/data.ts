@@ -1,5 +1,5 @@
 import { queryOptions } from '@tanstack/react-query'
-import { sendData, streamPath } from '@/lib/api'
+import { sendData, streamPath, type PageData } from '@/lib/api'
 import { readLiveQuery } from '@/lib/live-query'
 import { queryKeys } from '@/lib/query-keys'
 import type { Cluster } from './types'
@@ -7,8 +7,28 @@ import type { Cluster } from './types'
 export const clusterOptionsQuery = queryOptions({
   retry: false,
   queryKey: [...queryKeys.clusters, 'options'],
-  queryFn: ({ queryKey, signal }) => readLiveQuery<Cluster[]>(streamPath('/clusters/options'), queryKey, signal),
+  queryFn: ({ queryKey, signal }) =>
+    readLiveQuery<Cluster[]>(streamPath('/clusters/options'), queryKey, signal),
 })
+
+export function clustersQuery(params: {
+  page: number
+  page_size: number
+  keyword?: string
+  status?: string
+  dns_zone_id?: string
+}) {
+  return queryOptions({
+    retry: false,
+    queryKey: [...queryKeys.clusters, 'list', params],
+    queryFn: ({ queryKey, signal }) =>
+      readLiveQuery<PageData<Cluster>>(
+        streamPath('/clusters', params),
+        queryKey,
+        signal
+      ),
+  })
+}
 
 export type ClusterInput = Pick<
   Cluster,

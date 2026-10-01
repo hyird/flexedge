@@ -6,6 +6,6 @@ export const queryKeys = {
   clusters: ['clusters'],
   nodes: ['nodes'],
   websites: ['websites'],
-  syncEvents: ['sync-event-monitor'],
   tasks: ['tasks'],
+  cachePolicies: ['cache-policies'],
 } as const

@@ -1,10 +1,10 @@
 import { z } from 'zod'
 import { queryOptions } from '@tanstack/react-query'
 import { sendData, streamPath, type PageData } from '@/lib/api'
-import { readLiveQuery } from '@/lib/live-query'
 import { ApiProtocolError } from '@/lib/api-response'
+import { readLiveQuery } from '@/lib/live-query'
 import { queryKeys } from '@/lib/query-keys'
-import type { Node, NodeEndpoint } from './types'
+import type { Node, NodeEndpoint, NodeCacheConfig } from './types'
 
 const credentialsSchema = z.object({
   node_id: z.string().uuid(),
@@ -17,7 +17,7 @@ export type NodeInput = {
   cluster_id: string
   name: string
   status: 'enabled' | 'disabled'
-  config: { endpoints: NodeEndpoint[] }
+  config: { endpoints: NodeEndpoint[]; cache?: NodeCacheConfig }
 }
 
 export async function createNode(input: NodeInput) {
@@ -32,7 +32,10 @@ function parseCredentials(value: unknown): NodeCredentials {
 }
 
 export async function getNodeCredentials(id: string) {
-  const response = await sendData<unknown>('post', `/nodes/${id}/credentials/reveal`)
+  const response = await sendData<unknown>(
+    'post',
+    `/nodes/${id}/credentials/reveal`
+  )
   return parseCredentials(response.data)
 }
 
@@ -57,7 +60,7 @@ export function nodesQuery(params: {
   status?: string
 }) {
   return queryOptions({
-  retry: false,
+    retry: false,
     queryKey: [...queryKeys.nodes, 'list', params],
     queryFn: ({ queryKey, signal }) =>
       readLiveQuery<PageData<Node>>(
@@ -67,14 +70,24 @@ export function nodesQuery(params: {
         undefined,
         (current, value) => {
           if (!current || !value || typeof value !== 'object') return current
-          const patch = value as { id?: string; node_revision?: number; runtime?: Node['runtime'] }
-          if (!patch.id || patch.node_revision === undefined || !patch.runtime) return current
+          const patch = value as {
+            id?: string
+            node_revision?: number
+            runtime?: Node['runtime']
+          }
+          if (!patch.id || patch.node_revision === undefined || !patch.runtime)
+            return current
           return {
             ...current,
             list: current.list.map((node) =>
-              node.id === patch.id && node.revision === patch.node_revision &&
-              !(node.runtime.last_heartbeat_at && patch.runtime?.last_heartbeat_at &&
-                Date.parse(node.runtime.last_heartbeat_at) > Date.parse(patch.runtime.last_heartbeat_at))
+              node.id === patch.id &&
+              node.revision === patch.node_revision &&
+              !(
+                node.runtime.last_heartbeat_at &&
+                patch.runtime?.last_heartbeat_at &&
+                Date.parse(node.runtime.last_heartbeat_at) >
+                  Date.parse(patch.runtime.last_heartbeat_at)
+              )
                 ? {
                     ...node,
                     runtime: {

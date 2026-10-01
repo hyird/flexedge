@@ -1,8 +1,8 @@
 import { isAxiosError } from 'axios'
 import type { QueryClient } from '@tanstack/react-query'
 import { queryKeys } from '@/lib/query-keys'
-import { replaceSession, sessionVersion } from './session-lifecycle'
 import { sessionQueryOptions } from './data'
+import { replaceSession, sessionVersion } from './session-lifecycle'
 
 /** The API client has already attempted refresh before reporting a final 401. */
 export function createSessionExpiryHandler(

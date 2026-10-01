@@ -7,7 +7,12 @@ import type { Certificate } from './types'
 export const usableCertificateOptionsQuery = queryOptions({
   retry: false,
   queryKey: [...queryKeys.certificates, 'usable-options'],
-  queryFn: ({ queryKey, signal }) => readLiveQuery<Certificate[]>(streamPath('/certificates/options', { usable: true }), queryKey, signal),
+  queryFn: ({ queryKey, signal }) =>
+    readLiveQuery<Certificate[]>(
+      streamPath('/certificates/options', { usable: true }),
+      queryKey,
+      signal
+    ),
 })
 
 export function certificatesQuery(params: {
@@ -17,9 +22,14 @@ export function certificatesQuery(params: {
   status?: string
 }) {
   return queryOptions({
-  retry: false,
+    retry: false,
     queryKey: [...queryKeys.certificates, 'list', params],
-    queryFn: ({ queryKey, signal }) => readLiveQuery<PageData<Certificate>>(streamPath('/certificates', params), queryKey, signal),
+    queryFn: ({ queryKey, signal }) =>
+      readLiveQuery<PageData<Certificate>>(
+        streamPath('/certificates', params),
+        queryKey,
+        signal
+      ),
   })
 }
 

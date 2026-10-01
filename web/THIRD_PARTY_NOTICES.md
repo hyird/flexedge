@@ -4,9 +4,14 @@ The route preview uses RE2JS (MIT). Its complete license and the native RE2
 license are included in `docs/route-engine-notices.md` and distributed under
 `licenses/route-engine-notices.md` in the Server package.
 
-The FlexEdge console layout, theme foundation, and shared UI components are
-adapted from [satnaing/shadcn-admin](https://github.com/satnaing/shadcn-admin),
-revision `e16c87f213a5ba5e45964e9b67c792105ec74d26`.
+The console now uses HeroUI OSS and HeroUI Pro, with layout and interaction
+informed by the local UltraTerminal frontend. HeroUI Pro is distributed under
+its own commercial license; no package source is checked into this repository.
+
+The previous shadcn-admin layout, theme, and UI components have been removed.
+The notice below is retained for shared utility code previously introduced from
+[satnaing/shadcn-admin](https://github.com/satnaing/shadcn-admin), revision
+`e16c87f213a5ba5e45964e9b67c792105ec74d26`.
 
 MIT License
 

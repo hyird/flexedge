@@ -28,6 +28,31 @@ class Source extends EventTarget {
 const log = (id: string, occurred_at = id) => ({ id, occurred_at })
 
 describe('live log buffers', () => {
+  it('manual reconnect closes the old source before opening a new one and retains records', () => {
+    const sources: Source[] = []
+    const store = createLiveLogStore('/node/a', parseLogs, () => {
+      expect(sources.filter((source) => source.closes === 0)).toHaveLength(0)
+      const source = new Source()
+      sources.push(source)
+      return source
+    })
+    store.reconnect()
+    expect(sources).toHaveLength(0)
+    const stop = store.subscribe(() => undefined)
+    sources[0].logs([log('one')])
+    store.reconnect()
+    expect(sources[0].closes).toBe(1)
+    expect(sources).toHaveLength(2)
+    sources[0].logs([log('retired')])
+    expect(store.getSnapshot().logs).toEqual([log('one')])
+    sources[1].logs([log('two')])
+    expect(store.getSnapshot().logs.map((entry) => entry.id)).toEqual([
+      'two',
+      'one',
+    ])
+    stop()
+    expect(sources[1].closes).toBe(1)
+  })
   it('preserves valid records on parse failure and clears the error after a valid batch', () => {
     const source = new Source()
     const store = createLiveLogStore('/node/a', parseLogs, () => source)

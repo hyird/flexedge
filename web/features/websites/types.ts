@@ -18,6 +18,8 @@ export type WebsiteOrigin = {
 }
 
 export type WebsiteConfig = {
+  cache_enabled: boolean
+  cache_policy_id: string
   name?: string
   domains: WebsiteDomain[]
   origins: WebsiteOrigin[]

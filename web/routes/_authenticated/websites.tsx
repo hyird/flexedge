@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { Websites } from '@/features/websites'
+import { WebsitesPage } from '@/features/websites'
 
 export const Route = createFileRoute('/_authenticated/websites')({
-  component: Websites,
+  validateSearch: (search: Record<string, unknown>) => search,
+  component: WebsitesPage,
 })

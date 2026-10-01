@@ -1,294 +1,251 @@
-import { useFieldArray, useForm } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation } from '@tanstack/react-query'
-import { Plus, X } from 'lucide-react'
-import { toast } from 'sonner'
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
+import { useState } from 'react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { Button, toast } from '@heroui/react'
+import { apiErrorMessage } from '@/lib/api'
+import { queryKeys } from '@/lib/query-keys'
+import { Confirm } from '@/components/confirm'
 import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from '@/components/ui/form'
-import { Input } from '@/components/ui/input'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet'
-import { DnsLineSelect } from '@/features/dns-zones/dns-line-tree'
-import type { DnsZone } from '@/features/dns-zones/types'
+  Choice,
+  Dialog,
+  Field,
+  FormActions,
+  Notice,
+  TextAreaField,
+  Toggle,
+} from '@/components/forms'
 import { saveDnsRecords } from './data'
-import { recordsSchema, type RecordsValues } from './records-form'
+import { dnsLinePath } from './dns-lines'
+import { recordsSchema } from './records-form'
+import type { DnsRecord, DnsZone } from './types'
 
 export function RecordsDialog({
   zone,
-  open,
-  onOpenChange,
+  onClose,
 }: {
   zone: DnsZone
-  open: boolean
-  onOpenChange: (open: boolean) => void
+  onClose: () => void
 }) {
-  const supportsProxy = zone.dns_provider === 'cloudflare'
-  const systemRecords = zone.runtime.projected_records
-  const form = useForm<RecordsValues>({
-    resolver: zodResolver(recordsSchema),
-    defaultValues: { records: zone.config.records },
-  })
-  const records = useFieldArray({
-    control: form.control,
-    name: 'records',
-    keyName: 'formKey',
-  })
+  const client = useQueryClient()
+  const [records, setRecords] = useState<DnsRecord[]>(() =>
+    structuredClone(zone.config.records)
+  )
+  const [errors, setErrors] = useState<Record<string, string>>({})
+  const [remove, setRemove] = useState<DnsRecord | null>(null)
   const mutation = useMutation({
-    mutationFn: (values: RecordsValues) => saveDnsRecords(zone, values.records),
-    onSuccess: async (response) => {
-      toast.success(response.message)
-      onOpenChange(false)
+    mutationFn: (input: DnsRecord[]) => saveDnsRecords(zone, input),
+    onSuccess: (response) => {
+      toast.success(response.message || '记录已保存并提交同步')
+      void client.invalidateQueries({ queryKey: queryKeys.dnsZones })
+      onClose()
     },
   })
-
+  const update = (id: string, change: Partial<DnsRecord>) =>
+    setRecords((current) =>
+      current.map((record) =>
+        record.id === id ? { ...record, ...change } : record
+      )
+    )
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className='flex h-full w-full flex-col overflow-hidden p-0 sm:max-w-4xl'>
-        <SheetHeader className='px-6 pt-6'>
-          <SheetTitle>{zone.domain} · DNS 记录</SheetTitle>
-          <SheetDescription>
-            保存后会自动提交同步任务。系统自动记录由节点和托管网站生成，只读且不可删除。
-            {supportsProxy
-              ? ' Cloudflare 支持代理开关。'
-              : ' 当前服务商仅支持 DNS 解析。'}
-          </SheetDescription>
-        </SheetHeader>
-        <Form {...form}>
-          <form
-            id='zone-records-form'
-            className='flex min-h-0 flex-1 flex-col'
-            onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
-          >
-            <ScrollArea className='min-h-0 flex-1 px-6'>
-              <div className='space-y-3 pb-4'>
-                {!!systemRecords.length && (
-                  <section className='space-y-3 rounded-md border border-dashed bg-muted/30 p-3'>
-                    <div className='flex flex-wrap items-center gap-2'>
-                      <h3 className='text-sm font-medium'>系统自动记录</h3>
-                      <Badge variant='secondary'>只读</Badge>
-                      <p className='text-xs text-muted-foreground'>
-                        随节点、集群或网站托管解析自动更新，不能在此编辑或删除。
-                      </p>
-                    </div>
-                    <div className='space-y-2'>
-                      {systemRecords.map((record) => (
-                        <div
-                          key={record.id}
-                          className='grid gap-1 rounded-md border bg-background px-3 py-2 text-sm md:grid-cols-[100px_1fr_1.4fr_90px_100px] md:gap-2'
-                        >
-                          <span className='font-medium'>{record.type}</span>
-                          <span className='break-all'>{record.name}</span>
-                          <span className='break-all text-muted-foreground'>
-                            {record.content}
-                          </span>
-                          <span>TTL {record.ttl}</span>
-                          <span className='text-muted-foreground'>
-                            {record.line_code}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                )}
-                <div className='sticky top-0 z-10 hidden gap-2 border-b bg-background px-3 py-2 text-xs font-medium text-muted-foreground md:grid md:grid-cols-[100px_1fr_1.4fr_90px_100px_auto]'>
-                  <span>类型</span>
-                  <span>主机记录</span>
-                  <span>记录值</span>
-                  <span>TTL</span>
-                  <span>线路</span>
-                  <span>{supportsProxy ? '代理 / 操作' : '操作'}</span>
-                </div>
-                {records.fields.map((record, index) => (
-                  <div
-                    key={record.formKey}
-                    className='grid gap-2 rounded-md border p-3 md:grid-cols-[100px_1fr_1.4fr_90px_100px_auto]'
-                  >
-                    <FormField
-                      control={form.control}
-                      name={`records.${index}.type`}
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel className='md:sr-only'>类型</FormLabel>
-                          <Select
-                            value={field.value}
-                            onValueChange={field.onChange}
-                          >
-                            <FormControl>
-                              <SelectTrigger>
-                                <SelectValue />
-                              </SelectTrigger>
-                            </FormControl>
-                            <SelectContent>
-                              {['A', 'AAAA', 'CNAME', 'TXT', 'MX'].map(
-                                (type) => (
-                                  <SelectItem key={type} value={type}>
-                                    {type}
-                                  </SelectItem>
-                                )
-                              )}
-                            </SelectContent>
-                          </Select>
-                        </FormItem>
-                      )}
-                    />
-                    <FormField
-                      control={form.control}
-                      name={`records.${index}.name`}
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel className='md:sr-only'>主机记录</FormLabel>
-                          <FormControl>
-                            <Input placeholder='@ 或 www' {...field} />
-                          </FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-                    <FormField
-                      control={form.control}
-                      name={`records.${index}.content`}
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel className='md:sr-only'>记录值</FormLabel>
-                          <FormControl>
-                            <Input placeholder='记录值' {...field} />
-                          </FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-                    <FormField
-                      control={form.control}
-                      name={`records.${index}.ttl`}
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel className='md:sr-only'>TTL</FormLabel>
-                          <FormControl>
-                            <Input
-                              type='number'
-                              {...field}
-                              onChange={(event) =>
-                                field.onChange(
-                                  event.currentTarget.valueAsNumber
-                                )
-                              }
-                            />
-                          </FormControl>
-                        </FormItem>
-                      )}
-                    />
-                    <FormField
-                      control={form.control}
-                      name={`records.${index}.line_code`}
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel className='md:sr-only'>线路</FormLabel>
-                          <FormControl>
-                            <DnsLineSelect
-                              lines={zone.runtime.lines}
-                              value={field.value}
-                              onValueChange={field.onChange}
-                            />
-                          </FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-                    <div className='flex items-center gap-1'>
-                      {supportsProxy && (
-                        <FormField
-                          control={form.control}
-                          name={`records.${index}.proxied`}
-                          render={({ field }) => (
-                            <FormItem className='flex items-center gap-2 space-y-0'>
-                              <FormControl>
-                                <Checkbox
-                                  checked={field.value}
-                                  onCheckedChange={field.onChange}
-                                  aria-label='代理'
-                                />
-                              </FormControl>
-                              <FormLabel className='cursor-pointer text-sm font-normal'>
-                                代理
-                              </FormLabel>
-                            </FormItem>
-                          )}
-                        />
-                      )}
-                      <Button
-                        type='button'
-                        variant='ghost'
-                        size='icon'
-                        aria-label='删除 DNS 记录'
-                        onClick={() => records.remove(index)}
-                      >
-                        <X />
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-                {!records.fields.length && (
-                  <div className='rounded-md border border-dashed py-12 text-center text-sm text-muted-foreground'>
-                    暂无 DNS 记录
-                  </div>
-                )}
-              </div>
-            </ScrollArea>
-          </form>
-        </Form>
-        <SheetFooter className='px-6 py-4'>
-          <Button
-            variant='outline'
-            onClick={() =>
-              records.append({
-                id: crypto.randomUUID(),
-                type: 'A',
-                name: '@',
-                content: '',
-                ttl: 600,
-                proxied: false,
-                line_code: zone.runtime.lines[0]?.code || 'default',
-              })
+    <>
+      <Dialog
+        title={`${zone.domain} · 编辑记录`}
+        size='lg'
+        onClose={onClose}
+        busy={mutation.isPending}
+      >
+        <form
+          className='grid gap-5'
+          onSubmit={(event) => {
+            event.preventDefault()
+            const result = recordsSchema.safeParse({ records })
+            if (!result.success) {
+              setErrors(
+                Object.fromEntries(
+                  result.error.issues.map((issue) => [
+                    issue.path.join('.'),
+                    issue.message,
+                  ])
+                )
+              )
+              return
             }
-          >
-            <Plus /> 添加记录
-          </Button>
-          <div className='flex-1' />
-          <Button variant='outline' onClick={() => onOpenChange(false)}>
-            取消
-          </Button>
-          <Button
-            type='submit'
-            form='zone-records-form'
-            disabled={mutation.isPending}
-          >
-            {mutation.isPending ? '正在保存…' : '保存并同步'}
-          </Button>
-        </SheetFooter>
-      </SheetContent>
-    </Sheet>
+            setErrors({})
+            mutation.mutate(result.data.records)
+          }}
+        >
+          <p className='text-sm text-muted'>
+            保存后自动同步。系统记录由关联资源生成，不能在此编辑或删除。
+          </p>
+          {!!zone.runtime.projected_records.length && (
+            <section className='grid gap-2'>
+              <h3 className='text-sm font-medium'>系统自动记录</h3>
+              {zone.runtime.projected_records.map((record) => (
+                <p key={record.id} className='text-xs break-all text-muted'>
+                  {record.type} · {record.name} · {record.content} · TTL{' '}
+                  {record.ttl}
+                </p>
+              ))}
+            </section>
+          )}
+          <section className='grid gap-4'>
+            <div className='flex items-center justify-between'>
+              <h3 className='text-sm font-medium'>
+                自定义记录 · {records.length}
+              </h3>
+              <Button
+                size='sm'
+                variant='secondary'
+                isDisabled={mutation.isPending || records.length >= 10000}
+                onPress={() =>
+                  setRecords((current) => [
+                    ...current,
+                    {
+                      id: crypto.randomUUID(),
+                      type: 'A',
+                      name: '@',
+                      content: '',
+                      ttl: zone.dns_provider === 'cloudflare' ? 1 : 600,
+                      proxied: false,
+                      line_code: 'default',
+                    },
+                  ])
+                }
+              >
+                添加记录
+              </Button>
+            </div>
+            {!records.length && (
+              <p className='text-sm text-muted'>暂无自定义记录。</p>
+            )}
+            {records.map((record, index) => (
+              <fieldset
+                key={record.id}
+                disabled={mutation.isPending}
+                className='grid min-w-0 gap-3 rounded-xl bg-surface-secondary p-3'
+              >
+                <div className='flex items-center justify-between'>
+                  <strong className='text-sm font-medium'>
+                    记录 {index + 1}
+                  </strong>
+                  <Button
+                    variant='danger-soft'
+                    size='sm'
+                    onPress={() => setRemove(record)}
+                  >
+                    删除
+                  </Button>
+                </div>
+                <div className='grid gap-3 sm:grid-cols-3'>
+                  <Choice
+                    label='记录类型'
+                    value={record.type}
+                    onChange={(value) =>
+                      update(record.id, {
+                        type: value as DnsRecord['type'],
+                        ...(value === 'MX'
+                          ? { priority: record.priority ?? 10 }
+                          : { priority: undefined }),
+                      })
+                    }
+                    items={['A', 'AAAA', 'CNAME', 'TXT', 'MX'].map((id) => ({
+                      id,
+                      label: id,
+                    }))}
+                  />
+                  <Field
+                    label='主机记录'
+                    value={record.name}
+                    onChange={(value) => update(record.id, { name: value })}
+                    required
+                    error={errors[`records.${index}.name`]}
+                  />
+                  <Field
+                    label='TTL（秒）'
+                    type='number'
+                    min={1}
+                    max={86400}
+                    value={String(record.ttl)}
+                    onChange={(value) =>
+                      update(record.id, { ttl: Number(value) })
+                    }
+                    error={errors[`records.${index}.ttl`]}
+                  />
+                </div>
+                <TextAreaField
+                  label='记录值'
+                  rows={2}
+                  value={record.content}
+                  onChange={(value) => update(record.id, { content: value })}
+                  required
+                  error={errors[`records.${index}.content`]}
+                />
+                <div className='grid gap-3 sm:grid-cols-2'>
+                  <Choice
+                    label='解析线路'
+                    value={record.line_code}
+                    onChange={(value) =>
+                      update(record.id, { line_code: value })
+                    }
+                    items={[
+                      ...(!zone.runtime.lines.some(
+                        (line) => line.code === record.line_code
+                      )
+                        ? [{ id: record.line_code, label: record.line_code }]
+                        : []),
+                      ...zone.runtime.lines.map((line) => ({
+                        id: line.code,
+                        label: dnsLinePath(zone.runtime.lines, line.code),
+                      })),
+                    ]}
+                  />
+                  {record.type === 'MX' && (
+                    <Field
+                      label='MX 优先级'
+                      type='number'
+                      min={0}
+                      max={65535}
+                      value={String(record.priority ?? 10)}
+                      onChange={(value) =>
+                        update(record.id, { priority: Number(value) })
+                      }
+                      error={errors[`records.${index}.priority`]}
+                    />
+                  )}
+                </div>
+                {zone.dns_provider === 'cloudflare' && (
+                  <Toggle
+                    label='Cloudflare 代理'
+                    selected={record.proxied}
+                    onChange={(value) => update(record.id, { proxied: value })}
+                  />
+                )}
+              </fieldset>
+            ))}
+          </section>
+          {errors.records && <Notice>{errors.records}</Notice>}
+          {mutation.isError && (
+            <Notice>{apiErrorMessage(mutation.error)}</Notice>
+          )}
+          <FormActions
+            onCancel={onClose}
+            busy={mutation.isPending}
+            label='保存并同步'
+          />
+        </form>
+      </Dialog>
+      {remove && (
+        <Confirm
+          title='删除 DNS 记录'
+          description={`将从当前草稿移除 ${remove.type} ${remove.name}，保存后同步到服务商。`}
+          onClose={() => setRemove(null)}
+          onConfirm={() => {
+            setRecords((current) =>
+              current.filter((record) => record.id !== remove.id)
+            )
+            setRemove(null)
+          }}
+        />
+      )}
+    </>
   )
 }

@@ -1,8 +1,8 @@
 import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { afterEach, describe, expect, it } from 'vitest'
 import { api } from '@/lib/api'
-import { setLiveQueryQueryClient } from '@/lib/live-query'
 import { ApiProtocolError } from '@/lib/api-response'
+import { setLiveQueryQueryClient } from '@/lib/live-query'
 import {
   createNode,
   getNodeCredentials,
@@ -37,32 +37,79 @@ function respond(data: unknown) {
 
 describe('node API contracts', () => {
   it('applies only newer matching node runtime patches', async () => {
-    class Source extends EventTarget { close() {} }
+    class Source extends EventTarget {
+      close() {}
+    }
     const source = new Source()
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
     setLiveQueryQueryClient(client, undefined, () => source as never)
     const params = { page: 1, page_size: 100 }
     const node = {
-      id, revision: 2, cluster_id: id, cluster_name: 'cluster', name: 'edge', status: 'disabled',
-      node_spec_revision: 1, config: { endpoints: [] },
-      runtime: { registration_status: 'registered', connection_status: 'offline', last_heartbeat_at: '2026-09-09T00:00:00Z', applied_node_spec_revision: 1, cpu_usage: 1 },
+      id,
+      revision: 2,
+      cluster_id: id,
+      cluster_name: 'cluster',
+      name: 'edge',
+      status: 'disabled',
+      node_spec_revision: 1,
+      config: { endpoints: [] },
+      runtime: {
+        registration_status: 'registered',
+        connection_status: 'offline',
+        last_heartbeat_at: '2026-09-09T00:00:00Z',
+        applied_node_spec_revision: 1,
+        cpu_usage: 1,
+      },
     }
     const observer = new QueryObserver(client, nodesQuery(params))
     const stop = observer.subscribe(() => undefined)
     const pending = observer.refetch()
-    source.dispatchEvent(new MessageEvent('snapshot', { data: JSON.stringify({ code: 0, message: 'ok', data: { list: [node], total: 1, page: 1, page_size: 100, total_pages: 1 } }) }))
+    source.dispatchEvent(
+      new MessageEvent('snapshot', {
+        data: JSON.stringify({
+          code: 0,
+          message: 'ok',
+          data: {
+            list: [node],
+            total: 1,
+            page: 1,
+            page_size: 100,
+            total_pages: 1,
+          },
+        }),
+      })
+    )
     await pending
     const patch = (nodeRevision: number, heartbeat: string, cpu: number) =>
-      source.dispatchEvent(new MessageEvent('node-runtime', { data: JSON.stringify({ id, node_revision: nodeRevision, runtime: { registration_status: 'registered', connection_status: 'online', last_heartbeat_at: heartbeat, applied_node_spec_revision: 2, cpu_usage: cpu } }) }))
+      source.dispatchEvent(
+        new MessageEvent('node-runtime', {
+          data: JSON.stringify({
+            id,
+            node_revision: nodeRevision,
+            runtime: {
+              registration_status: 'registered',
+              connection_status: 'online',
+              last_heartbeat_at: heartbeat,
+              applied_node_spec_revision: 2,
+              cpu_usage: cpu,
+            },
+          }),
+        })
+      )
     patch(1, '2026-09-09T00:02:00Z', 2)
     patch(2, '2026-09-09T00:00:00Z', 3)
     patch(2, '2026-09-09T00:01:00Z', 4)
     await new Promise<void>((resolve) => queueMicrotask(() => resolve()))
-    const cached = client.getQueryData<{ list: typeof node[] }>(nodesQuery(params).queryKey)!
+    const cached = client.getQueryData<{ list: (typeof node)[] }>(
+      nodesQuery(params).queryKey
+    )!
     expect(cached.list[0].runtime.cpu_usage).toBe(4)
     expect(cached.list[0].runtime.connection_status).toBe('offline')
     expect(cached.list[0].runtime.registration_status).toBe('registered')
-    stop(); observer.destroy()
+    stop()
+    observer.destroy()
   })
   it('rejects missing or malformed credentials on creation and retrieval', async () => {
     for (const data of [

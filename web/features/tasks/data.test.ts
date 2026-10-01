@@ -1,13 +1,15 @@
 import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { afterEach, expect, test } from 'vitest'
-import { setLiveQueryQueryClient } from '@/lib/live-query'
 import { ApiProtocolError } from '@/lib/api-response'
+import { setLiveQueryQueryClient } from '@/lib/live-query'
 import { taskDetailQuery, taskHistoryQuery, tasksQuery } from './data'
 import type { Task } from './types'
 
 const clients: QueryClient[] = []
 let nextSnapshot: unknown
-class Source extends EventTarget { close() {} }
+class Source extends EventTarget {
+  close() {}
+}
 afterEach(() => {
   setLiveQueryQueryClient(new QueryClient())
   clients.splice(0).forEach((client) => client.clear())
@@ -41,9 +43,13 @@ function setup() {
   clients.push(client)
   setLiveQueryQueryClient(client, undefined, () => {
     const source = new Source()
-    queueMicrotask(() => source.dispatchEvent(new MessageEvent('snapshot', {
-      data: JSON.stringify({ code: 0, message: '', data: nextSnapshot }),
-    })))
+    queueMicrotask(() =>
+      source.dispatchEvent(
+        new MessageEvent('snapshot', {
+          data: JSON.stringify({ code: 0, message: '', data: nextSnapshot }),
+        })
+      )
+    )
     return source as never
   })
   return client
@@ -74,7 +80,10 @@ test('detail and history own their revision parameters and validate their respon
   const client = setup()
   nextSnapshot = task
   expect(await client.fetchQuery(taskDetailQuery(task))).toEqual(task)
-  nextSnapshot = { list: [{ outcome: 'failed', error: 'timeout', emitted_at: '2026-09-08' }], truncated: false }
+  nextSnapshot = {
+    list: [{ outcome: 'failed', error: 'timeout', emitted_at: '2026-09-08' }],
+    truncated: false,
+  }
   expect((await client.fetchQuery(taskHistoryQuery(task))).list[0].error).toBe(
     'timeout'
   )

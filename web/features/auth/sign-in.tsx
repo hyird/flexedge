@@ -1,161 +1,88 @@
-import { z } from 'zod'
-import { useForm } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useNavigate, useSearch } from '@tanstack/react-router'
-import { Activity, Globe2, Loader2, LockKeyhole, Network } from 'lucide-react'
-import { toast } from 'sonner'
-import { Button } from '@/components/ui/button'
-import {
-  Card,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
-import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from '@/components/ui/form'
-import { Input } from '@/components/ui/input'
-import { PasswordInput } from '@/components/password-input'
-import { login } from '@/features/auth/data'
+import { useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
+import { Globe } from '@gravity-ui/icons'
+import { Button } from '@heroui/react'
+import { apiErrorMessage } from '@/lib/api'
+import { Field, Notice } from '@/components/forms'
+import { login } from './data'
 
-const schema = z.object({
-  username: z.string().trim().min(1, '请输入用户名'),
-  password: z.string().min(1, '请输入密码'),
-})
-
-type Values = z.infer<typeof schema>
-
-export function SignIn() {
-  const navigate = useNavigate()
-  const search = useSearch({ from: '/sign-in' })
-  const queryClient = useQueryClient()
-  const form = useForm<Values>({
-    resolver: zodResolver(schema),
-    defaultValues: { username: '', password: '' },
-  })
-
-  const mutation = useMutation({
-    mutationFn: (values: Values) =>
-      login(queryClient, values.username, values.password),
-    onSuccess: async (user) => {
-      toast.success(`欢迎回来，${user.nickname || user.username}`)
-      await navigate({ to: search.redirect || '/', replace: true })
-    },
-  })
-
+export function SignInPage() {
+  const client = useQueryClient(),
+    navigate = useNavigate()
+  const [username, setUsername] = useState(''),
+    [password, setPassword] = useState(''),
+    [error, setError] = useState(''),
+    [busy, setBusy] = useState(false)
+  async function submit(event: React.FormEvent) {
+    event.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      await login(client, username.trim(), password)
+      setPassword('')
+      const redirect = new URLSearchParams(location.search).get('redirect')
+      await navigate({
+        to:
+          redirect?.startsWith('/') && !redirect.startsWith('//')
+            ? redirect
+            : '/',
+        replace: true,
+      })
+    } catch (reason) {
+      setError(apiErrorMessage(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
   return (
-    <div className='relative grid min-h-svh lg:grid-cols-2'>
-      <div className='flex items-center justify-center px-6 py-12'>
-        <div className='w-full max-w-sm space-y-8'>
-          <div className='flex items-center gap-3'>
-            <div className='flex size-10 items-center justify-center rounded-lg bg-primary text-primary-foreground'>
-              <Network className='size-5' />
-            </div>
-            <div>
-              <div className='font-semibold'>FlexEdge</div>
-              <div className='text-xs text-muted-foreground'>Edge Console</div>
-            </div>
-          </div>
-
-          <div>
-            <h1 className='text-2xl font-bold tracking-tight'>登录控制台</h1>
-            <p className='mt-2 text-sm text-muted-foreground'>
-              输入管理员凭据以继续管理边缘网络。
-            </p>
-          </div>
-
-          <Form {...form}>
-            <form
-              className='grid gap-4'
-              onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
-            >
-              <FormField
-                control={form.control}
-                name='username'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>用户名</FormLabel>
-                    <FormControl>
-                      <Input
-                        autoComplete='username'
-                        placeholder='请输入用户名'
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name='password'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>密码</FormLabel>
-                    <FormControl>
-                      <PasswordInput
-                        autoComplete='current-password'
-                        placeholder='请输入密码'
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <Button className='mt-2' disabled={mutation.isPending}>
-                {mutation.isPending ? (
-                  <Loader2 className='animate-spin' />
-                ) : (
-                  <LockKeyhole />
-                )}
-                {mutation.isPending ? '正在登录…' : '登录'}
-              </Button>
-            </form>
-          </Form>
-
-          <p className='text-xs leading-relaxed text-muted-foreground'>
-            登录会话由 FlexEdge 服务端通过安全 Cookie 管理。
+    <main className='flex min-h-dvh flex-col items-center justify-center bg-surface-secondary px-5 py-12'>
+      <div className='mb-6 flex items-center gap-3 text-lg font-semibold'>
+        <span className='flex size-9 items-center justify-center rounded-xl bg-accent text-accent-foreground'>
+          <Globe className='size-5' />
+        </span>
+        FlexEdge
+      </div>
+      <section className='w-full max-w-[26rem] rounded-3xl border border-border bg-surface p-7'>
+        <div className='mb-7'>
+          <p className='mb-2 text-sm text-muted'>边缘网络控制台</p>
+          <h1 className='text-2xl font-semibold tracking-tight'>登录工作台</h1>
+          <p className='mt-3 text-sm leading-6 text-muted'>
+            管理网站、节点、DNS 与证书。
           </p>
         </div>
-      </div>
-
-      <div className='relative hidden overflow-hidden border-s bg-muted/40 lg:block'>
-        <div className='absolute inset-0 bg-[radial-gradient(circle_at_75%_15%,color-mix(in_oklab,var(--primary)_12%,transparent),transparent_38%)]' />
-        <div className='absolute inset-x-16 top-[14%] rounded-xl border bg-background p-5 shadow-2xl'>
-          <div className='mb-7 flex items-center justify-between border-b pb-4'>
-            <div>
-              <p className='text-lg font-semibold'>边缘资源，统一管理</p>
-              <p className='text-sm text-muted-foreground'>
-                网站接入、节点分发与运行观测
-              </p>
-            </div>
-          </div>
-          <div className='grid grid-cols-3 gap-4'>
-            {[
-              [Globe2, '网站', '域名与回源'],
-              [Network, '节点', '接入与分发'],
-              [Activity, '观测', '日志与状态'],
-            ].map(([Icon, label, value]) => (
-              <Card key={String(label)} className='gap-3 py-5 shadow-none'>
-                <CardHeader className='px-5'>
-                  <div className='flex items-center justify-between'>
-                    <CardDescription>{String(label)}</CardDescription>
-                    <Icon className='size-4 text-muted-foreground' />
-                  </div>
-                  <CardTitle className='text-base'>{String(value)}</CardTitle>
-                </CardHeader>
-              </Card>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
+        <form onSubmit={submit} className='flex flex-col gap-4'>
+          <Notice>{error}</Notice>
+          <Field
+            label='用户名'
+            value={username}
+            onChange={setUsername}
+            required
+            maxLength={64}
+            autoComplete='username'
+            disabled={busy}
+          />
+          <Field
+            label='密码'
+            type='password'
+            value={password}
+            onChange={setPassword}
+            required
+            autoComplete='current-password'
+            disabled={busy}
+          />
+          <Button
+            size='sm'
+            type='submit'
+            className='mt-2 w-full'
+            isPending={busy}
+          >
+            登录
+          </Button>
+        </form>
+      </section>
+      <p className='mt-7 text-xs text-muted'>使用管理员分配的平台账户</p>
+    </main>
   )
 }

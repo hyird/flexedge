@@ -16,7 +16,9 @@ const adapter = api.defaults.adapter
 const client = new QueryClient({
   defaultOptions: { queries: { retry: false } },
 })
-class Source extends EventTarget { close() {} }
+class Source extends EventTarget {
+  close() {}
+}
 afterEach(() => {
   api.defaults.adapter = adapter
   setLiveQueryQueryClient(client)
@@ -30,23 +32,39 @@ test('zone snapshots isolate provider selections and transform available data', 
     sources.set(url, source)
     return source as never
   })
-  const read = async <T,>(query: { queryKey: readonly unknown[]; queryFn?: unknown }, data: unknown) => {
+  const read = async <T>(
+    query: { queryKey: readonly unknown[]; queryFn?: unknown },
+    data: unknown
+  ) => {
     const observer = new QueryObserver<T>(client, query as never)
     const stop = observer.subscribe(() => undefined)
     const pending = observer.refetch()
     await new Promise<void>((resolve) => queueMicrotask(resolve))
     const source = [...sources.values()].at(-1)!
-    source.dispatchEvent(new MessageEvent('snapshot', {
-      data: JSON.stringify({ code: 0, message: 'ok', data }),
-    }))
+    source.dispatchEvent(
+      new MessageEvent('snapshot', {
+        data: JSON.stringify({ code: 0, message: 'ok', data }),
+      })
+    )
     const result = await pending
     stop()
     observer.destroy()
     return result.data
   }
-  expect(await read(availableDnsZonesQuery('provider-a'), { list: [{ domain: 'a.example', status: 'active' }] })).toEqual([{ domain: 'a.example', status: 'active' }])
-  expect(await read(availableDnsZonesQuery('provider-b'), { list: [] })).toEqual([])
-  expect(await read(dnsZonesQuery({ page: 2, page_size: 10, dns_provider_id: 'provider-a' }), { list: [], total: 0, page: 2, page_size: 10, total_pages: 0 })).toMatchObject({ page: 2 })
+  expect(
+    await read(availableDnsZonesQuery('provider-a'), {
+      list: [{ domain: 'a.example', status: 'active' }],
+    })
+  ).toEqual([{ domain: 'a.example', status: 'active' }])
+  expect(
+    await read(availableDnsZonesQuery('provider-b'), { list: [] })
+  ).toEqual([])
+  expect(
+    await read(
+      dnsZonesQuery({ page: 2, page_size: 10, dns_provider_id: 'provider-a' }),
+      { list: [], total: 0, page: 2, page_size: 10, total_pages: 0 }
+    )
+  ).toMatchObject({ page: 2 })
   expect(availableDnsZonesQuery('').enabled).toBe(false)
 })
 
@@ -107,9 +125,15 @@ test('line queries share a zone read and change cache identity when a cluster ch
     const stop = observer.subscribe(() => undefined)
     const pending = observer.refetch()
     await new Promise<void>((resolve) => queueMicrotask(resolve))
-    sources.get(`/api/dns-zones/${zone}/stream`)?.dispatchEvent(new MessageEvent('snapshot', {
-      data: JSON.stringify({ code: 0, message: 'ok', data: { runtime: { lines: [{ code: zone }] } } }),
-    }))
+    sources.get(`/api/dns-zones/${zone}/stream`)?.dispatchEvent(
+      new MessageEvent('snapshot', {
+        data: JSON.stringify({
+          code: 0,
+          message: 'ok',
+          data: { runtime: { lines: [{ code: zone }] } },
+        }),
+      })
+    )
     const result = await pending
     stop()
     observer.destroy()

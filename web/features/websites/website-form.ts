@@ -5,7 +5,7 @@ import {
   validRouteCondition,
   type RouteCondition,
 } from './route-matching'
-import type { WebsiteConfig } from './types'
+import type { Website, WebsiteConfig } from './types'
 
 const routeConditionSchema = z
   .object({
@@ -332,6 +332,8 @@ const routeRuleSchema = z
 
 export const websiteFormSchema = z
   .object({
+    cache_enabled: z.boolean(),
+    cache_policy_id: z.string().uuid().or(z.literal('')),
     cluster_id: z.string().uuid('请选择所属集群'),
     status: z.enum(['enabled', 'disabled']),
     name: z.string().trim().min(1, '请输入网站名称').max(100),
@@ -382,6 +384,20 @@ export const websiteFormSchema = z
     route_rules: z.array(routeRuleSchema).max(100),
   })
   .superRefine((values, context) => {
+    if (values.https_enabled && values.certificate_ids.length === 0) {
+      context.addIssue({
+        code: 'custom',
+        path: ['certificate_ids'],
+        message: '启用 HTTPS 必须绑定至少一张可用证书',
+      })
+    }
+    if (!values.https_enabled && values.certificate_ids.length > 0) {
+      context.addIssue({
+        code: 'custom',
+        path: ['certificate_ids'],
+        message: '关闭 HTTPS 后不能保留证书绑定',
+      })
+    }
     if (
       values.response_compression_enabled &&
       !values.response_compression_algorithms.length
@@ -407,6 +423,42 @@ export const websiteFormSchema = z
 
 export type WebsiteFormValues = z.infer<typeof websiteFormSchema>
 export type WebsiteRouteRuleForm = z.infer<typeof routeRuleSchema>
+
+export function setWebsiteHttpsEnabled(
+  values: WebsiteFormValues,
+  enabled: boolean
+): WebsiteFormValues {
+  return enabled
+    ? { ...values, https_enabled: true }
+    : {
+        ...values,
+        https_enabled: false,
+        certificate_ids: [],
+        force_https: false,
+        hsts_enabled: false,
+      }
+}
+
+export function websiteCertificateOptions(
+  available: readonly { id: string; domains: string[] }[],
+  selectedIds: readonly string[],
+  attached: readonly Website['certificates'][number][]
+): Website['certificates'] {
+  const options = available.map((certificate) => ({
+    ...certificate,
+    usable: true,
+  }))
+  for (const id of selectedIds) {
+    if (options.some((certificate) => certificate.id === id)) continue
+    options.push({
+      id,
+      domains:
+        attached.find((certificate) => certificate.id === id)?.domains ?? [],
+      usable: false,
+    })
+  }
+  return options
+}
 
 export function routeRuleToForm(
   rule: Record<string, unknown>
@@ -486,6 +538,8 @@ export function routeRuleToForm(
 }
 export function defaultWebsiteConfig(): WebsiteConfig {
   return {
+    cache_enabled: false,
+    cache_policy_id: '',
     name: '',
     domains: [],
     origins: [],

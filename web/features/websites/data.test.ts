@@ -12,20 +12,74 @@ afterEach(() => {
 it('applies current origin runtime per node and ignores stale updates', () => {
   const website = {
     id: 'website',
-    runtime: { origin_sources: [{ node_id: 'node', node_revision: 1, reported_at: '2026-09-08T00:00:00Z' }], origin_states: [
-      { node_id: 'node', node_name: 'N', origin_id: 'origin-old', status: 'healthy', checked_at_unix_millis: 200 },
-      { node_id: 'other', node_name: 'O', origin_id: 'origin-other', status: 'healthy', checked_at_unix_millis: 1 },
-    ] },
+    runtime: {
+      origin_sources: [
+        {
+          node_id: 'node',
+          node_revision: 1,
+          reported_at: '2026-09-08T00:00:00Z',
+        },
+      ],
+      origin_states: [
+        {
+          node_id: 'node',
+          node_name: 'N',
+          origin_id: 'origin-old',
+          status: 'healthy',
+          checked_at_unix_millis: 200,
+        },
+        {
+          node_id: 'other',
+          node_name: 'O',
+          origin_id: 'origin-other',
+          status: 'healthy',
+          checked_at_unix_millis: 1,
+        },
+      ],
+    },
   } as Website
-  const update = { id: 'website', node_id: 'node', node_revision: 1, reported_at: '2026-09-08T00:01:00Z', origin_states: [
-    { node_id: 'node', node_name: 'N', origin_id: 'origin-new', status: 'unhealthy', checked_at_unix_millis: 300 },
-  ] }
+  const update = {
+    id: 'website',
+    node_id: 'node',
+    node_revision: 1,
+    reported_at: '2026-09-08T00:01:00Z',
+    origin_states: [
+      {
+        node_id: 'node',
+        node_name: 'N',
+        origin_id: 'origin-new',
+        status: 'unhealthy',
+        checked_at_unix_millis: 300,
+      },
+    ],
+  }
   const changed = patchWebsiteOriginRuntime(website, update)!
-  expect(changed.runtime.origin_states.map((state) => state.origin_id)).toEqual(['origin-other', 'origin-new'])
-  expect(patchWebsiteOriginRuntime(changed, { ...update, reported_at: '2026-09-08T00:00:30Z', origin_states: [{ ...update.origin_states[0], checked_at_unix_millis: 100 }] })).toBe(changed)
-  const removed = patchWebsiteOriginRuntime(changed, { ...update, reported_at: '2026-09-08T00:02:00Z', origin_states: [] })!
-  expect(removed.runtime.origin_states).toEqual([changed.runtime.origin_states[0]])
-  expect(patchWebsiteOriginRuntime(removed, { ...update, reported_at: '2026-09-08T00:01:30Z' })).toBe(removed)
+  expect(changed.runtime.origin_states.map((state) => state.origin_id)).toEqual(
+    ['origin-other', 'origin-new']
+  )
+  expect(
+    patchWebsiteOriginRuntime(changed, {
+      ...update,
+      reported_at: '2026-09-08T00:00:30Z',
+      origin_states: [
+        { ...update.origin_states[0], checked_at_unix_millis: 100 },
+      ],
+    })
+  ).toBe(changed)
+  const removed = patchWebsiteOriginRuntime(changed, {
+    ...update,
+    reported_at: '2026-09-08T00:02:00Z',
+    origin_states: [],
+  })!
+  expect(removed.runtime.origin_states).toEqual([
+    changed.runtime.origin_states[0],
+  ])
+  expect(
+    patchWebsiteOriginRuntime(removed, {
+      ...update,
+      reported_at: '2026-09-08T00:01:30Z',
+    })
+  ).toBe(removed)
 })
 
 it('sends cluster selection separately from the website configuration', async () => {

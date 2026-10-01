@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { registerSessionCleanup } from '@/features/auth/session-lifecycle'
 import { recoverStreamSession } from '@/features/auth/session-expiry'
+import { registerSessionCleanup } from '@/features/auth/session-lifecycle'
 import { createLiveLogStore, type LogEntry } from './live-log-store'
 
 const pausedSubscription = () => () => undefined
@@ -14,7 +14,9 @@ export function useLiveLogs<T extends LogEntry>(
   const client = useQueryClient()
   const store = useMemo(() => {
     const created = createLiveLogStore(url, parseLogs, undefined, () => {
-      void recoverStreamSession(client).then((valid) => { if (valid) created.reconnect() })
+      void recoverStreamSession(client).then((valid) => {
+        if (valid) created.reconnect()
+      })
     })
     return created
   }, [client, url, parseLogs])
@@ -32,5 +34,6 @@ export function useLiveLogs<T extends LogEntry>(
     logs: snapshot.logs,
     connected: enabled && snapshot.connected,
     error: enabled ? snapshot.error : null,
+    reconnect: store.reconnect,
   }
 }

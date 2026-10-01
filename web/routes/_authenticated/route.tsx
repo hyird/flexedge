@@ -1,21 +1,21 @@
+import { isAxiosError } from 'axios'
 import { createFileRoute, redirect } from '@tanstack/react-router'
-import { AuthenticatedLayout } from '@/components/layout/authenticated-layout'
+import { AppShell } from '@/components/layout/app-shell'
 import { ensureAuthenticatedSession } from '@/features/auth/data'
 
 export const Route = createFileRoute('/_authenticated')({
   beforeLoad: async ({ context, location }) => {
     try {
-      await ensureAuthenticatedSession(context.queryClient)
-    } catch {
-      throw redirect({
-        to: '/sign-in',
-        search: { redirect: location.href },
-      })
+      return { user: await ensureAuthenticatedSession(context.queryClient) }
+    } catch (error) {
+      if (isAxiosError(error) && error.response?.status === 401)
+        throw redirect({
+          to: '/sign-in',
+          search: { redirect: location.href },
+          replace: true,
+        })
+      throw error
     }
   },
-  component: () => (
-    <>
-      <AuthenticatedLayout />
-    </>
-  ),
+  component: AppShell,
 })

@@ -7,7 +7,7 @@ import globals from 'globals'
 import tseslint from 'typescript-eslint'
 
 export default defineConfig(
-  { ignores: ['build', 'node_modules', 'web/routeTree.gen.ts'] },
+  { ignores: ['build', 'node_modules'] },
   {
     extends: [
       js.configs.recommended,
@@ -15,7 +15,6 @@ export default defineConfig(
       ...pluginQuery.configs['flat/recommended'],
     ],
     files: ['web/**/*.{ts,tsx}'],
-    ignores: ['web/components/ui/**'],
     languageOptions: {
       ecmaVersion: 2022,
       globals: globals.browser,
@@ -26,7 +25,7 @@ export default defineConfig(
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
-      // TanStack Table and React Hook Form intentionally expose mutable APIs.
+      // React Hook Form intentionally exposes mutable APIs.
       'react-hooks/incompatible-library': 'off',
       'react-refresh/only-export-components': [
         'warn',
@@ -88,12 +87,8 @@ export default defineConfig(
     },
   },
   {
-    // Keep upstream UI styling conventions, but enforce our dependency boundary.
-    files: [
-      'web/lib/**/*.{ts,tsx}',
-      'web/components/ui/**/*.{ts,tsx}',
-      'web/components/data-table/**/*.{ts,tsx}',
-    ],
+    // Shared primitives and utilities cannot depend on business features.
+    files: ['web/lib/**/*.{ts,tsx}', 'web/components/*.{ts,tsx}'],
     languageOptions: { parser: tseslint.parser },
     rules: {
       'no-restricted-imports': [

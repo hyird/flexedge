@@ -1,11 +1,11 @@
 <!doctype html>
-<html lang="zh-CN" dir="ltr" class="light font-inter">
+<html lang="zh-CN" dir="ltr" class="light" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <script>
       // Apply the saved theme before styles paint; React owns subsequent changes.
       // Keep the storage key and default aligned with ThemeProvider.
-      (() => {
+      ;(() => {
         let theme = 'light'
         try {
           const saved = localStorage.getItem('flexedge-theme')
@@ -24,6 +24,8 @@
           }
         }
         document.documentElement.classList.toggle('dark', dark)
+        document.documentElement.classList.toggle('light', !dark)
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light'
         document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
       })()
     </script>
@@ -33,12 +35,6 @@
       content="FlexEdge 边缘网站、DNS、证书与节点管理控制台"
     />
     <meta name="theme-color" content="#ffffff" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=Noto+Sans+SC:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
     <title>FlexEdge Console</title>
   </head>
   <body>

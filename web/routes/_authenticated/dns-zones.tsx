@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { DnsZones } from '@/features/dns-zones'
+import { DnsZonesPage } from '@/features/dns-zones'
 
 export const Route = createFileRoute('/_authenticated/dns-zones')({
-  component: DnsZones,
+  validateSearch: (search: Record<string, unknown>) => search,
+  component: DnsZonesPage,
 })

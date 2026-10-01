@@ -33,11 +33,19 @@ test('history page sizes use separate cache entries and preserve request paginat
   const requestedSizes: number[] = []
   for (const pageSize of [100, 500, 1000]) {
     const params = { page: 1, page_size: pageSize, keyword: '/api' }
-    const pending = client.fetchQuery(websiteAccessLogHistoryQuery('website', params))
+    const pending = client.fetchQuery(
+      websiteAccessLogHistoryQuery('website', params)
+    )
     requestedSizes.push(pageSize)
-    sources.at(-1)?.dispatchEvent(snapshot({
-      list: [], page: params.page, page_size: pageSize, total: 0, total_pages: 0,
-    }))
+    sources.at(-1)?.dispatchEvent(
+      snapshot({
+        list: [],
+        page: params.page,
+        page_size: pageSize,
+        total: 0,
+        total_pages: 0,
+      })
+    )
     const result = await pending
     expect(result.page_size).toBe(pageSize)
   }
@@ -74,16 +82,30 @@ test('history rejects invalid records without caching them and passes filters an
     return source as never
   })
   const pending = client.fetchQuery(options)
-  sources[0].dispatchEvent(snapshot({
-    list: [{ id: 'incomplete' }], page: 2, page_size: 50, total: 0, total_pages: 1,
-  }))
+  sources[0].dispatchEvent(
+    snapshot({
+      list: [{ id: 'incomplete' }],
+      page: 2,
+      page_size: 50,
+      total: 0,
+      total_pages: 1,
+    })
+  )
   await expect(pending).rejects.toThrow()
   expect(client.getQueryData(options.queryKey)).toBeUndefined()
   await new Promise<void>((resolve) => queueMicrotask(resolve))
   const retry = client.fetchQuery(options)
-  sources.at(-1)?.dispatchEvent(snapshot({
-    list: [], page: 2, page_size: 50, total: 0, total_pages: 1,
-  }))
+  sources.at(-1)?.dispatchEvent(
+    snapshot({
+      list: [],
+      page: 2,
+      page_size: 50,
+      total: 0,
+      total_pages: 1,
+    })
+  )
   expect((await retry).list).toEqual([])
-  expect(urls[0]).toBe('/api/websites/website/access-logs/history/stream?keyword=%2Fapi&method=GET&page=2&page_size=50&status_class=5xx')
+  expect(urls[0]).toBe(
+    '/api/websites/website/access-logs/history/stream?keyword=%2Fapi&method=GET&page=2&page_size=50&status_class=5xx'
+  )
 })

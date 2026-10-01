@@ -5,4 +5,3 @@ export function providerLabel(provider: string) {
   if (provider === 'zerossl') return 'ZeroSSL'
   return provider
 }
-
