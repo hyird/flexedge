@@ -1,6 +1,9 @@
 #pragma once
 
-#include "ruvia/web/Model.h"
+#include <ruvia/core/task.h>
+#include <ruvia/http/http_known_method.h>
+#include <ruvia/web/context.h>
+#include <ruvia/web/http_client_handle.h>
 
 #include <algorithm>
 #include <array>
@@ -19,10 +22,7 @@
 
 #include <asio/ip/address.hpp>
 
-#include <ruvia/core/Task.h>
-#include <ruvia/http/HttpKnownMethod.h>
-#include <ruvia/web/Context.h>
-#include <ruvia/web/HttpClientHandle.h>
+#include "ruvia/web/model.h"
 
 #include "service/config/outbound.h"
 #include "service/features/outbound_http/client.h"
@@ -30,150 +30,153 @@
 
 namespace service::dns {
 
-RUVIA_MODEL(CloudflareApiErrorPayload, RUVIA_OPTIONAL_FIELD(code, ruvia::Int64),
-                    RUVIA_OPTIONAL_FIELD(message, ruvia::String));
+RUVIA_MODEL(cloudflare_api_error_payload, RUVIA_OPTIONAL_FIELD(code, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD(message, ruvia::string));
 
-RUVIA_MODEL(CloudflareErrorEnvelope, RUVIA_OPTIONAL_FIELD(success, ruvia::Bool),
-                    RUVIA_OPTIONAL_FIELD(errors, ruvia::Array<CloudflareApiErrorPayload>));
+RUVIA_MODEL(cloudflare_error_envelope, RUVIA_OPTIONAL_FIELD(success, ruvia::bool_value),
+    RUVIA_OPTIONAL_FIELD(errors, ruvia::array<cloudflare_api_error_payload>));
 
-RUVIA_MODEL(CloudflareTokenPayload, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(status, ruvia::String));
+RUVIA_MODEL(cloudflare_token_payload, RUVIA_OPTIONAL_FIELD(id, ruvia::string),
+    RUVIA_OPTIONAL_FIELD(status, ruvia::string));
 
-RUVIA_MODEL(CloudflareTokenEnvelope, RUVIA_OPTIONAL_FIELD(success, ruvia::Bool),
-                    RUVIA_OPTIONAL_FIELD(result, CloudflareTokenPayload),
-                    RUVIA_OPTIONAL_FIELD(errors, ruvia::Array<CloudflareApiErrorPayload>));
+RUVIA_MODEL(cloudflare_token_envelope, RUVIA_OPTIONAL_FIELD(success, ruvia::bool_value),
+    RUVIA_OPTIONAL_FIELD(result, cloudflare_token_payload),
+    RUVIA_OPTIONAL_FIELD(errors, ruvia::array<cloudflare_api_error_payload>));
 
-RUVIA_MODEL(CloudflareZonePayload, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(name, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(status, ruvia::String));
+RUVIA_MODEL(cloudflare_zone_payload, RUVIA_OPTIONAL_FIELD(id, ruvia::string),
+    RUVIA_OPTIONAL_FIELD(name, ruvia::string),
+    RUVIA_OPTIONAL_FIELD(status, ruvia::string));
 
-RUVIA_MODEL(CloudflareResultInfo, RUVIA_OPTIONAL_FIELD(page, ruvia::Int64),
-                    RUVIA_OPTIONAL_FIELD_NAME("per_page", perPage, ruvia::Int64),
-                    RUVIA_OPTIONAL_FIELD_NAME("total_count", totalCount, ruvia::Int64),
-                    RUVIA_OPTIONAL_FIELD_NAME("total_pages", totalPages, ruvia::Int64));
+RUVIA_MODEL(cloudflare_result_info, RUVIA_OPTIONAL_FIELD(page, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD_NAME("per_page", per_page, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD_NAME("total_count", total_count, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD_NAME("total_pages", total_pages, ruvia::int64));
 
-RUVIA_MODEL(CloudflareZoneEnvelope, RUVIA_OPTIONAL_FIELD(success, ruvia::Bool),
-                    RUVIA_OPTIONAL_FIELD(result, ruvia::Array<CloudflareZonePayload>),
-                    RUVIA_OPTIONAL_FIELD_NAME("result_info", resultInfo, CloudflareResultInfo),
-                    RUVIA_OPTIONAL_FIELD(errors, ruvia::Array<CloudflareApiErrorPayload>));
+RUVIA_MODEL(cloudflare_zone_envelope, RUVIA_OPTIONAL_FIELD(success, ruvia::bool_value),
+    RUVIA_OPTIONAL_FIELD(result, ruvia::array<cloudflare_zone_payload>),
+    RUVIA_OPTIONAL_FIELD_NAME("result_info", result_info, cloudflare_result_info),
+    RUVIA_OPTIONAL_FIELD(errors, ruvia::array<cloudflare_api_error_payload>));
 
-RUVIA_MODEL(CloudflareRecordPayload, RUVIA_OPTIONAL_FIELD(id, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(type, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(name, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(content, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD(ttl, ruvia::Int64),
-                    RUVIA_OPTIONAL_FIELD(priority, ruvia::Int64),
-                    RUVIA_OPTIONAL_FIELD(proxied, ruvia::Bool),
-                    RUVIA_OPTIONAL_FIELD_NAME("modified_on", modifiedOn, ruvia::String));
+RUVIA_MODEL(cloudflare_record_payload, RUVIA_OPTIONAL_FIELD(id, ruvia::string),
+    RUVIA_OPTIONAL_FIELD(type, ruvia::string),
+    RUVIA_OPTIONAL_FIELD(name, ruvia::string),
+    RUVIA_OPTIONAL_FIELD(content, ruvia::string),
+    RUVIA_OPTIONAL_FIELD(ttl, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD(priority, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD(proxied, ruvia::bool_value),
+    RUVIA_OPTIONAL_FIELD_NAME("modified_on", modified_on, ruvia::string));
 
-RUVIA_MODEL(CloudflareRecordEnvelope, RUVIA_OPTIONAL_FIELD(success, ruvia::Bool),
-                    RUVIA_OPTIONAL_FIELD(result, CloudflareRecordPayload),
-                    RUVIA_OPTIONAL_FIELD(errors, ruvia::Array<CloudflareApiErrorPayload>));
+RUVIA_MODEL(cloudflare_record_envelope, RUVIA_OPTIONAL_FIELD(success, ruvia::bool_value),
+    RUVIA_OPTIONAL_FIELD(result, cloudflare_record_payload),
+    RUVIA_OPTIONAL_FIELD(errors, ruvia::array<cloudflare_api_error_payload>));
 
-RUVIA_MODEL(CloudflareRecordListEnvelope, RUVIA_OPTIONAL_FIELD(success, ruvia::Bool),
-                    RUVIA_OPTIONAL_FIELD(result, ruvia::Array<CloudflareRecordPayload>),
-                    RUVIA_OPTIONAL_FIELD_NAME("result_info", resultInfo, CloudflareResultInfo),
-                    RUVIA_OPTIONAL_FIELD(errors, ruvia::Array<CloudflareApiErrorPayload>));
+RUVIA_MODEL(cloudflare_record_list_envelope, RUVIA_OPTIONAL_FIELD(success, ruvia::bool_value),
+    RUVIA_OPTIONAL_FIELD(result, ruvia::array<cloudflare_record_payload>),
+    RUVIA_OPTIONAL_FIELD_NAME("result_info", result_info, cloudflare_result_info),
+    RUVIA_OPTIONAL_FIELD(errors, ruvia::array<cloudflare_api_error_payload>));
 
-RUVIA_MODEL(CloudflareDeleteEnvelope, RUVIA_OPTIONAL_FIELD(success, ruvia::Bool),
-                    RUVIA_OPTIONAL_FIELD(errors, ruvia::Array<CloudflareApiErrorPayload>));
+RUVIA_MODEL(cloudflare_delete_envelope, RUVIA_OPTIONAL_FIELD(success, ruvia::bool_value),
+    RUVIA_OPTIONAL_FIELD(errors, ruvia::array<cloudflare_api_error_payload>));
 
-RUVIA_MODEL(CloudflareSaveRecordPayload, RUVIA_REQUIRED_FIELD(type, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(name, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(content, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(ttl, ruvia::Int64),
-                     RUVIA_OPTIONAL_FIELD(priority, ruvia::Int64, RUVIA_OMIT_EMPTY),
-                     RUVIA_OPTIONAL_FIELD(proxied, ruvia::Bool, RUVIA_OMIT_EMPTY));
+RUVIA_MODEL(cloudflare_save_record_payload, RUVIA_REQUIRED_FIELD(type, ruvia::string),
+    RUVIA_REQUIRED_FIELD(name, ruvia::string),
+    RUVIA_REQUIRED_FIELD(content, ruvia::string),
+    RUVIA_REQUIRED_FIELD(ttl, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD(priority, ruvia::int64, RUVIA_OMIT_EMPTY),
+    RUVIA_OPTIONAL_FIELD(proxied, ruvia::bool_value, RUVIA_OMIT_EMPTY));
 
-enum class CloudflareErrorCode {
-    credentialInvalid,
-    authorizationFailed,
-    upstreamFailed,
-    zoneNotFound,
-    dnsFailed,
-    recordConflict,
-    recordNotFound,
+enum class cloudflare_error_code {
+    credential_invalid,
+    authorization_failed,
+    upstream_failed,
+    zone_not_found,
+    dns_failed,
+    record_conflict,
+    record_not_found,
 };
 
-class CloudflareError final : public std::runtime_error {
-  public:
-    CloudflareError(CloudflareErrorCode code, std::string_view message)
-        : std::runtime_error(std::string(message)), code_(code) {}
+class cloudflare_error final : public std::runtime_error {
+public:
+    cloudflare_error(cloudflare_error_code code, std::string_view message)
+        : std::runtime_error(std::string(message)),
+          code_(code) {}
 
-    [[nodiscard]] CloudflareErrorCode code() const noexcept { return code_; }
+    [[nodiscard]] cloudflare_error_code code() const noexcept {
+        return code_;
+    }
 
-  private:
-    CloudflareErrorCode code_;
+private:
+    cloudflare_error_code code_;
 };
 
-struct CloudflareZone {
-    std::string id;
-    std::string name;
-    std::string status;
+struct cloudflare_zone {
+    std::string id_;
+    std::string name_;
+    std::string status_;
 };
 
-struct CloudflareRecord {
-    std::string id;
-    std::string type;
-    std::string name;
-    std::string content;
-    std::int64_t ttl;
-    std::optional<std::int64_t> priority;
-    bool proxied;
-    std::string modifiedAt;
+struct cloudflare_record {
+    std::string id_;
+    std::string type_;
+    std::string name_;
+    std::string content_;
+    std::int64_t ttl_;
+    std::optional<std::int64_t> priority_;
+    bool proxied_;
+    std::string modified_at_;
 };
 
-struct CloudflareRecordPage {
-    std::vector<CloudflareRecord> list;
-    std::int64_t total;
-    std::int64_t totalPages;
+struct cloudflare_record_page {
+    std::vector<cloudflare_record> list_;
+    std::int64_t total_;
+    std::int64_t total_pages_;
 };
 
-class CloudflareClient final {
-  public:
-    template <typename Runtime>
-    ruvia::Task<std::vector<CloudflareZone>> verifyToken(Runtime& c, std::string_view token,
-                                                         std::string_view accountId) const {
+class cloudflare_client final {
+public:
+    template <typename runtime_type>
+    ruvia::task<std::vector<cloudflare_zone>> verify_token(runtime_type& c, std::string_view token,
+        std::string_view account_id) const {
         const auto response = co_await send(
-            c, ruvia::HttpKnownMethod::kGet,
-            "/client/v4/accounts/" + std::string(accountId) + "/tokens/verify", token);
-        const std::optional<CloudflareTokenEnvelope> parsed =
-            ruvia::fromJson<CloudflareTokenEnvelope>(response.body(), {.resource = c.pool()});
-        if (!response.status().isSuccessful() || !parsed || !success(*parsed)) {
-            fail(parsed, CloudflareErrorCode::credentialInvalid,
-                 "Cloudflare API Token 无效或未激活");
+            c, ruvia::http_known_method::get,
+            "/client/v4/accounts/" + std::string(account_id) + "/tokens/verify", token);
+        const std::optional<cloudflare_token_envelope> parsed =
+            ruvia::from_json<cloudflare_token_envelope>(response.body(), {.resource_ = c.pool()});
+        if (!response.status().is_successful() || !parsed || !success(*parsed)) {
+            fail(parsed, cloudflare_error_code::credential_invalid,
+                "Cloudflare API Token 无效或未激活");
         }
         const auto& result = parsed->get<"result">();
         if (!result) {
-            throw CloudflareError(CloudflareErrorCode::credentialInvalid,
-                                  "Cloudflare API Token 无效或未激活");
+            throw cloudflare_error(cloudflare_error_code::credential_invalid,
+                "Cloudflare API Token 无效或未激活");
         }
         const auto& status = result->get<"status">();
         if (!status || status->view() != "active") {
-            throw CloudflareError(CloudflareErrorCode::credentialInvalid,
-                                  "Cloudflare API Token 无效或未激活");
+            throw cloudflare_error(cloudflare_error_code::credential_invalid,
+                "Cloudflare API Token 无效或未激活");
         }
 
-        co_return co_await listZones(c, token, accountId);
+        co_return co_await list_zones(c, token, account_id);
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::vector<CloudflareZone>> listZones(Runtime& c, std::string_view token,
-                                                       std::string_view accountId) const {
-        std::vector<CloudflareZone> result;
+    template <typename runtime_type>
+    ruvia::task<std::vector<cloudflare_zone>> list_zones(runtime_type& c, std::string_view token,
+        std::string_view account_id) const {
+        std::vector<cloudflare_zone> result;
         std::int64_t page = 1;
-        std::int64_t totalPages = 1;
+        std::int64_t total_pages = 1;
         do {
             const auto target =
-                "/client/v4/zones?account.id=" + percentEncode(accountId) +
+                "/client/v4/zones?account.id=" + percent_encode(account_id) +
                 "&status=active&order=name&direction=asc&per_page=50&page=" + std::to_string(page);
-            const auto response = co_await send(c, ruvia::HttpKnownMethod::kGet, target, token);
-            const std::optional<CloudflareZoneEnvelope> parsed =
-                ruvia::fromJson<CloudflareZoneEnvelope>(response.body(),
-                                                        {.resource = c.pool()});
-            if (!response.status().isSuccessful() || !parsed || !success(*parsed)) {
-                fail(parsed, CloudflareErrorCode::credentialInvalid,
-                     "Cloudflare API Token 缺少 Zone Read 权限");
+            const auto response = co_await send(c, ruvia::http_known_method::get, target, token);
+            const std::optional<cloudflare_zone_envelope> parsed =
+                ruvia::from_json<cloudflare_zone_envelope>(response.body(),
+                    {.resource_ = c.pool()});
+            if (!response.status().is_successful() || !parsed || !success(*parsed)) {
+                fail(parsed, cloudflare_error_code::credential_invalid,
+                    "Cloudflare API Token 缺少 Zone Read 权限");
             }
             const auto& zones = parsed->get<"result">();
             if (zones) {
@@ -182,43 +185,43 @@ class CloudflareClient final {
                     const auto& name = zone.get<"name">();
                     const auto& status = zone.get<"status">();
                     if (id && name && status) {
-                        result.push_back(CloudflareZone{std::string(id->view()),
-                                                        std::string(name->view()),
-                                                        std::string(status->view())});
+                        result.push_back(cloudflare_zone{std::string(id->view()),
+                            std::string(name->view()),
+                            std::string(status->view())});
                     }
                 }
             }
-            totalPages = 1;
-            const auto& info = parsed->get<"resultInfo">();
+            total_pages = 1;
+            const auto& info = parsed->get<"result_info">();
             if (info) {
-                const auto& value = info->get<"totalPages">();
+                const auto& value = info->get<"total_pages">();
                 if (value) {
-                    totalPages = static_cast<std::int64_t>(*value);
+                    total_pages = static_cast<std::int64_t>(*value);
                 }
             }
             ++page;
-        } while (page <= totalPages);
+        } while (page <= total_pages);
         co_return result;
     }
 
-    template <typename Runtime>
-    ruvia::Task<CloudflareZone> findZone(Runtime& c, std::string_view token,
-                                         std::string_view accountId,
-                                         std::string_view domain) const {
-        std::string candidate = normalizeDomain(domain);
+    template <typename runtime_type>
+    ruvia::task<cloudflare_zone> find_zone(runtime_type& c, std::string_view token,
+        std::string_view account_id,
+        std::string_view domain) const {
+        std::string candidate = normalize_domain(domain);
         if (candidate.starts_with("*.")) {
             candidate.erase(0, 2);
         }
 
         while (candidate.find('.') != std::string::npos) {
-            const auto target = "/client/v4/zones?account.id=" + percentEncode(accountId) +
-                                "&name=" + percentEncode(candidate) + "&status=active&per_page=5";
-            const auto response = co_await send(c, ruvia::HttpKnownMethod::kGet, target, token);
-            const std::optional<CloudflareZoneEnvelope> parsed =
-                ruvia::fromJson<CloudflareZoneEnvelope>(response.body(),
-                                                        {.resource = c.pool()});
-            if (!response.status().isSuccessful() || !parsed || !success(*parsed)) {
-                fail(parsed, CloudflareErrorCode::upstreamFailed, "Cloudflare Zone 查询失败");
+            const auto target = "/client/v4/zones?account.id=" + percent_encode(account_id) +
+                                "&name=" + percent_encode(candidate) + "&status=active&per_page=5";
+            const auto response = co_await send(c, ruvia::http_known_method::get, target, token);
+            const std::optional<cloudflare_zone_envelope> parsed =
+                ruvia::from_json<cloudflare_zone_envelope>(response.body(),
+                    {.resource_ = c.pool()});
+            if (!response.status().is_successful() || !parsed || !success(*parsed)) {
+                fail(parsed, cloudflare_error_code::upstream_failed, "Cloudflare Zone 查询失败");
             }
 
             const auto& zones = parsed->get<"result">();
@@ -229,39 +232,39 @@ class CloudflareClient final {
                     const auto& status = zone.get<"status">();
                     if (id && name && status && status->view() == "active" &&
                         name->view() == candidate) {
-                        co_return CloudflareZone{std::string(id->view()), std::string(name->view()),
-                                                 std::string(status->view())};
+                        co_return cloudflare_zone{std::string(id->view()), std::string(name->view()),
+                            std::string(status->view())};
                     }
                 }
             }
             candidate.erase(0, candidate.find('.') + 1);
         }
-        throw CloudflareError(CloudflareErrorCode::zoneNotFound,
-                              "Cloudflare 中未找到该域名对应的活动 Zone");
+        throw cloudflare_error(cloudflare_error_code::zone_not_found,
+            "Cloudflare 中未找到该域名对应的活动 Zone");
     }
 
-    template <typename Runtime>
-    ruvia::Task<CloudflareRecordPage>
-    listRecords(Runtime& c, std::string_view token, std::string_view zoneId, std::int64_t page,
-                std::int64_t pageSize, const std::optional<std::string>& keyword) const {
-        auto target = "/client/v4/zones/" + std::string(zoneId) +
+    template <typename runtime_type>
+    ruvia::task<cloudflare_record_page>
+    list_records(runtime_type& c, std::string_view token, std::string_view zone_id, std::int64_t page,
+        std::int64_t page_size, const std::optional<std::string>& keyword) const {
+        auto target = "/client/v4/zones/" + std::string(zone_id) +
                       "/dns_records?order=name&direction=asc&page=" + std::to_string(page) +
-                      "&per_page=" + std::to_string(pageSize);
+                      "&per_page=" + std::to_string(page_size);
         if (keyword && !keyword->empty()) {
-            target += "&search=" + percentEncode(*keyword);
+            target += "&search=" + percent_encode(*keyword);
         }
-        const auto response = co_await send(c, ruvia::HttpKnownMethod::kGet, target, token);
-        const std::optional<CloudflareRecordListEnvelope> parsed =
-            ruvia::fromJson<CloudflareRecordListEnvelope>(response.body(),
-                                                          {.resource = c.pool()});
-        if (!response.status().isSuccessful() || !parsed || !success(*parsed)) {
-            fail(parsed, CloudflareErrorCode::dnsFailed, "Cloudflare DNS 记录查询失败");
+        const auto response = co_await send(c, ruvia::http_known_method::get, target, token);
+        const std::optional<cloudflare_record_list_envelope> parsed =
+            ruvia::from_json<cloudflare_record_list_envelope>(response.body(),
+                {.resource_ = c.pool()});
+        if (!response.status().is_successful() || !parsed || !success(*parsed)) {
+            fail(parsed, cloudflare_error_code::dns_failed, "Cloudflare DNS 记录查询失败");
         }
 
-        CloudflareRecordPage result;
+        cloudflare_record_page result;
         const auto& records = parsed->get<"result">();
         if (records) {
-            result.list.reserve(records->size());
+            result.list_.reserve(records->size());
             for (const auto& record : *records) {
                 const auto& id = record.get<"id">();
                 const auto& type = record.get<"type">();
@@ -271,184 +274,184 @@ class CloudflareClient final {
                 if (!id || !type || !name || !content || !ttl) {
                     continue;
                 }
-                CloudflareRecord item{std::string(id->view()),
-                                      std::string(type->view()),
-                                      std::string(name->view()),
-                                      std::string(content->view()),
-                                      *ttl,
-                                      std::nullopt,
-                                      false,
-                                      {}};
+                cloudflare_record item{std::string(id->view()),
+                    std::string(type->view()),
+                    std::string(name->view()),
+                    std::string(content->view()),
+                    *ttl,
+                    std::nullopt,
+                    false,
+                    {}};
                 const auto& priority = record.get<"priority">();
                 if (priority) {
-                    item.priority = *priority;
+                    item.priority_ = *priority;
                 }
-                const auto& proxiedValue = record.get<"proxied">();
-                if (proxiedValue) {
-                    item.proxied = static_cast<bool>(*proxiedValue);
+                const auto& proxied_value = record.get<"proxied">();
+                if (proxied_value) {
+                    item.proxied_ = static_cast<bool>(*proxied_value);
                 }
-                const auto& modifiedOn = record.get<"modifiedOn">();
-                if (modifiedOn) {
-                    item.modifiedAt = std::string(modifiedOn->view());
+                const auto& modified_on = record.get<"modified_on">();
+                if (modified_on) {
+                    item.modified_at_ = std::string(modified_on->view());
                 }
-                result.list.push_back(std::move(item));
+                result.list_.push_back(std::move(item));
             }
         }
-        const auto& info = parsed->get<"resultInfo">();
-        result.total = static_cast<std::int64_t>(result.list.size());
-        result.totalPages = 1;
+        const auto& info = parsed->get<"result_info">();
+        result.total_ = static_cast<std::int64_t>(result.list_.size());
+        result.total_pages_ = 1;
         if (info) {
-            const auto& totalCount = info->get<"totalCount">();
-            if (totalCount) {
-                result.total = static_cast<std::int64_t>(*totalCount);
+            const auto& total_count = info->get<"total_count">();
+            if (total_count) {
+                result.total_ = static_cast<std::int64_t>(*total_count);
             }
-            const auto& totalPages = info->get<"totalPages">();
-            if (totalPages) {
-                result.totalPages = static_cast<std::int64_t>(*totalPages);
+            const auto& total_pages = info->get<"total_pages">();
+            if (total_pages) {
+                result.total_pages_ = static_cast<std::int64_t>(*total_pages);
             }
         }
         co_return result;
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::vector<CloudflareRecord>> listAllRecords(Runtime& c, std::string_view token,
-                                                              std::string_view zoneId) const {
-        std::vector<CloudflareRecord> result;
+    template <typename runtime_type>
+    ruvia::task<std::vector<cloudflare_record>> list_all_records(runtime_type& c, std::string_view token,
+        std::string_view zone_id) const {
+        std::vector<cloudflare_record> result;
         std::int64_t page = 1;
-        std::int64_t totalPages = 1;
+        std::int64_t total_pages = 1;
         do {
-            auto current = co_await listRecords(c, token, zoneId, page, 100, std::nullopt);
-            result.insert(result.end(), std::make_move_iterator(current.list.begin()),
-                          std::make_move_iterator(current.list.end()));
-            totalPages = current.totalPages;
+            auto current = co_await list_records(c, token, zone_id, page, 100, std::nullopt);
+            result.insert(result.end(), std::make_move_iterator(current.list_.begin()),
+                std::make_move_iterator(current.list_.end()));
+            total_pages = current.total_pages_;
             ++page;
-        } while (page <= totalPages);
+        } while (page <= total_pages);
         co_return result;
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::string>
-    createOrAdoptRecord(Runtime& c, std::string_view token, std::string_view zoneId,
-                        std::string_view type, std::string_view name, std::string_view content,
-                        std::int64_t ttl, std::optional<std::int64_t> priority,
-                        bool proxied) const {
-        auto existingId = co_await findExactRecordId(c, token, zoneId, type, name, content);
-        if (existingId) {
-            co_return co_await updateRecord(c, token, zoneId, *existingId, type, name, content, ttl,
-                                            priority, proxied);
+    template <typename runtime_type>
+    ruvia::task<std::string>
+    create_or_adopt_record(runtime_type& c, std::string_view token, std::string_view zone_id,
+        std::string_view type, std::string_view name, std::string_view content,
+        std::int64_t ttl, std::optional<std::int64_t> priority,
+        bool proxied) const {
+        auto existing_id = co_await find_exact_record_id(c, token, zone_id, type, name, content);
+        if (existing_id) {
+            co_return co_await update_record(c, token, zone_id, *existing_id, type, name, content, ttl,
+                priority, proxied);
         }
 
         bool duplicate = false;
         try {
-            co_return co_await saveRecord(c, ruvia::HttpKnownMethod::kPost,
-                                          "/client/v4/zones/" + std::string(zoneId) +
-                                              "/dns_records",
-                                          token, type, name, content, ttl, priority, proxied);
-        } catch (const CloudflareError& error) {
-            if (error.code() != CloudflareErrorCode::recordConflict) {
+            co_return co_await save_record(c, ruvia::http_known_method::post,
+                "/client/v4/zones/" + std::string(zone_id) +
+                    "/dns_records",
+                token, type, name, content, ttl, priority, proxied);
+        } catch (const cloudflare_error& error) {
+            if (error.code() != cloudflare_error_code::record_conflict) {
                 throw;
             }
             duplicate = true;
         }
 
         if (duplicate) {
-            existingId = co_await findExactRecordId(c, token, zoneId, type, name, content);
-            if (existingId) {
-                co_return co_await updateRecord(c, token, zoneId, *existingId, type, name, content,
-                                                ttl, priority, proxied);
+            existing_id = co_await find_exact_record_id(c, token, zone_id, type, name, content);
+            if (existing_id) {
+                co_return co_await update_record(c, token, zone_id, *existing_id, type, name, content,
+                    ttl, priority, proxied);
             }
         }
-        throw CloudflareError(CloudflareErrorCode::recordConflict,
-                              "Cloudflare DNS 记录冲突，未找到可安全接管的相同记录");
+        throw cloudflare_error(cloudflare_error_code::record_conflict,
+            "Cloudflare DNS 记录冲突，未找到可安全接管的相同记录");
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::string>
-    updateRecord(Runtime& c, std::string_view token, std::string_view zoneId,
-                 std::string_view recordId, std::string_view type, std::string_view name,
-                 std::string_view content, std::int64_t ttl, std::optional<std::int64_t> priority,
-                 bool proxied) const {
-        co_return co_await saveRecord(c, ruvia::HttpKnownMethod::kPut,
-                                      "/client/v4/zones/" + std::string(zoneId) + "/dns_records/" +
-                                          std::string(recordId),
-                                      token, type, name, content, ttl, priority, proxied);
+    template <typename runtime_type>
+    ruvia::task<std::string>
+    update_record(runtime_type& c, std::string_view token, std::string_view zone_id,
+        std::string_view record_id, std::string_view type, std::string_view name,
+        std::string_view content, std::int64_t ttl, std::optional<std::int64_t> priority,
+        bool proxied) const {
+        co_return co_await save_record(c, ruvia::http_known_method::put,
+            "/client/v4/zones/" + std::string(zone_id) + "/dns_records/" +
+                std::string(record_id),
+            token, type, name, content, ttl, priority, proxied);
     }
 
-    template <typename Runtime>
-    ruvia::Task<void> deleteRecord(Runtime& c, std::string_view token, std::string_view zoneId,
-                                   std::string_view recordId) const {
+    template <typename runtime_type>
+    ruvia::task<void> delete_record(runtime_type& c, std::string_view token, std::string_view zone_id,
+        std::string_view record_id) const {
         const auto target =
-            "/client/v4/zones/" + std::string(zoneId) + "/dns_records/" + std::string(recordId);
-        const auto response = co_await send(c, ruvia::HttpKnownMethod::kDelete, target, token);
-        if (response.status() == ruvia::http_status::kNotFound) {
+            "/client/v4/zones/" + std::string(zone_id) + "/dns_records/" + std::string(record_id);
+        const auto response = co_await send(c, ruvia::http_known_method::delete_value, target, token);
+        if (response.status() == ruvia::http_status::not_found) {
             co_return;
         }
-        const std::optional<CloudflareDeleteEnvelope> parsed =
-            ruvia::fromJson<CloudflareDeleteEnvelope>(response.body(), {.resource = c.pool()});
-        if (!response.status().isSuccessful() || !parsed || !success(*parsed)) {
-            fail(parsed, CloudflareErrorCode::dnsFailed, "Cloudflare DNS 记录删除失败");
+        const std::optional<cloudflare_delete_envelope> parsed =
+            ruvia::from_json<cloudflare_delete_envelope>(response.body(), {.resource_ = c.pool()});
+        if (!response.status().is_successful() || !parsed || !success(*parsed)) {
+            fail(parsed, cloudflare_error_code::dns_failed, "Cloudflare DNS 记录删除失败");
         }
         co_return;
     }
 
-  private:
-    static constexpr std::int64_t kRecordAlreadyExistsCode{81057};
+private:
+    static constexpr std::int64_t record_already_exists_code{81057};
 
-    template <typename Runtime>
-    ruvia::Task<service::outbound_http::BufferedResponse>
-    send(Runtime& c, ruvia::HttpKnownMethod method, std::string_view target, std::string_view token,
-         std::optional<std::string_view> body = std::nullopt) const {
-        auto&& client = c.httpClient(service::config::kCloudflareOriginAlias);
-        service::utils::SensitiveString authorization("Bearer " + std::string(token));
-        std::array<ruvia::HttpHeaderView, 3> headers{
-            ruvia::HttpHeaderView{"authorization", authorization.view()},
-            ruvia::HttpHeaderView{"accept", "application/json"},
-            ruvia::HttpHeaderView{"content-type", "application/json"},
+    template <typename runtime_type>
+    ruvia::task<service::outbound_http::buffered_response>
+    send(runtime_type& c, ruvia::http_known_method method, std::string_view target, std::string_view token,
+        std::optional<std::string_view> body = std::nullopt) const {
+        auto&& client = c.get_http_client(service::config::cloudflare_origin_alias);
+        service::utils::sensitive_string authorization("Bearer " + std::string(token));
+        std::array<ruvia::http_header_view, 3> headers{
+            ruvia::http_header_view{"authorization", authorization.view()},
+            ruvia::http_header_view{"accept", "application/json"},
+            ruvia::http_header_view{"content-type", "application/json"},
         };
-        const auto headerCount = body ? headers.size() : headers.size() - 1;
+        const auto header_count = body ? headers.size() : headers.size() - 1;
         try {
-            co_return co_await service::outbound_http::sendBuffered(
+            co_return co_await service::outbound_http::send_buffered(
                 client,
                 {
-                    .method = ruvia::knownHttpMethodToken(method),
-                    .target = target,
-                    .headers = std::span(headers).first(headerCount),
-                    .content = body ? ruvia::HttpClientRequestContentView::bytes(*body)
-                                    : ruvia::HttpClientRequestContentView::none(),
+                    .method_ = ruvia::known_http_method_token(method),
+                    .target_ = target,
+                    .headers_ = std::span(headers).first(header_count),
+                    .content_ = body ? ruvia::http_client_request_content_view::bytes(*body)
+                                     : ruvia::http_client_request_content_view::none(),
                 },
-                {.timeout = std::chrono::seconds(10), .stopToken = c.stopToken()});
-        } catch (const ruvia::HttpClientError& error) {
-            using Code = ruvia::HttpClientError::Code;
+                {.timeout_ = std::chrono::seconds(10), .stop_token_ = c.get_stop_token()});
+        } catch (const ruvia::http_client_error& error) {
+            using code = ruvia::http_client_error::code_type;
             switch (error.code()) {
-            case Code::kTimeout:
-                throw CloudflareError(CloudflareErrorCode::upstreamFailed,
-                                      "Cloudflare API 请求超时（10 秒）");
-            case Code::kResolveFailed:
-                throw CloudflareError(CloudflareErrorCode::upstreamFailed,
-                                      "Cloudflare API 域名解析失败");
-            case Code::kConnectFailed:
-                throw CloudflareError(CloudflareErrorCode::upstreamFailed,
-                                      "Cloudflare API 连接失败");
-            case Code::kTlsFailed:
-                throw CloudflareError(CloudflareErrorCode::upstreamFailed,
-                                      "Cloudflare API TLS 连接失败");
-            case Code::kResponseTooLarge:
-                throw CloudflareError(CloudflareErrorCode::upstreamFailed,
-                                      "Cloudflare API 响应超过大小限制");
-            default:
-                throw CloudflareError(CloudflareErrorCode::upstreamFailed,
-                                      "Cloudflare API 请求失败");
+                case code::timeout:
+                    throw cloudflare_error(cloudflare_error_code::upstream_failed,
+                        "Cloudflare API 请求超时（10 秒）");
+                case code::resolve_failed:
+                    throw cloudflare_error(cloudflare_error_code::upstream_failed,
+                        "Cloudflare API 域名解析失败");
+                case code::connect_failed:
+                    throw cloudflare_error(cloudflare_error_code::upstream_failed,
+                        "Cloudflare API 连接失败");
+                case code::tls_failed:
+                    throw cloudflare_error(cloudflare_error_code::upstream_failed,
+                        "Cloudflare API TLS 连接失败");
+                case code::response_too_large:
+                    throw cloudflare_error(cloudflare_error_code::upstream_failed,
+                        "Cloudflare API 响应超过大小限制");
+                default:
+                    throw cloudflare_error(cloudflare_error_code::upstream_failed,
+                        "Cloudflare API 请求失败");
             }
         }
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::string> saveRecord(Runtime& c, ruvia::HttpKnownMethod method,
-                                        std::string target, std::string_view token,
-                                        std::string_view type, std::string_view name,
-                                        std::string_view content, std::int64_t ttl,
-                                        std::optional<std::int64_t> priority, bool proxied) const {
-        CloudflareSaveRecordPayload payload({.resource = c.pool()});
+    template <typename runtime_type>
+    ruvia::task<std::string> save_record(runtime_type& c, ruvia::http_known_method method,
+        std::string target, std::string_view token,
+        std::string_view type, std::string_view name,
+        std::string_view content, std::int64_t ttl,
+        std::optional<std::int64_t> priority, bool proxied) const {
+        cloudflare_save_record_payload payload({.resource_ = c.pool()});
         payload.set<"type">(type);
         payload.set<"name">(name);
         payload.set<"content">(content);
@@ -459,50 +462,50 @@ class CloudflareClient final {
         if (type == "A" || type == "AAAA" || type == "CNAME") {
             payload.set<"proxied">(proxied);
         }
-        const auto json = ruvia::toJson(payload, {.resource = c.pool()});
+        const auto json = ruvia::to_json(payload, {.resource_ = c.pool()});
         const auto response = co_await send(c, method, target, token, json);
-        if (response.status() == ruvia::http_status::kNotFound) {
-            throw CloudflareError(CloudflareErrorCode::recordNotFound, "Cloudflare DNS 记录不存在");
+        if (response.status() == ruvia::http_status::not_found) {
+            throw cloudflare_error(cloudflare_error_code::record_not_found, "Cloudflare DNS 记录不存在");
         }
-        const std::optional<CloudflareRecordEnvelope> parsed =
-            ruvia::fromJson<CloudflareRecordEnvelope>(response.body(), {.resource = c.pool()});
-        if (!response.status().isSuccessful() || !parsed || !success(*parsed)) {
+        const std::optional<cloudflare_record_envelope> parsed =
+            ruvia::from_json<cloudflare_record_envelope>(response.body(), {.resource_ = c.pool()});
+        if (!response.status().is_successful() || !parsed || !success(*parsed)) {
             if (parsed) {
-                fail(parsed, CloudflareErrorCode::dnsFailed, "Cloudflare DNS 记录保存失败");
+                fail(parsed, cloudflare_error_code::dns_failed, "Cloudflare DNS 记录保存失败");
             }
-            const std::optional<CloudflareErrorEnvelope> errorEnvelope =
-                ruvia::fromJson<CloudflareErrorEnvelope>(response.body(),
-                                                         {.resource = c.pool()});
-            fail(errorEnvelope, CloudflareErrorCode::dnsFailed, "Cloudflare DNS 记录保存失败");
+            const std::optional<cloudflare_error_envelope> error_envelope =
+                ruvia::from_json<cloudflare_error_envelope>(response.body(),
+                    {.resource_ = c.pool()});
+            fail(error_envelope, cloudflare_error_code::dns_failed, "Cloudflare DNS 记录保存失败");
         }
         const auto& result = parsed->get<"result">();
         if (!result) {
-            throw CloudflareError(CloudflareErrorCode::dnsFailed,
-                                  "Cloudflare DNS 记录保存响应缺少记录 ID");
+            throw cloudflare_error(cloudflare_error_code::dns_failed,
+                "Cloudflare DNS 记录保存响应缺少记录 ID");
         }
         const auto& id = result->get<"id">();
         if (!id) {
-            throw CloudflareError(CloudflareErrorCode::dnsFailed,
-                                  "Cloudflare DNS 记录保存响应缺少记录 ID");
+            throw cloudflare_error(cloudflare_error_code::dns_failed,
+                "Cloudflare DNS 记录保存响应缺少记录 ID");
         }
         co_return std::string(id->view());
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::optional<std::string>>
-    findExactRecordId(Runtime& c, std::string_view token, std::string_view zoneId,
-                      std::string_view type, std::string_view name,
-                      std::string_view content) const {
-        const auto target = "/client/v4/zones/" + std::string(zoneId) +
-                            "/dns_records?match=all&type=" + percentEncode(type) +
-                            "&name.exact=" + percentEncode(name) +
-                            "&content.exact=" + percentEncode(content) + "&per_page=100";
-        const auto response = co_await send(c, ruvia::HttpKnownMethod::kGet, target, token);
-        const std::optional<CloudflareRecordListEnvelope> parsed =
-            ruvia::fromJson<CloudflareRecordListEnvelope>(response.body(),
-                                                          {.resource = c.pool()});
-        if (!response.status().isSuccessful() || !parsed || !success(*parsed)) {
-            fail(parsed, CloudflareErrorCode::dnsFailed, "Cloudflare DNS 相同记录查询失败");
+    template <typename runtime_type>
+    ruvia::task<std::optional<std::string>>
+    find_exact_record_id(runtime_type& c, std::string_view token, std::string_view zone_id,
+        std::string_view type, std::string_view name,
+        std::string_view content) const {
+        const auto target = "/client/v4/zones/" + std::string(zone_id) +
+                            "/dns_records?match=all&type=" + percent_encode(type) +
+                            "&name.exact=" + percent_encode(name) +
+                            "&content.exact=" + percent_encode(content) + "&per_page=100";
+        const auto response = co_await send(c, ruvia::http_known_method::get, target, token);
+        const std::optional<cloudflare_record_list_envelope> parsed =
+            ruvia::from_json<cloudflare_record_list_envelope>(response.body(),
+                {.resource_ = c.pool()});
+        if (!response.status().is_successful() || !parsed || !success(*parsed)) {
+            fail(parsed, cloudflare_error_code::dns_failed, "Cloudflare DNS 相同记录查询失败");
         }
 
         std::optional<std::string> result;
@@ -512,34 +515,35 @@ class CloudflareClient final {
         }
         for (const auto& record : *records) {
             const auto& id = record.get<"id">();
-            const auto& recordType = record.get<"type">();
-            const auto& recordName = record.get<"name">();
-            const auto& recordContent = record.get<"content">();
-            if (!id || !recordType || !recordName || !recordContent || recordType->view() != type ||
-                !dnsNameEquals(recordName->view(), name) ||
-                !recordContentEquals(type, recordContent->view(), content)) {
+            const auto& record_type = record.get<"type">();
+            const auto& record_name = record.get<"name">();
+            const auto& record_content = record.get<"content">();
+            if (!id || !record_type || !record_name || !record_content || record_type->view() != type ||
+                !dns_name_equals(record_name->view(), name) ||
+                !record_content_equals(type, record_content->view(), content)) {
                 continue;
             }
             if (result && *result != id->view()) {
-                throw CloudflareError(CloudflareErrorCode::recordConflict,
-                                      "Cloudflare 中存在多条相同 DNS 记录，无法安全接管");
+                throw cloudflare_error(cloudflare_error_code::record_conflict,
+                    "Cloudflare 中存在多条相同 DNS 记录，无法安全接管");
             }
             result = std::string(id->view());
         }
         co_return result;
     }
 
-    template <typename Envelope> [[nodiscard]] static bool success(const Envelope& envelope) {
+    template <typename envelope_type>
+    [[nodiscard]] static bool success(const envelope_type& envelope) {
         const auto& value = envelope.template get<"success">();
         return value && static_cast<bool>(*value);
     }
 
-    template <typename Envelope>
-    [[nodiscard]] static std::string message(const Envelope& envelope, std::string_view fallback) {
+    template <typename envelope_type>
+    [[nodiscard]] static std::string message(const envelope_type& envelope, std::string_view fallback) {
         const auto& errors = envelope.template get<"errors">();
         if (errors && !errors->empty()) {
             const auto& code = errors->front().template get<"code">();
-            if (code && static_cast<std::int64_t>(*code) == kRecordAlreadyExistsCode) {
+            if (code && static_cast<std::int64_t>(*code) == record_already_exists_code) {
                 return "Cloudflare 中已存在相同 DNS 记录";
             }
             const auto& value = errors->front().template get<"message">();
@@ -550,67 +554,67 @@ class CloudflareClient final {
         return std::string(fallback);
     }
 
-    template <typename Envelope>
-    [[noreturn]] static void fail(const std::optional<Envelope>& envelope, CloudflareErrorCode code,
-                                  std::string_view fallback) {
-        auto resolvedCode = code;
+    template <typename envelope_type>
+    [[noreturn]] static void fail(const std::optional<envelope_type>& envelope, cloudflare_error_code code,
+        std::string_view fallback) {
+        auto resolved_code = code;
         if (envelope) {
             const auto& errors = envelope->template get<"errors">();
             if (errors && !errors->empty()) {
-                const auto& apiCode = errors->front().template get<"code">();
-                if (apiCode) {
-                    const auto value = static_cast<std::int64_t>(*apiCode);
+                const auto& api_code = errors->front().template get<"code">();
+                if (api_code) {
+                    const auto value = static_cast<std::int64_t>(*api_code);
                     if (value == 10000) {
-                        resolvedCode = CloudflareErrorCode::authorizationFailed;
-                    } else if (value == kRecordAlreadyExistsCode) {
-                        resolvedCode = CloudflareErrorCode::recordConflict;
+                        resolved_code = cloudflare_error_code::authorization_failed;
+                    } else if (value == record_already_exists_code) {
+                        resolved_code = cloudflare_error_code::record_conflict;
                     }
                 }
             }
         }
-        throw CloudflareError(resolvedCode,
-                              envelope ? message(*envelope, fallback) : std::string(fallback));
+        throw cloudflare_error(resolved_code,
+            envelope ? message(*envelope, fallback) : std::string(fallback));
     }
 
-    [[nodiscard]] static std::string normalizeDomain(std::string_view input) {
+    [[nodiscard]] static std::string normalize_domain(std::string_view input) {
         std::string result(input);
         std::transform(result.begin(), result.end(), result.begin(),
-                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
         return result;
     }
 
-    [[nodiscard]] static bool dnsNameEquals(std::string_view left, std::string_view right) {
-        auto normalizedLeft = normalizeDomain(left);
-        auto normalizedRight = normalizeDomain(right);
-        if (normalizedLeft.ends_with('.')) {
-            normalizedLeft.pop_back();
+    [[nodiscard]] static bool dns_name_equals(std::string_view left, std::string_view right) {
+        auto normalized_left = normalize_domain(left);
+        auto normalized_right = normalize_domain(right);
+        if (normalized_left.ends_with('.')) {
+            normalized_left.pop_back();
         }
-        if (normalizedRight.ends_with('.')) {
-            normalizedRight.pop_back();
+        if (normalized_right.ends_with('.')) {
+            normalized_right.pop_back();
         }
-        return normalizedLeft == normalizedRight;
+        return normalized_left == normalized_right;
     }
 
-    [[nodiscard]] static bool ipAddressEquals(std::string_view left, std::string_view right) {
-        std::error_code leftError;
-        std::error_code rightError;
-        const auto leftAddress = asio::ip::make_address(left, leftError);
-        const auto rightAddress = asio::ip::make_address(right, rightError);
-        return !leftError && !rightError && leftAddress == rightAddress;
+    [[nodiscard]] static bool ip_address_equals(std::string_view left, std::string_view right) {
+        std::error_code left_error;
+        std::error_code right_error;
+        const auto left_address = asio::ip::make_address(left, left_error);
+        const auto right_address = asio::ip::make_address(right, right_error);
+        return !left_error && !right_error && left_address == right_address;
     }
 
-    [[nodiscard]] static bool recordContentEquals(std::string_view type, std::string_view left,
-                                                  std::string_view right) {
+    [[nodiscard]] static bool record_content_equals(std::string_view type, std::string_view left,
+        std::string_view right) {
         if (type == "A" || type == "AAAA") {
-            return ipAddressEquals(left, right);
+            return ip_address_equals(left, right);
         }
         if (type == "CNAME" || type == "MX") {
-            return dnsNameEquals(left, right);
+            return dns_name_equals(left, right);
         }
         return left == right;
     }
 
-    [[nodiscard]] static std::string percentEncode(std::string_view input) {
+    [[nodiscard]] static std::string percent_encode(std::string_view input) {
         constexpr char hex[] = "0123456789ABCDEF";
         std::string result;
         result.reserve(input.size());
@@ -628,9 +632,9 @@ class CloudflareClient final {
     }
 };
 
-inline const CloudflareClient& cloudflareClient() {
-    static const CloudflareClient client;
+inline const cloudflare_client& get_cloudflare_client() {
+    static const cloudflare_client client;
     return client;
 }
 
-} // namespace service::dns
+}  // namespace service::dns

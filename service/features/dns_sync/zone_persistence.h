@@ -1,5 +1,8 @@
 #pragma once
 
+#include <ruvia/core/task.h>
+#include <ruvia/web/model_json.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <stdexcept>
@@ -9,14 +12,11 @@
 #include <utility>
 #include <vector>
 
-#include <ruvia/core/Task.h>
-#include <ruvia/web/ModelJson.h>
-
 #include "service/features/background/worker_pool.h"
 #include "service/features/dns/driver.h"
+#include "service/features/dns_sync/mapper.h"
 #include "service/features/dns_sync/queue.h"
 #include "service/features/dns_sync/reconciliation.h"
-#include "service/features/dns_sync/mapper.h"
 #include "service/features/dns_sync/task.h"
 #include "service/features/logging/logger.h"
 #include "service/features/sync_runtime/error.h"
@@ -24,365 +24,365 @@
 
 namespace service::dns_sync::detail {
 
-inline ruvia::Task<void>
-importInitialRemoteRecords(service::background::WorkerContext& context, const DnsTask& task,
-                           const service::sync_runtime::RunningMarkerLease& lease,
-                           std::int64_t configRevision, std::string_view domain,
-                           const ZoneRuntimeData& currentRuntime,
-                           const service::dns::DnsProviderDriver& driver,
-                           const std::vector<service::dns::ProviderRecord>& remoteRecords,
-                           const std::vector<service::dns::ProviderLine>& lines) {
-    if (remoteRecords.size() > kMaxReconciliationRecords) {
+inline ruvia::task<void>
+import_initial_remote_records(service::background::worker_context& context, const dns_task& task,
+    const service::sync_runtime::running_marker_lease& lease,
+    std::int64_t config_revision, std::string_view domain,
+    const zone_runtime_data& current_runtime,
+    const service::dns::dns_provider_driver& driver,
+    const std::vector<service::dns::provider_record>& remote_records,
+    const std::vector<service::dns::provider_line>& lines) {
+    if (remote_records.size() > max_reconciliation_records) {
         throw std::runtime_error("远程 DNS 记录超过单个域名可导入上限");
     }
 
-    std::unordered_set<std::string> enabledLines;
-    enabledLines.reserve(lines.size());
+    std::unordered_set<std::string> enabled_lines;
+    enabled_lines.reserve(lines.size());
     for (const auto& line : lines) {
-        if (!line.code.empty()) {
-            enabledLines.emplace(line.code);
+        if (!line.code_.empty()) {
+            enabled_lines.emplace(line.code_);
         }
     }
 
-    std::unordered_set<std::string> remoteIds;
-    remoteIds.reserve(remoteRecords.size());
-    for (const auto& record : remoteRecords) {
-        if (!supportsManagedRecordType(record.type)) {
-            throw std::runtime_error("远程 DNS 存在当前不支持自动托管的记录类型：" + record.type);
+    std::unordered_set<std::string> remote_ids;
+    remote_ids.reserve(remote_records.size());
+    for (const auto& record : remote_records) {
+        if (!supports_managed_record_type(record.type_)) {
+            throw std::runtime_error("远程 DNS 存在当前不支持自动托管的记录类型：" + record.type_);
         }
-        if (record.id.empty() || record.name.empty() || record.content.empty() || record.ttl < 1 ||
-            record.ttl > 86400 ||
-            (record.priority && (*record.priority < 0 || *record.priority > 65535)) ||
-            !enabledLines.contains(record.lineCode)) {
+        if (record.id_.empty() || record.name_.empty() || record.content_.empty() || record.ttl_ < 1 ||
+            record.ttl_ > 86400 ||
+            (record.priority_ && (*record.priority_ < 0 || *record.priority_ > 65535)) ||
+            !enabled_lines.contains(record.line_code_)) {
             throw std::runtime_error("远程 DNS 记录不符合本地托管配置要求");
         }
-        if (!remoteIds.emplace(record.id).second) {
+        if (!remote_ids.emplace(record.id_).second) {
             throw std::runtime_error("远程 DNS 记录 ID 重复");
         }
     }
 
-    auto transaction = co_await context.db().beginTransaction();
+    auto transaction = co_await context.db().begin_transaction();
     const auto ids = co_await transaction.query(
         "SELECT gen_random_uuid()::TEXT FROM generate_series(1, $1::BIGINT)",
-        static_cast<std::int64_t>(remoteRecords.size()));
-    if (ids.size() != remoteRecords.size()) {
+        static_cast<std::int64_t>(remote_records.size()));
+    if (ids.size() != remote_records.size()) {
         throw std::runtime_error("远程 DNS 记录本地 ID 生成失败");
     }
 
-    ZoneConfigOutput importedConfig({.resource = context.pool()});
-    auto& configRecords = importedConfig.ensure<"records">();
-    ZoneRuntimeDto importedRuntime({.resource = context.pool()});
-    importedRuntime.set<"recordsImported">(true);
-    auto& runtimeLines = importedRuntime.ensure<"lines">();
+    zone_config_output imported_config({.resource_ = context.pool()});
+    auto& config_records = imported_config.ensure<"records">();
+    zone_runtime_dto imported_runtime({.resource_ = context.pool()});
+    imported_runtime.set<"records_imported">(true);
+    auto& runtime_lines = imported_runtime.ensure<"lines">();
     for (const auto& line : lines) {
-        auto& outputLine =
-            runtimeLines.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
-        outputLine.set<"code">(line.code);
-        outputLine.set<"name">(line.name);
-        outputLine.set<"displayName">(line.displayName);
-        outputLine.set<"status">("enabled");
+        auto& output_line =
+            runtime_lines.emplace_back(ruvia::model_options{.resource_ = context.pool()});
+        output_line.set<"code">(line.code_);
+        output_line.set<"name">(line.name_);
+        output_line.set<"display_name">(line.display_name_);
+        output_line.set<"status">("enabled");
     }
-    auto& states = importedRuntime.ensure<"recordStates">();
-    (void)importedRuntime.ensure<"conflicts">();
-    appendChallengeRecords(importedRuntime, currentRuntime);
-    for (std::size_t index = 0; index < remoteRecords.size(); ++index) {
-        const auto& remote = remoteRecords[index];
+    auto& states = imported_runtime.ensure<"record_states">();
+    (void)imported_runtime.ensure<"conflicts">();
+    append_challenge_records(imported_runtime, current_runtime);
+    for (std::size_t index = 0; index < remote_records.size(); ++index) {
+        const auto& remote = remote_records[index];
         const auto id = std::string(ids[index][0].value().value_or(""));
         if (id.empty()) {
             throw std::runtime_error("远程 DNS 记录本地 ID 为空");
         }
         auto& record =
-            configRecords.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
+            config_records.emplace_back(ruvia::model_options{.resource_ = context.pool()});
         record.set<"id">(id);
-        record.set<"type">(remote.type);
-        record.set<"name">(driver.recordNames().localRecordName(remote.name, domain));
-        record.set<"content">(remote.content);
-        record.set<"ttl">(remote.ttl);
-        record.set<"proxied">(remote.proxied);
-        record.set<"lineCode">(remote.lineCode);
-        if (remote.priority) {
-            record.set<"priority">(*remote.priority);
+        record.set<"type">(remote.type_);
+        record.set<"name">(driver.record_names().local_record_name(remote.name_, domain));
+        record.set<"content">(remote.content_);
+        record.set<"ttl">(remote.ttl_);
+        record.set<"proxied">(remote.proxied_);
+        record.set<"line_code">(remote.line_code_);
+        if (remote.priority_) {
+            record.set<"priority">(*remote.priority_);
         }
-        auto& state = states.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
+        auto& state = states.emplace_back(ruvia::model_options{.resource_ = context.pool()});
         state.set<"id">(id);
-        state.set<"remoteRecordId">(remote.id);
-        state.set<"syncStatus">("pending");
-        state.set<"syncedRevision">(0);
+        state.set<"remote_record_id">(remote.id_);
+        state.set<"sync_status">("pending");
+        state.set<"synced_revision">(0);
     }
 
-    const auto configJson = ruvia::toJson(importedConfig, {.resource = context.pool()});
-    const auto runtimeJson = ruvia::toJson(importedRuntime, {.resource = context.pool()});
+    const auto config_json = ruvia::to_json(imported_config, {.resource_ = context.pool()});
+    const auto runtime_json = ruvia::to_json(imported_runtime, {.resource_ = context.pool()});
     const auto updated = co_await transaction.query(
         "UPDATE sys_dns_zone SET config = $1::jsonb, runtime = $2::jsonb, revision = revision + "
         "1, desired_revision = desired_revision + 1, sync_status = 'pending', last_error = NULL, "
         "updated_at = NOW() WHERE id = $3 AND tenant_id = $4 AND revision = $5 AND "
         "desired_revision = $6 AND deleted_at IS NULL RETURNING desired_revision",
-        std::string_view(configJson), std::string_view(runtimeJson), task.resourceId, task.tenantId,
-        configRevision, task.version);
+        std::string_view(config_json), std::string_view(runtime_json), task.resource_id_, task.tenant_id_,
+        config_revision, task.version_);
     if (updated.empty()) {
-        (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
+        (void)co_await service::sync_runtime::release_running(transaction, lease);
         co_await transaction.commit();
         co_return;
     }
-    if (!co_await service::sync_runtime::releaseRunning(transaction, lease)) {
+    if (!co_await service::sync_runtime::release_running(transaction, lease)) {
         throw std::runtime_error("DNS 同步标记 lease 已失效");
     }
-    (void)co_await enqueueZoneRevision(
-        transaction, task.tenantId, task.resourceId,
-        updated.front()[0].as<std::int64_t>().value_or(task.version + 1));
+    (void)co_await enqueue_zone_revision(
+        transaction, task.tenant_id_, task.resource_id_,
+        updated.front()[0].as<std::int64_t>().value_or(task.version_ + 1));
     co_await transaction.commit();
     co_return;
 }
 
-inline ruvia::Task<void>
-storeConflicts(service::background::WorkerContext& context, const DnsTask& task,
-               const service::sync_runtime::RunningMarkerLease& lease, std::int64_t desiredRevision,
-               const ZoneRuntimeData& runtime, const std::vector<service::dns::ProviderLine>& lines,
-               const std::vector<RecordConflict>& conflicts) {
-    ZoneRuntimeDto nextRuntime({.resource = context.pool()});
-    nextRuntime.set<"recordsImported">(true);
-    auto& runtimeLines = nextRuntime.ensure<"lines">();
+inline ruvia::task<void>
+store_conflicts(service::background::worker_context& context, const dns_task& task,
+    const service::sync_runtime::running_marker_lease& lease, std::int64_t desired_revision,
+    const zone_runtime_data& runtime, const std::vector<service::dns::provider_line>& lines,
+    const std::vector<record_conflict>& conflicts) {
+    zone_runtime_dto next_runtime({.resource_ = context.pool()});
+    next_runtime.set<"records_imported">(true);
+    auto& runtime_lines = next_runtime.ensure<"lines">();
     for (const auto& line : lines) {
-        auto& outputLine =
-            runtimeLines.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
-        outputLine.set<"code">(line.code);
-        outputLine.set<"name">(line.name);
-        outputLine.set<"displayName">(line.displayName);
-        outputLine.set<"status">("enabled");
+        auto& output_line =
+            runtime_lines.emplace_back(ruvia::model_options{.resource_ = context.pool()});
+        output_line.set<"code">(line.code_);
+        output_line.set<"name">(line.name_);
+        output_line.set<"display_name">(line.display_name_);
+        output_line.set<"status">("enabled");
     }
-    auto& states = nextRuntime.ensure<"recordStates">();
-    (void)nextRuntime.ensure<"conflicts">();
-    for (const auto& state : runtime.recordStates) {
-        if (!state.id) {
+    auto& states = next_runtime.ensure<"record_states">();
+    (void)next_runtime.ensure<"conflicts">();
+    for (const auto& state : runtime.record_states_) {
+        if (!state.id_) {
             continue;
         }
-        auto& output = states.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
-        output.set<"id">(*state.id);
-        output.set<"syncStatus">(state.syncStatus ? *state.syncStatus
-                                                  : std::string_view{"pending"});
-        output.set<"syncedRevision">(state.syncedRevision ? *state.syncedRevision : 0);
-        if (state.remoteRecordId) {
-            output.set<"remoteRecordId">(*state.remoteRecordId);
+        auto& output = states.emplace_back(ruvia::model_options{.resource_ = context.pool()});
+        output.set<"id">(*state.id_);
+        output.set<"sync_status">(state.sync_status_ ? *state.sync_status_
+                                                     : std::string_view{"pending"});
+        output.set<"synced_revision">(state.synced_revision_ ? *state.synced_revision_ : 0);
+        if (state.remote_record_id_) {
+            output.set<"remote_record_id">(*state.remote_record_id_);
         }
-        if (state.lastError) {
-            output.set<"lastError">(*state.lastError);
+        if (state.last_error_) {
+            output.set<"last_error">(*state.last_error_);
         }
     }
-    auto& outputConflicts = nextRuntime.ensure<"conflicts">();
+    auto& output_conflicts = next_runtime.ensure<"conflicts">();
     for (const auto& conflict : conflicts) {
-        auto& outputConflict =
-            outputConflicts.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
-        outputConflict.set<"id">(conflict.id);
-        outputConflict.set<"type">(conflict.type);
-        outputConflict.set<"name">(conflict.name);
-        outputConflict.set<"lineCode">(conflict.lineCode);
-        outputConflict.set<"localContent">(conflict.localContent);
-        outputConflict.set<"remoteContent">(conflict.remoteContent);
+        auto& output_conflict =
+            output_conflicts.emplace_back(ruvia::model_options{.resource_ = context.pool()});
+        output_conflict.set<"id">(conflict.id_);
+        output_conflict.set<"type">(conflict.type_);
+        output_conflict.set<"name">(conflict.name_);
+        output_conflict.set<"line_code">(conflict.line_code_);
+        output_conflict.set<"local_content">(conflict.local_content_);
+        output_conflict.set<"remote_content">(conflict.remote_content_);
     }
-    appendChallengeRecords(nextRuntime, runtime);
+    append_challenge_records(next_runtime, runtime);
 
-    const auto runtimeJson = ruvia::toJson(nextRuntime, {.resource = context.pool()});
-    auto transaction = co_await context.db().beginTransaction();
+    const auto runtime_json = ruvia::to_json(next_runtime, {.resource_ = context.pool()});
+    auto transaction = co_await context.db().begin_transaction();
     const auto updated = co_await transaction.execute(
         "UPDATE sys_dns_zone SET runtime = $1::jsonb, sync_status = 'conflict', last_error = "
         "NULL, updated_at = NOW() WHERE id = $2 AND tenant_id = $3 AND desired_revision = "
         "$4 AND deleted_at IS NULL",
-        std::string_view(runtimeJson), task.resourceId, task.tenantId, desiredRevision);
-    service::sync_runtime::RunningResultTransition resultTransition;
-    if (updated.affectedRows() != 0) {
-        if (!co_await service::sync_runtime::renewRunningLease(transaction, lease)) {
+        std::string_view(runtime_json), task.resource_id_, task.tenant_id_, desired_revision);
+    service::sync_runtime::running_result_transition result_transition;
+    if (updated.affected_rows() != 0) {
+        if (!co_await service::sync_runtime::renew_running_lease(transaction, lease)) {
             throw std::runtime_error("DNS 同步标记 lease 已失效");
         }
-        resultTransition =
-            co_await service::sync_runtime::completeRunningAndRecordEvent(transaction, lease);
-        if (!resultTransition.markerTransitioned) {
+        result_transition =
+            co_await service::sync_runtime::complete_running_and_record_event(transaction, lease);
+        if (!result_transition.marker_transitioned_) {
             throw std::runtime_error("DNS 同步标记 lease 已失效");
         }
     } else {
-        (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
+        (void)co_await service::sync_runtime::release_running(transaction, lease);
     }
-    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
-                                                                resultTransition);
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, lease,
+        result_transition);
     co_return;
 }
 
-inline ruvia::Task<bool> persistRemoteMerge(service::background::WorkerContext& context,
-                                            const DnsTask& task,
-                                            const service::sync_runtime::RunningMarkerLease& lease,
-                                            std::int64_t configRevision,
-                                            std::int64_t desiredRevision, RemoteMergePlan plan,
-                                            const ZoneRuntimeData& runtime,
-                                            const std::vector<service::dns::ProviderLine>& lines) {
-    auto& merged = plan.records;
-    auto& remoteIdsByLocalId = plan.remoteIdsByLocalId;
-    auto transaction = co_await context.db().beginTransaction();
-    const auto newIdCount = static_cast<std::int64_t>(std::count_if(
-        merged.begin(), merged.end(), [](const auto& record) { return record.id.empty(); }));
+inline ruvia::task<bool> persist_remote_merge(service::background::worker_context& context,
+    const dns_task& task,
+    const service::sync_runtime::running_marker_lease& lease,
+    std::int64_t config_revision,
+    std::int64_t desired_revision, remote_merge_plan plan,
+    const zone_runtime_data& runtime,
+    const std::vector<service::dns::provider_line>& lines) {
+    auto& merged = plan.records_;
+    auto& remote_ids_by_local_id = plan.remote_ids_by_local_id_;
+    auto transaction = co_await context.db().begin_transaction();
+    const auto new_id_count = static_cast<std::int64_t>(std::count_if(
+        merged.begin(), merged.end(), [](const auto& record) { return record.id_.empty(); }));
     const auto ids = co_await transaction.query(
-        "SELECT gen_random_uuid()::TEXT FROM generate_series(1, $1::BIGINT)", newIdCount);
-    if (ids.size() != static_cast<std::size_t>(newIdCount)) {
+        "SELECT gen_random_uuid()::TEXT FROM generate_series(1, $1::BIGINT)", new_id_count);
+    if (ids.size() != static_cast<std::size_t>(new_id_count)) {
         throw std::runtime_error("远程 DNS 记录本地 ID 生成失败");
     }
-    std::size_t nextId = 0;
+    std::size_t next_id = 0;
     for (auto& record : merged) {
-        if (!record.id.empty()) {
+        if (!record.id_.empty()) {
             continue;
         }
-        record.id = std::string(ids[nextId++][0].value().value_or(""));
-        if (record.id.empty()) {
+        record.id_ = std::string(ids[next_id++][0].value().value_or(""));
+        if (record.id_.empty()) {
             throw std::runtime_error("远程 DNS 记录本地 ID 为空");
         }
-        if (record.remoteId.empty()) {
+        if (record.remote_id_.empty()) {
             throw std::runtime_error("远程 DNS 记录合并状态损坏");
         }
-        remoteIdsByLocalId.emplace(record.id, record.remoteId);
+        remote_ids_by_local_id.emplace(record.id_, record.remote_id_);
     }
 
-    ZoneConfigOutput mergedConfig({.resource = context.pool()});
-    auto& configRecords = mergedConfig.ensure<"records">();
+    zone_config_output merged_config({.resource_ = context.pool()});
+    auto& config_records = merged_config.ensure<"records">();
     for (const auto& record : merged) {
         auto& output =
-            configRecords.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
-        output.set<"id">(record.id);
-        output.set<"type">(record.type);
-        output.set<"name">(record.name);
-        output.set<"content">(record.content);
-        output.set<"ttl">(record.ttl);
-        output.set<"proxied">(record.proxied);
-        output.set<"lineCode">(record.lineCode);
-        if (record.priority) {
-            output.set<"priority">(*record.priority);
+            config_records.emplace_back(ruvia::model_options{.resource_ = context.pool()});
+        output.set<"id">(record.id_);
+        output.set<"type">(record.type_);
+        output.set<"name">(record.name_);
+        output.set<"content">(record.content_);
+        output.set<"ttl">(record.ttl_);
+        output.set<"proxied">(record.proxied_);
+        output.set<"line_code">(record.line_code_);
+        if (record.priority_) {
+            output.set<"priority">(*record.priority_);
         }
     }
 
-    ZoneRuntimeDto mergedRuntime({.resource = context.pool()});
-    mergedRuntime.set<"recordsImported">(true);
-    auto& runtimeLines = mergedRuntime.ensure<"lines">();
+    zone_runtime_dto merged_runtime({.resource_ = context.pool()});
+    merged_runtime.set<"records_imported">(true);
+    auto& runtime_lines = merged_runtime.ensure<"lines">();
     for (const auto& line : lines) {
-        auto& outputLine =
-            runtimeLines.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
-        outputLine.set<"code">(line.code);
-        outputLine.set<"name">(line.name);
-        outputLine.set<"displayName">(line.displayName);
-        outputLine.set<"status">("enabled");
+        auto& output_line =
+            runtime_lines.emplace_back(ruvia::model_options{.resource_ = context.pool()});
+        output_line.set<"code">(line.code_);
+        output_line.set<"name">(line.name_);
+        output_line.set<"display_name">(line.display_name_);
+        output_line.set<"status">("enabled");
     }
-    auto& states = mergedRuntime.ensure<"recordStates">();
-    (void)mergedRuntime.ensure<"conflicts">();
-    for (const auto& [id, remoteId] : remoteIdsByLocalId) {
-        auto& state = states.emplace_back(ruvia::ModelOptions{.resource = context.pool()});
+    auto& states = merged_runtime.ensure<"record_states">();
+    (void)merged_runtime.ensure<"conflicts">();
+    for (const auto& [id, remote_id] : remote_ids_by_local_id) {
+        auto& state = states.emplace_back(ruvia::model_options{.resource_ = context.pool()});
         state.set<"id">(id);
-        state.set<"remoteRecordId">(remoteId);
-        state.set<"syncStatus">("pending");
-        state.set<"syncedRevision">(0);
+        state.set<"remote_record_id">(remote_id);
+        state.set<"sync_status">("pending");
+        state.set<"synced_revision">(0);
     }
-    appendChallengeRecords(mergedRuntime, runtime);
+    append_challenge_records(merged_runtime, runtime);
 
-    const auto configJson = ruvia::toJson(mergedConfig, {.resource = context.pool()});
-    const auto runtimeJson = ruvia::toJson(mergedRuntime, {.resource = context.pool()});
+    const auto config_json = ruvia::to_json(merged_config, {.resource_ = context.pool()});
+    const auto runtime_json = ruvia::to_json(merged_runtime, {.resource_ = context.pool()});
     const auto updated = co_await transaction.query(
         "UPDATE sys_dns_zone SET config = $1::jsonb, runtime = $2::jsonb, revision = revision + "
         "1, desired_revision = desired_revision + 1, sync_status = 'pending', last_error = NULL, "
         "updated_at = NOW() WHERE id = $3 AND tenant_id = $4 AND revision = $5 AND "
         "desired_revision = $6 AND deleted_at IS NULL RETURNING desired_revision",
-        std::string_view(configJson), std::string_view(runtimeJson), task.resourceId, task.tenantId,
-        configRevision, desiredRevision);
+        std::string_view(config_json), std::string_view(runtime_json), task.resource_id_, task.tenant_id_,
+        config_revision, desired_revision);
     if (updated.empty()) {
-        (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
+        (void)co_await service::sync_runtime::release_running(transaction, lease);
         co_await transaction.commit();
         co_return false;
     }
-    if (!co_await service::sync_runtime::renewRunningLease(transaction, lease)) {
+    if (!co_await service::sync_runtime::renew_running_lease(transaction, lease)) {
         throw std::runtime_error("DNS 同步标记 lease 已失效");
     }
-    (void)co_await enqueueZoneRevision(
-        transaction, task.tenantId, task.resourceId,
-        updated.front()[0].as<std::int64_t>().value_or(desiredRevision + 1), task.operation);
-    (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
+    (void)co_await enqueue_zone_revision(
+        transaction, task.tenant_id_, task.resource_id_,
+        updated.front()[0].as<std::int64_t>().value_or(desired_revision + 1), task.operation_);
+    (void)co_await service::sync_runtime::release_running(transaction, lease);
     co_await transaction.commit();
     co_return true;
 }
 
-inline ruvia::Task<void> persistSyncedZone(service::background::WorkerContext& context,
-                                           const DnsTask& task,
-                                           const service::sync_runtime::RunningMarkerLease& lease,
-                                           const ZoneRuntimeDto& runtime, std::int64_t revision) {
-    const auto runtimeJson = ruvia::toJson(runtime, {.resource = context.pool()});
-    auto transaction = co_await context.db().beginTransaction();
+inline ruvia::task<void> persist_synced_zone(service::background::worker_context& context,
+    const dns_task& task,
+    const service::sync_runtime::running_marker_lease& lease,
+    const zone_runtime_dto& runtime, std::int64_t revision) {
+    const auto runtime_json = ruvia::to_json(runtime, {.resource_ = context.pool()});
+    auto transaction = co_await context.db().begin_transaction();
     const auto updated = co_await transaction.execute(
         "UPDATE sys_dns_zone SET runtime = $2::jsonb, synced_revision = GREATEST("
         "synced_revision, $3), sync_status = CASE WHEN desired_revision <= $3 THEN 'synced' ELSE "
         "'pending' END, last_synced_at = NOW(), last_error = NULL, updated_at = NOW() WHERE id = "
         "$1 AND tenant_id = $4 AND desired_revision = $3",
-        task.resourceId, std::string_view(runtimeJson), revision, task.tenantId);
-    service::sync_runtime::RunningResultTransition resultTransition;
-    if (updated.affectedRows() == 0) {
-        (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
+        task.resource_id_, std::string_view(runtime_json), revision, task.tenant_id_);
+    service::sync_runtime::running_result_transition result_transition;
+    if (updated.affected_rows() == 0) {
+        (void)co_await service::sync_runtime::release_running(transaction, lease);
     } else {
-        if (!co_await service::sync_runtime::renewRunningLease(transaction, lease)) {
+        if (!co_await service::sync_runtime::renew_running_lease(transaction, lease)) {
             throw std::runtime_error("DNS 同步标记 lease 已失效");
         }
-        if (task.operation == service::sync_runtime::MarkerOperation::remove) {
-            if (!co_await service::sync_runtime::removeRunning(transaction, lease)) {
+        if (task.operation_ == service::sync_runtime::marker_operation::remove) {
+            if (!co_await service::sync_runtime::remove_running(transaction, lease)) {
                 throw std::runtime_error("DNS 删除同步标记 lease 已失效");
             }
         } else {
-            resultTransition =
-                co_await service::sync_runtime::completeRunningAndRecordEvent(transaction, lease);
-            if (!resultTransition.markerTransitioned) {
+            result_transition =
+                co_await service::sync_runtime::complete_running_and_record_event(transaction, lease);
+            if (!result_transition.marker_transitioned_) {
                 throw std::runtime_error("DNS 同步标记 lease 已失效");
             }
         }
     }
-    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
-                                                                resultTransition);
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, lease,
+        result_transition);
     co_return;
 }
 
-inline ruvia::Task<void>
-finishDeletedZoneWithoutRemote(service::background::WorkerContext& context, const DnsTask& task,
-                               const service::sync_runtime::RunningMarkerLease& lease) {
-    auto transaction = co_await context.db().beginTransaction();
+inline ruvia::task<void>
+finish_deleted_zone_without_remote(service::background::worker_context& context, const dns_task& task,
+    const service::sync_runtime::running_marker_lease& lease) {
+    auto transaction = co_await context.db().begin_transaction();
     const auto updated = co_await transaction.execute(
         "UPDATE sys_dns_zone SET synced_revision = GREATEST(synced_revision, $3), "
         "sync_status = 'synced', last_synced_at = NOW(), last_error = NULL, updated_at = NOW() "
         "WHERE id = $1 AND tenant_id = $2 AND desired_revision = $3",
-        task.resourceId, task.tenantId, task.version);
-    if (updated.affectedRows() != 0 &&
-        !co_await service::sync_runtime::removeRunning(transaction, lease)) {
+        task.resource_id_, task.tenant_id_, task.version_);
+    if (updated.affected_rows() != 0 &&
+        !co_await service::sync_runtime::remove_running(transaction, lease)) {
         throw std::runtime_error("DNS 删除同步标记 lease 已失效");
     }
-    if (updated.affectedRows() == 0) {
-        (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
+    if (updated.affected_rows() == 0) {
+        (void)co_await service::sync_runtime::release_running(transaction, lease);
     }
     co_await transaction.commit();
     co_return;
 }
 
-inline ruvia::Task<void> failDnsTask(service::background::WorkerContext& context,
-                                     const DnsTask& task, std::string_view error, bool permanent) {
-    const auto message = service::sync_runtime::boundedError(error);
-    const auto lease = service::sync_runtime::makeRunningLease(
-        task.tenantId, task.id, task.version, context.leaseOwner(),
-        service::sync_runtime::MarkerResourceType::dnsZone, task.resourceId);
-    auto transaction = co_await context.db().beginTransaction();
+inline ruvia::task<void> fail_dns_task(service::background::worker_context& context,
+    const dns_task& task, std::string_view error, bool permanent) {
+    const auto message = service::sync_runtime::bounded_error(error);
+    const auto lease = service::sync_runtime::make_running_lease(
+        task.tenant_id_, task.id_, task.version_, context.lease_owner(),
+        service::sync_runtime::marker_resource_type::dns_zone, task.resource_id_);
+    auto transaction = co_await context.db().begin_transaction();
     (void)co_await transaction.query(
         "SELECT id FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 LIMIT 1 FOR UPDATE",
-        task.tenantId, task.resourceId);
-    const auto resultTransition =
-        co_await service::sync_runtime::failRunningAndRecordEvent(transaction, lease, message);
-    if (resultTransition.markerTransitioned) {
+        task.tenant_id_, task.resource_id_);
+    const auto result_transition =
+        co_await service::sync_runtime::fail_running_and_record_event(transaction, lease, message);
+    if (result_transition.marker_transitioned_) {
         (void)co_await transaction.execute(
             "UPDATE sys_dns_zone SET sync_status = $2, last_error = $3, updated_at = NOW() WHERE "
             "id = $1 AND desired_revision = $4 AND tenant_id = $5",
-            task.resourceId, permanent ? std::string_view{"failed"} : std::string_view{"pending"},
-            std::string_view(message), task.version, task.tenantId);
+            task.resource_id_, permanent ? std::string_view{"failed"} : std::string_view{"pending"},
+            std::string_view(message), task.version_, task.tenant_id_);
     }
-    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
-                                                                resultTransition);
-    if (resultTransition.markerTransitioned) {
-        service::logging::error("DNS sync task " + task.id + " failed: " + message);
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, lease,
+        result_transition);
+    if (result_transition.marker_transitioned_) {
+        service::logging::error("DNS sync task " + task.id_ + " failed: " + message);
     }
     co_return;
 }
 
-} // namespace service::dns_sync::detail
+}  // namespace service::dns_sync::detail

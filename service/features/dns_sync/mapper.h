@@ -1,17 +1,18 @@
 #pragma once
 
+#include <ruvia/web/model_json.h>
+
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
-#include <ruvia/web/ModelJson.h>
 
 #include "service/features/dns_sync/model.h"
 #include "service/features/dns_sync/transport.h"
 
 namespace service::dns_sync {
 
-[[nodiscard]] inline std::optional<ZoneRecordData> normalize(const ZoneRecordInput& input) {
+[[nodiscard]] inline std::optional<zone_record_data> normalize(const zone_record_input& input) {
     const auto& id = input.get<"id">();
     const auto& type = input.get<"type">();
     const auto& name = input.get<"name">();
@@ -19,227 +20,227 @@ namespace service::dns_sync {
     const auto& ttl = input.get<"ttl">();
     const auto& priority = input.get<"priority">();
     const auto& proxied = input.get<"proxied">();
-    const auto& lineCode = input.get<"lineCode">();
-    if (!id || !type || !name || !content || !ttl || !proxied || !lineCode) {
+    const auto& line_code = input.get<"line_code">();
+    if (!id || !type || !name || !content || !ttl || !proxied || !line_code) {
         return std::nullopt;
     }
-    return ZoneRecordData{.id = std::string(id->view()),
-                          .type = std::string(type->view()),
-                          .name = std::string(name->view()),
-                          .content = std::string(content->view()),
-                          .ttl = ttl->value,
-                          .priority = priority ? std::optional<std::int64_t>{priority->value}
-                                               : std::nullopt,
-                          .proxied = proxied->value,
-                          .lineCode = std::string(lineCode->view())};
+    return zone_record_data{.id_ = std::string(id->view()),
+        .type_ = std::string(type->view()),
+        .name_ = std::string(name->view()),
+        .content_ = std::string(content->view()),
+        .ttl_ = ttl->value_,
+        .priority_ = priority ? std::optional<std::int64_t>{priority->value_}
+                              : std::nullopt,
+        .proxied_ = proxied->value_,
+        .line_code_ = std::string(line_code->view())};
 }
 
-[[nodiscard]] inline std::optional<ZoneConfigData> normalize(const ZoneConfigInput& input) {
+[[nodiscard]] inline std::optional<zone_config_data> normalize(const zone_config_input& input) {
     const auto& records = input.get<"records">();
     if (!records) {
         return std::nullopt;
     }
 
-    ZoneConfigData result;
-    result.records.reserve(records->size());
+    zone_config_data result;
+    result.records_.reserve(records->size());
     for (const auto& record : *records) {
         auto normalized = normalize(record);
         if (!normalized) {
             return std::nullopt;
         }
-        result.records.push_back(std::move(*normalized));
+        result.records_.push_back(std::move(*normalized));
     }
     return result;
 }
 
-[[nodiscard]] inline std::optional<ZoneConfigData>
-parseStored(std::string_view json, ruvia::ModelParseOptions options = {}) {
-    const std::optional<ZoneConfigInput> input = ruvia::fromJson<ZoneConfigInput>(json, options);
+[[nodiscard]] inline std::optional<zone_config_data>
+parse_stored(std::string_view json, ruvia::model_parse_options options = {}) {
+    const std::optional<zone_config_input> input = ruvia::from_json<zone_config_input>(json, options);
     return input ? normalize(*input) : std::nullopt;
 }
 
-[[nodiscard]] inline ZoneConfigOutput toOutput(const ZoneConfigData& input,
-                                               ruvia::ModelOptions options = {}) {
-    ZoneConfigOutput output(options);
+[[nodiscard]] inline zone_config_output to_output(const zone_config_data& input,
+    ruvia::model_options options = {}) {
+    zone_config_output output(options);
     auto& records = output.ensure<"records">();
-    records.reserve(input.records.size());
-    for (const auto& record : input.records) {
+    records.reserve(input.records_.size());
+    for (const auto& record : input.records_) {
         auto& item = records.emplace_back(options);
-        item.set<"id">(record.id);
-        item.set<"type">(record.type);
-        item.set<"name">(record.name);
-        item.set<"content">(record.content);
-        item.set<"ttl">(record.ttl);
-        item.set<"proxied">(record.proxied);
-        item.set<"lineCode">(record.lineCode);
-        if (record.priority) {
-            item.set<"priority">(*record.priority);
+        item.set<"id">(record.id_);
+        item.set<"type">(record.type_);
+        item.set<"name">(record.name_);
+        item.set<"content">(record.content_);
+        item.set<"ttl">(record.ttl_);
+        item.set<"proxied">(record.proxied_);
+        item.set<"line_code">(record.line_code_);
+        if (record.priority_) {
+            item.set<"priority">(*record.priority_);
         }
     }
     return output;
 }
 
-[[nodiscard]] inline ZoneRuntimeData normalize(const ZoneRuntimeInput& input) {
-    ZoneRuntimeData result;
-    if (const auto& value = input.get<"recordsImported">()) {
-        result.recordsImported = value->value;
+[[nodiscard]] inline zone_runtime_data normalize(const zone_runtime_input& input) {
+    zone_runtime_data result;
+    if (const auto& value = input.get<"records_imported">()) {
+        result.records_imported_ = value->value_;
     }
-    if (const auto& value = input.get<"linesSyncedAt">()) {
-        result.linesSyncedAt = std::string(value->view());
+    if (const auto& value = input.get<"lines_synced_at">()) {
+        result.lines_synced_at_ = std::string(value->view());
     }
     if (const auto& source = input.get<"lines">()) {
-        result.lines.reserve(source->size());
+        result.lines_.reserve(source->size());
         for (const auto& line : *source) {
-            ZoneLineRuntimeData item;
+            zone_line_runtime_data item;
             if (const auto& value = line.get<"code">()) {
-                item.code = std::string(value->view());
+                item.code_ = std::string(value->view());
             }
             if (const auto& value = line.get<"name">()) {
-                item.name = std::string(value->view());
+                item.name_ = std::string(value->view());
             }
-            if (const auto& value = line.get<"displayName">()) {
-                item.displayName = std::string(value->view());
+            if (const auto& value = line.get<"display_name">()) {
+                item.display_name_ = std::string(value->view());
             }
             if (const auto& value = line.get<"status">()) {
-                item.status = std::string(value->view());
+                item.status_ = std::string(value->view());
             }
-            result.lines.push_back(std::move(item));
+            result.lines_.push_back(std::move(item));
         }
     }
-    if (const auto& source = input.get<"recordStates">()) {
-        result.recordStates.reserve(source->size());
+    if (const auto& source = input.get<"record_states">()) {
+        result.record_states_.reserve(source->size());
         for (const auto& state : *source) {
-            ZoneRecordRuntimeData item;
+            zone_record_runtime_data item;
             if (const auto& value = state.get<"id">()) {
-                item.id = std::string(value->view());
+                item.id_ = std::string(value->view());
             }
-            if (const auto& value = state.get<"remoteRecordId">()) {
-                item.remoteRecordId = std::string(value->view());
+            if (const auto& value = state.get<"remote_record_id">()) {
+                item.remote_record_id_ = std::string(value->view());
             }
-            if (const auto& value = state.get<"syncStatus">()) {
-                item.syncStatus = std::string(value->view());
+            if (const auto& value = state.get<"sync_status">()) {
+                item.sync_status_ = std::string(value->view());
             }
-            if (const auto& value = state.get<"syncedRevision">()) {
-                item.syncedRevision = value->value;
+            if (const auto& value = state.get<"synced_revision">()) {
+                item.synced_revision_ = value->value_;
             }
-            if (const auto& value = state.get<"lastError">()) {
-                item.lastError = std::string(value->view());
+            if (const auto& value = state.get<"last_error">()) {
+                item.last_error_ = std::string(value->view());
             }
-            result.recordStates.push_back(std::move(item));
+            result.record_states_.push_back(std::move(item));
         }
     }
     if (const auto& source = input.get<"conflicts">()) {
-        result.conflicts.reserve(source->size());
+        result.conflicts_.reserve(source->size());
         for (const auto& conflict : *source) {
-            ZoneRecordConflictData item;
+            zone_record_conflict_data item;
             if (const auto& value = conflict.get<"id">()) {
-                item.id = std::string(value->view());
+                item.id_ = std::string(value->view());
             }
             if (const auto& value = conflict.get<"type">()) {
-                item.type = std::string(value->view());
+                item.type_ = std::string(value->view());
             }
             if (const auto& value = conflict.get<"name">()) {
-                item.name = std::string(value->view());
+                item.name_ = std::string(value->view());
             }
-            if (const auto& value = conflict.get<"lineCode">()) {
-                item.lineCode = std::string(value->view());
+            if (const auto& value = conflict.get<"line_code">()) {
+                item.line_code_ = std::string(value->view());
             }
-            if (const auto& value = conflict.get<"localContent">()) {
-                item.localContent = std::string(value->view());
+            if (const auto& value = conflict.get<"local_content">()) {
+                item.local_content_ = std::string(value->view());
             }
-            if (const auto& value = conflict.get<"remoteContent">()) {
-                item.remoteContent = std::string(value->view());
+            if (const auto& value = conflict.get<"remote_content">()) {
+                item.remote_content_ = std::string(value->view());
             }
-            result.conflicts.push_back(std::move(item));
+            result.conflicts_.push_back(std::move(item));
         }
     }
-    if (const auto& source = input.get<"challengeRecords">()) {
-        result.challengeRecords.reserve(source->size());
+    if (const auto& source = input.get<"challenge_records">()) {
+        result.challenge_records_.reserve(source->size());
         for (const auto& challenge : *source) {
             const auto& id = challenge.get<"id">();
             const auto& name = challenge.get<"name">();
             const auto& content = challenge.get<"content">();
             const auto& ttl = challenge.get<"ttl">();
-            const auto& certificateId = challenge.get<"certificateId">();
-            if (!id || !name || !content || !ttl || !certificateId) {
+            const auto& certificate_id = challenge.get<"certificate_id">();
+            if (!id || !name || !content || !ttl || !certificate_id) {
                 continue;
             }
-            result.challengeRecords.push_back(
-                {.id = std::string(id->view()),
-                 .name = std::string(name->view()),
-                 .content = std::string(content->view()),
-                 .ttl = ttl->value,
-                 .certificateId = std::string(certificateId->view())});
+            result.challenge_records_.push_back(
+                {.id_ = std::string(id->view()),
+                    .name_ = std::string(name->view()),
+                    .content_ = std::string(content->view()),
+                    .ttl_ = ttl->value_,
+                    .certificate_id_ = std::string(certificate_id->view())});
         }
     }
     return result;
 }
 
-[[nodiscard]] inline std::optional<ZoneRuntimeData>
-parseStoredRuntime(std::string_view json, ruvia::ModelParseOptions options = {}) {
-    const std::optional<ZoneRuntimeInput> input = ruvia::fromJson<ZoneRuntimeInput>(json, options);
-    if (!input || !input->get<"recordsImported">() || !input->get<"lines">() ||
-        !input->get<"recordStates">() || !input->get<"conflicts">()) {
+[[nodiscard]] inline std::optional<zone_runtime_data>
+parse_stored_runtime(std::string_view json, ruvia::model_parse_options options = {}) {
+    const std::optional<zone_runtime_input> input = ruvia::from_json<zone_runtime_input>(json, options);
+    if (!input || !input->get<"records_imported">() || !input->get<"lines">() ||
+        !input->get<"record_states">() || !input->get<"conflicts">()) {
         return std::nullopt;
     }
     return normalize(*input);
 }
 
-inline void appendChallengeRecords(ZoneRuntimeDto& output, const ZoneRuntimeData& runtime) {
-    if (runtime.challengeRecords.empty()) {
+inline void append_challenge_records(zone_runtime_dto& output, const zone_runtime_data& runtime) {
+    if (runtime.challenge_records_.empty()) {
         return;
     }
-    auto& records = output.ensure<"challengeRecords">();
-    for (const auto& challenge : runtime.challengeRecords) {
+    auto& records = output.ensure<"challenge_records">();
+    for (const auto& challenge : runtime.challenge_records_) {
         auto& item = records.emplace_back();
-        item.set<"id">(challenge.id);
-        item.set<"name">(challenge.name);
-        item.set<"content">(challenge.content);
-        item.set<"ttl">(challenge.ttl);
-        item.set<"certificateId">(challenge.certificateId);
+        item.set<"id">(challenge.id_);
+        item.set<"name">(challenge.name_);
+        item.set<"content">(challenge.content_);
+        item.set<"ttl">(challenge.ttl_);
+        item.set<"certificate_id">(challenge.certificate_id_);
     }
 }
 
-[[nodiscard]] inline ZoneRuntimeDto toOutput(const ZoneRuntimeData& input,
-                                             ruvia::ModelOptions options = {}) {
-    ZoneRuntimeDto output(options);
-    output.set<"recordsImported">(input.recordsImported);
-    if (input.linesSyncedAt) {
-        output.set<"linesSyncedAt">(*input.linesSyncedAt);
+[[nodiscard]] inline zone_runtime_dto to_output(const zone_runtime_data& input,
+    ruvia::model_options options = {}) {
+    zone_runtime_dto output(options);
+    output.set<"records_imported">(input.records_imported_);
+    if (input.lines_synced_at_) {
+        output.set<"lines_synced_at">(*input.lines_synced_at_);
     }
     auto& lines = output.ensure<"lines">();
-    for (const auto& line : input.lines) {
+    for (const auto& line : input.lines_) {
         auto& item = lines.emplace_back(options);
-        item.set<"code">(line.code.value_or(""));
-        item.set<"name">(line.name.value_or(""));
-        item.set<"displayName">(line.displayName.value_or(""));
-        item.set<"status">(line.status.value_or(""));
+        item.set<"code">(line.code_.value_or(""));
+        item.set<"name">(line.name_.value_or(""));
+        item.set<"display_name">(line.display_name_.value_or(""));
+        item.set<"status">(line.status_.value_or(""));
     }
-    auto& states = output.ensure<"recordStates">();
-    for (const auto& state : input.recordStates) {
+    auto& states = output.ensure<"record_states">();
+    for (const auto& state : input.record_states_) {
         auto& item = states.emplace_back(options);
-        item.set<"id">(state.id.value_or(""));
-        item.set<"syncStatus">(state.syncStatus.value_or("pending"));
-        item.set<"syncedRevision">(state.syncedRevision.value_or(0));
-        if (state.remoteRecordId) {
-            item.set<"remoteRecordId">(*state.remoteRecordId);
+        item.set<"id">(state.id_.value_or(""));
+        item.set<"sync_status">(state.sync_status_.value_or("pending"));
+        item.set<"synced_revision">(state.synced_revision_.value_or(0));
+        if (state.remote_record_id_) {
+            item.set<"remote_record_id">(*state.remote_record_id_);
         }
-        if (state.lastError) {
-            item.set<"lastError">(*state.lastError);
+        if (state.last_error_) {
+            item.set<"last_error">(*state.last_error_);
         }
     }
     auto& conflicts = output.ensure<"conflicts">();
-    for (const auto& conflict : input.conflicts) {
+    for (const auto& conflict : input.conflicts_) {
         auto& item = conflicts.emplace_back(options);
-        item.set<"id">(conflict.id.value_or(""));
-        item.set<"type">(conflict.type.value_or(""));
-        item.set<"name">(conflict.name.value_or(""));
-        item.set<"lineCode">(conflict.lineCode.value_or(""));
-        item.set<"localContent">(conflict.localContent.value_or(""));
-        item.set<"remoteContent">(conflict.remoteContent.value_or(""));
+        item.set<"id">(conflict.id_.value_or(""));
+        item.set<"type">(conflict.type_.value_or(""));
+        item.set<"name">(conflict.name_.value_or(""));
+        item.set<"line_code">(conflict.line_code_.value_or(""));
+        item.set<"local_content">(conflict.local_content_.value_or(""));
+        item.set<"remote_content">(conflict.remote_content_.value_or(""));
     }
-    appendChallengeRecords(output, input);
+    append_challenge_records(output, input);
     return output;
 }
 
-} // namespace service::dns_sync
+}  // namespace service::dns_sync

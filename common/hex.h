@@ -5,7 +5,7 @@
 
 namespace flexedge::crypto {
 
-inline std::string hexEncode(std::span<const unsigned char> bytes) {
+inline std::string hex_encode(std::span<const unsigned char> bytes) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string result;
     result.reserve(bytes.size() * 2);
@@ -16,4 +16,4 @@ inline std::string hexEncode(std::span<const unsigned char> bytes) {
     return result;
 }
 
-} // namespace flexedge::crypto
+}  // namespace flexedge::crypto

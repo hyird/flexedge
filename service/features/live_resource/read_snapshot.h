@@ -1,5 +1,11 @@
 #pragma once
 
+#include <ruvia/core/task.h>
+#include <ruvia/core/worker_wait_result.h>
+#include <ruvia/web/context.h>
+#include <ruvia/web/error.h>
+#include <ruvia/web/model_json.h>
+
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -9,9 +15,6 @@
 #include <string>
 #include <utility>
 
-#include <ruvia/web/Context.h>
-#include <ruvia/web/ModelJson.h>
-
 #include "service/common/http.h"
 #include "service/features/live_resource/read_scope.h"
 #include "service/features/live_resource/snapshot_cache.h"
@@ -19,106 +22,118 @@
 
 namespace service::live_resource {
 
-inline Snapshot snapshotError(const ruvia::HttpErrorInfo& info) {
-    service::common::ErrorResponse response(
-        ruvia::ModelOptions{.resource = std::pmr::new_delete_resource()});
-    response.set<"code">(service::common::normalizeBusinessErrorCode(info.code(), info.status().value()));
-    response.set<"message">(service::common::responseErrorMessage(info));
-    return {std::string(ruvia::toJson(response, {.resource = std::pmr::new_delete_resource()})), true};
+inline snapshot snapshot_error(const ruvia::http_error_info& info) {
+    service::common::error_response response(
+        ruvia::model_options{.resource_ = std::pmr::new_delete_resource()});
+    response.set<"code">(service::common::normalize_business_error_code(info.code(), info.status().value()));
+    response.set<"message">(service::common::response_error_message(info));
+    return {std::string(ruvia::to_json(response, {.resource_ = std::pmr::new_delete_resource()})), true};
 }
 
-inline Snapshot snapshotUnavailable() {
+inline snapshot snapshot_unavailable() {
     return {R"({"code":10004,"message":"资源读取暂时不可用，请稍后重试"})", true};
 }
 
 namespace detail {
 
-template <typename Fetch>
-ruvia::Task<Snapshot> fetchSnapshotAndJoinWatchdog(
-    ruvia::Context& context, SnapshotCache::Clock::time_point deadline, Fetch& fetch) {
-    SnapshotReadScope scope(context, deadline);
-    std::optional<Snapshot> candidate;
-    std::exception_ptr fetchFailure;
+template <typename fetch_type>
+ruvia::task<snapshot> fetch_snapshot_and_join_watchdog(
+    ruvia::context& context, snapshot_cache::clock::time_point deadline, fetch_type& fetch) {
+    snapshot_read_scope scope(context, deadline);
+    std::optional<snapshot> candidate;
+    std::exception_ptr fetch_failure;
     try {
         try {
-            candidate.emplace(Snapshot{co_await fetch(scope), false});
-        } catch (const ruvia::HttpError& error) {
-            candidate.emplace(snapshotError(error.info()));
+            candidate.emplace(snapshot{co_await fetch(scope), false});
+        } catch (const ruvia::http_error& error) {
+            candidate.emplace(snapshot_error(error.info()));
         } catch (const std::exception& error) {
-            if (!scope.stopRequested())
+            if (!scope.stop_requested()) {
                 service::logging::error("Live resource read failure: " + std::string(error.what()));
-            candidate.emplace(snapshotUnavailable());
+            }
+            candidate.emplace(snapshot_unavailable());
         } catch (...) {
-            candidate.emplace(snapshotUnavailable());
+            candidate.emplace(snapshot_unavailable());
         }
     } catch (...) {
-        fetchFailure = std::current_exception();
+        fetch_failure = std::current_exception();
     }
 
-    std::exception_ptr joinFailure;
+    std::exception_ptr join_failure;
     try {
-        co_await scope.stopAndJoin();
+        co_await scope.stop_and_join();
     } catch (...) {
-        joinFailure = std::current_exception();
+        join_failure = std::current_exception();
     }
-    if (joinFailure) std::rethrow_exception(joinFailure);
-    if (fetchFailure) std::rethrow_exception(fetchFailure);
-    if (context.stopToken().stopRequested())
+    if (join_failure) {
+        std::rethrow_exception(join_failure);
+    }
+    if (fetch_failure) {
+        std::rethrow_exception(fetch_failure);
+    }
+    if (context.get_stop_token().stop_requested()) {
         throw std::runtime_error("live resource read interrupted");
-    if (scope.deadlineExceeded())
+    }
+    if (scope.deadline_exceeded()) {
         throw std::runtime_error("live resource read timed out");
+    }
     co_return std::move(*candidate);
 }
 
-inline void checkSnapshotReadBudget(
-    const ruvia::Context& context, SnapshotCache::Clock::time_point deadline) {
-    if (context.stopToken().stopRequested())
+inline void check_snapshot_read_budget(
+    const ruvia::context& context, snapshot_cache::clock::time_point deadline) {
+    if (context.get_stop_token().stop_requested()) {
         throw std::runtime_error("live resource read interrupted");
-    if (SnapshotCache::Clock::now() >= deadline || context.deadlineExceeded())
+    }
+    if (snapshot_cache::clock::now() >= deadline || context.deadline_exceeded()) {
         throw std::runtime_error("live resource read timed out");
+    }
 }
 
 }  // namespace detail
 
-template <typename Fetch>
-ruvia::Task<std::shared_ptr<const Snapshot>> readSnapshotUntil(
-    ruvia::Context& context, const SnapshotCache::Lease& lease,
-    SnapshotCache::Clock::time_point deadline, Fetch fetch) {
-    std::uint64_t minimumPatchEpoch{};
-    std::shared_ptr<const Snapshot> answer;
+template <typename fetch_type>
+ruvia::task<std::shared_ptr<const snapshot>> read_snapshot_until(
+    ruvia::context& context, const snapshot_cache::lease& lease,
+    snapshot_cache::clock::time_point deadline, fetch_type fetch) {
+    std::uint64_t minimum_patch_epoch{};
+    std::shared_ptr<const snapshot> answer;
     std::exception_ptr failure;
-    std::optional<SnapshotCache::Ticket> activeTicket;
+    std::optional<snapshot_cache::ticket> active_ticket;
 
     try {
-        minimumPatchEpoch = lease.patchEpoch();
+        minimum_patch_epoch = lease.patch_epoch();
         for (;;) {
-            detail::checkSnapshotReadBudget(context, deadline);
+            detail::check_snapshot_read_budget(context, deadline);
             auto read = lease.read(context.worker());
-            if (read.ready.snapshot && lease.current(read.ready, minimumPatchEpoch)) {
-                answer = read.ready.snapshot;
+            if (read.ready_.snapshot_ && lease.current(read.ready_, minimum_patch_epoch)) {
+                answer = read.ready_.snapshot_;
                 break;
             }
 
-            if (read.ticket) {
-                activeTicket.emplace(*read.ticket);
-                auto candidate = co_await detail::fetchSnapshotAndJoinWatchdog(context, deadline, fetch);
-                detail::checkSnapshotReadBudget(context, deadline);
-                activeTicket->complete(std::make_shared<const Snapshot>(std::move(candidate)));
-                activeTicket.reset();
+            if (read.ticket_) {
+                active_ticket.emplace(*read.ticket_);
+                auto candidate = co_await detail::fetch_snapshot_and_join_watchdog(context, deadline, fetch);
+                detail::check_snapshot_read_budget(context, deadline);
+                active_ticket->complete(std::make_shared<const snapshot>(std::move(candidate)));
+                active_ticket.reset();
             }
 
-            const auto remaining = deadline - SnapshotCache::Clock::now();
-            if (remaining <= SnapshotCache::Clock::duration::zero())
-                throw std::runtime_error("live resource read timed out");
-            if (read.ready.snapshot) continue;
-            auto received = co_await read.receiver.receiveFor(remaining, context.stopToken());
-            if (!received.hasValue()) {
-                detail::checkSnapshotReadBudget(context, deadline);
+            const auto remaining = deadline - snapshot_cache::clock::now();
+            if (remaining <= snapshot_cache::clock::duration::zero()) {
                 throw std::runtime_error("live resource read timed out");
             }
-            const auto result = std::move(received).takeValue();
-            if (result.snapshot && lease.current(result, minimumPatchEpoch)) {
-                answer = result.snapshot;
+            if (read.ready_.snapshot_) {
+                continue;
+            }
+            auto received = co_await read.receiver_.receive_for(remaining, context.get_stop_token());
+            if (!received.has_value()) {
+                detail::check_snapshot_read_budget(context, deadline);
+                throw std::runtime_error("live resource read timed out");
+            }
+            const auto result = std::move(received).take_value();
+            if (result.snapshot_ && lease.current(result, minimum_patch_epoch)) {
+                answer = result.snapshot_;
                 break;
             }
         }
@@ -126,23 +141,27 @@ ruvia::Task<std::shared_ptr<const Snapshot>> readSnapshotUntil(
         failure = std::current_exception();
     }
 
-    if (activeTicket) {
+    if (active_ticket) {
         try {
-            activeTicket->cancel();
+            active_ticket->cancel();
         } catch (...) {
-            if (!failure) failure = std::current_exception();
+            if (!failure) {
+                failure = std::current_exception();
+            }
         }
     }
-    if (failure) std::rethrow_exception(failure);
-    detail::checkSnapshotReadBudget(context, deadline);
+    if (failure) {
+        std::rethrow_exception(failure);
+    }
+    detail::check_snapshot_read_budget(context, deadline);
     co_return answer;
 }
 
-template <typename Fetch>
-ruvia::Task<std::shared_ptr<const Snapshot>> readSnapshot(
-    ruvia::Context& context, const SnapshotCache::Lease& lease, Fetch fetch) {
-    const auto deadline = SnapshotCache::Clock::now() + std::chrono::seconds(30);
-    co_return co_await readSnapshotUntil(context, lease, deadline, std::move(fetch));
+template <typename fetch_type>
+ruvia::task<std::shared_ptr<const snapshot>> read_snapshot(
+    ruvia::context& context, const snapshot_cache::lease& lease, fetch_type fetch) {
+    const auto deadline = snapshot_cache::clock::now() + std::chrono::seconds(30);
+    co_return co_await read_snapshot_until(context, lease, deadline, std::move(fetch));
 }
 
 }  // namespace service::live_resource

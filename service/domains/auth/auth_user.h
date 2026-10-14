@@ -4,11 +4,11 @@
 
 namespace service::auth {
 
-struct AuthUserRecord final {
-    std::string id;
-    std::string username;
-    std::string nickname;
-    std::string status;
+struct auth_user_record final {
+    std::string id_;
+    std::string username_;
+    std::string nickname_;
+    std::string status_;
 };
 
-} // namespace service::auth
+}  // namespace service::auth

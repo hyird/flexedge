@@ -6,27 +6,27 @@
 
 namespace service::node_dispatch {
 
-struct AvailableCertificate final {
-    std::string id;
-    std::vector<std::string> domains;
-    std::string certificateChainPem;
-    std::string privateKeyEnvelope;
+struct available_certificate final {
+    std::string id_;
+    std::vector<std::string> domains_;
+    std::string certificate_chain_pem_;
+    std::string private_key_envelope_;
 };
 
-struct DeploymentWebsiteSource final {
-    std::string id;
-    std::int64_t revision;
-    bool enabled;
-    std::string configJson;
+struct deployment_website_source final {
+    std::string id_;
+    std::int64_t revision_;
+    bool enabled_;
+    std::string config_json_;
 };
 
-struct ClusterDeploymentSource final {
-    std::string clusterId;
-    std::string tenantId;
-    std::string accessDomain;
-    bool enabled;
-    std::vector<DeploymentWebsiteSource> websites;
-    std::unordered_map<std::string, std::vector<AvailableCertificate>> certificatesByWebsite;
+struct cluster_deployment_source final {
+    std::string cluster_id_;
+    std::string tenant_id_;
+    std::string access_domain_;
+    bool enabled_;
+    std::vector<deployment_website_source> websites_;
+    std::unordered_map<std::string, std::vector<available_certificate>> certificates_by_website_;
 };
 
-} // namespace service::node_dispatch
+}  // namespace service::node_dispatch

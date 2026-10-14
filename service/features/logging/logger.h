@@ -18,34 +18,39 @@
 
 namespace service::logging {
 
-enum class Level : std::uint8_t { info, error };
+enum class level : std::uint8_t { info,
+    error };
 
-struct Event final {
-    std::chrono::system_clock::time_point occurredAt;
-    Level level;
-    std::string message;
+struct event final {
+    std::chrono::system_clock::time_point occurred_at_;
+    level level_;
+    std::string message_;
 };
 
-class AsyncLogger final {
-  public:
-    static constexpr std::size_t kDefaultMaxEvents{100000};
-    static constexpr std::size_t kDefaultMaxBytes{64 * 1024 * 1024};
+class async_logger final {
+public:
+    static constexpr std::size_t default_max_events{100000};
+    static constexpr std::size_t default_max_bytes{64 * 1024 * 1024};
 
-    AsyncLogger(std::ostream& infoOutput, std::ostream& errorOutput,
-                std::size_t maxEvents = kDefaultMaxEvents, std::size_t maxBytes = kDefaultMaxBytes)
-        : infoOutput_(infoOutput), errorOutput_(errorOutput), maxEvents_(maxEvents),
-          maxBytes_(maxBytes) {
-        if (maxEvents_ == 0 || maxBytes_ == 0) {
+    async_logger(std::ostream& info_output, std::ostream& error_output,
+        std::size_t max_events = default_max_events, std::size_t max_bytes = default_max_bytes)
+        : info_output_(info_output),
+          error_output_(error_output),
+          max_events_(max_events),
+          max_bytes_(max_bytes) {
+        if (max_events_ == 0 || max_bytes_ == 0) {
             throw std::invalid_argument("logger queue capacity must be positive");
         }
     }
 
-    ~AsyncLogger() { stop(); }
+    ~async_logger() {
+        stop();
+    }
 
-    AsyncLogger(const AsyncLogger&) = delete;
-    AsyncLogger& operator=(const AsyncLogger&) = delete;
-    AsyncLogger(AsyncLogger&&) = delete;
-    AsyncLogger& operator=(AsyncLogger&&) = delete;
+    async_logger(const async_logger&) = delete;
+    async_logger& operator=(const async_logger&) = delete;
+    async_logger(async_logger&&) = delete;
+    async_logger& operator=(async_logger&&) = delete;
 
     void start() {
         std::lock_guard lock(mutex_);
@@ -79,14 +84,14 @@ class AsyncLogger final {
         stopping_ = false;
     }
 
-    [[nodiscard]] bool enqueue(Level level, std::string message) noexcept {
+    [[nodiscard]] bool enqueue(level level, std::string message) noexcept {
         try {
-            Event event{
-                .occurredAt = std::chrono::system_clock::now(),
-                .level = level,
-                .message = std::move(message),
+            event event_value{
+                .occurred_at_ = std::chrono::system_clock::now(),
+                .level_ = level,
+                .message_ = std::move(message),
             };
-            const auto bytes = event.message.size() + sizeof(Event);
+            const auto bytes = event_value.message_.size() + sizeof(event);
             bool notify = false;
             bool accepted = false;
             {
@@ -94,14 +99,14 @@ class AsyncLogger final {
                 if (!running_ || stopping_) {
                     return false;
                 }
-                if (bytes > maxBytes_ || queue_.size() >= maxEvents_ ||
-                    queuedBytes_ > maxBytes_ - bytes) {
-                    ++droppedSinceReport_;
+                if (bytes > max_bytes_ || queue_.size() >= max_events_ ||
+                    queued_bytes_ > max_bytes_ - bytes) {
+                    ++dropped_since_report_;
                     notify = true;
                 } else {
                     notify = queue_.empty();
-                    queuedBytes_ += bytes;
-                    queue_.push_back(std::move(event));
+                    queued_bytes_ += bytes;
+                    queue_.push_back(std::move(event_value));
                     accepted = true;
                 }
             }
@@ -114,7 +119,7 @@ class AsyncLogger final {
         }
     }
 
-  private:
+private:
     static std::string timestamp(std::chrono::system_clock::time_point value) {
         const auto seconds = std::chrono::time_point_cast<std::chrono::seconds>(value);
         const auto milliseconds =
@@ -132,88 +137,92 @@ class AsyncLogger final {
         return output.str();
     }
 
-    static void write(std::ostream& output, std::string_view level, const Event& event) {
-        output << '[' << timestamp(event.occurredAt) << "] " << level << ' ' << event.message
+    static void write(std::ostream& output, std::string_view level, const event& event) {
+        output << '[' << timestamp(event.occurred_at_) << "] " << level << ' ' << event.message_
                << '\n';
     }
 
     void run() noexcept {
-        std::deque<Event> batch;
+        std::deque<event> batch;
         while (true) {
             std::uint64_t dropped{};
-            bool stopAfterBatch = false;
+            bool stop_after_batch = false;
             {
                 std::unique_lock lock(mutex_);
                 ready_.wait(lock, [this] {
-                    return stopping_ || !queue_.empty() || droppedSinceReport_ != 0;
+                    return stopping_ || !queue_.empty() || dropped_since_report_ != 0;
                 });
                 batch.swap(queue_);
-                queuedBytes_ = 0;
-                dropped = std::exchange(droppedSinceReport_, 0);
-                stopAfterBatch = stopping_;
+                queued_bytes_ = 0;
+                dropped = std::exchange(dropped_since_report_, 0);
+                stop_after_batch = stopping_;
             }
 
             for (const auto& event : batch) {
-                if (event.level == Level::error) {
-                    write(errorOutput_, "ERROR", event);
+                if (event.level_ == level::error) {
+                    write(error_output_, "ERROR", event);
                 } else {
-                    write(infoOutput_, "INFO", event);
+                    write(info_output_, "INFO", event);
                 }
             }
             batch.clear();
             if (dropped != 0) {
-                const Event warning{
-                    .occurredAt = std::chrono::system_clock::now(),
-                    .level = Level::error,
-                    .message = "Server log queue dropped " + std::to_string(dropped) +
-                               " messages due to bounded capacity",
+                const event warning{
+                    .occurred_at_ = std::chrono::system_clock::now(),
+                    .level_ = level::error,
+                    .message_ = "Server log queue dropped " + std::to_string(dropped) +
+                                " messages due to bounded capacity",
                 };
-                write(errorOutput_, "ERROR", warning);
+                write(error_output_, "ERROR", warning);
             }
-            infoOutput_.flush();
-            errorOutput_.flush();
-            if (stopAfterBatch) {
+            info_output_.flush();
+            error_output_.flush();
+            if (stop_after_batch) {
                 return;
             }
         }
     }
 
-    std::ostream& infoOutput_;
-    std::ostream& errorOutput_;
-    const std::size_t maxEvents_;
-    const std::size_t maxBytes_;
+    std::ostream& info_output_;
+    std::ostream& error_output_;
+    const std::size_t max_events_;
+    const std::size_t max_bytes_;
     std::mutex mutex_;
     std::condition_variable ready_;
-    std::deque<Event> queue_;
-    std::size_t queuedBytes_{};
-    std::uint64_t droppedSinceReport_{};
+    std::deque<event> queue_;
+    std::size_t queued_bytes_{};
+    std::uint64_t dropped_since_report_{};
     bool running_{};
     bool stopping_{};
     std::thread worker_;
 };
 
-inline AsyncLogger& logger() {
-    static AsyncLogger value(std::cout, std::cerr);
+inline async_logger& logger() {
+    static async_logger value(std::cout, std::cerr);
     return value;
 }
 
-class Session final {
-  public:
-    Session() { logger().start(); }
-    ~Session() { logger().stop(); }
+class session final {
+public:
+    session() {
+        logger().start();
+    }
+    ~session() {
+        logger().stop();
+    }
 
-    Session(const Session&) = delete;
-    Session& operator=(const Session&) = delete;
-    Session(Session&&) = delete;
-    Session& operator=(Session&&) = delete;
+    session(const session&) = delete;
+    session& operator=(const session&) = delete;
+    session(session&&) = delete;
+    session& operator=(session&&) = delete;
 };
 
 inline void info(std::string message) noexcept {
-    (void)logger().enqueue(Level::info, std::move(message));
+    (void)logger().enqueue(level::info, std::move(message));
 }
 
 inline void error(std::string message) noexcept {
-    (void)logger().enqueue(Level::error, std::move(message));
+    (void)logger().enqueue(level::error, std::move(message));
 }
 
-} // namespace service::logging
+}  // namespace service::logging

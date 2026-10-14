@@ -1,0 +1,1824 @@
+#include <ruvia/core/event_loop_pool.h>
+#include <ruvia/http/http_content_codec.h>
+#include <ruvia/http/http_header.h>
+#include <ruvia/http/http_status.h>
+
+#include <array>
+#include <atomic>
+#include <cctype>
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <initializer_list>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <thread>
+#include <type_traits>
+#include <vector>
+
+#include <asio/buffer.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/read.hpp>
+#include <asio/ssl/context.hpp>
+#include <asio/ssl/error.hpp>
+#include <asio/ssl/stream.hpp>
+#include <asio/write.hpp>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+
+#include "common/file_digest.h"
+#include "node/data/chunked_body.h"
+#include "node/data/chunked_wire_tracker.h"
+#include "node/data/health_supervisor.h"
+#include "node/data/http_listener.h"
+#include "node/data/https_listener.h"
+#include "node/data/origin_health.h"
+#include "node/data/origin_selection.h"
+#include "node/proto/release_metadata.h"
+#include "node/proto/schema_version.h"
+#include "node/runtime/http_redirect.h"
+#include "node/runtime/node_credentials.h"
+#include "node/runtime/runtime_state.h"
+#include "node/runtime/self_updater.h"
+#include "node/runtime/state_cipher.h"
+#include "node/runtime/state_store.h"
+#include "node/runtime/upgrade_record.h"
+#include "tests/support/config_fixture.h"
+#include "tests/support/http_client.h"
+
+#define REQUIRE(condition)                                               \
+    do {                                                                 \
+        if (!(condition))                                                \
+            throw std::runtime_error("requirement failed: " #condition); \
+    } while (false)
+
+namespace {
+static_assert(!std::is_copy_constructible_v<flexedge::node::compiled_config>);
+static_assert(!std::is_copy_assignable_v<flexedge::node::compiled_config>);
+static_assert(!std::is_move_constructible_v<flexedge::node::compiled_config>);
+static_assert(!std::is_move_assignable_v<flexedge::node::compiled_config>);
+static_assert(!std::is_copy_constructible_v<flexedge::node::tls_context_set>);
+static_assert(!std::is_move_constructible_v<flexedge::node::tls_context_set>);
+static_assert(!std::is_move_assignable_v<flexedge::node::tls_context_set>);
+
+using flexedge::testing::snapshot;
+using flexedge::testing::TestConfig;
+
+std::shared_ptr<const flexedge::node::compiled_config> compiled(TestConfig value) {
+    value.finalize();
+    return std::make_shared<const flexedge::node::compiled_config>(
+        std::make_shared<const flexedge::node::v2::ActiveState>(std::move(value.active)),
+        std::move(value.objects));
+}
+
+void apply(flexedge::node::runtime_state& runtime, TestConfig value) {
+    auto config = compiled(std::move(value));
+    runtime.validate_next(*config);
+    runtime.publish(std::move(config));
+}
+
+using flexedge::testing::request;
+using flexedge::testing::waitUntil;
+
+bool accept_until_stopped(asio::ip::tcp::acceptor& acceptor, asio::ip::tcp::socket& socket,
+    std::stop_token stop_token) {
+    std::error_code error;
+    acceptor.non_blocking(true, error);
+    if (error) {
+        throw std::system_error(error, "could not make test acceptor non-blocking");
+    }
+    while (!stop_token.stop_requested()) {
+        acceptor.accept(socket, error);
+        if (!error) {
+            return true;
+        }
+        if (error != asio::error::would_block && error != asio::error::try_again) {
+            throw std::system_error(error, "could not accept test origin connection");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+}
+
+struct pem_identity final {
+    std::string certificate_;
+    std::string private_key_;
+};
+
+pem_identity make_identity(std::string_view common_name, std::int64_t serial) {
+    const auto key = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>(
+        EVP_PKEY_Q_keygen(nullptr, nullptr, "RSA", 2048), &EVP_PKEY_free);
+    const auto certificate = std::unique_ptr<X509, decltype(&X509_free)>(X509_new(), &X509_free);
+    REQUIRE(key != nullptr);
+    REQUIRE(certificate != nullptr);
+    REQUIRE(X509_set_version(certificate.get(), 2) == 1);
+    REQUIRE(ASN1_INTEGER_set_int64(X509_get_serialNumber(certificate.get()), serial) == 1);
+    REQUIRE(X509_gmtime_adj(X509_get_notBefore(certificate.get()), 0) != nullptr);
+    REQUIRE(X509_gmtime_adj(X509_get_notAfter(certificate.get()), 3600) != nullptr);
+    REQUIRE(X509_set_pubkey(certificate.get(), key.get()) == 1);
+    auto* subject = X509_get_subject_name(certificate.get());
+    REQUIRE(subject != nullptr);
+    REQUIRE(X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC,
+                reinterpret_cast<const unsigned char*>(common_name.data()),
+                static_cast<int>(common_name.size()), -1, 0) == 1);
+    REQUIRE(X509_set_issuer_name(certificate.get(), subject) == 1);
+    REQUIRE(X509_sign(certificate.get(), key.get(), EVP_sha256()) > 0);
+
+    const auto certificate_bio =
+        std::unique_ptr<BIO, decltype(&BIO_free)>(BIO_new(BIO_s_mem()), &BIO_free);
+    const auto key_bio = std::unique_ptr<BIO, decltype(&BIO_free)>(BIO_new(BIO_s_mem()), &BIO_free);
+    REQUIRE(certificate_bio != nullptr);
+    REQUIRE(key_bio != nullptr);
+    REQUIRE(PEM_write_bio_X509(certificate_bio.get(), certificate.get()) == 1);
+    REQUIRE(PEM_write_bio_PrivateKey(key_bio.get(), key.get(), nullptr, nullptr, 0, nullptr,
+                nullptr) == 1);
+    char* certificate_bytes{};
+    char* key_bytes{};
+    const auto certificate_size = BIO_get_mem_data(certificate_bio.get(), &certificate_bytes);
+    const auto key_size = BIO_get_mem_data(key_bio.get(), &key_bytes);
+    REQUIRE(certificate_size > 0);
+    REQUIRE(key_size > 0);
+    return {
+        .certificate_ = std::string(certificate_bytes, static_cast<std::size_t>(certificate_size)),
+        .private_key_ = std::string(key_bytes, static_cast<std::size_t>(key_size)),
+    };
+}
+
+struct tls_response final {
+    std::string bytes_{};
+    std::string peer_common_name_;
+};
+
+tls_response tls_request(std::uint16_t port, std::string_view server_name) {
+    asio::io_context context;
+    asio::ssl::context tls_context(asio::ssl::context::tls_client);
+    tls_context.set_verify_mode(asio::ssl::verify_none);
+    asio::ssl::stream<asio::ip::tcp::socket> stream(context, tls_context);
+    REQUIRE(SSL_set_tlsext_host_name(stream.native_handle(), std::string(server_name).c_str()) == 1);
+    stream.lowest_layer().connect({asio::ip::address_v4::loopback(), port});
+    stream.handshake(asio::ssl::stream_base::client);
+    const auto peer = std::unique_ptr<X509, decltype(&X509_free)>(
+        SSL_get1_peer_certificate(stream.native_handle()), &X509_free);
+    REQUIRE(peer != nullptr);
+    std::array<char, 256> common_name{};
+    const auto common_name_size =
+        X509_NAME_get_text_by_NID(X509_get_subject_name(peer.get()), NID_commonName,
+            common_name.data(), static_cast<int>(common_name.size()));
+    REQUIRE(common_name_size > 0);
+    const auto bytes =
+        "GET /tls HTTP/1.1\r\nHost: " + std::string(server_name) + "\r\nConnection: close\r\n\r\n";
+    asio::write(stream, asio::buffer(bytes));
+    tls_response response{
+        .peer_common_name_ = std::string(common_name.data(), static_cast<std::size_t>(common_name_size))};
+    std::array<char, 1024> buffer{};
+    std::error_code error;
+    for (;;) {
+        const auto size = stream.read_some(asio::buffer(buffer), error);
+        response.bytes_.append(buffer.data(), size);
+        if (error == asio::error::eof || error == asio::ssl::error::stream_truncated) {
+            break;
+        }
+        if (error) {
+            throw std::system_error(error, "could not read HTTPS edge response");
+        }
+    }
+    return response;
+}
+
+std::string tls_alpn(std::uint16_t port, std::string_view server_name, bool offer_http2) {
+    asio::io_context context;
+    asio::ssl::context tls_context(asio::ssl::context::tls_client);
+    tls_context.set_verify_mode(asio::ssl::verify_none);
+    asio::ssl::stream<asio::ip::tcp::socket> stream(context, tls_context);
+    REQUIRE(SSL_set_tlsext_host_name(stream.native_handle(), std::string(server_name).c_str()) == 1);
+    static constexpr unsigned char http1[] = {8, 'h', 't', 't', 'p', '/', '1', '.', '1'};
+    static constexpr unsigned char adaptive[] = {2, 'h', '2', 8, 'h', 't',
+        't', 'p', '/', '1', '.', '1'};
+    REQUIRE(SSL_set_alpn_protos(
+                stream.native_handle(), offer_http2 ? adaptive : http1,
+                static_cast<unsigned int>(offer_http2 ? sizeof(adaptive) : sizeof(http1))) == 0);
+    stream.lowest_layer().connect({asio::ip::address_v4::loopback(), port});
+    stream.handshake(asio::ssl::stream_base::client);
+    const unsigned char* selected{};
+    unsigned int selected_size{};
+    SSL_get0_alpn_selected(stream.native_handle(), &selected, &selected_size);
+    return std::string(reinterpret_cast<const char*>(selected), selected_size);
+}
+
+// Writes raw request bytes in separate pieces, so the edge observes partial input,
+// then returns every response byte until the edge closes the connection.
+std::string exchange_raw(std::uint16_t port, std::initializer_list<std::string> pieces) {
+    asio::io_context context;
+    asio::ip::tcp::socket socket(context);
+    socket.connect({asio::ip::address_v4::loopback(), port});
+    for (const auto& piece : pieces) {
+        asio::write(socket, asio::buffer(piece));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    std::string response;
+    std::array<char, 16384> buffer{};
+    std::error_code error;
+    for (;;) {
+        const auto size = socket.read_some(asio::buffer(buffer), error);
+        response.append(buffer.data(), size);
+        if (error == asio::error::eof) {
+            return response;
+        }
+        if (error) {
+            throw std::system_error(error, "could not read edge response");
+        }
+    }
+}
+
+std::string response_body(std::string_view response) {
+    const auto offset = response.find("\r\n\r\n");
+    return offset == std::string_view::npos ? std::string{}
+                                            : std::string(response.substr(offset + 4));
+}
+
+void append_varint(std::string& output, std::uint64_t value) {
+    while (value >= 0x80) {
+        output.push_back(static_cast<char>((value & 0x7f) | 0x80));
+        value >>= 7;
+    }
+    output.push_back(static_cast<char>(value));
+}
+
+std::uint64_t read_varint(std::string_view bytes, std::size_t& offset) {
+    std::uint64_t value{};
+    for (unsigned shift = 0; shift < 64; shift += 7) {
+        REQUIRE(offset < bytes.size());
+        const auto byte = static_cast<unsigned char>(bytes[offset++]);
+        value |= static_cast<std::uint64_t>(byte & 0x7f) << shift;
+        if ((byte & 0x80) == 0) {
+            return value;
+        }
+    }
+    throw std::runtime_error("invalid protobuf varint");
+}
+
+std::string length_delimited(std::uint32_t field, std::string_view bytes) {
+    std::string result;
+    append_varint(result, (static_cast<std::uint64_t>(field) << 3) | 2);
+    append_varint(result, bytes.size());
+    result.append(bytes);
+    return result;
+}
+
+// Deterministic Website bytes as published before http2_enabled was retired: fields are in
+// number order, so field 14 (true) precedes every field numbered above it.
+std::string with_legacy_http2_field(std::string_view website) {
+    std::size_t offset{};
+    while (offset < website.size()) {
+        const auto field_start = offset;
+        const auto tag = read_varint(website, offset);
+        if ((tag >> 3) > 14) {
+            offset = field_start;
+            break;
+        }
+        switch (tag & 7) {
+            case 0:
+                (void)read_varint(website, offset);
+                break;
+            case 1:
+                offset += 8;
+                break;
+            case 2: {
+                const auto length = read_varint(website, offset);
+                offset += static_cast<std::size_t>(length);
+                break;
+            }
+            case 5:
+                offset += 4;
+                break;
+            default:
+                throw std::runtime_error("unsupported protobuf wire type");
+        }
+    }
+    // A later field must follow; otherwise appending would not exercise field ordering.
+    REQUIRE(offset < website.size());
+    return std::string(website.substr(0, offset)) + std::string("\x70\x01", 2) +
+           std::string(website.substr(offset));
+}
+
+std::string web_socket_round_trip(std::uint16_t port) {
+    asio::io_context context;
+    asio::ip::tcp::socket socket(context);
+    socket.connect({asio::ip::address_v4::loopback(), port});
+    constexpr std::string_view handshake =
+        "GET /ws HTTP/1.1\r\n"
+        "Host: www.example.com\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: keep-alive, Upgrade\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+    asio::write(socket, asio::buffer(handshake));
+    std::string response;
+    std::array<char, 1024> buffer{};
+    while (response.find("\r\n\r\n") == std::string::npos) {
+        const auto size = socket.read_some(asio::buffer(buffer));
+        response.append(buffer.data(), size);
+    }
+    REQUIRE(response.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
+    constexpr std::string_view client_bytes = "PING";
+    asio::write(socket, asio::buffer(client_bytes));
+    std::array<char, 4> server_bytes{};
+    asio::read(socket, asio::buffer(server_bytes));
+    return std::string(server_bytes.data(), server_bytes.size());
+}
+
+}  // namespace
+
+// This integration test owns one shared runtime and network lifecycle so each assertion observes
+// the same state.
+// NOLINTNEXTLINE(google-readability-function-size)
+int main(int argc, char* argv[]) {
+    try {
+        if (argc < 1 || argv == nullptr || argv[0] == nullptr) {
+            throw std::runtime_error("test executable path is unavailable");
+        }
+        const auto executable_path = std::filesystem::absolute(argv[0]);
+        REQUIRE(flexedge::node::valid_credential_node_id(std::string(32, 'a')));
+        REQUIRE(!flexedge::node::valid_credential_node_id(std::string(32, 'A')));
+        REQUIRE(!flexedge::node::valid_credential_node_id(std::string(31, 'a')));
+        REQUIRE(!flexedge::node::valid_credential_node_id(std::string(33, 'a')));
+        REQUIRE(flexedge::node::valid_credential_secret(std::string(32, '!')));
+        REQUIRE(flexedge::node::valid_credential_secret(std::string(128, '~')));
+        REQUIRE(!flexedge::node::valid_credential_secret(std::string(31, '!')));
+        REQUIRE(!flexedge::node::valid_credential_secret(std::string(129, '!')));
+        REQUIRE(!flexedge::node::valid_credential_secret(std::string(32, ' ')));
+        REQUIRE(!flexedge::node::valid_credential_secret(std::string(32, '\x7f')));
+        const auto credentials_root =
+            std::filesystem::temp_directory_path() /
+            ("flexedge-node-credentials-" +
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        struct credentials_directory_cleanup final {
+            std::filesystem::path path_;
+            ~credentials_directory_cleanup() {
+                std::error_code ignored;
+                std::filesystem::remove_all(path_, ignored);
+            }
+        } credentials_cleanup{credentials_root};
+        const auto credentials_path = credentials_root / "credentials";
+        constexpr std::string_view node_id = "0123456789abcdef0123456789abcdef";
+        constexpr std::string_view secret = "0123456789abcdefABCDEFghijklmnop";
+        flexedge::node::write_secure_file_atomic(credentials_path,
+            "node_id=0123456789abcdef0123456789abcdef\n"
+            "secret=0123456789abcdefABCDEFghijklmnop\n");
+        auto credentials = flexedge::node::node_credentials::load(credentials_path);
+        REQUIRE(credentials.node_id() == node_id);
+        REQUIRE(credentials.secret() == secret);
+        REQUIRE(std::filesystem::exists(credentials_path));
+        const auto invalid_credentials_path = credentials_root / "invalid-credentials";
+        const std::string valid_credential_text =
+            "node_id=" + std::string(node_id) + "\nsecret=" + std::string(secret) + "\n";
+        for (const auto& prefix : {"node_id=\n", "secret=\n", "node_id=duplicate\n",
+                 "secret=duplicate\n"}) {
+            flexedge::node::write_secure_file_atomic(invalid_credentials_path,
+                prefix + valid_credential_text);
+            bool rejected = false;
+            try {
+                (void)flexedge::node::node_credentials::load(invalid_credentials_path);
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            REQUIRE(rejected);
+        }
+#ifndef _WIN32
+        const auto credential_permissions = std::filesystem::status(credentials_path).permissions();
+        REQUIRE((credential_permissions & std::filesystem::perms::group_all) ==
+                std::filesystem::perms::none);
+        REQUIRE((credential_permissions & std::filesystem::perms::others_all) ==
+                std::filesystem::perms::none);
+#endif
+
+        flexedge::node::node_log_buffer delivery_buffer;
+        delivery_buffer.access({
+            .website_id_ = "89cbd310-6e73-4e47-b020-0863ed440880",
+            .client_ip_ = "192.0.2.1",
+            .protocol_ = "HTTP/1.1",
+            .method_ = "GET",
+            .host_ = "www.example.com",
+            .target_ = "/",
+            .status_code_ = 200,
+            .user_agent_ = "test-agent",
+            .referer_ = "https://example.com/",
+            .request_headers_ = "Host: www.example.com\n",
+            .request_body_ = "payload",
+            .tls_fingerprint_ = "ja3:0123456789abcdef0123456789abcdef",
+            .response_headers_ = "Content-Type: text/plain\n",
+            .query_string_ = "debug=1",
+            .cookies_ = flexedge::node::node_log_buffer::cookie_value("sid=abc"),
+        });
+        delivery_buffer.node("warning", "control", "retry delivery");
+        REQUIRE(delivery_buffer.pending());
+        auto first_delivery = delivery_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d");
+        REQUIRE(first_delivery && first_delivery->value().events_size() == 2);
+        REQUIRE(first_delivery->value().events(0).has_access_log());
+        REQUIRE(first_delivery->value().events(1).has_node_log());
+        const auto access_log_id = first_delivery->value().events(0).access_log().id();
+        REQUIRE(first_delivery->value().events(0).access_log().request_headers().find("Host:") !=
+                std::string::npos);
+        REQUIRE(first_delivery->value().events(0).access_log().request_body() == "payload");
+        REQUIRE(
+            first_delivery->value().events(0).access_log().tls_fingerprint().starts_with("ja3:"));
+        REQUIRE(first_delivery->value().events(0).access_log().response_headers().find(
+                    "Content-Type:") != std::string::npos);
+        REQUIRE(first_delivery->value().events(0).access_log().query_string() == "debug=1");
+        REQUIRE(first_delivery->value().events(0).access_log().cookies() == "sid=abc");
+        delivery_buffer.restore(std::move(*first_delivery));
+        auto retried_delivery = delivery_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d");
+        REQUIRE(retried_delivery && retried_delivery->value().events_size() == 2);
+        REQUIRE(retried_delivery->value().events(0).access_log().id() == access_log_id);
+        REQUIRE(delivery_buffer.pending());
+        delivery_buffer.acknowledge(std::move(*retried_delivery));
+        REQUIRE(flexedge::node::node_log_buffer::request_header_value("Authorization", "secret") ==
+                "secret");
+        REQUIRE(flexedge::node::node_log_buffer::request_body_value("{\"token\":\"secret\"}") ==
+                "{\"token\":\"secret\"}");
+        REQUIRE(flexedge::node::node_log_buffer::cookie_value("sid=abc; theme=dark") ==
+                "sid=abc; theme=dark");
+
+        flexedge::node::v2::Website website_log_policy;
+        REQUIRE(!website_log_policy.access_log_enabled());
+        website_log_policy.set_access_log_enabled(true);
+        REQUIRE(website_log_policy.access_log_enabled());
+
+        flexedge::node::node_log_buffer high_volume_buffer;
+        for (std::size_t index = 0; index < 600; ++index) {
+            high_volume_buffer.node("info", "load", "event-" + std::to_string(index));
+        }
+        auto high_volume_first = high_volume_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d");
+        REQUIRE(high_volume_first && high_volume_first->value().events_size() == 512);
+        REQUIRE(high_volume_first->value().ByteSizeLong() <= 1024 * 1024);
+        high_volume_buffer.acknowledge(std::move(*high_volume_first));
+        auto high_volume_second = high_volume_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d");
+        REQUIRE(high_volume_second && high_volume_second->value().events_size() == 88);
+        high_volume_buffer.acknowledge(std::move(*high_volume_second));
+        REQUIRE(!high_volume_buffer.pending());
+
+        flexedge::node::node_log_buffer concurrent_buffer(4);
+        std::vector<std::thread> producers;
+        for (std::size_t worker = 0; worker < 4; ++worker) {
+            const auto producer = concurrent_buffer.worker_producer(worker);
+            producers.emplace_back([producer, worker] {
+                for (std::size_t index = 0; index < 2000; ++index) {
+                    producer.node("info", "load",
+                        "worker-" + std::to_string(worker) + '-' + std::to_string(index));
+                }
+            });
+        }
+        for (auto& producer : producers) {
+            producer.join();
+        }
+        REQUIRE(concurrent_buffer.queued_events() == 8000);
+        REQUIRE(concurrent_buffer.dropped_events() == 0);
+        for (std::size_t index = 0; index < 512; ++index) {
+            concurrent_buffer.node("info", "load", "overflow-" + std::to_string(index));
+        }
+        REQUIRE(concurrent_buffer.queued_events() == 8512);
+        REQUIRE(concurrent_buffer.dropped_events() == 0);
+        auto retained_delivery = concurrent_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d");
+        REQUIRE(retained_delivery && retained_delivery->value().events_size() == 512);
+        REQUIRE(!concurrent_buffer.node("info", "load", "must-not-reuse-in-flight-capacity"));
+        concurrent_buffer.restore(std::move(*retained_delivery));
+        REQUIRE(concurrent_buffer.queued_events() == 8512);
+        std::size_t delivered_events{};
+        while (auto delivery = concurrent_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d")) {
+            REQUIRE(delivery->value().ByteSizeLong() <= 1024 * 1024);
+            delivered_events += static_cast<std::size_t>(delivery->value().events_size());
+            concurrent_buffer.acknowledge(std::move(*delivery));
+        }
+        REQUIRE(delivered_events == 8512);
+        REQUIRE(concurrent_buffer.dropped_events() == 1);
+
+        flexedge::node::node_log_buffer interleaved_buffer(1);
+        const auto interleaved_producer = interleaved_buffer.worker_producer(0);
+        std::atomic_bool interleaved_producer_done{};
+        std::atomic<std::size_t> interleaved_accepted{};
+        std::atomic<std::size_t> interleaved_delivered{};
+        std::thread interleaved_consumer([&] {
+            while (!interleaved_producer_done.load(std::memory_order_acquire) ||
+                   interleaved_buffer.pending()) {
+                if (auto delivery =
+                        interleaved_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d")) {
+                    interleaved_delivered.fetch_add(
+                        static_cast<std::size_t>(delivery->value().events_size()),
+                        std::memory_order_relaxed);
+                    interleaved_buffer.acknowledge(std::move(*delivery));
+                } else {
+                    std::this_thread::yield();
+                }
+            }
+        });
+        std::thread interleaved_writer([&] {
+            for (std::size_t index = 0; index < 4096; ++index) {
+                if (interleaved_producer.node("info", "load",
+                        "interleaved-" + std::to_string(index))) {
+                    interleaved_accepted.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            interleaved_producer_done.store(true, std::memory_order_release);
+        });
+        interleaved_writer.join();
+        interleaved_consumer.join();
+        REQUIRE(interleaved_accepted == 4096);
+        REQUIRE(interleaved_delivered == interleaved_accepted.load());
+        REQUIRE(interleaved_buffer.dropped_events() == 0);
+        REQUIRE(!interleaved_buffer.pending());
+
+        flexedge::node::node_log_buffer control_drain_buffer(1);
+        const auto background_logs = control_drain_buffer.background_producer();
+        REQUIRE(background_logs.node("info", "upgrade", "upgrade completed"));
+        REQUIRE(!control_drain_buffer.wait_for_control_drain(std::chrono::milliseconds(1)));
+        auto control_delivery = control_drain_buffer.take("576369c6-946e-4dee-8434-9b8909d72dbd5");
+        REQUIRE(control_delivery.has_value());
+        REQUIRE(!control_drain_buffer.wait_for_drain(std::chrono::milliseconds(1)));
+        control_drain_buffer.acknowledge(std::move(*control_delivery));
+        REQUIRE(control_drain_buffer.wait_for_control_drain(std::chrono::milliseconds(1)));
+        REQUIRE(control_drain_buffer.wait_for_drain(std::chrono::milliseconds(1)));
+
+        flexedge::node::node_log_buffer priority_buffer(4);
+        const auto first_priority_producer = priority_buffer.worker_producer(0);
+        const auto second_priority_producer = priority_buffer.worker_producer(1);
+        for (std::size_t index = 0; index < 512; ++index) {
+            REQUIRE(first_priority_producer.node("info", "access", "first-" + std::to_string(index)));
+            REQUIRE(
+                second_priority_producer.node("info", "access", "second-" + std::to_string(index)));
+        }
+        auto first_priority_delivery = priority_buffer.take("576369c6-946e-4dee-8434-9b8909d72dbd5");
+        REQUIRE(first_priority_delivery && first_priority_delivery->value().events_size() == 512);
+        priority_buffer.acknowledge(std::move(*first_priority_delivery));
+        const auto priority_logs = priority_buffer.background_producer();
+        REQUIRE(priority_logs.node("info", "upgrade", "upgrade completed"));
+        auto priority_delivery = priority_buffer.take("576369c6-946e-4dee-8434-9b8909d72dbd5");
+        REQUIRE(priority_delivery && priority_delivery->value().events_size() == 512);
+        REQUIRE(priority_delivery->value().events(0).node_log().category() == "upgrade");
+        priority_buffer.acknowledge(std::move(*priority_delivery));
+
+        const auto updater_binary_path = credentials_root / "node";
+        {
+            std::ofstream output(updater_binary_path, std::ios::binary | std::ios::trunc);
+            output << "current-node";
+        }
+        const std::string next_node_bytes{"next-node-from-control-websocket"};
+        const auto next_node_path = credentials_root / "node.next";
+        {
+            std::ofstream output(next_node_path, std::ios::binary | std::ios::trunc);
+            output.write(next_node_bytes.data(), static_cast<std::streamsize>(next_node_bytes.size()));
+        }
+        const auto next_node_digest = flexedge::crypto::file_sha256(next_node_path);
+        bool restart_requested{};
+        flexedge::node::self_updater ws_updater({
+            .binary_path_ = updater_binary_path,
+            .current_version_ = "0.0.0",
+            .upgrade_record_path_ = credentials_root / "pending-upgrade",
+            .node_log_ = {},
+            .request_restart_ = [&] { restart_requested = true; },
+        });
+        REQUIRE(!ws_updater.update_available("invalid"));
+        REQUIRE(!ws_updater.update_available(flexedge::crypto::file_sha256(updater_binary_path)));
+        REQUIRE(ws_updater.update_available(next_node_digest));
+        const auto upgrade_rejected = [](auto&& action) {
+            try {
+                action();
+                return false;
+            } catch (const std::runtime_error&) {
+                return true;
+            }
+        };
+        const auto original_digest = flexedge::crypto::file_sha256(updater_binary_path);
+        ws_updater.begin("0.0.1", next_node_digest,
+            static_cast<std::uint64_t>(next_node_bytes.size()));
+        REQUIRE(upgrade_rejected([&] { ws_updater.append(1, "bad-offset"); }));
+        REQUIRE(upgrade_rejected([&] { ws_updater.append(0, ""); }));
+        REQUIRE(upgrade_rejected([&] { ws_updater.append(0, std::string(next_node_bytes.size() + 1, 'x')); }));
+        REQUIRE(upgrade_rejected([&] { ws_updater.commit(); }));
+        REQUIRE(ws_updater.written_bytes() == 0);
+        ws_updater.append(0, "partial");
+        ws_updater.abort();
+        REQUIRE(!restart_requested);
+        REQUIRE(flexedge::crypto::file_sha256(updater_binary_path) == original_digest);
+        ws_updater.begin("0.0.1", next_node_digest,
+            static_cast<std::uint64_t>(next_node_bytes.size()));
+        ws_updater.append(0, std::string(next_node_bytes.size(), 'x'));
+        REQUIRE(upgrade_rejected([&] { ws_updater.commit(); }));
+        REQUIRE(!restart_requested);
+        REQUIRE(flexedge::crypto::file_sha256(updater_binary_path) == original_digest);
+        for (const auto& entry : std::filesystem::directory_iterator(credentials_root)) {
+            REQUIRE(!entry.path().filename().string().starts_with(".node.upgrade."));
+        }
+        ws_updater.begin("0.0.1", next_node_digest,
+            static_cast<std::uint64_t>(next_node_bytes.size()));
+        ws_updater.append(0, std::string_view(next_node_bytes).substr(0, 9));
+        REQUIRE(!ws_updater.complete());
+        REQUIRE(ws_updater.written_bytes() == 9);
+        ws_updater.append(9, std::string_view(next_node_bytes).substr(9));
+        REQUIRE(ws_updater.complete());
+#ifndef _WIN32
+        ws_updater.commit();
+        REQUIRE(restart_requested);
+        REQUIRE(flexedge::crypto::file_sha256(updater_binary_path) == next_node_digest);
+        const auto ws_upgrade = flexedge::node::take_pending_upgrade_record(
+            credentials_root / "pending-upgrade", next_node_digest);
+        REQUIRE(ws_upgrade && ws_upgrade->current_version_ == "0.0.1");
+#else
+        REQUIRE(upgrade_rejected([&] { ws_updater.commit(); }));
+        REQUIRE(!flexedge::node::take_pending_upgrade_record(
+            credentials_root / "pending-upgrade", original_digest));
+        REQUIRE(!std::filesystem::exists(credentials_root / "pending-upgrade"));
+        REQUIRE(!restart_requested);
+        REQUIRE(flexedge::crypto::file_sha256(updater_binary_path) == original_digest);
+        for (const auto& entry : std::filesystem::directory_iterator(credentials_root)) {
+            REQUIRE(!entry.path().filename().string().starts_with(".node.upgrade."));
+        }
+#endif
+
+        flexedge::node::node_log_buffer bounded_body_buffer;
+        bounded_body_buffer.access({
+            .website_id_ = "89cbd310-6e73-4e47-b020-0863ed440880",
+            .client_ip_ = "192.0.2.1",
+            .protocol_ = "HTTP/1.1",
+            .method_ = "POST",
+            .host_ = "www.example.com",
+            .target_ = "/upload",
+            .status_code_ = 200,
+            .user_agent_ = {},
+            .referer_ = {},
+            .request_headers_ = {},
+            .request_body_ = std::string(2 * 1024 * 1024, 'x'),
+            .tls_fingerprint_ = {},
+            .response_headers_ = {},
+            .query_string_ = {},
+            .cookies_ = {},
+        });
+        auto bounded_body_delivery = bounded_body_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d");
+        REQUIRE(bounded_body_delivery && bounded_body_delivery->value().events_size() == 1);
+        const auto& bounded_access = bounded_body_delivery->value().events(0).access_log();
+        REQUIRE(bounded_access.request_body().size() ==
+                flexedge::node::node_log_buffer::max_request_body_bytes);
+        REQUIRE(bounded_access.request_body_truncated());
+        REQUIRE(bounded_body_delivery->value().ByteSizeLong() <= 1024 * 1024);
+        bounded_body_buffer.acknowledge(std::move(*bounded_body_delivery));
+
+        const auto chunked = flexedge::node::decode_chunked_body(
+            "4\r\nWiki\r\n5;name=value\r\npedia\r\n0\r\nX-Test: value\r\n\r\n", 64);
+        REQUIRE(chunked && *chunked == "Wikipedia");
+        REQUIRE(!flexedge::node::decode_chunked_body("4\r\nWiki\r\n", 64));
+        REQUIRE(!flexedge::node::decode_chunked_body("5\r\nhello\r\n0\r\n\r\n", 4));
+        REQUIRE(flexedge::node::accepts_event_stream("text/event-stream"));
+        REQUIRE(flexedge::node::accepts_event_stream(
+            "application/json, text/event-stream; charset=utf-8"));
+        REQUIRE(!flexedge::node::accepts_event_stream("text/plain"));
+        const std::array<ruvia::http_header_view, 2> streaming_headers{
+            ruvia::http_header_view{"Accept", "text/event-stream"},
+            ruvia::http_header_view{"Accept-Encoding", "gzip"},
+        };
+        const auto streaming_config = snapshot();
+        const auto streaming_origin_request = flexedge::node::prepare_origin_request(
+            {.method_ = "GET",
+                .target_ = "/events",
+                .headers_ = streaming_headers,
+                .body_ = {},
+                .has_body_ = false},
+            streaming_config.website(), "www.example.com", "198.51.100.1", true, false, false, true);
+        REQUIRE(streaming_origin_request);
+        REQUIRE(streaming_origin_request->bytes_.find("Accept-Encoding: identity\r\n") !=
+                std::string::npos);
+        REQUIRE(streaming_origin_request->bytes_.find("Accept-Encoding: gzip\r\n") ==
+                std::string::npos);
+        flexedge::node::chunked_wire_tracker chunked_tracker;
+        REQUIRE(chunked_tracker.consume("4\r\nWi") ==
+                flexedge::node::chunked_wire_status::incomplete);
+        REQUIRE(chunked_tracker.consume("ki\r\n0\r\nX-Test: value\r\n") ==
+                flexedge::node::chunked_wire_status::incomplete);
+        REQUIRE(chunked_tracker.consume("\r\n") == flexedge::node::chunked_wire_status::complete);
+        REQUIRE(chunked_tracker.consume("extra") == flexedge::node::chunked_wire_status::invalid);
+
+        const std::string buffered_response =
+            "HTTP/1.1 100 Continue\r\nX-Ignored: yes\r\n\r\n"
+            "HTTP/1.1 200 OK\r\n"
+            "Connection: keep-alive, X-Remove\r\n"
+            "X-Remove: secret\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "X-Test: value \r\n\r\n"
+            "4\r\nbody\r\n0\r\n\r\n";
+        const auto buffered_head =
+            flexedge::node::detail::parse_buffered_response_head(buffered_response);
+        REQUIRE(buffered_head);
+        REQUIRE(buffered_head->status_ == 200);
+        REQUIRE(buffered_head->chunked_);
+        REQUIRE(buffered_head->body_offset_ == buffered_response.find("4\r\nbody"));
+        REQUIRE(buffered_head->headers_.size() == 1);
+        REQUIRE(buffered_head->headers_.front().first == "X-Test");
+        REQUIRE(buffered_head->headers_.front().second == "value ");
+        REQUIRE(
+            !flexedge::node::detail::parse_buffered_response_head("HTTP/1.1 20x Bad Status\r\n\r\n"));
+
+        flexedge::node::buffered_bytes_budget budget(8192);
+        auto first_reservation = budget.lease();
+        REQUIRE(first_reservation.try_grow(4096));
+        REQUIRE(budget.used_bytes() == 4096);
+        auto moved_reservation = std::move(first_reservation);
+        moved_reservation.shrink(1024);
+        REQUIRE(budget.used_bytes() == 3072);
+        moved_reservation = {};
+        REQUIRE(budget.used_bytes() == 0);
+        auto maximum_reservation = budget.lease();
+        REQUIRE(maximum_reservation.try_grow(budget.maximum_bytes()));
+        auto rejected_reservation = budget.lease();
+        REQUIRE(!rejected_reservation.try_grow(1));
+        REQUIRE(budget.rejected_reservations() == 1);
+        maximum_reservation = {};
+        REQUIRE(budget.used_bytes() == 0);
+
+        flexedge::node::buffered_bytes_budget request_budget(32);
+        auto held_request_bytes = request_budget.lease();
+        REQUIRE(held_request_bytes.try_grow(32));
+        auto rejected_request_bytes = request_budget.lease();
+        REQUIRE(!rejected_request_bytes.try_grow(1));
+        REQUIRE(request_budget.rejected_reservations() == 1);
+
+        flexedge::node::buffered_proxy_request compression_request;
+        compression_request.headers_.emplace_back("Accept-Encoding", "gzip;q=0.5, br, zstd;q=0.8");
+        flexedge::node::buffered_proxy_response compression_response;
+        compression_response.status_ = 200;
+        compression_response.headers_.emplace_back("Content-Type", "text/plain; charset=utf-8");
+        compression_response.body_.assign(4096, 'a');
+        flexedge::node::buffered_bytes_budget compression_budget(
+            flexedge::node::maximum_response_buffer_bytes);
+        compression_response.reservation_ = compression_budget.lease();
+        REQUIRE(compression_response.reservation_.try_grow(compression_response.body_.size()));
+        flexedge::node::v2::Website compression_website;
+        compression_website.set_response_compression_enabled(true);
+        compression_website.set_response_compression_min_bytes(256);
+        compression_website.set_response_compression_max_bytes(32 * 1024 * 1024);
+        compression_website.add_response_compression_algorithms("br");
+        compression_website.add_response_compression_mime_types("text/*");
+        compression_website.add_response_compression_extensions(".txt");
+        compression_website.add_response_compression_excluded_extensions(".apk");
+        flexedge::node::apply_response_compression(compression_request, compression_website,
+            compression_response);
+        REQUIRE(flexedge::node::response_header(compression_response, "Content-Encoding") == "br");
+        REQUIRE(flexedge::node::response_header(compression_response, "Vary") == "Accept-Encoding");
+        auto decoded_compression = ruvia::decode_http_content(
+            ruvia::http_content_coding::brotli, compression_response.body_, {.max_decoded_bytes_ = 4096});
+        REQUIRE(decoded_compression.decoded() != nullptr);
+        REQUIRE(decoded_compression.decoded()->bytes() == std::string(4096, 'a'));
+        REQUIRE(compression_budget.used_bytes() == 4096);
+
+        auto plain_compression_response = [] {
+            flexedge::node::buffered_proxy_response response;
+            response.status_ = 200;
+            response.headers_.emplace_back("Content-Type", "text/plain");
+            response.body_.assign(4096, 'a');
+            return response;
+        };
+        auto excluded_compression_request = compression_request;
+        excluded_compression_request.target_ = "/download/package.APK?token=1";
+        auto excluded_compression_response = plain_compression_response();
+        flexedge::node::apply_response_compression(excluded_compression_request, compression_website,
+            excluded_compression_response);
+        REQUIRE(flexedge::node::response_header(excluded_compression_response, "Content-Encoding")
+                .empty());
+
+        auto partial_compression_response = plain_compression_response();
+        partial_compression_response.status_ = 206;
+        flexedge::node::apply_response_compression(compression_request, compression_website,
+            partial_compression_response);
+        REQUIRE(
+            flexedge::node::response_header(partial_compression_response, "Content-Encoding").empty());
+
+        auto limited_compression_website = compression_website;
+        limited_compression_website.set_response_compression_max_bytes(1024);
+        auto limited_compression_response = plain_compression_response();
+        flexedge::node::apply_response_compression(compression_request, limited_compression_website,
+            limited_compression_response);
+        REQUIRE(
+            flexedge::node::response_header(limited_compression_response, "Content-Encoding").empty());
+
+        flexedge::node::buffered_bytes_budget exhausted_compression_budget(
+            flexedge::node::maximum_response_buffer_bytes);
+        auto held_compression_budget = exhausted_compression_budget.lease();
+        REQUIRE(held_compression_budget.try_grow(exhausted_compression_budget.maximum_bytes()));
+        auto overloaded_compression_response = plain_compression_response();
+        overloaded_compression_response.reservation_ = exhausted_compression_budget.lease();
+        flexedge::node::apply_response_compression(compression_request, compression_website,
+            overloaded_compression_response);
+        REQUIRE(flexedge::node::response_header(overloaded_compression_response, "Content-Encoding")
+                .empty());
+
+        auto origin_encoded = ruvia::encode_http_content(
+            ruvia::http_content_coding::gzip, std::string(4096, 'a'), {.max_encoded_bytes_ = 4096});
+        REQUIRE(origin_encoded.encoded() != nullptr);
+        auto recompressed_response = plain_compression_response();
+        recompressed_response.body_.assign(origin_encoded.encoded()->bytes());
+        recompressed_response.headers_.emplace_back("Content-Encoding", "gzip");
+        const auto original_encoded_body = recompressed_response.body_;
+        flexedge::node::apply_response_compression(compression_request, compression_website,
+            recompressed_response);
+        REQUIRE(recompressed_response.body_ == original_encoded_body);
+
+        flexedge::node::state_cipher state_cipher(std::string(64, '1'));
+        const auto sealed_state = state_cipher.seal("device-encrypted-private-state");
+        REQUIRE(sealed_state.starts_with("FES1"));
+        REQUIRE(sealed_state.find("device-encrypted-private-state") == std::string::npos);
+        REQUIRE(state_cipher.open(sealed_state) == "device-encrypted-private-state");
+        auto tampered_state = sealed_state;
+        tampered_state.back() ^= 1;
+        bool tampered_state_rejected = false;
+        try {
+            (void)state_cipher.open(tampered_state);
+        } catch (const std::runtime_error&) {
+            tampered_state_rejected = true;
+        }
+        REQUIRE(tampered_state_rejected);
+
+        const auto state_directory =
+            std::filesystem::temp_directory_path() /
+            ("flexedge-node-state-" +
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        struct state_directory_cleanup final {
+            std::filesystem::path path_;
+            ~state_directory_cleanup() {
+                std::error_code ignored;
+                std::filesystem::remove_all(path_, ignored);
+            }
+        } state_cleanup{state_directory};
+        const auto node_digest = flexedge::crypto::file_sha256(executable_path);
+        const auto upgrade_record_path = state_directory / "pending-upgrade";
+        const flexedge::node::upgrade_record upgrade_record{
+            .previous_version_ = "0.3.23",
+            .current_version_ = "0.3.24",
+            .target_sha256_ = node_digest,
+        };
+        flexedge::node::write_pending_upgrade_record(upgrade_record_path, upgrade_record);
+        const auto restored_upgrade =
+            flexedge::node::take_pending_upgrade_record(upgrade_record_path, node_digest);
+        REQUIRE(restored_upgrade.has_value());
+        REQUIRE(restored_upgrade->message() == upgrade_record.message());
+        REQUIRE(!std::filesystem::exists(upgrade_record_path));
+        flexedge::node::write_pending_upgrade_record(upgrade_record_path, upgrade_record);
+        REQUIRE(!flexedge::node::take_pending_upgrade_record(
+            upgrade_record_path, "e1408004be0e7e8736f9365f835cb1454adeeda979a0b08bc60acf753aa2e4ea"));
+        REQUIRE(!std::filesystem::exists(upgrade_record_path));
+        flexedge::node::state_store state_store(state_directory,
+            "3df64f75-2df7-43b8-aa89-661920126564");
+        auto stored_snapshot = snapshot();
+        stored_snapshot.finalize();
+        state_store.stage(stored_snapshot.active, stored_snapshot.objects);
+        REQUIRE(!std::filesystem::exists(state_directory / "releases"));
+        state_store.activate_staged();
+        const auto persisted = state_store.load();
+        REQUIRE(persisted.active_.SerializeAsString() == stored_snapshot.active.SerializeAsString());
+        REQUIRE(persisted.objects_.size() == stored_snapshot.objects.size());
+        auto stale_snapshot = snapshot();
+        stale_snapshot.active.mutable_node_spec()->mutable_content()->set_schema_version(1);
+        stale_snapshot.finalize();
+        state_store.stage(stale_snapshot.active, stale_snapshot.objects);
+        state_store.activate_staged();
+        const auto discarded = state_store.load();
+        REQUIRE(!discarded.active_.has_node_spec());
+        REQUIRE(discarded.objects_.empty());
+        auto stale_release = snapshot();
+        stale_release.active.mutable_release()->mutable_content()->set_schema_version(1);
+        stale_release.finalize();
+        state_store.stage(stale_release.active, stale_release.objects);
+        state_store.activate_staged();
+        const auto discarded_release = state_store.load();
+        REQUIRE(!discarded_release.active_.has_release());
+        REQUIRE(discarded_release.objects_.empty());
+        for (const auto version : {2u, 3u, 4u}) {
+            auto compatible = snapshot();
+            compatible.active.mutable_release()->mutable_content()->set_schema_version(version);
+            compatible.finalize();
+            state_store.stage(compatible.active, compatible.objects);
+            state_store.activate_staged();
+            REQUIRE(state_store.load().active_.has_release());
+        }
+
+        const auto config = compiled(snapshot());
+        REQUIRE(config->website("www.example.com:80") != nullptr);
+        REQUIRE(config->domain("WWW.EXAMPLE.COM") != nullptr);
+        const auto redirect =
+            flexedge::node::http_to_https_redirect(*config, "WWW.Example.COM:80", "/a?q=1");
+        REQUIRE(redirect);
+        REQUIRE(redirect->status_ == ruvia::http_status::moved_permanently);
+        REQUIRE(redirect->location_ == "https://www.example.com/a?q=1");
+        REQUIRE(!flexedge::node::http_to_https_redirect(*config, "http.example.com", "/"));
+
+        const auto no_redirect = compiled(snapshot(false));
+        REQUIRE(!flexedge::node::http_to_https_redirect(*no_redirect, "www.example.com", "/"));
+
+        // Release objects are content-addressed by SHA-256 over their deterministic
+        // serialization. Objects published before http2_enabled was retired carry field 14
+        // in number order; the control plane serves them and upgraded nodes reload them from
+        // disk by re-serializing, which must reproduce the published bytes exactly.
+        {
+            const auto legacy_website = with_legacy_http2_field(
+                flexedge::node::serialize_artifact(snapshot(false).website()));
+            const auto legacy_content = length_delimited(10, legacy_website);
+            const auto legacy_digest = flexedge::node::artifact_digest(std::string_view(legacy_content));
+            flexedge::node::v2::DeliveryObjectContent parsed_content;
+            REQUIRE(flexedge::node::parse_artifact(legacy_content, parsed_content));
+            REQUIRE(parsed_content.has_website());
+            REQUIRE(flexedge::node::serialize_artifact(parsed_content) == legacy_content);
+            REQUIRE(flexedge::node::artifact_digest(parsed_content) == legacy_digest);
+
+            // The object file exactly as the previous node binary persisted it.
+            constexpr std::string_view legacy_secret = "3df64f75-2df7-43b8-aa89-661920126564";
+            const auto legacy_directory = state_directory / "legacy-http2";
+            flexedge::node::write_secure_file_atomic(
+                legacy_directory / "objects" / (legacy_digest + ".pb"),
+                flexedge::node::state_cipher(legacy_secret)
+                    .seal(length_delimited(1, legacy_digest) + length_delimited(2, legacy_content)));
+            const flexedge::node::state_store legacy_store(legacy_directory, legacy_secret);
+            const auto legacy_object = legacy_store.load_object(legacy_digest);
+            REQUIRE(legacy_object && legacy_object->content().has_website());
+            REQUIRE(flexedge::node::serialize_artifact(legacy_object->content()) == legacy_content);
+
+            auto legacy_http2 = snapshot(false);
+            *legacy_http2.mutableWebsite() = legacy_object->content().website();
+            const auto legacy_http2_config = compiled(std::move(legacy_http2));
+            REQUIRE(legacy_http2_config->website("www.example.com") != nullptr);
+        }
+
+        auto invalid_compression_mime_type = snapshot(false);
+        invalid_compression_mime_type.mutableWebsite()->add_response_compression_mime_types(
+            "application");
+        bool invalid_compression_mime_type_rejected = false;
+        try {
+            (void)compiled(std::move(invalid_compression_mime_type));
+        } catch (const std::runtime_error&) {
+            invalid_compression_mime_type_rejected = true;
+        }
+        REQUIRE(invalid_compression_mime_type_rejected);
+
+        flexedge::node::runtime_state runtime;
+        apply(runtime, snapshot());
+        const auto previous = runtime.config();
+        REQUIRE(previous != nullptr);
+        REQUIRE(previous->node_spec().content().revision() == 3);
+
+        auto duplicate = snapshot();
+        duplicate.setGeneration(4);
+        duplicate.duplicateWebsite();
+        bool rejected = false;
+        try {
+            apply(runtime, std::move(duplicate));
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        REQUIRE(rejected);
+        REQUIRE(runtime.config() == previous);
+        REQUIRE(runtime.applied_node_spec_revision() == 3);
+
+        auto replacement = snapshot(false);
+        replacement.setGeneration(4);
+        apply(runtime, std::move(replacement));
+        REQUIRE(runtime.config() != previous);
+        REQUIRE(runtime.applied_node_spec_revision() == 4);
+        REQUIRE(previous->website("www.example.com") != nullptr);
+        std::int64_t next_generation{5};
+
+        ruvia::event_loop_pool loops({.loop_count_ = 2});
+        flexedge::node::origin_health_registry listener_health;
+        flexedge::node::origin_tls_context first_origin_tls;
+        flexedge::node::origin_tls_context second_origin_tls;
+        flexedge::node::origin_connection_pool first_origin_connections(loops.loop(0).executor(),
+            first_origin_tls);
+        flexedge::node::origin_connection_pool second_origin_connections(loops.loop(1).executor(),
+            second_origin_tls);
+        flexedge::node::runtime_metrics runtime_metrics;
+        flexedge::node::buffered_bytes_budget request_buffers(
+            flexedge::node::maximum_request_buffer_bytes);
+        flexedge::node::buffered_bytes_budget response_buffers(
+            flexedge::node::maximum_response_buffer_bytes);
+        flexedge::node::node_log_buffer log_buffer(2);
+        auto first_worker_logs = log_buffer.worker_producer(0);
+        auto second_worker_logs = log_buffer.worker_producer(1);
+        (void)runtime_metrics.sample();
+        auto first_listener = flexedge::node::http_listener::create(
+            loops.loop(0), runtime, listener_health, runtime_metrics, first_worker_logs,
+            first_origin_connections, request_buffers, response_buffers,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto port = first_listener->local_endpoint().port();
+        auto second_listener = flexedge::node::http_listener::create(
+            loops.loop(1), runtime, listener_health, runtime_metrics, second_worker_logs,
+            second_origin_connections, request_buffers, response_buffers,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), port));
+        flexedge::node::buffered_bytes_budget constrained_request_buffers(32);
+        auto constrained_listener = flexedge::node::http_listener::create(
+            loops.loop(0), runtime, listener_health, runtime_metrics, first_worker_logs,
+            first_origin_connections, constrained_request_buffers, response_buffers,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto constrained_port = constrained_listener->local_endpoint().port();
+        first_listener->request_start();
+        second_listener->request_start();
+        constrained_listener->request_start();
+        loops.start();
+        // A listener stopped while waiting for activation must release its
+        // timer/self references even if another start request was queued.
+        auto verify_stopped_before_activation = [&](auto listener) {
+            const std::weak_ptr weak(listener);
+            const auto gate = std::make_shared<flexedge::node::listener_activation_gate>();
+            listener->request_start(gate);
+            listener->request_start(gate);
+            listener->request_stop();
+            listener.reset();
+            REQUIRE(waitUntil([&] { return weak.expired(); }, std::chrono::seconds(2)));
+        };
+        verify_stopped_before_activation(flexedge::node::http_listener::create(
+            loops.loop(0), runtime, listener_health, runtime_metrics, first_worker_logs,
+            first_origin_connections, request_buffers, response_buffers,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0)));
+        flexedge::node::tls_context_registry inactive_tls_contexts;
+        verify_stopped_before_activation(flexedge::node::https_listener::create(
+            loops.loop(0), runtime, listener_health, inactive_tls_contexts, runtime_metrics,
+            first_worker_logs, first_origin_connections, request_buffers, response_buffers,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0)));
+        const auto constrained_response = request(constrained_port);
+        REQUIRE(constrained_response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        REQUIRE(waitUntil([&] { return constrained_request_buffers.used_bytes() == 0; },
+            std::chrono::seconds(1)));
+        REQUIRE(constrained_request_buffers.rejected_reservations() == 1);
+        constrained_listener->request_stop();
+        // Retire and recreate the health record only after a real upstream
+        // request arrives. Its subsequent failure belongs to the old target.
+        {
+            asio::io_context origin_context;
+            asio::ip::tcp::acceptor origin_acceptor(origin_context,
+                {asio::ip::address_v4::loopback(), 0});
+            auto pending_config = snapshot(false);
+            pending_config.setGeneration(next_generation++);
+            pending_config.mutableWebsite()->set_unhealthy_threshold(1);
+            auto* origin = pending_config.mutableWebsite()->mutable_origins(0);
+            origin->set_host("127.0.0.1");
+            origin->set_port(origin_acceptor.local_endpoint().port());
+            apply(runtime, std::move(pending_config));
+            const flexedge::node::origin_health_registry::key_set keys{
+                flexedge::node::origin_health_registry::get_key("website-1", "origin-1")};
+            listener_health.publish(listener_health.prepare(keys));
+            std::atomic<bool> replaced_health{false};
+            std::jthread upstream([&](std::stop_token stop) {
+                asio::ip::tcp::socket socket(origin_context);
+                if (!accept_until_stopped(origin_acceptor, socket, stop)) {
+                    return;
+                }
+                std::array<char, 4096> bytes{};
+                std::error_code error;
+                if (socket.read_some(asio::buffer(bytes), error) == 0 || error) {
+                    return;
+                }
+                listener_health.publish(listener_health.prepare({}));
+                listener_health.publish(listener_health.prepare(keys));
+                replaced_health.store(true);
+                // Closing without a response drives the real failure callback.
+            });
+            const auto failed_response = request(port);
+            upstream.request_stop();
+            upstream.join();
+            REQUIRE(replaced_health.load());
+            REQUIRE(failed_response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+            REQUIRE(listener_health.healthy("website-1", "origin-1"));
+        }
+        const auto no_route_response = request(port, "unknown.example.com");
+        REQUIRE(no_route_response.starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
+        REQUIRE(waitUntil([&] { return runtime_metrics.connection_count() == 0; },
+            std::chrono::seconds(1)));
+        const auto observed_metrics = runtime_metrics.sample();
+        REQUIRE(observed_metrics.traffic_out_bps_ > 0);
+        REQUIRE(observed_metrics.connection_count_ == 0);
+        REQUIRE(observed_metrics.cpu_usage_ >= 0 && observed_metrics.cpu_usage_ <= 1);
+        REQUIRE(observed_metrics.memory_usage_ >= 0 && observed_metrics.memory_usage_ <= 1);
+
+        auto redirect_snapshot = snapshot(true);
+        redirect_snapshot.setGeneration(next_generation++);
+        apply(runtime, std::move(redirect_snapshot));
+        const auto redirect_response = request(port);
+        REQUIRE(redirect_response.starts_with("HTTP/1.1 301 Moved Permanently\r\n"));
+        REQUIRE(redirect_response.find("Location: https://www.example.com/a?q=1\r\n") !=
+                std::string::npos);
+
+        auto route_snapshot = snapshot(false);
+        route_snapshot.setGeneration(next_generation++);
+        auto* route = route_snapshot.mutableWebsite()->add_route_rules();
+        route->set_id("route-1");
+        route->set_enabled(true);
+        route->set_match_type("prefix");
+        route->set_path("/a");
+        route->add_methods("GET");
+        route->set_action("redirect");
+        route->set_redirect_url("/moved");
+        route->set_redirect_status(302);
+        auto* route_header = route->add_response_headers();
+        route_header->set_name("X-Edge-Route");
+        route_header->set_value("matched");
+        apply(runtime, std::move(route_snapshot));
+        const auto route_response = request(port);
+        REQUIRE(route_response.starts_with("HTTP/1.1 302 Found\r\n"));
+        REQUIRE(route_response.find("Location: /moved?q=1\r\n") != std::string::npos);
+        REQUIRE(route_response.find("X-Edge-Route: matched\r\n") != std::string::npos);
+        for (const auto status : {307u, 308u}) {
+            auto advanced = snapshot(false);
+            advanced.setGeneration(next_generation++);
+            auto* matched = advanced.mutableWebsite()->add_route_rules();
+            matched->set_id("regex-post");
+            matched->set_enabled(true);
+            matched->set_match_type("regex");
+            matched->set_path("^/old/(.*)$");
+            matched->add_methods("POST");
+            matched->set_action("redirect");
+            matched->set_redirect_status(status);
+            matched->set_redirect_url("/new/${1}#end");
+            auto* header = matched->add_conditions();
+            header->set_source("header");
+            header->set_name("X-Channel");
+            header->set_op("equals");
+            header->set_value("beta");
+            auto* query = matched->add_conditions();
+            query->set_source("query");
+            query->set_name("q");
+            query->set_op("equals");
+            query->set_value("a b");
+            auto* fallback = advanced.mutableWebsite()->add_route_rules();
+            // A later prefix must not outrank the earlier matching regex.
+            fallback->set_id("fallback-prefix");
+            fallback->set_enabled(true);
+            fallback->set_match_type("prefix");
+            fallback->set_path("/old");
+            fallback->set_action("redirect");
+            fallback->set_redirect_status(302);
+            fallback->set_redirect_url("/fallback");
+            apply(runtime, std::move(advanced));
+            const auto answer = request(port, "www.example.com", "x-channel: beta\r\n", "/old/a%2Fb?q=a+b", "POST", "payload");
+            REQUIRE(answer.starts_with("HTTP/1.1 " + std::string(flexedge::route_policy::redirect_status_line(status)) + "\r\n"));
+            REQUIRE(answer.find("Location: /new/a%2Fb?q=a+b#end\r\n") != std::string::npos);
+            REQUIRE(request(port, "www.example.com", "X-Channel: stable\r\n", "/old/a?q=a+b", "POST", "payload").starts_with("HTTP/1.1 302 Found"));
+            REQUIRE(request(port, "www.example.com", "X-Channel: beta\r\n", "/old/a?q=other", "POST", "payload").starts_with("HTTP/1.1 302 Found"));
+        }
+
+        // Ruvia parses only the request head; the node frames Content-Length and chunked
+        // bodies, applies its 2 MiB request budget, and serves one request per connection.
+        {
+            asio::io_context echo_context;
+            asio::ip::tcp::acceptor echo_acceptor(
+                echo_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+            std::mutex echo_mutex;
+            std::vector<std::string> echoed_bodies;
+            std::jthread echo_origin([&](std::stop_token stop_token) {
+                for (;;) {
+                    asio::ip::tcp::socket socket(echo_context);
+                    if (!accept_until_stopped(echo_acceptor, socket, stop_token)) {
+                        return;
+                    }
+                    std::string input;
+                    std::array<char, 16384> buffer{};
+                    std::error_code error;
+                    while (!error && input.find("\r\n\r\n") == std::string::npos) {
+                        const auto size = socket.read_some(asio::buffer(buffer), error);
+                        input.append(buffer.data(), size);
+                    }
+                    if (error) {
+                        continue;
+                    }
+                    const auto body_offset = input.find("\r\n\r\n") + 4;
+                    auto head = input.substr(0, body_offset);
+                    for (auto& ch : head) {
+                        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                    }
+                    std::size_t length{};
+                    if (const auto field = head.find("\r\ncontent-length:"); field != std::string::npos) {
+                        length = std::stoul(head.substr(field + 17));
+                    }
+                    while (!error && input.size() - body_offset < length) {
+                        const auto size = socket.read_some(asio::buffer(buffer), error);
+                        input.append(buffer.data(), size);
+                    }
+                    if (error) {
+                        continue;
+                    }
+                    const auto body = input.substr(body_offset, length);
+                    {
+                        std::lock_guard lock(echo_mutex);
+                        echoed_bodies.push_back(body);
+                    }
+                    const auto response = "HTTP/1.1 200 OK\r\nContent-Length: " +
+                                          std::to_string(body.size()) +
+                                          "\r\nConnection: close\r\n\r\n" + body;
+                    asio::write(socket, asio::buffer(response), error);
+                }
+            });
+            auto framing_snapshot = snapshot(false);
+            framing_snapshot.setGeneration(next_generation++);
+            framing_snapshot.mutableWebsite()->mutable_origins(0)->set_host("127.0.0.1");
+            framing_snapshot.mutableWebsite()->mutable_origins(0)->set_port(
+                echo_acceptor.local_endpoint().port());
+            apply(runtime, std::move(framing_snapshot));
+            const auto echoed_count = [&] {
+                std::lock_guard lock(echo_mutex);
+                return echoed_bodies.size();
+            };
+            const std::string head = "POST /echo HTTP/1.1\r\nHost: www.example.com\r\n";
+
+            const auto known = exchange_raw(port, {head + "Content-Length: 5\r\n\r\nhe", "llo"});
+            REQUIRE(known.starts_with("HTTP/1.1 200 OK\r\n"));
+            REQUIRE(response_body(known) == "hello");
+            REQUIRE(echoed_count() == 1);
+
+            const auto chunked = exchange_raw(
+                port, {head + "Transfer-Encoding: chunked\r\n\r\n4\r\nWi",
+                          "ki\r\n5;name=value\r\npedia\r\n0\r\nX-Trailer: value\r\n", "\r\n"});
+            REQUIRE(chunked.starts_with("HTTP/1.1 200 OK\r\n"));
+            REQUIRE(response_body(chunked) == "Wikipedia");
+            REQUIRE(echoed_count() == 2);
+
+            for (const std::string_view invalid :
+                {"zz\r\nWiki\r\n0\r\n\r\n", "4\r\nWikiXX0\r\n\r\n", "4\nWiki\r\n0\r\n\r\n",
+                    "4\r\nWiki\r\n0\r\nbad trailer\r\n\r\n"}) {
+                const auto rejected = exchange_raw(
+                    port, {head + "Transfer-Encoding: chunked\r\n\r\n" + std::string(invalid)});
+                REQUIRE(rejected.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+            }
+            REQUIRE(echoed_count() == 2);
+
+            constexpr std::size_t max_request_bytes = 2 * 1024 * 1024;
+            const auto length_head = [&](std::size_t length) {
+                return head + "Content-Length: " + std::to_string(length) + "\r\n\r\n";
+            };
+            // Seven length digits keep the head size fixed for the boundary pair.
+            const auto boundary_length = max_request_bytes - length_head(1000000).size();
+            REQUIRE(length_head(boundary_length).size() + boundary_length == max_request_bytes);
+            const auto at_limit = exchange_raw(
+                port, {length_head(boundary_length) + std::string(boundary_length, 'b')});
+            REQUIRE(at_limit.starts_with("HTTP/1.1 200 OK\r\n"));
+            REQUIRE(response_body(at_limit) == std::string(boundary_length, 'b'));
+            REQUIRE(echoed_count() == 3);
+            const auto over_limit = exchange_raw(port, {length_head(boundary_length + 1)});
+            REQUIRE(over_limit.starts_with("HTTP/1.1 413 Content Too Large\r\n"));
+            const auto over_framing_ceiling = exchange_raw(port, {length_head(16 * 1024 * 1024 + 1)});
+            REQUIRE(over_framing_ceiling.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+            const auto oversized_chunk =
+                exchange_raw(port, {head + "Transfer-Encoding: chunked\r\n\r\n1000001\r\n"});
+            REQUIRE(oversized_chunk.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+            const auto unfinished_chunk_head =
+                head + "Transfer-Encoding: chunked\r\n\r\n200000\r\n";
+            const auto unfinished_chunk = exchange_raw(
+                port, {unfinished_chunk_head +
+                          std::string(max_request_bytes - unfinished_chunk_head.size(), 'c')});
+            REQUIRE(unfinished_chunk.starts_with("HTTP/1.1 413 Content Too Large\r\n"));
+            REQUIRE(echoed_count() == 3);
+
+            // The response closes the connection; a pipelined request is never served and
+            // its bytes are not forwarded with the first body.
+            const auto pipelined = exchange_raw(
+                port, {head + "Content-Length: 5\r\n\r\nhello"
+                              "GET /second HTTP/1.1\r\nHost: www.example.com\r\n\r\n"});
+            REQUIRE(pipelined.starts_with("HTTP/1.1 200 OK\r\n"));
+            REQUIRE(pipelined.find("Connection: close\r\n") != std::string::npos);
+            REQUIRE(pipelined.find("HTTP/1.1 ", 1) == std::string::npos);
+            REQUIRE(response_body(pipelined) == "hello");
+            REQUIRE(echoed_count() == 4);
+            echo_origin.request_stop();
+        }
+
+        asio::io_context origin_context;
+        asio::ip::tcp::acceptor origin_acceptor(
+            origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto origin_port = origin_acceptor.local_endpoint().port();
+        asio::ip::tcp::acceptor unavailable_acceptor(
+            origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto unavailable_port = unavailable_acceptor.local_endpoint().port();
+        unavailable_acceptor.close();
+        std::atomic<bool> saw_route_rewrite{false};
+        std::jthread origin_server([&](std::stop_token stop_token) {
+            asio::ip::tcp::socket origin_socket(origin_context);
+            if (!accept_until_stopped(origin_acceptor, origin_socket, stop_token)) {
+                return;
+            }
+            std::array<char, 4096> origin_request{};
+            std::error_code ignored;
+            const auto received = origin_socket.read_some(asio::buffer(origin_request), ignored);
+            saw_route_rewrite.store(std::string_view(origin_request.data(), received).starts_with("GET /internal/users?route=1 HTTP/1.1\r\n"));
+            constexpr std::string_view origin_response =
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: Foo\r\n"
+                "Foo: remove-me\r\nX-Origin: retained\r\n\r\nOK";
+            asio::write(origin_socket, asio::buffer(origin_response));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        });
+        auto proxy_snapshot = snapshot(false);
+        proxy_snapshot.setGeneration(next_generation++);
+        proxy_snapshot.mutableWebsite()->mutable_origins(0)->set_host("127.0.0.1");
+        proxy_snapshot.mutableWebsite()->mutable_origins(0)->set_port(unavailable_port);
+        auto* backup = proxy_snapshot.mutableWebsite()->add_origins();
+        backup->set_id("origin-backup");
+        backup->set_protocol("http");
+        backup->set_host("127.0.0.1");
+        backup->set_port(origin_port);
+        backup->set_role("backup");
+        backup->set_weight(100);
+        backup->set_enabled(true);
+        auto* proxy_route = proxy_snapshot.mutableWebsite()->add_route_rules();
+        proxy_route->set_id("route-backup");
+        proxy_route->set_enabled(true);
+        proxy_route->set_match_type("regex");
+        proxy_route->set_path("^/a/(.*)$");
+        proxy_route->set_action("proxy");
+        proxy_route->add_origin_ids("origin-backup");
+        proxy_route->add_hostnames("www.example.com");
+        proxy_route->set_rewrite_mode("replace_path");
+        proxy_route->set_rewrite_path("/internal/${1}");
+        proxy_route->set_query_mode("replace");
+        proxy_route->set_query_string("route=1");
+        auto* source_route = proxy_snapshot.mutableWebsite()->add_route_rules();
+        *source_route = *proxy_route;
+        source_route->set_id("select-rewritten-path");
+        source_route->set_match_type("prefix");
+        source_route->set_path("/internal");
+        source_route->set_rewrite_mode("none");
+        source_route->clear_rewrite_path();
+        source_route->set_query_mode("preserve");
+        source_route->clear_query_string();
+        proxy_route->set_action("rewrite");
+        proxy_route->clear_origin_ids();
+        const auto candidates =
+            flexedge::node::origin_candidates(proxy_snapshot.website(), 0, source_route);
+        REQUIRE(candidates.size() == 1);
+        REQUIRE(candidates.front()->id() == "origin-backup");
+        apply(runtime, std::move(proxy_snapshot));
+        const auto proxy_started = std::chrono::steady_clock::now();
+        const auto proxy_response = request(port, "WWW.Example.COM:80", {}, "/a/users?q=1");
+        REQUIRE(saw_route_rewrite.load());
+        const auto proxy_elapsed = std::chrono::steady_clock::now() - proxy_started;
+        REQUIRE(proxy_response.starts_with("HTTP/1.1 200 OK\r\n"));
+        REQUIRE(proxy_response.ends_with("\r\n\r\nOK"));
+        REQUIRE(proxy_response.find("Connection: close\r\n") != std::string::npos);
+        REQUIRE(proxy_response.find("X-Origin: retained\r\n") != std::string::npos);
+        REQUIRE(proxy_response.find("Foo: remove-me\r\n") == std::string::npos);
+        REQUIRE(proxy_elapsed < std::chrono::seconds(1));
+
+        asio::ip::tcp::acceptor compression_acceptor(
+            origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto compression_port = compression_acceptor.local_endpoint().port();
+        std::atomic<bool> saw_single_rewrite{false};
+        std::jthread compression_server([&](std::stop_token stop_token) {
+            asio::ip::tcp::socket socket(origin_context);
+            if (!accept_until_stopped(compression_acceptor, socket, stop_token)) {
+                return;
+            }
+            std::array<char, 4096> origin_request{};
+            std::error_code ignored;
+            const auto received = socket.read_some(asio::buffer(origin_request), ignored);
+            saw_single_rewrite.store(std::string_view(origin_request.data(), received).starts_with("GET /a/once?q=1 HTTP/1.1\r\n"));
+            const std::string body(4096, 'a');
+            const auto response =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4096\r\n"
+                "Connection: close\r\n\r\n" +
+                body;
+            asio::write(socket, asio::buffer(response));
+        });
+        auto compression_snapshot = snapshot(false);
+        compression_snapshot.setGeneration(next_generation++);
+        auto* compression_origin = compression_snapshot.mutableWebsite()->mutable_origins(0);
+        compression_origin->set_host("127.0.0.1");
+        compression_origin->set_port(compression_port);
+        auto* compression_route = compression_snapshot.mutableWebsite()->add_route_rules();
+        compression_route->set_id("rewrite-once");
+        compression_route->set_enabled(true);
+        compression_route->set_match_type("prefix");
+        compression_route->set_path("/a");
+        compression_route->set_action("proxy");
+        compression_route->set_origin_group("default");
+        compression_route->set_rewrite_mode("replace_prefix");
+        compression_route->set_rewrite_path("/a/once");
+        apply(runtime, std::move(compression_snapshot));
+        const auto compressed_proxy_response =
+            request(port, "www.example.com", "Accept-Encoding: gzip\r\n");
+        REQUIRE(compressed_proxy_response.find("Content-Encoding: gzip\r\n") != std::string::npos);
+        REQUIRE(saw_single_rewrite.load());
+        REQUIRE(compressed_proxy_response.find("Vary: Accept-Encoding\r\n") != std::string::npos);
+        const auto compressed_body_offset = compressed_proxy_response.find("\r\n\r\n");
+        REQUIRE(compressed_body_offset != std::string::npos);
+        auto decoded_proxy_response = ruvia::decode_http_content(
+            ruvia::http_content_coding::gzip,
+            std::string_view(compressed_proxy_response).substr(compressed_body_offset + 4),
+            {.max_decoded_bytes_ = 4096});
+        REQUIRE(decoded_proxy_response.decoded() != nullptr);
+        REQUIRE(decoded_proxy_response.decoded()->bytes() == std::string(4096, 'a'));
+
+        asio::ip::tcp::acceptor health_acceptor(
+            origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto health_port = health_acceptor.local_endpoint().port();
+        std::atomic<int> health_requests{};
+        std::jthread health_server([&](std::stop_token stop_token) {
+            for (int request_index = 0; request_index < 1; ++request_index) {
+                asio::ip::tcp::socket health_socket(origin_context);
+                if (!accept_until_stopped(health_acceptor, health_socket, stop_token)) {
+                    return;
+                }
+                std::array<char, 4096> health_request{};
+                std::error_code ignored;
+                (void)health_socket.read_some(asio::buffer(health_request), ignored);
+                ++health_requests;
+                constexpr std::string_view health_response =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                asio::write(health_socket, asio::buffer(health_response));
+            }
+        });
+        auto health_snapshot = snapshot(false);
+        health_snapshot.setGeneration(next_generation++);
+        auto* health_website = health_snapshot.mutableWebsite();
+        health_website->set_health_check_enabled(true);
+        health_website->set_healthy_threshold(1);
+        health_website->set_unhealthy_threshold(1);
+        health_website->mutable_origins(0)->set_host("127.0.0.1");
+        health_website->mutable_origins(0)->set_port(health_port);
+        apply(runtime, std::move(health_snapshot));
+        flexedge::node::origin_health_registry node_health;
+        node_health.publish(node_health.prepare({flexedge::node::origin_health_registry::get_key("website-1", "origin-1")}));
+        node_health.get_target("website-1", "origin-1").failure(1);
+        auto node_supervisor = flexedge::node::origin_health_supervisor::create(loops.loop(0), runtime, node_health,
+            first_origin_tls);
+        node_supervisor->request_start();
+        const auto node_healthy = waitUntil(
+            [&] { return node_health.healthy("website-1", "origin-1"); }, std::chrono::seconds(3));
+        if (!node_healthy) {
+            std::cerr << "health requests=" << health_requests.load() << '\n';
+        }
+        REQUIRE(node_healthy);
+        REQUIRE(health_requests.load() == 1);
+        node_supervisor->request_stop();
+
+        const auto www_identity = make_identity("www.example.com", 1);
+        const auto api_identity = make_identity("api.example.com", 2);
+        asio::ip::tcp::acceptor tls_origin_acceptor(
+            origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto tls_origin_port = tls_origin_acceptor.local_endpoint().port();
+        std::jthread tls_origin_server([&](std::stop_token stop_token) {
+            for (int request_index = 0; request_index < 8; ++request_index) {
+                asio::ip::tcp::socket origin_socket(origin_context);
+                if (!accept_until_stopped(tls_origin_acceptor, origin_socket, stop_token)) {
+                    return;
+                }
+                std::array<char, 4096> origin_request{};
+                std::error_code ignored;
+                (void)origin_socket.read_some(asio::buffer(origin_request), ignored);
+                constexpr std::string_view origin_response =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nTLS";
+                asio::write(origin_socket, asio::buffer(origin_response));
+            }
+        });
+        auto tls_snapshot = snapshot(false);
+        tls_snapshot.setGeneration(next_generation++);
+        auto* tls_website = tls_snapshot.mutableWebsite();
+        tls_website->set_hsts_enabled(true);
+        tls_website->set_unhealthy_threshold(1);
+        tls_website->set_healthy_threshold(1);
+        tls_website->mutable_origins(0)->set_host("127.0.0.1");
+        tls_website->mutable_origins(0)->set_port(tls_origin_port);
+        tls_snapshot.mutableCertificate(0)->set_certificate_chain_pem(www_identity.certificate_);
+        tls_snapshot.mutableCertificate(0)->set_private_key_pem(www_identity.private_key_);
+        auto* api_certificate = tls_snapshot.addCertificate();
+        api_certificate->set_id("certificate-2");
+        api_certificate->set_certificate_chain_pem(api_identity.certificate_);
+        api_certificate->set_private_key_pem(api_identity.private_key_);
+        auto* api_domain = tls_snapshot.mutableWebsite()->add_domains();
+        api_domain->set_hostname("api.example.com");
+        api_domain->set_https_enabled(true);
+        api_domain->set_certificate_digest(
+            flexedge::node::artifact_digest(tls_snapshot.objects.back().content()));
+        apply(runtime, std::move(tls_snapshot));
+        flexedge::node::tls_context_registry tls_contexts;
+        tls_contexts.publish(
+            std::make_shared<const flexedge::node::tls_context_set>(*runtime.config()));
+        auto https_listener = flexedge::node::https_listener::create(
+            loops.loop(0), runtime, node_health, tls_contexts, runtime_metrics, first_worker_logs,
+            first_origin_connections, request_buffers, response_buffers,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto https_port = https_listener->local_endpoint().port();
+        https_listener->request_start();
+        // Only HTTP/1.1 is offered downstream, even to clients that also offer h2.
+        REQUIRE(tls_alpn(https_port, "www.example.com", true) == "http/1.1");
+        REQUIRE(tls_alpn(https_port, "www.example.com", false) == "http/1.1");
+        const auto www_response = tls_request(https_port, "www.example.com");
+        REQUIRE(www_response.peer_common_name_ == "www.example.com");
+        REQUIRE(www_response.bytes_.ends_with("\r\n\r\nTLS"));
+        REQUIRE(www_response.bytes_.find("Strict-Transport-Security: max-age=31536000\r\n") !=
+                std::string::npos);
+        const auto api_response = tls_request(https_port, "api.example.com");
+        REQUIRE(api_response.peer_common_name_ == "api.example.com");
+        REQUIRE(api_response.bytes_.starts_with("HTTP/1.1 200 OK\r\n"));
+
+        bool unknown_sni_rejected = false;
+        try {
+            (void)tls_request(https_port, "unknown.example.com");
+        } catch (const std::system_error&) {
+            unknown_sni_rejected = true;
+        }
+        REQUIRE(unknown_sni_rejected);
+
+        const auto refreshed_identity = make_identity("refreshed.example.com", 3);
+        auto refreshed_snapshot = snapshot(false);
+        refreshed_snapshot.setGeneration(next_generation++);
+        auto* refreshed_website = refreshed_snapshot.mutableWebsite();
+        refreshed_website->set_hsts_enabled(true);
+        refreshed_website->mutable_origins(0)->set_host("127.0.0.1");
+        refreshed_website->mutable_origins(0)->set_port(tls_origin_port);
+        refreshed_snapshot.mutableCertificate(0)->set_certificate_chain_pem(
+            refreshed_identity.certificate_);
+        refreshed_snapshot.mutableCertificate(0)->set_private_key_pem(refreshed_identity.private_key_);
+        apply(runtime, std::move(refreshed_snapshot));
+        tls_contexts.publish(
+            std::make_shared<const flexedge::node::tls_context_set>(*runtime.config()));
+        const auto refreshed_response = tls_request(https_port, "www.example.com");
+        REQUIRE(refreshed_response.peer_common_name_ == "refreshed.example.com");
+        REQUIRE(refreshed_response.bytes_.starts_with("HTTP/1.1 200 OK\r\n"));
+        https_listener->request_stop();
+
+        const auto localhost_identity = make_identity("localhost", 4);
+        asio::ssl::context tls_origin_server_context(asio::ssl::context::tls_server);
+        tls_origin_server_context.use_certificate_chain(asio::buffer(localhost_identity.certificate_));
+        tls_origin_server_context.use_private_key(asio::buffer(localhost_identity.private_key_),
+            asio::ssl::context::pem);
+        asio::ip::tcp::acceptor secure_origin_acceptor(
+            origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto secure_origin_port = secure_origin_acceptor.local_endpoint().port();
+        std::jthread secure_origin_server([&](std::stop_token stop_token) {
+            for (int request_index = 0; request_index < 2; ++request_index) {
+                asio::ip::tcp::socket socket(origin_context);
+                if (!accept_until_stopped(secure_origin_acceptor, socket, stop_token)) {
+                    return;
+                }
+                asio::ssl::stream<asio::ip::tcp::socket> stream(std::move(socket),
+                    tls_origin_server_context);
+                std::error_code error;
+                stream.handshake(asio::ssl::stream_base::server, error);
+                if (error) {
+                    continue;
+                }
+                std::array<char, 4096> origin_request{};
+                (void)stream.read_some(asio::buffer(origin_request), error);
+                if (error) {
+                    continue;
+                }
+                constexpr std::string_view origin_response =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nSECURE";
+                asio::write(stream, asio::buffer(origin_response), error);
+            }
+        });
+        auto secure_origin_snapshot = snapshot(false);
+        secure_origin_snapshot.setGeneration(next_generation++);
+        auto* secure_origin_website = secure_origin_snapshot.mutableWebsite();
+        secure_origin_website->set_health_check_enabled(true);
+        secure_origin_website->set_healthy_threshold(1);
+        secure_origin_website->set_unhealthy_threshold(1);
+        secure_origin_website->mutable_origins(0)->set_protocol("https");
+        secure_origin_website->mutable_origins(0)->set_host("localhost");
+        secure_origin_website->mutable_origins(0)->set_port(secure_origin_port);
+        apply(runtime, std::move(secure_origin_snapshot));
+        flexedge::node::origin_tls_context trusted_origin_tls(localhost_identity.certificate_);
+        flexedge::node::origin_connection_pool trusted_origin_connections(loops.loop(0).executor(),
+            trusted_origin_tls);
+        flexedge::node::origin_health_registry secure_origin_health;
+        secure_origin_health.publish(secure_origin_health.prepare({flexedge::node::origin_health_registry::get_key("website-1", "origin-1")}));
+        auto secure_origin_listener = flexedge::node::http_listener::create(
+            loops.loop(0), runtime, secure_origin_health, runtime_metrics, first_worker_logs,
+            trusted_origin_connections, request_buffers, response_buffers,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto secure_edge_port = secure_origin_listener->local_endpoint().port();
+        secure_origin_listener->request_start();
+        const auto secure_origin_response = request(secure_edge_port);
+        REQUIRE(secure_origin_response.starts_with("HTTP/1.1 200 OK\r\n"));
+        REQUIRE(secure_origin_response.ends_with("\r\n\r\nSECURE"));
+
+        secure_origin_health.get_target("website-1", "origin-1").failure(1);
+        auto secure_origin_supervisor = flexedge::node::origin_health_supervisor::create(
+            loops.loop(0), runtime, secure_origin_health, trusted_origin_tls);
+        secure_origin_supervisor->request_start();
+        REQUIRE(waitUntil([&] { return secure_origin_health.healthy("website-1", "origin-1"); },
+            std::chrono::seconds(3)));
+        secure_origin_supervisor->request_stop();
+        secure_origin_listener->request_stop();
+
+        asio::ssl::context buffered_origin_server_context(asio::ssl::context::tls_server);
+        buffered_origin_server_context.use_certificate_chain(
+            asio::buffer(localhost_identity.certificate_));
+        buffered_origin_server_context.use_private_key(asio::buffer(localhost_identity.private_key_),
+            asio::ssl::context::pem);
+        // The node must offer only HTTP/1.1 to origins; record the client's ALPN offer.
+        std::atomic<bool> buffered_origin_used_http1{};
+        SSL_CTX_set_alpn_select_cb(
+            buffered_origin_server_context.native_handle(),
+            [](SSL*, const unsigned char**, unsigned char*, const unsigned char* input,
+                unsigned int input_size, void* argument) -> int {
+                static_cast<std::atomic<bool>*>(argument)->store(
+                    std::string_view(reinterpret_cast<const char*>(input), input_size) ==
+                    std::string_view("\x08http/1.1", 9));
+                return SSL_TLSEXT_ERR_NOACK;
+            },
+            &buffered_origin_used_http1);
+        asio::ip::tcp::acceptor buffered_origin_acceptor(
+            origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto buffered_origin_port = buffered_origin_acceptor.local_endpoint().port();
+        std::atomic<int> buffered_origin_connections{};
+        std::atomic<int> buffered_origin_requests{};
+        std::jthread buffered_origin_server([&](std::stop_token stop_token) {
+            asio::ip::tcp::socket socket(origin_context);
+            if (!accept_until_stopped(buffered_origin_acceptor, socket, stop_token)) {
+                return;
+            }
+            asio::ssl::stream<asio::ip::tcp::socket> stream(std::move(socket),
+                buffered_origin_server_context);
+            stream.handshake(asio::ssl::stream_base::server);
+            ++buffered_origin_connections;
+            for (int request_index = 0; request_index < 2; ++request_index) {
+                std::string input;
+                std::array<char, 1024> buffer{};
+                while (input.find("\r\n\r\n") == std::string::npos) {
+                    const auto size = stream.read_some(asio::buffer(buffer));
+                    input.append(buffer.data(), size);
+                }
+                REQUIRE(input.find("Connection: close\r\n") == std::string::npos);
+                ++buffered_origin_requests;
+                constexpr std::string_view origin_response =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nH1ORIGIN";
+                asio::write(stream, asio::buffer(origin_response));
+            }
+        });
+        auto buffered_origin_snapshot = snapshot(false);
+        buffered_origin_snapshot.setGeneration(next_generation++);
+        auto* buffered_origin_website = buffered_origin_snapshot.mutableWebsite();
+        buffered_origin_website->set_response_compression_enabled(true);
+        buffered_origin_website->set_health_check_enabled(false);
+        buffered_origin_website->mutable_origins(0)->set_protocol("https");
+        buffered_origin_website->mutable_origins(0)->set_host("localhost");
+        buffered_origin_website->mutable_origins(0)->set_port(buffered_origin_port);
+        apply(runtime, std::move(buffered_origin_snapshot));
+        auto buffered_origin_listener = flexedge::node::http_listener::create(
+            loops.loop(0), runtime, secure_origin_health, runtime_metrics, first_worker_logs,
+            trusted_origin_connections, request_buffers, response_buffers,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto buffered_origin_edge_port = buffered_origin_listener->local_endpoint().port();
+        buffered_origin_listener->request_start();
+        const auto first_buffered_origin_response =
+            request(buffered_origin_edge_port, "WWW.Example.COM:80", "Accept-Encoding: gzip\r\n");
+        const auto second_buffered_origin_response =
+            request(buffered_origin_edge_port, "WWW.Example.COM:80", "Accept-Encoding: gzip\r\n");
+        REQUIRE(buffered_origin_used_http1.load());
+        REQUIRE(first_buffered_origin_response.ends_with("\r\n\r\nH1ORIGIN"));
+        REQUIRE(second_buffered_origin_response.ends_with("\r\n\r\nH1ORIGIN"));
+        REQUIRE(buffered_origin_connections.load() == 1);
+        REQUIRE(buffered_origin_requests.load() == 2);
+        buffered_origin_listener->request_stop();
+
+        asio::ip::tcp::acceptor untrusted_origin_acceptor(
+            origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto untrusted_origin_port = untrusted_origin_acceptor.local_endpoint().port();
+        std::jthread untrusted_origin_server([&](std::stop_token stop_token) {
+            asio::ip::tcp::socket socket(origin_context);
+            if (!accept_until_stopped(untrusted_origin_acceptor, socket, stop_token)) {
+                return;
+            }
+            asio::ssl::stream<asio::ip::tcp::socket> stream(std::move(socket),
+                tls_origin_server_context);
+            std::error_code ignored;
+            stream.handshake(asio::ssl::stream_base::server, ignored);
+        });
+        auto untrusted_origin_snapshot = snapshot(false);
+        untrusted_origin_snapshot.setGeneration(next_generation++);
+        auto* untrusted_origin = untrusted_origin_snapshot.mutableWebsite()->mutable_origins(0);
+        untrusted_origin->set_protocol("https");
+        untrusted_origin->set_host("localhost");
+        untrusted_origin->set_port(untrusted_origin_port);
+        apply(runtime, std::move(untrusted_origin_snapshot));
+        const auto untrusted_origin_response = request(port);
+        REQUIRE(untrusted_origin_response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+
+        asio::ip::tcp::acceptor web_socket_acceptor(
+            origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto web_socket_port = web_socket_acceptor.local_endpoint().port();
+        std::atomic<bool> upgrade_headers_preserved{};
+        std::jthread web_socket_origin([&](std::stop_token stop_token) {
+            asio::ip::tcp::socket socket(origin_context);
+            if (!accept_until_stopped(web_socket_acceptor, socket, stop_token)) {
+                return;
+            }
+            std::string handshake;
+            std::array<char, 1024> buffer{};
+            while (handshake.find("\r\n\r\n") == std::string::npos) {
+                const auto size = socket.read_some(asio::buffer(buffer));
+                handshake.append(buffer.data(), size);
+            }
+            upgrade_headers_preserved =
+                handshake.find("Upgrade: websocket\r\n") != std::string::npos &&
+                handshake.find("Connection: keep-alive, Upgrade\r\n") != std::string::npos &&
+                handshake.find("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n") != std::string::npos;
+            constexpr std::string_view switching_protocols =
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+            asio::write(socket, asio::buffer(switching_protocols));
+            std::array<char, 4> client_bytes{};
+            asio::read(socket, asio::buffer(client_bytes));
+            if (std::string_view(client_bytes.data(), client_bytes.size()) == "PING") {
+                asio::write(socket, asio::buffer(std::string_view("PONG")));
+            }
+        });
+        auto web_socket_snapshot = snapshot(false);
+        web_socket_snapshot.setGeneration(next_generation++);
+        auto* web_socket_origin_config = web_socket_snapshot.mutableWebsite()->mutable_origins(0);
+        web_socket_origin_config->set_host("127.0.0.1");
+        web_socket_origin_config->set_port(web_socket_port);
+        apply(runtime, std::move(web_socket_snapshot));
+        REQUIRE(web_socket_round_trip(port) == "PONG");
+        REQUIRE(upgrade_headers_preserved.load());
+
+        asio::ip::tcp::acceptor reusable_origin_acceptor(
+            origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto reusable_origin_port = reusable_origin_acceptor.local_endpoint().port();
+        std::atomic<int> reusable_origin_connections{};
+        std::atomic<int> reusable_origin_requests{};
+        std::jthread reusable_origin_server([&](std::stop_token stop_token) {
+            asio::ip::tcp::socket socket(origin_context);
+            if (!accept_until_stopped(reusable_origin_acceptor, socket, stop_token)) {
+                return;
+            }
+            ++reusable_origin_connections;
+            for (int request_index = 0; request_index < 2; ++request_index) {
+                std::string input;
+                std::array<char, 1024> buffer{};
+                while (input.find("\r\n\r\n") == std::string::npos) {
+                    const auto size = socket.read_some(asio::buffer(buffer));
+                    input.append(buffer.data(), size);
+                }
+                REQUIRE(input.find("Connection: close\r\n") == std::string::npos);
+                ++reusable_origin_requests;
+                constexpr std::string_view origin_response =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nREUSE";
+                asio::write(socket, asio::buffer(origin_response));
+            }
+        });
+        auto reusable_origin_snapshot = snapshot(false);
+        reusable_origin_snapshot.setGeneration(next_generation++);
+        auto* reusable_website = reusable_origin_snapshot.mutableWebsite();
+        reusable_website->set_response_compression_enabled(false);
+        reusable_website->set_health_check_enabled(false);
+        reusable_website->mutable_origins(0)->set_host("127.0.0.1");
+        reusable_website->mutable_origins(0)->set_port(reusable_origin_port);
+        apply(runtime, std::move(reusable_origin_snapshot));
+        flexedge::node::origin_health_registry reusable_origin_health;
+        auto reusable_edge_listener = flexedge::node::http_listener::create(
+            loops.loop(0), runtime, reusable_origin_health, runtime_metrics, first_worker_logs,
+            first_origin_connections, request_buffers, response_buffers,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const auto reusable_edge_port = reusable_edge_listener->local_endpoint().port();
+        reusable_edge_listener->request_start();
+        const auto first_reused_response = request(reusable_edge_port);
+        const auto second_reused_response = request(reusable_edge_port);
+        REQUIRE(first_reused_response.ends_with("\r\n\r\nREUSE"));
+        REQUIRE(second_reused_response.ends_with("\r\n\r\nREUSE"));
+        REQUIRE(reusable_origin_connections.load() == 1);
+        REQUIRE(reusable_origin_requests.load() == 2);
+        reusable_edge_listener->request_stop();
+        first_listener->request_stop();
+        second_listener->request_stop();
+        // Posting cleanup after shutdown must not keep an otherwise unused
+        // listener (and its event loop handle) alive indefinitely.
+        auto stopped_loop_listener = flexedge::node::http_listener::create(
+            loops.loop(0), runtime, listener_health, runtime_metrics, first_worker_logs,
+            first_origin_connections, request_buffers, response_buffers,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        const std::weak_ptr stopped_loop_weak(stopped_loop_listener);
+        loops.stop();
+        loops.join();
+        first_listener->request_stop();
+        second_listener->request_stop();
+        constrained_listener->request_stop();
+        reusable_edge_listener->request_stop();
+        bool restart_after_worker_retirement_rejected = false;
+        try {
+            first_listener->request_start();
+        } catch (const std::runtime_error&) {
+            restart_after_worker_retirement_rejected = true;
+        }
+        REQUIRE(restart_after_worker_retirement_rejected);
+        stopped_loop_listener->request_stop();
+        stopped_loop_listener.reset();
+        REQUIRE(stopped_loop_weak.expired());
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+}
+
+#undef REQUIRE

@@ -1,11 +1,11 @@
 #pragma once
 
+#include <ruvia/core/task.h>
+
 #include <chrono>
 #include <cstddef>
 #include <exception>
 #include <string>
-
-#include <ruvia/core/Task.h>
 
 #include "service/features/background/marker_worker_loop.h"
 #include "service/features/background/worker_pool.h"
@@ -19,85 +19,86 @@ namespace service::website_dispatch {
 
 namespace detail {
 
-inline constexpr std::chrono::seconds kIdlePollInterval{2};
-inline constexpr std::chrono::seconds kLeaseRecoveryInterval{15};
-inline constexpr std::chrono::minutes kReconciliationInterval{15};
-inline constexpr std::size_t kMaxJobsPerTick{8};
+inline constexpr std::chrono::seconds idle_poll_interval{2};
+inline constexpr std::chrono::seconds lease_recovery_interval{15};
+inline constexpr std::chrono::minutes reconciliation_interval{15};
+inline constexpr std::size_t max_jobs_per_tick{8};
 
-inline ruvia::Task<void> recoverStaleMarkers(service::background::WorkerContext& context) {
-    co_await service::sync_runtime::recoverStaleRunning(
-        context.db(), service::sync_runtime::MarkerResourceType::website);
+inline ruvia::task<void> recover_stale_markers(service::background::worker_context& context) {
+    auto db = context.db();
+    co_await service::sync_runtime::recover_stale_running(
+        db, service::sync_runtime::marker_resource_type::website);
     co_return;
 }
 
-inline ruvia::Task<void> execute(service::background::WorkerContext& context,
-                                 const WebsiteMarker& marker) {
-    const auto lease = service::sync_runtime::makeRunningLease(
-        marker.tenantId, marker.id, marker.version, context.leaseOwner(),
-        service::sync_runtime::MarkerResourceType::website, marker.resourceId);
-    co_await service::website_dns::probeWebsite(context, marker.resourceId, lease, marker.version);
+inline ruvia::task<void> execute(service::background::worker_context& context,
+    const website_marker& marker) {
+    const auto lease = service::sync_runtime::make_running_lease(
+        marker.tenant_id_, marker.id_, marker.version_, context.lease_owner(),
+        service::sync_runtime::marker_resource_type::website, marker.resource_id_);
+    co_await service::website_dns::probe_website(context, marker.resource_id_, lease, marker.version_);
     co_return;
 }
 
-inline ruvia::Task<void> processMarker(service::background::WorkerContext& context,
-                                       const WebsiteMarker& marker) {
-    std::string markerError;
+inline ruvia::task<void> process_marker(service::background::worker_context& context,
+    const website_marker& marker) {
+    std::string marker_error;
     try {
         co_await execute(context, marker);
     } catch (const std::exception& error) {
-        markerError = service::sync_runtime::boundedError(error.what());
+        marker_error = service::sync_runtime::bounded_error(error.what());
     } catch (...) {
-        markerError = "网站同步发生未知错误";
+        marker_error = "网站同步发生未知错误";
     }
-    if (!context.stopToken().stopRequested() && !markerError.empty()) {
-        co_await failWebsiteMarker(context, marker, markerError);
+    if (!context.get_stop_token().stop_requested() && !marker_error.empty()) {
+        co_await fail_website_marker(context, marker, marker_error);
     }
     co_return;
 }
 
-inline ruvia::Task<void> processMarkers(service::background::WorkerContext& context,
-                                        std::size_t& processed) {
-    for (; processed < kMaxJobsPerTick; ++processed) {
-        if (context.stopToken().stopRequested()) {
+inline ruvia::task<void> process_markers(service::background::worker_context& context,
+    std::size_t& processed) {
+    for (; processed < max_jobs_per_tick; ++processed) {
+        if (context.get_stop_token().stop_requested()) {
             break;
         }
         const auto marker = co_await claim(context);
-        if (context.stopToken().stopRequested() || !marker) {
+        if (context.get_stop_token().stop_requested() || !marker) {
             break;
         }
-        co_await processMarker(context, *marker);
+        co_await process_marker(context, *marker);
     }
     co_return;
 }
 
-inline ruvia::Task<void> runMaintenance(service::background::WorkerContext& context,
-                                        std::chrono::steady_clock::time_point& nextLeaseRecovery,
-                                        std::chrono::steady_clock::time_point& nextReconciliation) {
-    if (std::chrono::steady_clock::now() >= nextLeaseRecovery) {
-        co_await recoverStaleMarkers(context);
-        nextLeaseRecovery = std::chrono::steady_clock::now() + kLeaseRecoveryInterval;
+inline ruvia::task<void> run_maintenance(service::background::worker_context& context,
+    std::chrono::steady_clock::time_point& next_lease_recovery,
+    std::chrono::steady_clock::time_point& next_reconciliation) {
+    if (std::chrono::steady_clock::now() >= next_lease_recovery) {
+        co_await recover_stale_markers(context);
+        next_lease_recovery = std::chrono::steady_clock::now() + lease_recovery_interval;
     }
-    if (context.stopToken().stopRequested()) {
+    if (context.get_stop_token().stop_requested()) {
         co_return;
     }
-    if (std::chrono::steady_clock::now() >= nextReconciliation) {
-        co_await reconcileMarkers(context);
-        nextReconciliation = std::chrono::steady_clock::now() + kReconciliationInterval;
+    if (std::chrono::steady_clock::now() >= next_reconciliation) {
+        co_await reconcile_markers(context);
+        next_reconciliation = std::chrono::steady_clock::now() + reconciliation_interval;
     }
     co_return;
 }
 
-inline ruvia::Task<void> run(service::background::WorkerContext& context) {
-    co_await service::background::runMarkerWorkerLoop(
-        context, kIdlePollInterval, "Website sync worker failure: ", "网站同步发生未知错误",
-        runMaintenance, processMarkers, service::sync_runtime::boundedError);
+inline ruvia::task<void> run(service::background::worker_context& context) {
+    co_await service::background::run_marker_worker_loop(
+        context, idle_poll_interval, "Website sync worker failure: ", "网站同步发生未知错误",
+        run_maintenance, process_markers, service::sync_runtime::bounded_error);
     co_return;
 }
 
-} // namespace detail
+}  // namespace detail
 
-inline ruvia::Task<void> runWorker(service::background::WorkerContext& context) {
+inline ruvia::task<void> run_worker(service::background::worker_context& context) {
     co_await detail::run(context);
 }
 
-} // namespace service::website_dispatch
+}  // namespace service::website_dispatch

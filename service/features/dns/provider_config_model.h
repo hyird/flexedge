@@ -4,10 +4,9 @@
 
 namespace service::dns {
 
-struct DnsProviderConfigData final {
-    std::string credentialEnvelope;
-    std::string credentialHint;
+struct dns_provider_config_data final {
+    std::string credential_envelope_;
+    std::string credential_hint_;
 };
 
-
-} // namespace service::dns
+}  // namespace service::dns

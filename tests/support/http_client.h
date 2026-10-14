@@ -1,15 +1,16 @@
 #pragma once
-#include <string>
-#include <string_view>
 #include <array>
 #include <chrono>
+#include <string>
+#include <string_view>
 #include <thread>
+
 #include <asio/ip/tcp.hpp>
 #include <asio/write.hpp>
 namespace flexedge::testing {
 inline std::string request(std::uint16_t port, std::string_view host = "WWW.Example.COM:80",
-                    std::string_view extraHeaders = {}, std::string_view target = "/a?q=1",
-                    std::string_view method = "GET", std::string_view body = {}) {
+    std::string_view extraHeaders = {}, std::string_view target = "/a?q=1",
+    std::string_view method = "GET", std::string_view body = {}) {
     asio::io_context context;
     asio::ip::tcp::socket socket(context);
     socket.connect({asio::ip::address_v4::loopback(), port});
@@ -45,5 +46,4 @@ bool waitUntil(Predicate predicate, std::chrono::milliseconds timeout) {
     return predicate();
 }
 
-
-}
+}  // namespace flexedge::testing

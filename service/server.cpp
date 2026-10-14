@@ -1,9 +1,11 @@
 #include <chrono>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <limits>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -16,27 +18,27 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <winsock2.h>
-#include <windows.h>
 #include <wincrypt.h>
+#include <windows.h>
+#include <winsock2.h>
 #endif
+
+#include <ruvia/core/task.h>
+#include <ruvia/http/http_known_method.h>
+#include <ruvia/http/http_status.h>
+#include <ruvia/web/app.h>
+#include <ruvia/web/context.h>
+#include <ruvia/web/controller.h>
+#include <ruvia/web/db/db.h>
+#include <ruvia/web/db/db_migration.h>
+#include <ruvia/web/error.h>
 
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 
-#include <ruvia/core/Task.h>
-#include <ruvia/http/HttpKnownMethod.h>
-#include <ruvia/http/HttpStatus.h>
-#include <ruvia/web/App.h>
-#include <ruvia/web/Context.h>
-#include <ruvia/web/Controller.h>
-#include <ruvia/web/Error.h>
-#include <ruvia/web/db/Db.h>
-#include <ruvia/web/db/DbMigration.h>
-
 #include "service/common/http.h"
-#include "service/config/database.h"
 #include "service/config/auth.h"
+#include "service/config/database.h"
 #include "service/config/http_server.h"
 #include "service/config/outbound.h"
 #include "service/config/redis.h"
@@ -47,37 +49,37 @@
 #include "service/features/logging/logger.h"
 
 // 业务控制器（RUVIA_CONTROLLER_GROUP 在静态阶段把路由表注册到 ruvia::app()）。
-#include "service/domains/website/website.controller.h"
-#include "service/domains/auth/auth.controller.h"
-#include "service/domains/agent/agent.controller.h"
-#include "service/domains/certificate/certificate.controller.h"
-#include "service/domains/cluster/cluster.controller.h"
-#include "service/domains/dns_zone/dns_zone.controller.h"
-#include "service/domains/node/node.controller.h"
-#include "service/domains/overview/overview.controller.h"
-#include "service/domains/provider/provider.controller.h"
-#include "service/features/live_resource/node_runtime.h"
-#include "service/domains/task/task.controller.h"
+#include "service/domains/agent/agent_controller.h"
+#include "service/domains/auth/auth_controller.h"
+#include "service/domains/certificate/certificate_controller.h"
+#include "service/domains/cluster/cluster_controller.h"
+#include "service/domains/dns_zone/dns_zone_controller.h"
+#include "service/domains/node/node_controller.h"
+#include "service/domains/overview/overview_controller.h"
+#include "service/domains/provider/provider_controller.h"
+#include "service/domains/task/task_controller.h"
+#include "service/domains/website/website_controller.h"
 #include "service/features/background/worker_pool.h"
 #include "service/features/certificate/worker.h"
 #include "service/features/dns_sync/worker.h"
 #include "service/features/initial_admin/bootstrap.h"
+#include "service/features/live_resource/node_runtime.h"
 #include "service/features/log_ingest/fanout.h"
 #include "service/features/log_ingest/ingest.h"
 #include "service/features/node_release/catalog.h"
-#include "service/features/website_dispatch/worker.h"
 #include "service/features/provider_verification/worker.h"
+#include "service/features/website_dispatch/worker.h"
 #include "service/utils/secret.h"
 #include "service/utils/token.h"
 
 namespace {
 
-std::filesystem::path executableDir(const char* executablePath) {
-    if (executablePath == nullptr || executablePath[0] == '\0') {
+std::filesystem::path executable_dir(const char* executable_path) {
+    if (executable_path == nullptr || executable_path[0] == '\0') {
         return std::filesystem::current_path();
     }
 
-    std::filesystem::path path(executablePath);
+    std::filesystem::path path(executable_path);
     if (path.is_relative()) {
         path = std::filesystem::current_path() / path;
     }
@@ -92,55 +94,63 @@ std::filesystem::path executableDir(const char* executablePath) {
     return dir.empty() ? std::filesystem::current_path() : dir;
 }
 
-std::filesystem::path& webRootPath() {
+std::filesystem::path& web_root_path() {
     static std::filesystem::path path;
     return path;
 }
 
-void configureDocumentRoot(ruvia::App& app, const std::filesystem::path& runtimeDir) {
-    auto webRoot = runtimeDir / "web";
-    if (!std::filesystem::is_directory(webRoot)) {
+// file_response_options borrows its path, so the SPA entry lives in named static storage.
+std::filesystem::path& web_index_path() {
+    static std::filesystem::path path;
+    return path;
+}
+
+void configure_document_root(ruvia::application& app, const std::filesystem::path& runtime_dir) {
+    auto web_root = runtime_dir / "web";
+    if (!std::filesystem::is_directory(web_root)) {
         return;
     }
 
-    ruvia::DocumentRootConfig config{
-        .root = std::move(webRoot),
-        .staticOptions =
+    ruvia::document_root_config config{
+        .root_ = std::move(web_root),
+        .static_options_ =
             {
-                .cacheControl = "no-cache",
-                .indexFile = "index.html",
+                .cache_control_ = "no-cache",
+                .index_file_ = "index.html",
             },
-        .precompressGzip = true,
-        .precompressMaxBytes = 64u * 1024u * 1024u,
+        .precompress_gzip_ = true,
+        .precompress_max_bytes_ = 64u * 1024u * 1024u,
     };
-    webRootPath() = config.root;
-    app.documentRoot(std::move(config));
+    web_root_path() = config.root_;
+    web_index_path() = config.root_ / "index.html";
+    app.document_root(std::move(config));
 }
 
-void logMigrationReport(const ruvia::DbMigrationReport& report) {
+void log_migration_report(const ruvia::db_migration_report& report) {
     service::logging::info("DB migrations applied=" + std::to_string(report.applied().size()) +
                            ", skipped=" + std::to_string(report.skipped().size()));
 }
 
-ruvia::DbConfig configureDatabase(ruvia::App& app) {
-    auto dbConfig = service::config::databaseConfig(app.env());
-    const ruvia::DbMigratorOptions migrationOptions{.table = "schema_migrations"};
-    logMigrationReport(
-        ruvia::DbMigrator::migrate(dbConfig, service::config::kSchemaMigrations, migrationOptions));
-    app.database({.alias = "default", .config = dbConfig});
-    return dbConfig;
+ruvia::db_config configure_database(ruvia::application& app) {
+    auto db_config = service::config::database_config(app.env());
+    const ruvia::db_migrator_options migration_options{.table_ = "schema_migrations"};
+    log_migration_report(
+        ruvia::db_migrator::migrate(db_config, service::config::schema_migrations, migration_options));
+    app.database({.alias_ = "default", .config_ = db_config});
+    return db_config;
 }
 
-void configureRedis(ruvia::App& app) {
-    app.redis({.config = service::config::redisConfig(app.env())});
+void configure_redis(ruvia::application& app) {
+    app.redis({.config_ = service::config::redis_config(app.env())});
 }
 
-std::filesystem::path systemCaBundle([[maybe_unused]] const std::filesystem::path& runtimeDir) {
+std::filesystem::path system_ca_bundle([[maybe_unused]] const std::filesystem::path& runtime_dir) {
 #ifdef _WIN32
-    const auto path = runtimeDir / "system-ca-bundle.pem";
+    const auto path = runtime_dir / "system-ca-bundle.pem";
     FILE* output = nullptr;
-    if (_wfopen_s(&output, path.c_str(), L"wb") != 0 || output == nullptr)
+    if (_wfopen_s(&output, path.c_str(), L"wb") != 0 || output == nullptr) {
         throw std::runtime_error("failed to create Windows system CA bundle");
+    }
 
     auto* bio = BIO_new_fp(output, BIO_NOCLOSE);
     if (bio == nullptr) {
@@ -148,60 +158,64 @@ std::filesystem::path systemCaBundle([[maybe_unused]] const std::filesystem::pat
         throw std::runtime_error("failed to initialize Windows system CA bundle");
     }
 
-    std::size_t certificateCount = 0;
-    const auto appendStore = [&](DWORD location) {
+    std::size_t certificate_count = 0;
+    const auto append_store = [&](DWORD location) {
         const auto store = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0,
-                                         location | CERT_STORE_OPEN_EXISTING_FLAG, L"ROOT");
-        if (store == nullptr)
+            location | CERT_STORE_OPEN_EXISTING_FLAG, L"ROOT");
+        if (store == nullptr) {
             return;
+        }
         PCCERT_CONTEXT context = nullptr;
         while ((context = CertEnumCertificatesInStore(store, context)) != nullptr) {
             const unsigned char* encoded = context->pbCertEncoded;
             auto* certificate = d2i_X509(nullptr, &encoded, context->cbCertEncoded);
-            if (certificate == nullptr)
+            if (certificate == nullptr) {
                 continue;
-            if (PEM_write_bio_X509(bio, certificate) == 1)
-                ++certificateCount;
+            }
+            if (PEM_write_bio_X509(bio, certificate) == 1) {
+                ++certificate_count;
+            }
             X509_free(certificate);
         }
         CertCloseStore(store, 0);
     };
-    appendStore(CERT_SYSTEM_STORE_LOCAL_MACHINE);
-    appendStore(CERT_SYSTEM_STORE_CURRENT_USER);
+    append_store(CERT_SYSTEM_STORE_LOCAL_MACHINE);
+    append_store(CERT_SYSTEM_STORE_CURRENT_USER);
     BIO_free(bio);
     std::fclose(output);
-    if (certificateCount == 0)
+    if (certificate_count == 0) {
         throw std::runtime_error("Windows system CA store is empty");
+    }
     return path;
 #else
     return {};
 #endif
 }
 
-void configureOutboundOrigins(ruvia::App& app, const std::filesystem::path& runtimeDir) {
-    const auto caFile = systemCaBundle(runtimeDir).string();
-    auto origins = service::config::makeOutboundOrigins(caFile);
-    app.httpClient({.alias = std::string(service::config::kCloudflareOriginAlias),
-                    .config = origins.cloudflare})
-        .httpClient({.alias = std::string(service::config::kAliyunDnsOriginAlias),
-                     .config = origins.aliyunDns})
-        .httpClient({.alias = std::string(service::config::kLetsEncryptOriginAlias),
-                     .config = origins.letsEncrypt})
-        .httpClient({.alias = std::string(service::config::kZeroSslAcmeOriginAlias),
-                     .config = origins.zeroSslAcme})
-        .httpClient({.alias = std::string(service::config::kZeroSslApiOriginAlias),
-                     .config = origins.zeroSslApi})
-        .httpClient({.alias = std::string(service::config::kAliDnsDohOriginAlias),
-                     .config = origins.aliDnsDoh});
-    service::config::configureOutboundOrigins(std::move(origins));
+void configure_outbound_origins(ruvia::application& app, const std::filesystem::path& runtime_dir) {
+    const auto ca_file = system_ca_bundle(runtime_dir).string();
+    auto origins = service::config::make_outbound_origins(ca_file);
+    app.get_http_client({.alias_ = std::string(service::config::cloudflare_origin_alias),
+                            .config_ = origins.cloudflare_})
+        .get_http_client({.alias_ = std::string(service::config::aliyun_dns_origin_alias),
+            .config_ = origins.aliyun_dns_})
+        .get_http_client({.alias_ = std::string(service::config::lets_encrypt_origin_alias),
+            .config_ = origins.lets_encrypt_})
+        .get_http_client({.alias_ = std::string(service::config::zero_ssl_acme_origin_alias),
+            .config_ = origins.zero_ssl_acme_})
+        .get_http_client({.alias_ = std::string(service::config::zero_ssl_api_origin_alias),
+            .config_ = origins.zero_ssl_api_})
+        .get_http_client({.alias_ = std::string(service::config::ali_dns_doh_origin_alias),
+            .config_ = origins.ali_dns_doh_});
+    service::config::configure_outbound_origins(std::move(origins));
 }
 
-bool isSpaRequest(ruvia::Context& c) {
-    if (webRootPath().empty()) {
+bool is_spa_request(ruvia::context& c) {
+    if (web_root_path().empty()) {
         return false;
     }
-    if (c.req().knownMethod() != ruvia::HttpKnownMethod::kGet &&
-        c.req().knownMethod() != ruvia::HttpKnownMethod::kHead) {
+    if (c.req().known_method() != ruvia::http_known_method::get &&
+        c.req().known_method() != ruvia::http_known_method::head) {
         return false;
     }
 
@@ -210,38 +224,38 @@ bool isSpaRequest(ruvia::Context& c) {
         return false;
     }
 
-    const auto lastSlash = path.rfind('/');
-    const auto lastSegment =
-        lastSlash == std::string_view::npos ? path : path.substr(lastSlash + 1);
-    return lastSegment.find('.') == std::string_view::npos;
+    const auto last_slash = path.rfind('/');
+    const auto last_segment =
+        last_slash == std::string_view::npos ? path : path.substr(last_slash + 1);
+    return last_segment.find('.') == std::string_view::npos;
 }
 
-bool isSpaFallbackRequest(ruvia::Context& c, ruvia::HttpErrorInfo info) {
-    return info.status() == ruvia::http_status::kNotFound && isSpaRequest(c);
+bool is_spa_fallback_request(ruvia::context& c, ruvia::http_error_info info) {
+    return info.status() == ruvia::http_status::not_found && is_spa_request(c);
 }
 
-ruvia::Task<ruvia::HttpResponse> handleNotFound(ruvia::Context& c) {
-    if (isSpaRequest(c)) {
+ruvia::task<ruvia::http_response> handle_not_found(ruvia::context& c) {
+    if (is_spa_request(c)) {
         c.header("cache-control", "no-cache");
         co_return c.file(
-            {.path = webRootPath() / "index.html", .contentType = "text/html; charset=UTF-8"});
+            {.path_ = web_index_path(), .content_type_ = "text/html; charset=UTF-8"});
     }
-    c.status(ruvia::http_status::kNotFound);
+    c.status(ruvia::http_status::not_found);
     co_return c.json(service::common::error(
-        c, service::common::normalizeBusinessErrorCode({}, ruvia::http_status::kNotFound.value()),
-        ruvia::httpReasonPhrase(ruvia::http_status::kNotFound)));
+        c, service::common::normalize_business_error_code({}, ruvia::http_status::not_found.value()),
+        ruvia::http_reason_phrase(ruvia::http_status::not_found)));
 }
 
-// 与 ruvia::HttpErrorHandler 签名匹配；运行时把业务 HttpError 转成统一响应 DTO。
-ruvia::Task<ruvia::HttpResponse> handleError(ruvia::Context& c, ruvia::HttpErrorInfo info) {
-    if (isSpaFallbackRequest(c, info)) {
+// 与 ruvia::http_error_handler_type 签名匹配；运行时把业务 http_error 转成统一响应 DTO。
+ruvia::task<ruvia::http_response> handle_error(ruvia::context& c, ruvia::http_error_info info) {
+    if (is_spa_fallback_request(c, info)) {
         c.header("cache-control", "no-cache");
         co_return c.file(
-            {.path = webRootPath() / "index.html", .contentType = "text/html; charset=UTF-8"});
+            {.path_ = web_index_path(), .content_type_ = "text/html; charset=UTF-8"});
     }
 
     const auto status = info.status();
-    if (status.isServerError()) {
+    if (status.is_server_error()) {
         std::string diagnostic;
         if (const auto exception = c.exception()) {
             try {
@@ -253,47 +267,60 @@ ruvia::Task<ruvia::HttpResponse> handleError(ruvia::Context& c, ruvia::HttpError
             }
         }
         if (diagnostic.empty()) {
-            diagnostic = info.message().empty() ? std::string(ruvia::httpReasonPhrase(status))
+            diagnostic = info.message().empty() ? std::string(ruvia::http_reason_phrase(status))
                                                 : std::string(info.message());
         }
         service::logging::error("Unhandled error: " + diagnostic);
     }
     c.status(status);
     co_return c.json(service::common::error(
-        c, service::common::normalizeBusinessErrorCode(info.code(), status.value()),
-        service::common::responseErrorMessage(info)));
+        c, service::common::normalize_business_error_code(info.code(), status.value()),
+        service::common::response_error_message(info)));
 }
 
-void configureHttpServer(ruvia::App& app) {
-    const auto settings = service::config::httpServerSettings(app.env());
-    app.blockingPool({
-                         .threadCount = settings.blockingThreads,
-                         .queueCapacity = settings.blockingQueueCapacity,
-                     })
-        .compression({.minBytes = settings.compressionMinBytes})
-        .listen({.address = settings.host, .http = settings.port})
-        .server({.workerCount = settings.workerCount,
-                 .processSignalHandlers = ruvia::ProcessSignalHandlerPolicy::kInstall})
-        .onNotFound(&handleNotFound)
-        .onError(&handleError)
-        .onAccess(ruvia::AccessLogCallback(service::logging::AccessLogger{}))
-        .onConnectionFailure(
-            ruvia::ConnectionFailureCallback(service::logging::ConnectionFailureLogger{}));
-    service::logging::info("Server starting on " + settings.host + ":" +
-                           std::to_string(settings.port));
+void configure_http_server(ruvia::application& app) {
+    const auto settings = service::config::get_http_server_settings(app.env());
+    app.get_blocking_pool({
+                              .thread_count_ = settings.blocking_threads_,
+                              .queue_capacity_ = settings.blocking_queue_capacity_,
+                          })
+        .compression({.min_bytes_ = settings.compression_min_bytes_})
+        .listen({.address_ = settings.host_, .http_ = settings.port_})
+        // Server limits Ruvia 8a14af03 did not have are pinned to that release's
+        // behavior: stop() closes connections at once (no graceful drain), request
+        // heads/bodies have no absolute completion deadline (the 60s inactivity
+        // timeouts still apply), and inbound buffering has no aggregate cap beyond
+        // the unchanged 16 MiB body / WebSocket message limits. SSE streams and
+        // the node control WebSocket therefore keep their previous lifetime.
+        .server({
+            .worker_count_ = settings.worker_count_,
+            .process_signal_handlers_ = ruvia::process_signal_handler_policy::install,
+            .drain_timeout_ = std::chrono::milliseconds::zero(),
+            .header_completion_timeout_ = std::nullopt,
+            .body_completion_timeout_ = std::nullopt,
+            .max_inbound_buffer_bytes_per_worker_ = std::numeric_limits<std::size_t>::max(),
+            .max_inbound_buffer_bytes_per_connection_ = std::numeric_limits<std::size_t>::max(),
+        })
+        .on_not_found(&handle_not_found)
+        .on_error(&handle_error)
+        .on_access(ruvia::access_log_callback_type(service::logging::access_logger{}))
+        .on_connection_failure(
+            ruvia::connection_failure_callback_type(service::logging::connection_failure_logger{}));
+    service::logging::info("Server starting on " + settings.host_ + ":" +
+                           std::to_string(settings.port_));
 }
 
-} // namespace
+}  // namespace
 
 // 健康检查。
-class HealthController final : public ruvia::Controller<HealthController> {
-  public:
-    RUVIA_ROUTES_BEGIN
+class health_controller final {
+public:
+    RUVIA_ROUTES_BEGIN(health_controller)
     RUVIA_GET("/api/health", health);
     RUVIA_ROUTES_END
 
-  private:
-    ruvia::Task<ruvia::HttpResponse> health(ruvia::Context& c) {
+private:
+    ruvia::task<ruvia::http_response> health(ruvia::context& c) {
         co_return c.json(service::common::health(c));
     }
 };
@@ -301,103 +328,103 @@ class HealthController final : public ruvia::Controller<HealthController> {
 int main(int argc, char* argv[]) {
     try {
         auto& app = ruvia::app();
-        service::logging::Session loggingSession;
-        const auto runtimeDir = executableDir(argc > 0 ? argv[0] : nullptr);
+        service::logging::session logging_session;
+        const auto runtime_dir = executable_dir(argc > 0 ? argv[0] : nullptr);
 #ifdef _WIN32
-        const auto nodeBinaryPath = runtimeDir / "node.exe";
+        const auto node_binary_path = runtime_dir / "node.exe";
 #else
-        const auto nodeBinaryPath = runtimeDir / "node";
+        const auto node_binary_path = runtime_dir / "node";
 #endif
-        service::node_release::configure(nodeBinaryPath, runtimeDir / "install-node.sh",
-                                         runtimeDir / "node-release.manifest");
-        const auto envPath = service::config::dotenvPath(runtimeDir);
-        app.loadDotenv(envPath, {.missingFile = ruvia::DotenvMissingFilePolicy::kRequire});
-        if (service::config::ensureRuntimeSecrets(envPath, app.env())) {
-            app.loadDotenv(envPath);
+        service::node_release::configure(node_binary_path, runtime_dir / "install-node.sh",
+            runtime_dir / "node-release.manifest");
+        const auto env_path = service::config::dotenv_path(runtime_dir);
+        app.load_dotenv(env_path, {.missing_file_ = ruvia::dotenv_missing_file_policy::require});
+        if (service::config::ensure_runtime_secrets(env_path, app.env())) {
+            app.load_dotenv(env_path);
         }
-        service::utils::configureSecretKey(app.env().get("SECRET_MASTER_KEY").value_or(""));
-        (void)service::config::authConfiguration(app.env());
-        auto initialAdmin = service::initial_admin::initialAdminConfig(app.env());
-        configureDocumentRoot(app, runtimeDir);
-        auto database = configureDatabase(app);
-        service::initial_admin::initialize(database, std::move(initialAdmin));
-        configureRedis(app);
-        configureOutboundOrigins(app, runtimeDir);
-        configureHttpServer(app);
+        service::utils::configure_secret_key(app.env().get("SECRET_MASTER_KEY").value_or(""));
+        (void)service::config::get_auth_configuration(app.env());
+        auto initial_admin = service::initial_admin::get_initial_admin_config(app.env());
+        configure_document_root(app, runtime_dir);
+        auto database = configure_database(app);
+        service::initial_admin::initialize(database, std::move(initial_admin));
+        configure_redis(app);
+        configure_outbound_origins(app, runtime_dir);
+        configure_http_server(app);
 
-        std::vector<service::background::WorkerDefinition> workers;
-        workers.emplace_back(service::background::WorkerDefinition{
-            .name = "provider-verification",
-            .outboundAliases = {service::config::kCloudflareOriginAlias,
-                                service::config::kAliyunDnsOriginAlias,
-                                service::config::kLetsEncryptOriginAlias,
-                                service::config::kZeroSslAcmeOriginAlias,
-                                service::config::kZeroSslApiOriginAlias},
-            .run = [](service::background::WorkerContext& context) -> ruvia::Task<void> {
-                co_await service::provider_verification::runWorker(context);
+        std::vector<service::background::worker_definition> workers;
+        workers.emplace_back(service::background::worker_definition{
+            .name_ = "provider-verification",
+            .outbound_aliases_ = {service::config::cloudflare_origin_alias,
+                service::config::aliyun_dns_origin_alias,
+                service::config::lets_encrypt_origin_alias,
+                service::config::zero_ssl_acme_origin_alias,
+                service::config::zero_ssl_api_origin_alias},
+            .run_ = [](service::background::worker_context& context) -> ruvia::task<void> {
+                co_await service::provider_verification::run_worker(context);
             },
         });
-        workers.emplace_back(service::background::WorkerDefinition{
-            .name = "dns-sync",
-            .outboundAliases = {service::config::kCloudflareOriginAlias,
-                                service::config::kAliyunDnsOriginAlias},
-            .run = [](service::background::WorkerContext& context) -> ruvia::Task<void> {
-                co_await service::dns_sync::runWorker(context);
+        workers.emplace_back(service::background::worker_definition{
+            .name_ = "dns-sync",
+            .outbound_aliases_ = {service::config::cloudflare_origin_alias,
+                service::config::aliyun_dns_origin_alias},
+            .run_ = [](service::background::worker_context& context) -> ruvia::task<void> {
+                co_await service::dns_sync::run_worker(context);
             },
         });
-        workers.emplace_back(service::background::WorkerDefinition{
-            .name = "certificate",
-            .outboundAliases = {service::config::kCloudflareOriginAlias,
-                                service::config::kAliyunDnsOriginAlias,
-                                service::config::kLetsEncryptOriginAlias,
-                                service::config::kZeroSslAcmeOriginAlias},
-            .run = [](service::background::WorkerContext& context) -> ruvia::Task<void> {
-                co_await service::certificate_issuance::runWorker(context);
+        workers.emplace_back(service::background::worker_definition{
+            .name_ = "certificate",
+            .outbound_aliases_ = {service::config::cloudflare_origin_alias,
+                service::config::aliyun_dns_origin_alias,
+                service::config::lets_encrypt_origin_alias,
+                service::config::zero_ssl_acme_origin_alias},
+            .run_ = [](service::background::worker_context& context) -> ruvia::task<void> {
+                co_await service::certificate_issuance::run_worker(context);
             },
         });
-        workers.emplace_back(service::background::WorkerDefinition{
-            .name = "website-dispatch",
-            .outboundAliases = {service::config::kAliDnsDohOriginAlias},
-            .run = [](service::background::WorkerContext& context) -> ruvia::Task<void> {
-                co_await service::website_dispatch::runWorker(context);
+        workers.emplace_back(service::background::worker_definition{
+            .name_ = "website-dispatch",
+            .outbound_aliases_ = {service::config::ali_dns_doh_origin_alias},
+            .run_ = [](service::background::worker_context& context) -> ruvia::task<void> {
+                co_await service::website_dispatch::run_worker(context);
             },
         });
-        service::background::WorkerPool backgroundWorkers(
-            database, service::config::outboundOrigins(), std::move(workers));
-        const auto logConsumerInstance = service::utils::randomToken().substr(0, 32);
-        app.onStart([&backgroundWorkers, logConsumerInstance] {
-               backgroundWorkers.start();
-               auto logWorkers = ruvia::app().workers();
-               if (logWorkers.empty()) {
+        service::background::worker_pool background_workers(
+            database, service::config::get_outbound_origins(), std::move(workers));
+        const auto log_consumer_instance = service::utils::random_token().substr(0, 32);
+        app.on_start([&background_workers, log_consumer_instance] {
+               background_workers.start();
+               auto log_workers = ruvia::app().workers();
+               if (log_workers.empty()) {
                    throw std::runtime_error("log fanout requires a web worker");
                }
-               for (auto& worker : logWorkers) {
-                   const auto deadlinesPosted = worker.post(
-                       [](ruvia::WebWorkerContext& context) -> ruvia::Task<void> {
-                           co_await service::live_resource::seedNodeDeadlines(context);
+               for (auto& worker : log_workers) {
+                   const auto deadlines_posted = worker.post(
+                       [](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                           co_await service::live_resource::seed_node_deadlines(context);
                        });
-                   if (!deadlinesPosted.accepted()) {
+                   if (!deadlines_posted.accepted()) {
                        throw std::runtime_error("node deadline initialization could not start");
                    }
-                   const auto fanoutPosted = worker.post(
-                       [](ruvia::WebWorkerContext& context) -> ruvia::Task<void> {
+                   const auto fanout_posted = worker.post(
+                       [](ruvia::web_worker_context& context) -> ruvia::task<void> {
                            co_await service::log_ingest::fanout::run(context);
                        });
-                   if (!fanoutPosted.accepted()) {
+                   if (!fanout_posted.accepted()) {
                        throw std::runtime_error("log notification fanout could not start");
                    }
-                   auto consumer = logConsumerInstance + "-" + std::to_string(worker.id());
+                   auto consumer = log_consumer_instance + "-" + std::to_string(worker.id());
                    const auto posted = worker.post(
-                       [consumer = std::move(consumer)](ruvia::WebWorkerContext& context)
-                           -> ruvia::Task<void> {
-                           co_await service::log_ingest::runWorker(context, consumer);
+                       [consumer = std::move(consumer)](ruvia::web_worker_context& context)
+                           -> ruvia::task<void> {
+                           co_await service::log_ingest::run_worker(context, consumer);
                        });
                    if (!posted.accepted()) {
                        throw std::runtime_error("log ingest worker could not start");
                    }
                }
            })
-            .onStop([&backgroundWorkers] { backgroundWorkers.stop(); });
+            .on_stop([&background_workers] { background_workers.stop(); });
         app.run();
         return 0;
     } catch (const std::exception& ex) {

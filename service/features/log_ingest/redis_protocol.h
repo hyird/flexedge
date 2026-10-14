@@ -1,17 +1,17 @@
 #pragma once
 
+#include <ruvia/web/redis/redis.h>
+
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
-#include <ruvia/web/redis/Redis.h>
-
 namespace service::log_ingest {
 
-inline void requireRedisSuccess(const ruvia::RedisValue& value, std::string_view operation) {
-    if (value.kind() == ruvia::RedisValue::Kind::kError) {
+inline void require_redis_success(const ruvia::redis_value& value, std::string_view operation) {
+    if (value.kind() == ruvia::redis_value::kind_type::error) {
         throw std::runtime_error(std::string(operation) + ": " + std::string(value.error()));
     }
 }
 
-} // namespace service::log_ingest
+}  // namespace service::log_ingest

@@ -6,16 +6,19 @@
 
 namespace flexedge::node {
 
-class SecretStringGuard final {
-  public:
-    explicit SecretStringGuard(std::string& value) noexcept : value_(value) {}
-    ~SecretStringGuard() { OPENSSL_cleanse(value_.data(), value_.size()); }
+class secret_string_guard final {
+public:
+    explicit secret_string_guard(std::string& value) noexcept
+        : value_(value) {}
+    ~secret_string_guard() {
+        OPENSSL_cleanse(value_.data(), value_.size());
+    }
 
-    SecretStringGuard(const SecretStringGuard&) = delete;
-    SecretStringGuard& operator=(const SecretStringGuard&) = delete;
+    secret_string_guard(const secret_string_guard&) = delete;
+    secret_string_guard& operator=(const secret_string_guard&) = delete;
 
-  private:
+private:
     std::string& value_;
 };
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

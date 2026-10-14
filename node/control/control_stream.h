@@ -1,26 +1,28 @@
 #pragma once
 
+#include <ruvia/core/task.h>
+#include <ruvia/web/websocket_client.h>
+
 #include <exception>
 #include <limits>
 #include <stdexcept>
-
-#include <ruvia/core/Task.h>
-#include <ruvia/web/WebSocketClient.h>
 
 #include "node/proto/edge_control.pb.h"
 
 namespace flexedge::node {
 
-class ControlStreamEnded final : public std::exception {
-  public:
-    [[nodiscard]] const char* what() const noexcept override { return "control stream ended"; }
+class control_stream_ended final : public std::exception {
+public:
+    [[nodiscard]] const char* what() const noexcept override {
+        return "control stream ended";
+    }
 };
 
-inline ruvia::Task<v2::ServerEnvelope>
-readServerEnvelope(const ruvia::WebSocketClientHandle& connection) {
+inline ruvia::task<v2::ServerEnvelope>
+read_server_envelope(const ruvia::websocket_client_handle& connection) {
     const auto message = co_await connection.read();
     if (!message) {
-        throw ControlStreamEnded{};
+        throw control_stream_ended{};
     }
     if (!message->binary()) {
         throw std::runtime_error("control plane must send protobuf binary messages");
@@ -30,7 +32,7 @@ readServerEnvelope(const ruvia::WebSocketClientHandle& connection) {
     }
     v2::ServerEnvelope envelope;
     if (!envelope.ParseFromArray(message->payload().data(),
-                                 static_cast<int>(message->payload().size()))) {
+            static_cast<int>(message->payload().size()))) {
         throw std::runtime_error("control plane sent invalid protobuf");
     }
     if (envelope.has_error()) {
@@ -39,4 +41,4 @@ readServerEnvelope(const ruvia::WebSocketClientHandle& connection) {
     co_return envelope;
 }
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

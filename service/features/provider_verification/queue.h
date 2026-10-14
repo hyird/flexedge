@@ -1,10 +1,10 @@
 #pragma once
 
+#include <ruvia/core/task.h>
+#include <ruvia/web/db/db_transaction.h>
+
 #include <cstdint>
 #include <string_view>
-
-#include <ruvia/core/Task.h>
-#include <ruvia/web/db/DbTransaction.h>
 
 #include "service/features/sync_runtime/state.h"
 
@@ -13,64 +13,64 @@ namespace service::provider_verification {
 // Verification is a current-state marker. The provider row contains the
 // configuration to verify; the marker only wakes the verifier for its latest
 // generation and coalesces repeated requests for the same provider.
-inline ruvia::Task<void> markCurrent(ruvia::DbTransaction& transaction, std::string_view tenantId,
-                                     std::string_view providerId) {
+inline ruvia::task<void> mark_current(ruvia::db_transaction& transaction, std::string_view tenant_id,
+    std::string_view provider_id) {
     const auto rows = co_await transaction.query(
         "SELECT kind, verification_generation FROM sys_provider WHERE tenant_id = $1 AND id = $2 "
         "AND deleted_at IS NULL LIMIT 1",
-        tenantId, providerId);
+        tenant_id, provider_id);
     if (rows.empty()) {
         co_return;
     }
-    co_await service::sync_runtime::upsertMarker(
-        transaction, tenantId, service::sync_runtime::MarkerResourceType::provider, providerId,
-        service::sync_runtime::MarkerOperation::verify,
+    co_await service::sync_runtime::upsert_marker(
+        transaction, tenant_id, service::sync_runtime::marker_resource_type::provider, provider_id,
+        service::sync_runtime::marker_operation::verify,
         rows.front()[1].as<std::int64_t>().value_or(1));
     co_return;
 }
 
-inline ruvia::Task<void> remove(ruvia::DbTransaction& transaction, std::string_view tenantId,
-                                std::string_view providerId) {
-    co_await service::sync_runtime::removeMarker(
-        transaction, tenantId, service::sync_runtime::MarkerResourceType::provider, providerId);
+inline ruvia::task<void> remove(ruvia::db_transaction& transaction, std::string_view tenant_id,
+    std::string_view provider_id) {
+    co_await service::sync_runtime::remove_marker(
+        transaction, tenant_id, service::sync_runtime::marker_resource_type::provider, provider_id);
     co_return;
 }
 
-inline ruvia::Task<bool> enqueueDns(ruvia::DbTransaction& transaction, std::string_view tenantId,
-                                    std::string_view providerId, std::int64_t expectedRevision) {
+inline ruvia::task<bool> enqueue_dns(ruvia::db_transaction& transaction, std::string_view tenant_id,
+    std::string_view provider_id, std::int64_t expected_revision) {
     const auto rows = co_await transaction.query(
         "UPDATE sys_provider SET verification_generation = verification_generation + 1, "
         "last_error = NULL, status = 'unverified', runtime = '{}'::jsonb, updated_at = NOW() "
         "WHERE id = $1 AND tenant_id = $2 AND kind = 'dns' AND revision = $3 AND deleted_at IS "
         "NULL RETURNING verification_generation",
-        providerId, tenantId, expectedRevision);
+        provider_id, tenant_id, expected_revision);
     if (rows.empty()) {
         co_return false;
     }
-    co_await service::sync_runtime::upsertMarker(
-        transaction, tenantId, service::sync_runtime::MarkerResourceType::provider, providerId,
-        service::sync_runtime::MarkerOperation::verify,
+    co_await service::sync_runtime::upsert_marker(
+        transaction, tenant_id, service::sync_runtime::marker_resource_type::provider, provider_id,
+        service::sync_runtime::marker_operation::verify,
         rows.front()[0].as<std::int64_t>().value_or(1));
     co_return true;
 }
 
-inline ruvia::Task<bool> enqueueCertificate(ruvia::DbTransaction& transaction,
-                                            std::string_view tenantId, std::string_view providerId,
-                                            std::int64_t expectedRevision) {
+inline ruvia::task<bool> enqueue_certificate(ruvia::db_transaction& transaction,
+    std::string_view tenant_id, std::string_view provider_id,
+    std::int64_t expected_revision) {
     const auto rows = co_await transaction.query(
         "UPDATE sys_provider SET verification_generation = verification_generation + 1, "
         "last_error = NULL, status = 'unverified', runtime = '{}'::jsonb, updated_at = NOW() "
         "WHERE id = $1 AND tenant_id = $2 AND kind = 'certificate' AND revision = $3 AND "
         "deleted_at IS NULL RETURNING verification_generation",
-        providerId, tenantId, expectedRevision);
+        provider_id, tenant_id, expected_revision);
     if (rows.empty()) {
         co_return false;
     }
-    co_await service::sync_runtime::upsertMarker(
-        transaction, tenantId, service::sync_runtime::MarkerResourceType::provider, providerId,
-        service::sync_runtime::MarkerOperation::verify,
+    co_await service::sync_runtime::upsert_marker(
+        transaction, tenant_id, service::sync_runtime::marker_resource_type::provider, provider_id,
+        service::sync_runtime::marker_operation::verify,
         rows.front()[0].as<std::int64_t>().value_or(1));
     co_return true;
 }
 
-} // namespace service::provider_verification
+}  // namespace service::provider_verification

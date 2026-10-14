@@ -7,60 +7,60 @@
 
 namespace service::dns_sync {
 
-struct ZoneRecordData final {
-    std::string id;
-    std::string type;
-    std::string name;
-    std::string content;
-    std::int64_t ttl;
-    std::optional<std::int64_t> priority;
-    bool proxied;
-    std::string lineCode;
+struct zone_record_data final {
+    std::string id_;
+    std::string type_;
+    std::string name_;
+    std::string content_;
+    std::int64_t ttl_;
+    std::optional<std::int64_t> priority_;
+    bool proxied_;
+    std::string line_code_;
 };
 
-struct ZoneConfigData final {
-    std::vector<ZoneRecordData> records;
+struct zone_config_data final {
+    std::vector<zone_record_data> records_;
 };
 
-struct ZoneLineRuntimeData final {
-    std::optional<std::string> code;
-    std::optional<std::string> name;
-    std::optional<std::string> displayName;
-    std::optional<std::string> status;
+struct zone_line_runtime_data final {
+    std::optional<std::string> code_;
+    std::optional<std::string> name_;
+    std::optional<std::string> display_name_;
+    std::optional<std::string> status_;
 };
 
-struct ZoneRecordRuntimeData final {
-    std::optional<std::string> id;
-    std::optional<std::string> remoteRecordId;
-    std::optional<std::string> syncStatus;
-    std::optional<std::int64_t> syncedRevision;
-    std::optional<std::string> lastError;
+struct zone_record_runtime_data final {
+    std::optional<std::string> id_;
+    std::optional<std::string> remote_record_id_;
+    std::optional<std::string> sync_status_;
+    std::optional<std::int64_t> synced_revision_;
+    std::optional<std::string> last_error_;
 };
 
-struct ZoneRecordConflictData final {
-    std::optional<std::string> id;
-    std::optional<std::string> type;
-    std::optional<std::string> name;
-    std::optional<std::string> lineCode;
-    std::optional<std::string> localContent;
-    std::optional<std::string> remoteContent;
+struct zone_record_conflict_data final {
+    std::optional<std::string> id_;
+    std::optional<std::string> type_;
+    std::optional<std::string> name_;
+    std::optional<std::string> line_code_;
+    std::optional<std::string> local_content_;
+    std::optional<std::string> remote_content_;
 };
 
-struct ZoneChallengeRuntimeData final {
-    std::string id;
-    std::string name;
-    std::string content;
-    std::int64_t ttl;
-    std::string certificateId;
+struct zone_challenge_runtime_data final {
+    std::string id_;
+    std::string name_;
+    std::string content_;
+    std::int64_t ttl_;
+    std::string certificate_id_;
 };
 
-struct ZoneRuntimeData final {
-    bool recordsImported{false};
-    std::optional<std::string> linesSyncedAt;
-    std::vector<ZoneLineRuntimeData> lines;
-    std::vector<ZoneRecordRuntimeData> recordStates;
-    std::vector<ZoneRecordConflictData> conflicts;
-    std::vector<ZoneChallengeRuntimeData> challengeRecords;
+struct zone_runtime_data final {
+    bool records_imported_{false};
+    std::optional<std::string> lines_synced_at_;
+    std::vector<zone_line_runtime_data> lines_;
+    std::vector<zone_record_runtime_data> record_states_;
+    std::vector<zone_record_conflict_data> conflicts_;
+    std::vector<zone_challenge_runtime_data> challenge_records_;
 };
 
-} // namespace service::dns_sync
+}  // namespace service::dns_sync

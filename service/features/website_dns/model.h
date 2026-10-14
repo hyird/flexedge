@@ -6,15 +6,15 @@
 
 namespace service::website_dns {
 
-struct WebsiteDomainRuntimeData final {
-    std::optional<std::string> id;
-    std::optional<std::string> resolutionStatus;
-    std::optional<std::string> lastVerifiedAt;
-    std::optional<std::string> lastError;
+struct website_domain_runtime_data final {
+    std::optional<std::string> id_;
+    std::optional<std::string> resolution_status_;
+    std::optional<std::string> last_verified_at_;
+    std::optional<std::string> last_error_;
 };
 
-struct WebsiteRuntimeData final {
-    std::vector<WebsiteDomainRuntimeData> domainStates;
+struct website_runtime_data final {
+    std::vector<website_domain_runtime_data> domain_states_;
 };
 
-} // namespace service::website_dns
+}  // namespace service::website_dns

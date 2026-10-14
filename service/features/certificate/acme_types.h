@@ -9,58 +9,61 @@
 
 namespace service::certificate_issuance {
 
-struct AcmeSettings final {
-    std::string host;
-    std::string directoryTarget;
-    std::string directoryUrl;
+struct acme_settings final {
+    std::string host_;
+    std::string directory_target_;
+    std::string directory_url_;
 };
 
-inline std::optional<AcmeSettings> settingsForProvider(std::string_view provider) {
+inline std::optional<acme_settings> settings_for_provider(std::string_view provider) {
     if (provider == "letsencrypt") {
-        return AcmeSettings{
-            .host = "acme-v02.api.letsencrypt.org",
-            .directoryTarget = "/directory",
-            .directoryUrl = "https://acme-v02.api.letsencrypt.org/directory",
+        return acme_settings{
+            .host_ = "acme-v02.api.letsencrypt.org",
+            .directory_target_ = "/directory",
+            .directory_url_ = "https://acme-v02.api.letsencrypt.org/directory",
         };
     }
     if (provider == "zerossl") {
-        return AcmeSettings{
-            .host = "acme.zerossl.com",
-            .directoryTarget = "/v2/DV90",
-            .directoryUrl = "https://acme.zerossl.com/v2/DV90",
+        return acme_settings{
+            .host_ = "acme.zerossl.com",
+            .directory_target_ = "/v2/DV90",
+            .directory_url_ = "https://acme.zerossl.com/v2/DV90",
         };
     }
     return std::nullopt;
 }
 
-class AcmeError final : public std::runtime_error {
-  public:
-    AcmeError(std::string_view message, bool permanent)
-        : std::runtime_error(std::string(message)), permanent_(permanent) {}
+class acme_error final : public std::runtime_error {
+public:
+    acme_error(std::string_view message, bool permanent)
+        : std::runtime_error(std::string(message)),
+          permanent_(permanent) {}
 
-    [[nodiscard]] bool permanent() const noexcept { return permanent_; }
+    [[nodiscard]] bool permanent() const noexcept {
+        return permanent_;
+    }
 
-  private:
+private:
     bool permanent_;
 };
 
-struct EabCredentials final {
-    std::string keyId;
-    service::utils::SensitiveString hmacKey;
+struct eab_credentials final {
+    std::string key_id_;
+    service::utils::sensitive_string hmac_key_;
 };
 
-struct AcmeAccount final {
-    service::utils::SensitiveString privateKeyPem;
-    std::string accountUrl;
+struct acme_account final {
+    service::utils::sensitive_string private_key_pem_;
+    std::string account_url_;
 };
 
-struct IssuedCertificate final {
-    service::utils::SensitiveString privateKeyPem;
-    std::string certificateChainPem;
-    std::string notBefore;
-    std::string expiresAt;
-    std::string serialNumber;
-    std::string fingerprintSha256;
+struct issued_certificate final {
+    service::utils::sensitive_string private_key_pem_;
+    std::string certificate_chain_pem_;
+    std::string not_before_;
+    std::string expires_at_;
+    std::string serial_number_;
+    std::string fingerprint_sha256_;
 };
 
-} // namespace service::certificate_issuance
+}  // namespace service::certificate_issuance

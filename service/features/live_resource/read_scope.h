@@ -1,107 +1,126 @@
 #pragma once
 
+#include <ruvia/core/operation_options.h>
+#include <ruvia/core/stop_token.h>
+#include <ruvia/core/task.h>
+#include <ruvia/core/task_scope.h>
+#include <ruvia/core/timer.h>
+#include <ruvia/core/worker_handle.h>
+#include <ruvia/web/context.h>
+#include <ruvia/web/db/db_handle.h>
+
 #include <chrono>
 #include <exception>
 #include <optional>
 #include <stdexcept>
 #include <utility>
 
-#include <ruvia/core/OperationOptions.h>
-#include <ruvia/core/TaskScope.h>
-#include <ruvia/core/Timer.h>
-#include <ruvia/web/Context.h>
-
 namespace service::live_resource {
 
-class SnapshotReadScope final {
+class snapshot_read_scope final {
 public:
-    using Clock = std::chrono::steady_clock;
+    using clock = std::chrono::steady_clock;
 
-    SnapshotReadScope(ruvia::Context& context, Clock::time_point deadline)
-        : context_(context), deadline_(deadline),
-          operationStopToken_(ruvia::combineStopTokens(context.stopToken(), budgetStop_.token())),
+    snapshot_read_scope(ruvia::context& context, clock::time_point deadline)
+        : context_(context),
+          deadline_(deadline),
+          operation_stop_token_(ruvia::combine_stop_tokens(context.get_stop_token(), budget_stop_.token())),
           watchdog_(context.worker()) {
-        watchdog_.spawn(watchDeadline());
+        watchdog_.spawn(watch_deadline());
     }
-    ~SnapshotReadScope() = default;
+    ~snapshot_read_scope() = default;
 
-    SnapshotReadScope(const SnapshotReadScope&) = delete;
-    SnapshotReadScope& operator=(const SnapshotReadScope&) = delete;
-    SnapshotReadScope(SnapshotReadScope&&) = delete;
-    SnapshotReadScope& operator=(SnapshotReadScope&&) = delete;
+    snapshot_read_scope(const snapshot_read_scope&) = delete;
+    snapshot_read_scope& operator=(const snapshot_read_scope&) = delete;
+    snapshot_read_scope(snapshot_read_scope&&) = delete;
+    snapshot_read_scope& operator=(snapshot_read_scope&&) = delete;
 
-    [[nodiscard]] std::pmr::memory_resource* pool() const noexcept { return context_.pool(); }
-    [[nodiscard]] const ruvia::WorkerHandle& worker() const noexcept { return context_.worker(); }
-    [[nodiscard]] bool deadlineExceeded() const noexcept {
-        return Clock::now() >= deadline_ || context_.deadlineExceeded() || budgetStop_.stopRequested();
+    [[nodiscard]] std::pmr::memory_resource* pool() const noexcept {
+        return context_.pool();
     }
-    [[nodiscard]] bool stopRequested() const noexcept {
-        return context_.stopToken().stopRequested() || budgetStop_.stopRequested();
+    [[nodiscard]] const ruvia::worker_handle& worker() const noexcept {
+        return context_.worker();
     }
-    [[nodiscard]] ruvia::StopToken stopToken() const noexcept { return operationStopToken_; }
+    [[nodiscard]] bool deadline_exceeded() const noexcept {
+        return clock::now() >= deadline_ || context_.deadline_exceeded() || budget_stop_.stop_requested();
+    }
+    [[nodiscard]] bool stop_requested() const noexcept {
+        return context_.get_stop_token().stop_requested() || budget_stop_.stop_requested();
+    }
+    [[nodiscard]] ruvia::stop_token stop_token() const noexcept {
+        return operation_stop_token_;
+    }
 
 #ifdef RUVIA_ENABLE_DATABASE
-    [[nodiscard]] ruvia::DbHandle db() const {
-        return context_.db().withOptions({.stopToken = stopToken()});
+    [[nodiscard]] ruvia::db_handle db() const {
+        return context_.db().with_options({.stop_token_ = stop_token()});
     }
 #endif
 
-    ruvia::Task<void> stopAndJoin() {
-        watchdog_.requestStop();
+    ruvia::task<void> stop_and_join() {
+        watchdog_.request_stop();
         co_await watchdog_.join();
     }
 
 private:
-    ruvia::Task<void> watchDeadline() {
+    ruvia::task<void> watch_deadline() {
         try {
-            const auto now = Clock::now();
+            const auto now = clock::now();
             if (now < deadline_) {
-                const auto result = co_await ruvia::sleepFor(
-                    context_.worker(), deadline_ - now, watchdog_.stopToken());
-                if (result == ruvia::TimerSleepResult::kElapsed) budgetStop_.requestStop();
+                const auto result = co_await ruvia::sleep_for(
+                    context_.worker(), deadline_ - now, watchdog_.get_stop_token());
+                if (result == ruvia::timer_sleep_result::elapsed) {
+                    budget_stop_.request_stop();
+                }
             } else {
-                budgetStop_.requestStop();
+                budget_stop_.request_stop();
             }
         } catch (...) {
-            budgetStop_.requestStop();
+            budget_stop_.request_stop();
             throw;
         }
     }
 
-    ruvia::Context& context_;
-    const Clock::time_point deadline_;
-    ruvia::StopSource budgetStop_;
-    const ruvia::StopToken operationStopToken_;
-    ruvia::TaskScope watchdog_;
+    ruvia::context& context_;
+    const clock::time_point deadline_;
+    ruvia::stop_source budget_stop_;
+    const ruvia::stop_token operation_stop_token_;
+    ruvia::task_scope watchdog_;
 };
 
 // SSE tail reads retain the original aggregate wait budget while binding all
 // dependency operations to the request and budget stop tokens.
-template <typename T, typename Fetch>
-ruvia::Task<T> readOnce(ruvia::Context& context, Fetch fetch) {
-    using Clock = SnapshotReadScope::Clock;
-    const auto deadline = Clock::now() + std::chrono::seconds(30);
-    SnapshotReadScope scope(context, deadline);
-    std::optional<T> result;
-    std::exception_ptr readFailure;
+template <typename t_type, typename fetch_type>
+ruvia::task<t_type> read_once(ruvia::context& context, fetch_type fetch) {
+    using clock = snapshot_read_scope::clock;
+    const auto deadline = clock::now() + std::chrono::seconds(30);
+    snapshot_read_scope scope(context, deadline);
+    std::optional<t_type> result;
+    std::exception_ptr read_failure;
     try {
         result.emplace(co_await fetch(scope));
     } catch (...) {
-        readFailure = std::current_exception();
+        read_failure = std::current_exception();
     }
 
-    std::exception_ptr joinFailure;
+    std::exception_ptr join_failure;
     try {
-        co_await scope.stopAndJoin();
+        co_await scope.stop_and_join();
     } catch (...) {
-        joinFailure = std::current_exception();
+        join_failure = std::current_exception();
     }
-    if (joinFailure) std::rethrow_exception(joinFailure);
-    if (context.stopToken().stopRequested())
+    if (join_failure) {
+        std::rethrow_exception(join_failure);
+    }
+    if (context.get_stop_token().stop_requested()) {
         throw std::runtime_error("live resource read interrupted");
-    if (scope.deadlineExceeded())
+    }
+    if (scope.deadline_exceeded()) {
         throw std::runtime_error("live resource read timed out");
-    if (readFailure) std::rethrow_exception(readFailure);
+    }
+    if (read_failure) {
+        std::rethrow_exception(read_failure);
+    }
     co_return std::move(*result);
 }
 

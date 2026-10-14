@@ -18,208 +18,208 @@
 
 namespace service::dns_sync::detail {
 
-inline constexpr std::size_t kMaxReconciliationRecords{10'000};
+inline constexpr std::size_t max_reconciliation_records{10'000};
 
-inline bool supportsManagedRecordType(std::string_view type) {
+inline bool supports_managed_record_type(std::string_view type) {
     return type == "A" || type == "AAAA" || type == "CNAME" || type == "TXT" || type == "MX";
 }
 
-struct ManagedRecord final {
-    std::string id;
-    std::string type;
-    std::string name;
-    std::string content;
-    std::int64_t ttl;
-    std::optional<std::int64_t> priority;
-    bool proxied;
-    std::string lineCode;
-    std::string remoteId{};
+struct managed_record final {
+    std::string id_;
+    std::string type_;
+    std::string name_;
+    std::string content_;
+    std::int64_t ttl_;
+    std::optional<std::int64_t> priority_;
+    bool proxied_;
+    std::string line_code_;
+    std::string remote_id_{};
 };
 
-inline std::string recordIdentity(const service::dns::ProviderRecord& record) {
-    return record.type + "\x1f" + service::common::normalizeDomainName(record.name) + "\x1f" +
-           record.lineCode;
+inline std::string record_identity(const service::dns::provider_record& record) {
+    return record.type_ + "\x1f" + service::common::normalize_domain_name(record.name_) + "\x1f" +
+           record.line_code_;
 }
 
-inline service::dns::ProviderRecord toRemoteRecord(const ManagedRecord& record,
-                                                   const service::dns::RecordNamePolicy& names,
-                                                   std::string_view domain) {
+inline service::dns::provider_record to_remote_record(const managed_record& record,
+    const service::dns::record_name_policy& names,
+    std::string_view domain) {
     return {
-        .id = {},
-        .type = record.type,
-        .name = names.remoteRecordName(record.name, domain),
-        .content = record.content,
-        .ttl = record.ttl,
-        .priority = record.priority,
-        .proxied = record.proxied,
-        .lineCode = record.lineCode,
+        .id_ = {},
+        .type_ = record.type_,
+        .name_ = names.remote_record_name(record.name_, domain),
+        .content_ = record.content_,
+        .ttl_ = record.ttl_,
+        .priority_ = record.priority_,
+        .proxied_ = record.proxied_,
+        .line_code_ = record.line_code_,
     };
 }
 
-inline bool recordMatches(const ManagedRecord& local, const service::dns::ProviderRecord& remote,
-                          const service::dns::RecordNamePolicy& names, std::string_view domain) {
-    const auto expected = toRemoteRecord(local, names, domain);
-    return expected.type == remote.type && expected.content == remote.content &&
-           expected.ttl == remote.ttl &&
-           (expected.type != "MX" || expected.priority == remote.priority) &&
-           expected.proxied == remote.proxied && expected.lineCode == remote.lineCode &&
-           service::common::normalizeDomainName(expected.name) ==
-               service::common::normalizeDomainName(remote.name);
+inline bool record_matches(const managed_record& local, const service::dns::provider_record& remote,
+    const service::dns::record_name_policy& names, std::string_view domain) {
+    const auto expected = to_remote_record(local, names, domain);
+    return expected.type_ == remote.type_ && expected.content_ == remote.content_ &&
+           expected.ttl_ == remote.ttl_ &&
+           (expected.type_ != "MX" || expected.priority_ == remote.priority_) &&
+           expected.proxied_ == remote.proxied_ && expected.line_code_ == remote.line_code_ &&
+           service::common::normalize_domain_name(expected.name_) ==
+               service::common::normalize_domain_name(remote.name_);
 }
 
-inline void applyRemoteRecord(ManagedRecord& target, const service::dns::ProviderRecord& source,
-                              const service::dns::RecordNamePolicy& names,
-                              std::string_view domain) {
-    target.type = source.type;
-    target.name = names.localRecordName(source.name, domain);
-    target.content = source.content;
-    target.ttl = source.ttl;
-    target.priority = source.priority;
-    target.proxied = source.proxied;
-    target.lineCode = source.lineCode;
+inline void apply_remote_record(managed_record& target, const service::dns::provider_record& source,
+    const service::dns::record_name_policy& names,
+    std::string_view domain) {
+    target.type_ = source.type_;
+    target.name_ = names.local_record_name(source.name_, domain);
+    target.content_ = source.content_;
+    target.ttl_ = source.ttl_;
+    target.priority_ = source.priority_;
+    target.proxied_ = source.proxied_;
+    target.line_code_ = source.line_code_;
 }
 
-inline void validateRemoteRecord(const service::dns::ProviderRecord& record,
-                                 const std::unordered_set<std::string>& enabledLines) {
-    if (!supportsManagedRecordType(record.type)) {
-        throw std::runtime_error("远程 DNS 存在当前不支持自动托管的记录类型：" + record.type);
+inline void validate_remote_record(const service::dns::provider_record& record,
+    const std::unordered_set<std::string>& enabled_lines) {
+    if (!supports_managed_record_type(record.type_)) {
+        throw std::runtime_error("远程 DNS 存在当前不支持自动托管的记录类型：" + record.type_);
     }
-    if (record.id.empty() || record.name.empty() || record.content.empty() || record.ttl < 1 ||
-        record.ttl > 86400 ||
-        (record.priority && (*record.priority < 0 || *record.priority > 65535)) ||
-        !enabledLines.contains(record.lineCode)) {
+    if (record.id_.empty() || record.name_.empty() || record.content_.empty() || record.ttl_ < 1 ||
+        record.ttl_ > 86400 ||
+        (record.priority_ && (*record.priority_ < 0 || *record.priority_ > 65535)) ||
+        !enabled_lines.contains(record.line_code_)) {
         throw std::runtime_error("远程 DNS 记录不符合本地托管配置要求");
     }
 }
 
-struct RecordConflict final {
-    std::string id;
-    std::string type;
-    std::string name;
-    std::string lineCode;
-    std::string localContent;
-    std::string remoteContent;
+struct record_conflict final {
+    std::string id_;
+    std::string type_;
+    std::string name_;
+    std::string line_code_;
+    std::string local_content_;
+    std::string remote_content_;
 };
 
-struct ManagedRecordSet final {
-    std::vector<ManagedRecord> records;
-    std::unordered_set<std::string> ids;
+struct managed_record_set final {
+    std::vector<managed_record> records_;
+    std::unordered_set<std::string> ids_;
 };
 
-struct RemoteMergePlan final {
-    std::vector<ManagedRecord> records;
-    std::unordered_map<std::string, std::string> remoteIdsByLocalId;
-    std::vector<RecordConflict> conflicts;
-    bool changed{};
+struct remote_merge_plan final {
+    std::vector<managed_record> records_;
+    std::unordered_map<std::string, std::string> remote_ids_by_local_id_;
+    std::vector<record_conflict> conflicts_;
+    bool changed_{};
 };
 
-inline std::unordered_map<std::string, const service::dns::ProviderRecord*>
-indexRemoteRecords(const std::vector<service::dns::ProviderRecord>& remoteRecords,
-                   const std::vector<service::dns::ProviderLine>& lines) {
-    if (remoteRecords.size() > kMaxReconciliationRecords) {
+inline std::unordered_map<std::string, const service::dns::provider_record*>
+index_remote_records(const std::vector<service::dns::provider_record>& remote_records,
+    const std::vector<service::dns::provider_line>& lines) {
+    if (remote_records.size() > max_reconciliation_records) {
         throw std::runtime_error("远程 DNS 记录超过单个域名可导入上限");
     }
 
-    std::unordered_set<std::string> enabledLines;
-    enabledLines.reserve(lines.size());
+    std::unordered_set<std::string> enabled_lines;
+    enabled_lines.reserve(lines.size());
     for (const auto& line : lines) {
-        if (!line.code.empty()) {
-            enabledLines.emplace(line.code);
+        if (!line.code_.empty()) {
+            enabled_lines.emplace(line.code_);
         }
     }
 
-    std::unordered_map<std::string, const service::dns::ProviderRecord*> result;
-    result.reserve(remoteRecords.size());
-    for (const auto& record : remoteRecords) {
-        validateRemoteRecord(record, enabledLines);
-        if (!result.emplace(record.id, &record).second) {
+    std::unordered_map<std::string, const service::dns::provider_record*> result;
+    result.reserve(remote_records.size());
+    for (const auto& record : remote_records) {
+        validate_remote_record(record, enabled_lines);
+        if (!result.emplace(record.id_, &record).second) {
             throw std::runtime_error("远程 DNS 记录 ID 重复");
         }
     }
     return result;
 }
 
-inline ManagedRecord toManagedRecord(const ZoneRecordData& record) {
+inline managed_record to_managed_record(const zone_record_data& record) {
     return {
-        .id = record.id,
-        .type = record.type,
-        .name = record.name,
-        .content = record.content,
-        .ttl = record.ttl,
-        .priority = record.priority,
-        .proxied = record.proxied,
-        .lineCode = record.lineCode,
+        .id_ = record.id_,
+        .type_ = record.type_,
+        .name_ = record.name_,
+        .content_ = record.content_,
+        .ttl_ = record.ttl_,
+        .priority_ = record.priority_,
+        .proxied_ = record.proxied_,
+        .line_code_ = record.line_code_,
     };
 }
 
-inline ManagedRecordSet buildManagedRecords(const ZoneConfigData& config) {
-    ManagedRecordSet result;
-    result.records.reserve(config.records.size());
-    result.ids.reserve(config.records.size());
-    for (const auto& record : config.records) {
-        auto managed = toManagedRecord(record);
-        if (!result.ids.emplace(managed.id).second) {
+inline managed_record_set build_managed_records(const zone_config_data& config) {
+    managed_record_set result;
+    result.records_.reserve(config.records_.size());
+    result.ids_.reserve(config.records_.size());
+    for (const auto& record : config.records_) {
+        auto managed = to_managed_record(record);
+        if (!result.ids_.emplace(managed.id_).second) {
             throw std::runtime_error("DNS 聚合配置中的记录 ID 重复");
         }
-        result.records.push_back(std::move(managed));
+        result.records_.push_back(std::move(managed));
     }
     return result;
 }
 
 inline std::unordered_set<std::string>
-collectDesiredConfigRecordIds(const ZoneConfigData& desiredConfig) {
+collect_desired_config_record_ids(const zone_config_data& desired_config) {
     std::unordered_set<std::string> result;
-    result.reserve(desiredConfig.records.size());
-    for (const auto& record : desiredConfig.records) {
-        result.emplace(record.id);
+    result.reserve(desired_config.records_.size());
+    for (const auto& record : desired_config.records_) {
+        result.emplace(record.id_);
     }
     return result;
 }
 
 inline std::unordered_map<std::string, std::string>
-collectRemoteIdsByLocalId(const ZoneRuntimeData& runtime) {
+collect_remote_ids_by_local_id(const zone_runtime_data& runtime) {
     std::unordered_map<std::string, std::string> result;
-    result.reserve(runtime.recordStates.size());
-    for (const auto& state : runtime.recordStates) {
-        if (state.id && state.remoteRecordId) {
-            result.emplace(*state.id, *state.remoteRecordId);
+    result.reserve(runtime.record_states_.size());
+    for (const auto& state : runtime.record_states_) {
+        if (state.id_ && state.remote_record_id_) {
+            result.emplace(*state.id_, *state.remote_record_id_);
         }
     }
     return result;
 }
 
-inline RecordConflict makeRecordConflict(const ManagedRecord& local,
-                                         std::string_view remoteContent) {
+inline record_conflict make_record_conflict(const managed_record& local,
+    std::string_view remote_content) {
     return {
-        .id = local.id,
-        .type = local.type,
-        .name = local.name,
-        .lineCode = local.lineCode,
-        .localContent = local.content,
-        .remoteContent = std::string(remoteContent),
+        .id_ = local.id_,
+        .type_ = local.type_,
+        .name_ = local.name_,
+        .line_code_ = local.line_code_,
+        .local_content_ = local.content_,
+        .remote_content_ = std::string(remote_content),
     };
 }
 
-inline bool requiresManualResolution(const ManagedRecord& local,
-                                     const service::dns::ProviderRecord& remote,
-                                     const service::dns::RecordNamePolicy& names,
-                                     std::string_view domain) {
-    const auto expected = toRemoteRecord(local, names, domain);
-    return expected.type != remote.type ||
-           service::common::normalizeDomainName(expected.name) !=
-               service::common::normalizeDomainName(remote.name) ||
-           expected.content != remote.content;
+inline bool requires_manual_resolution(const managed_record& local,
+    const service::dns::provider_record& remote,
+    const service::dns::record_name_policy& names,
+    std::string_view domain) {
+    const auto expected = to_remote_record(local, names, domain);
+    return expected.type_ != remote.type_ ||
+           service::common::normalize_domain_name(expected.name_) !=
+               service::common::normalize_domain_name(remote.name_) ||
+           expected.content_ != remote.content_;
 }
 
-inline const service::dns::ProviderRecord*
-findUnclaimedRemoteRecord(const ManagedRecord& local,
-                          const std::unordered_set<std::string>& claimedRemoteIds,
-                          const std::vector<service::dns::ProviderRecord>& remoteRecords,
-                          const service::dns::RecordNamePolicy& names, std::string_view domain) {
-    const auto identity = recordIdentity(toRemoteRecord(local, names, domain));
-    const service::dns::ProviderRecord* candidate = nullptr;
-    for (const auto& remote : remoteRecords) {
-        if (claimedRemoteIds.contains(remote.id) || recordIdentity(remote) != identity) {
+inline const service::dns::provider_record*
+find_unclaimed_remote_record(const managed_record& local,
+    const std::unordered_set<std::string>& claimed_remote_ids,
+    const std::vector<service::dns::provider_record>& remote_records,
+    const service::dns::record_name_policy& names, std::string_view domain) {
+    const auto identity = record_identity(to_remote_record(local, names, domain));
+    const service::dns::provider_record* candidate = nullptr;
+    for (const auto& remote : remote_records) {
+        if (claimed_remote_ids.contains(remote.id_) || record_identity(remote) != identity) {
             continue;
         }
         if (candidate) {
@@ -230,165 +230,165 @@ findUnclaimedRemoteRecord(const ManagedRecord& local,
     return candidate;
 }
 
-inline std::vector<RecordConflict> collectSyncConflicts(
-    const std::vector<ManagedRecord>& localRecords,
-    const std::unordered_map<std::string, std::string>& remoteIdsByLocalId,
-    const std::unordered_set<std::string>& configIds,
-    const std::unordered_map<std::string, const service::dns::ProviderRecord*>& remoteById,
-    const std::vector<service::dns::ProviderRecord>& remoteRecords,
-    const service::dns::RecordNamePolicy& names, std::string_view domain) {
-    std::unordered_set<std::string> claimedRemoteIds;
-    claimedRemoteIds.reserve(remoteIdsByLocalId.size());
-    for (const auto& [id, remoteId] : remoteIdsByLocalId) {
-        if (configIds.contains(id) && remoteById.contains(remoteId)) {
-            claimedRemoteIds.emplace(remoteId);
+inline std::vector<record_conflict> collect_sync_conflicts(
+    const std::vector<managed_record>& local_records,
+    const std::unordered_map<std::string, std::string>& remote_ids_by_local_id,
+    const std::unordered_set<std::string>& config_ids,
+    const std::unordered_map<std::string, const service::dns::provider_record*>& remote_by_id,
+    const std::vector<service::dns::provider_record>& remote_records,
+    const service::dns::record_name_policy& names, std::string_view domain) {
+    std::unordered_set<std::string> claimed_remote_ids;
+    claimed_remote_ids.reserve(remote_ids_by_local_id.size());
+    for (const auto& [id, remote_id] : remote_ids_by_local_id) {
+        if (config_ids.contains(id) && remote_by_id.contains(remote_id)) {
+            claimed_remote_ids.emplace(remote_id);
         }
     }
 
-    std::vector<RecordConflict> conflicts;
-    for (const auto& local : localRecords) {
-        const auto known = remoteIdsByLocalId.find(local.id);
-        if (known != remoteIdsByLocalId.end()) {
-            const auto remote = remoteById.find(known->second);
-            if (remote == remoteById.end()) {
-                conflicts.push_back(makeRecordConflict(local, "（远端已删除）"));
-            } else if (requiresManualResolution(local, *remote->second, names, domain)) {
-                conflicts.push_back(makeRecordConflict(local, remote->second->content));
+    std::vector<record_conflict> conflicts;
+    for (const auto& local : local_records) {
+        const auto known = remote_ids_by_local_id.find(local.id_);
+        if (known != remote_ids_by_local_id.end()) {
+            const auto remote = remote_by_id.find(known->second);
+            if (remote == remote_by_id.end()) {
+                conflicts.push_back(make_record_conflict(local, "（远端已删除）"));
+            } else if (requires_manual_resolution(local, *remote->second, names, domain)) {
+                conflicts.push_back(make_record_conflict(local, remote->second->content_));
             }
             continue;
         }
 
         const auto* candidate =
-            findUnclaimedRemoteRecord(local, claimedRemoteIds, remoteRecords, names, domain);
-        if (candidate && requiresManualResolution(local, *candidate, names, domain)) {
-            conflicts.push_back(makeRecordConflict(local, candidate->content));
+            find_unclaimed_remote_record(local, claimed_remote_ids, remote_records, names, domain);
+        if (candidate && requires_manual_resolution(local, *candidate, names, domain)) {
+            conflicts.push_back(make_record_conflict(local, candidate->content_));
         }
     }
     return conflicts;
 }
 
-inline std::unordered_set<std::string> claimKnownRemoteIds(
-    std::unordered_map<std::string, std::string>& remoteIdsByLocalId,
-    const std::unordered_set<std::string>& configIds,
-    const std::unordered_set<std::string>& desiredConfigIds,
-    const std::unordered_map<std::string, const service::dns::ProviderRecord*>& remoteById,
-    bool remotePreferred, bool& changed) {
-    std::unordered_set<std::string> claimedRemoteIds;
-    claimedRemoteIds.reserve(remoteIdsByLocalId.size());
-    for (auto it = remoteIdsByLocalId.begin(); it != remoteIdsByLocalId.end();) {
-        const auto remote = remoteById.find(it->second);
-        if (remote == remoteById.end()) {
+inline std::unordered_set<std::string> claim_known_remote_ids(
+    std::unordered_map<std::string, std::string>& remote_ids_by_local_id,
+    const std::unordered_set<std::string>& config_ids,
+    const std::unordered_set<std::string>& desired_config_ids,
+    const std::unordered_map<std::string, const service::dns::provider_record*>& remote_by_id,
+    bool remote_preferred, bool& changed) {
+    std::unordered_set<std::string> claimed_remote_ids;
+    claimed_remote_ids.reserve(remote_ids_by_local_id.size());
+    for (auto it = remote_ids_by_local_id.begin(); it != remote_ids_by_local_id.end();) {
+        const auto remote = remote_by_id.find(it->second);
+        if (remote == remote_by_id.end()) {
             ++it;
             continue;
         }
-        if (!configIds.contains(it->first) && !desiredConfigIds.contains(it->first) &&
-            remotePreferred) {
-            it = remoteIdsByLocalId.erase(it);
+        if (!config_ids.contains(it->first) && !desired_config_ids.contains(it->first) &&
+            remote_preferred) {
+            it = remote_ids_by_local_id.erase(it);
             changed = true;
             continue;
         }
-        claimedRemoteIds.emplace(it->second);
+        claimed_remote_ids.emplace(it->second);
         ++it;
     }
-    return claimedRemoteIds;
+    return claimed_remote_ids;
 }
 
-inline bool mergeManagedRecord(
-    ManagedRecord& local, std::unordered_map<std::string, std::string>& remoteIdsByLocalId,
-    std::unordered_set<std::string>& claimedRemoteIds,
-    const std::unordered_map<std::string, const service::dns::ProviderRecord*>& remoteById,
-    const std::vector<service::dns::ProviderRecord>& remoteRecords,
-    const service::dns::RecordNamePolicy& names, std::string_view domain, bool remotePreferred) {
-    const auto known = remoteIdsByLocalId.find(local.id);
-    if (known != remoteIdsByLocalId.end()) {
-        const auto remote = remoteById.find(known->second);
-        if (remote == remoteById.end()) {
-            if (!remotePreferred) {
+inline bool merge_managed_record(
+    managed_record& local, std::unordered_map<std::string, std::string>& remote_ids_by_local_id,
+    std::unordered_set<std::string>& claimed_remote_ids,
+    const std::unordered_map<std::string, const service::dns::provider_record*>& remote_by_id,
+    const std::vector<service::dns::provider_record>& remote_records,
+    const service::dns::record_name_policy& names, std::string_view domain, bool remote_preferred) {
+    const auto known = remote_ids_by_local_id.find(local.id_);
+    if (known != remote_ids_by_local_id.end()) {
+        const auto remote = remote_by_id.find(known->second);
+        if (remote == remote_by_id.end()) {
+            if (!remote_preferred) {
                 return false;
             }
-            local.id.clear();
-            remoteIdsByLocalId.erase(known);
+            local.id_.clear();
+            remote_ids_by_local_id.erase(known);
             return true;
         }
-        if (remotePreferred && !recordMatches(local, *remote->second, names, domain)) {
-            applyRemoteRecord(local, *remote->second, names, domain);
+        if (remote_preferred && !record_matches(local, *remote->second, names, domain)) {
+            apply_remote_record(local, *remote->second, names, domain);
             return true;
         }
         return false;
     }
 
     const auto* candidate =
-        findUnclaimedRemoteRecord(local, claimedRemoteIds, remoteRecords, names, domain);
+        find_unclaimed_remote_record(local, claimed_remote_ids, remote_records, names, domain);
     if (!candidate) {
         return false;
     }
-    remoteIdsByLocalId.emplace(local.id, candidate->id);
-    claimedRemoteIds.emplace(candidate->id);
-    if (remotePreferred && !recordMatches(local, *candidate, names, domain)) {
-        applyRemoteRecord(local, *candidate, names, domain);
+    remote_ids_by_local_id.emplace(local.id_, candidate->id_);
+    claimed_remote_ids.emplace(candidate->id_);
+    if (remote_preferred && !record_matches(local, *candidate, names, domain)) {
+        apply_remote_record(local, *candidate, names, domain);
     }
     return true;
 }
 
-inline void appendUnclaimedRemoteRecords(
-    std::vector<ManagedRecord>& merged, const std::unordered_set<std::string>& claimedRemoteIds,
-    const std::vector<service::dns::ProviderRecord>& remoteRecords,
-    const service::dns::RecordNamePolicy& names, std::string_view domain, bool& changed) {
-    std::erase_if(merged, [](const auto& record) { return record.id.empty(); });
-    for (const auto& remote : remoteRecords) {
-        if (claimedRemoteIds.contains(remote.id)) {
+inline void append_unclaimed_remote_records(
+    std::vector<managed_record>& merged, const std::unordered_set<std::string>& claimed_remote_ids,
+    const std::vector<service::dns::provider_record>& remote_records,
+    const service::dns::record_name_policy& names, std::string_view domain, bool& changed) {
+    std::erase_if(merged, [](const auto& record) { return record.id_.empty(); });
+    for (const auto& remote : remote_records) {
+        if (claimed_remote_ids.contains(remote.id_)) {
             continue;
         }
-        merged.push_back(ManagedRecord{
-            .id = {},
-            .type = remote.type,
-            .name = names.localRecordName(remote.name, domain),
-            .content = remote.content,
-            .ttl = remote.ttl,
-            .priority = remote.priority,
-            .proxied = remote.proxied,
-            .lineCode = remote.lineCode,
-            .remoteId = remote.id,
+        merged.push_back(managed_record{
+            .id_ = {},
+            .type_ = remote.type_,
+            .name_ = names.local_record_name(remote.name_, domain),
+            .content_ = remote.content_,
+            .ttl_ = remote.ttl_,
+            .priority_ = remote.priority_,
+            .proxied_ = remote.proxied_,
+            .line_code_ = remote.line_code_,
+            .remote_id_ = remote.id_,
         });
         changed = true;
     }
 }
 
-inline RemoteMergePlan
-planRemoteMerge(std::string_view operation, const ZoneConfigData& config,
-                const ZoneRuntimeData& runtime, const ZoneConfigData& desiredConfig,
-                std::string_view domain, const service::dns::RecordNamePolicy& names,
-                const std::vector<service::dns::ProviderRecord>& remoteRecords,
-                const std::vector<service::dns::ProviderLine>& lines) {
-    const auto remoteById = indexRemoteRecords(remoteRecords, lines);
-    auto managed = buildManagedRecords(config);
-    const auto desiredConfigIds = collectDesiredConfigRecordIds(desiredConfig);
-    auto remoteIdsByLocalId = collectRemoteIdsByLocalId(runtime);
+inline remote_merge_plan
+plan_remote_merge(std::string_view operation, const zone_config_data& config,
+    const zone_runtime_data& runtime, const zone_config_data& desired_config,
+    std::string_view domain, const service::dns::record_name_policy& names,
+    const std::vector<service::dns::provider_record>& remote_records,
+    const std::vector<service::dns::provider_line>& lines) {
+    const auto remote_by_id = index_remote_records(remote_records, lines);
+    auto managed = build_managed_records(config);
+    const auto desired_config_ids = collect_desired_config_record_ids(desired_config);
+    auto remote_ids_by_local_id = collect_remote_ids_by_local_id(runtime);
 
-    RemoteMergePlan result;
+    remote_merge_plan result;
     if (operation == "sync") {
-        result.conflicts = collectSyncConflicts(managed.records, remoteIdsByLocalId, managed.ids,
-                                                remoteById, remoteRecords, names, domain);
-        if (!result.conflicts.empty()) {
+        result.conflicts_ = collect_sync_conflicts(managed.records_, remote_ids_by_local_id, managed.ids_,
+            remote_by_id, remote_records, names, domain);
+        if (!result.conflicts_.empty()) {
             return result;
         }
     }
 
-    result.changed = !runtime.recordsImported;
-    const bool remotePreferred = operation == "sync_remote";
-    auto claimedRemoteIds = claimKnownRemoteIds(remoteIdsByLocalId, managed.ids, desiredConfigIds,
-                                                remoteById, remotePreferred, result.changed);
-    for (auto& local : managed.records) {
-        if (mergeManagedRecord(local, remoteIdsByLocalId, claimedRemoteIds, remoteById,
-                               remoteRecords, names, domain, remotePreferred)) {
-            result.changed = true;
+    result.changed_ = !runtime.records_imported_;
+    const bool remote_preferred = operation == "sync_remote";
+    auto claimed_remote_ids = claim_known_remote_ids(remote_ids_by_local_id, managed.ids_, desired_config_ids,
+        remote_by_id, remote_preferred, result.changed_);
+    for (auto& local : managed.records_) {
+        if (merge_managed_record(local, remote_ids_by_local_id, claimed_remote_ids, remote_by_id,
+                remote_records, names, domain, remote_preferred)) {
+            result.changed_ = true;
         }
     }
-    appendUnclaimedRemoteRecords(managed.records, claimedRemoteIds, remoteRecords, names, domain,
-                                 result.changed);
-    result.records = std::move(managed.records);
-    result.remoteIdsByLocalId = std::move(remoteIdsByLocalId);
+    append_unclaimed_remote_records(managed.records_, claimed_remote_ids, remote_records, names, domain,
+        result.changed_);
+    result.records_ = std::move(managed.records_);
+    result.remote_ids_by_local_id_ = std::move(remote_ids_by_local_id);
     return result;
 }
 
-} // namespace service::dns_sync::detail
+}  // namespace service::dns_sync::detail

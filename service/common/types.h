@@ -1,31 +1,28 @@
 #pragma once
 
-#include "ruvia/web/Model.h"
-
 #include <cstdint>
+
+#include "ruvia/web/model.h"
 
 namespace service::common {
 
-inline constexpr ruvia::FixedString kUuidPattern{
-    R"(^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$)"};
+RUVIA_MODEL(operation_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
+    RUVIA_REQUIRED_FIELD(message, ruvia::string));
 
-RUVIA_MODEL(OperationResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
-                     RUVIA_REQUIRED_FIELD(message, ruvia::String));
+RUVIA_MODEL(health_data, RUVIA_REQUIRED_FIELD(status, ruvia::string));
 
-RUVIA_MODEL(HealthData, RUVIA_REQUIRED_FIELD(status, ruvia::String));
+RUVIA_MODEL(health_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
+    RUVIA_REQUIRED_FIELD(message, ruvia::string),
+    RUVIA_REQUIRED_FIELD(data, health_data));
 
-RUVIA_MODEL(HealthResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
-                     RUVIA_REQUIRED_FIELD(message, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(data, HealthData));
+RUVIA_MODEL(count_data,
+    RUVIA_REQUIRED_FIELD_NAME("created_count", created_count, ruvia::int64));
 
-RUVIA_MODEL(CountData,
-                     RUVIA_REQUIRED_FIELD_NAME("created_count", createdCount, ruvia::Int64));
+RUVIA_MODEL(count_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
+    RUVIA_REQUIRED_FIELD(message, ruvia::string),
+    RUVIA_REQUIRED_FIELD(data, count_data));
 
-RUVIA_MODEL(CountResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
-                     RUVIA_REQUIRED_FIELD(message, ruvia::String),
-                     RUVIA_REQUIRED_FIELD(data, CountData));
+RUVIA_MODEL(error_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
+    RUVIA_REQUIRED_FIELD(message, ruvia::string));
 
-RUVIA_MODEL(ErrorResponse, RUVIA_REQUIRED_FIELD(code, ruvia::Int64),
-                     RUVIA_REQUIRED_FIELD(message, ruvia::String));
-
-} // namespace service::common
+}  // namespace service::common

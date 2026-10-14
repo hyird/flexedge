@@ -17,30 +17,30 @@
 
 namespace service::certificate_issuance::detail {
 
-using CertificateRequestPtr = std::unique_ptr<X509_REQ, decltype(&X509_REQ_free)>;
+using certificate_request_ptr = std::unique_ptr<X509_REQ, decltype(&X509_REQ_free)>;
 
-struct CertificateRequest final {
-    service::utils::SensitiveString privateKeyPem;
-    std::string csr;
+struct certificate_request final {
+    service::utils::sensitive_string private_key_pem_;
+    std::string csr_;
 };
 
-inline CertificateRequest createCertificateRequest(const std::vector<std::string>& domains) {
+inline certificate_request create_certificate_request(const std::vector<std::string>& domains) {
     if (domains.empty()) {
-        throw AcmeError("证书标识不能为空", true);
+        throw acme_error("证书标识不能为空", true);
     }
-    auto key = generateRsaKey();
-    CertificateRequestPtr request(X509_REQ_new(), X509_REQ_free);
+    auto key = generate_rsa_key();
+    certificate_request_ptr request(X509_REQ_new(), X509_REQ_free);
     if (!request || X509_REQ_set_version(request.get(), 0L) != 1 ||
         X509_REQ_set_pubkey(request.get(), key.get()) != 1) {
-        throw AcmeError("证书 CSR 初始化失败", true);
+        throw acme_error("证书 CSR 初始化失败", true);
     }
 
     auto* subject = X509_REQ_get_subject_name(request.get());
     if (subject == nullptr ||
         X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC,
-                                   reinterpret_cast<const unsigned char*>(domains.front().data()),
-                                   static_cast<int>(domains.front().size()), -1, 0) != 1) {
-        throw AcmeError("证书 CSR 主体设置失败", true);
+            reinterpret_cast<const unsigned char*>(domains.front().data()),
+            static_cast<int>(domains.front().size()), -1, 0) != 1) {
+        throw acme_error("证书 CSR 主体设置失败", true);
     }
 
     std::string san;
@@ -50,37 +50,37 @@ inline CertificateRequest createCertificateRequest(const std::vector<std::string
         }
         san.append("DNS:").append(domain);
     }
-    X509V3_CTX extensionContext{};
-    X509V3_set_ctx_nodb(&extensionContext);
-    X509V3_set_ctx(&extensionContext, nullptr, nullptr, request.get(), nullptr, 0);
+    X509V3_CTX extension_context{};
+    X509V3_set_ctx_nodb(&extension_context);
+    X509V3_set_ctx(&extension_context, nullptr, nullptr, request.get(), nullptr, 0);
     auto* extension =
-        X509V3_EXT_conf_nid(nullptr, &extensionContext, NID_subject_alt_name, san.data());
+        X509V3_EXT_conf_nid(nullptr, &extension_context, NID_subject_alt_name, san.data());
     if (extension == nullptr) {
-        throw AcmeError("证书 CSR SAN 设置失败", true);
+        throw acme_error("证书 CSR SAN 设置失败", true);
     }
     auto* extensions = sk_X509_EXTENSION_new_null();
     if (extensions == nullptr || sk_X509_EXTENSION_push(extensions, extension) == 0) {
         X509_EXTENSION_free(extension);
         sk_X509_EXTENSION_free(extensions);
-        throw AcmeError("证书 CSR 扩展创建失败", true);
+        throw acme_error("证书 CSR 扩展创建失败", true);
     }
-    const auto extensionsAdded = X509_REQ_add_extensions(request.get(), extensions);
+    const auto extensions_added = X509_REQ_add_extensions(request.get(), extensions);
     sk_X509_EXTENSION_pop_free(extensions, X509_EXTENSION_free);
-    if (extensionsAdded != 1 || X509_REQ_sign(request.get(), key.get(), EVP_sha256()) <= 0) {
-        throw AcmeError("证书 CSR 签名失败", true);
+    if (extensions_added != 1 || X509_REQ_sign(request.get(), key.get(), EVP_sha256()) <= 0) {
+        throw acme_error("证书 CSR 签名失败", true);
     }
 
-    const auto derSize = i2d_X509_REQ(request.get(), nullptr);
-    if (derSize <= 0) {
-        throw AcmeError("证书 CSR 编码失败", true);
+    const auto der_size = i2d_X509_REQ(request.get(), nullptr);
+    if (der_size <= 0) {
+        throw acme_error("证书 CSR 编码失败", true);
     }
-    std::vector<unsigned char> der(static_cast<std::size_t>(derSize));
+    std::vector<unsigned char> der(static_cast<std::size_t>(der_size));
     auto* output = der.data();
-    if (i2d_X509_REQ(request.get(), &output) != derSize) {
-        throw AcmeError("证书 CSR 编码失败", true);
+    if (i2d_X509_REQ(request.get(), &output) != der_size) {
+        throw acme_error("证书 CSR 编码失败", true);
     }
-    return CertificateRequest{service::utils::SensitiveString(privateKeyPem(key.get())),
-                              base64Url(der)};
+    return certificate_request{service::utils::sensitive_string(private_key_pem(key.get())),
+        base64_url(der)};
 }
 
-} // namespace service::certificate_issuance::detail
+}  // namespace service::certificate_issuance::detail

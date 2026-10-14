@@ -1,6 +1,5 @@
-#include "node/runtime/loop_shutdown.h"
-#include <atomic>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -14,20 +13,23 @@
 
 #include <asio/signal_set.hpp>
 
+#include "node/runtime/loop_shutdown.h"
+
 #if defined(__linux__)
 #include <sys/syscall.h>
 #include <unistd.h>
 #endif
 
-#include <ruvia/core/EventLoopPool.h>
-#include <ruvia/core/StopToken.h>
+#include <ruvia/core/channel.h>
+#include <ruvia/core/event_loop_pool.h>
+#include <ruvia/core/stop_token.h>
 
-#include "node/control/transport_config.h"
+#include "common/file_digest.h"
 #include "node/control/control_channel.h"
 #include "node/control/log_channel.h"
+#include "node/control/transport_config.h"
 #include "node/data/data_plane.h"
 #include "node/proto/control_protocol.h"
-#include "common/file_digest.h"
 #include "node/runtime/log_buffer.h"
 #include "node/runtime/node_credentials.h"
 #include "node/runtime/self_updater.h"
@@ -35,137 +37,137 @@
 
 namespace {
 
-std::filesystem::path executablePath(std::string_view fallback) {
+std::filesystem::path executable_path(std::string_view fallback) {
 #ifndef _WIN32
-    std::error_code procError;
-    const auto procPath = std::filesystem::read_symlink("/proc/self/exe", procError);
-    if (!procError && !procPath.empty()) {
-        return procPath;
+    std::error_code proc_error;
+    const auto proc_path = std::filesystem::read_symlink("/proc/self/exe", proc_error);
+    if (!proc_error && !proc_path.empty()) {
+        return proc_path;
     }
 #endif
     std::filesystem::path path{std::string(fallback)};
     if (path.is_relative()) {
         path = std::filesystem::current_path() / path;
     }
-    std::error_code canonicalError;
-    const auto canonical = std::filesystem::weakly_canonical(path, canonicalError);
-    return canonicalError ? path : canonical;
+    std::error_code canonical_error;
+    const auto canonical = std::filesystem::weakly_canonical(path, canonical_error);
+    return canonical_error ? path : canonical;
 }
 
-[[noreturn]] void reexecNode(const std::filesystem::path& binaryPath, char* const argv[]) {
+[[noreturn]] void reexec_node(const std::filesystem::path& binary_path, char* const argv[]) {
 #if defined(__linux__)
     if (::syscall(SYS_close_range, 3U, std::numeric_limits<unsigned int>::max(), 0U) == 0) {
-        ::execv(binaryPath.c_str(), argv);
+        ::execv(binary_path.c_str(), argv);
     }
 #else
-    (void)binaryPath;
+    (void)binary_path;
     (void)argv;
 #endif
     std::cerr << "flexedge node could not re-execute upgraded binary\n";
     std::_Exit(EXIT_FAILURE);
 }
 
-} // namespace
+}  // namespace
 
 int main(int argc, char* argv[]) {
     try {
         if (argc != 3) {
             throw std::runtime_error("usage: node <server-domain> <credentials-file>");
         }
-        std::cerr << "flexedge node " << flexedge::node::kNodeVersion << " starting\n";
-        auto webSocket = flexedge::node::controlTransportConfig(argv[1]);
-        ruvia::EventLoopPool controlLoops({.loopCount = 1});
-        ruvia::EventLoopPool workerLoops;
-        const auto loop = controlLoops.loop(0);
-        flexedge::node::RuntimeState runtime;
-        auto [logQueuedSender, logQueuedReceiver] =
-            ruvia::makeChannel<bool>(loop.handle(), {.capacity = 1});
-        flexedge::node::NodeLogBuffer logBuffer(workerLoops.loopCount(),
-            [logQueuedSender] { (void)logQueuedSender.send(true); });
-        const auto updaterLogs = logBuffer.backgroundProducer();
-        const std::filesystem::path stateDirectory{"./state"};
-        const auto binaryPath = executablePath(argv[0]);
-        auto credentials = flexedge::node::NodeCredentials::load(argv[2]);
-        if (const auto upgrade = flexedge::node::takePendingUpgradeRecord(
-                stateDirectory / "pending-upgrade", flexedge::crypto::fileSha256(binaryPath))) {
-            logBuffer.node("info", "upgrade", upgrade->message());
+        std::cerr << "flexedge node " << flexedge::node::node_version << " starting\n";
+        auto web_socket = flexedge::node::control_transport_config(argv[1]);
+        ruvia::event_loop_pool control_loops({.loop_count_ = 1});
+        ruvia::event_loop_pool worker_loops;
+        const auto loop = control_loops.loop(0);
+        flexedge::node::runtime_state runtime;
+        auto [log_queued_sender, log_queued_receiver] =
+            ruvia::make_channel<bool>(loop.handle(), {.capacity_ = 1});
+        flexedge::node::node_log_buffer log_buffer(worker_loops.loop_count(),
+            [log_queued_sender] { (void)log_queued_sender.send(true); });
+        const auto updater_logs = log_buffer.background_producer();
+        const std::filesystem::path state_directory{"./state"};
+        const auto binary_path = executable_path(argv[0]);
+        auto credentials = flexedge::node::node_credentials::load(argv[2]);
+        if (const auto upgrade = flexedge::node::take_pending_upgrade_record(
+                state_directory / "pending-upgrade", flexedge::crypto::file_sha256(binary_path))) {
+            log_buffer.node("info", "upgrade", upgrade->message());
         }
-        std::string startupLog{"flexedge node "};
-        startupLog.append(flexedge::node::kNodeVersion);
-        startupLog.append(" starting");
-        logBuffer.node("info", "runtime", startupLog);
-        flexedge::node::DataPlane dataPlane(workerLoops, loop, runtime, logBuffer);
-        ruvia::StopSource stopSource;
-        std::atomic<bool> shuttingDown{};
-        const auto requestStop = [&](std::string_view reason) {
-            if (!shuttingDown.exchange(true)) {
+        std::string startup_log{"flexedge node "};
+        startup_log.append(flexedge::node::node_version);
+        startup_log.append(" starting");
+        log_buffer.node("info", "runtime", startup_log);
+        flexedge::node::data_plane data_plane(worker_loops, loop, runtime, log_buffer);
+        ruvia::stop_source stop_source;
+        std::atomic<bool> shutting_down{};
+        const auto request_stop = [&](std::string_view reason) {
+            if (!shutting_down.exchange(true)) {
                 std::cerr << "flexedge node " << reason << '\n';
             }
-            dataPlane.requestStopAccepting();
-            stopSource.requestStop();
+            data_plane.request_stop_accepting();
+            stop_source.request_stop();
         };
-        asio::signal_set signals(loop.ioContext(), SIGINT, SIGTERM);
+        asio::signal_set signals(loop.io_context(), SIGINT, SIGTERM);
         signals.async_wait([&](const std::error_code& error, int) {
             if (error) {
                 return;
             }
-            requestStop("shutdown requested");
+            request_stop("shutdown requested");
         });
-        flexedge::node::SelfUpdater selfUpdater({
-            .binaryPath = binaryPath,
-            .currentVersion = std::string(flexedge::node::kNodeVersion),
-            .upgradeRecordPath = stateDirectory / "pending-upgrade",
-            .nodeLog =
-                [updaterLogs](std::string_view level, std::string_view category,
-                              std::string_view message) {
-                    return updaterLogs.node(level, category, message);
+        flexedge::node::self_updater self_updater({
+            .binary_path_ = binary_path,
+            .current_version_ = std::string(flexedge::node::node_version),
+            .upgrade_record_path_ = state_directory / "pending-upgrade",
+            .node_log_ =
+                [updater_logs](std::string_view level, std::string_view category,
+                    std::string_view message) {
+                    return updater_logs.node(level, category, message);
                 },
-            .requestRestart =
-                [&, binaryPath] {
-                    dataPlane.requestStopAccepting();
-                    reexecNode(binaryPath, argv);
+            .request_restart_ =
+                [&, binary_path] {
+                    data_plane.request_stop_accepting();
+                    reexec_node(binary_path, argv);
                 },
         });
-        auto controlWebSocket = webSocket;
-        controlWebSocket.readTimeout =
-            std::chrono::seconds(flexedge::node::kReleaseWatchMaximumSeconds + 5);
-        flexedge::node::ControlChannel channel(
+        auto control_web_socket = web_socket;
+        control_web_socket.read_timeout_ =
+            std::chrono::seconds(flexedge::node::release_watch_maximum_seconds + 5);
+        flexedge::node::control_channel channel(
             loop,
             {
-                .webSocket = std::move(controlWebSocket),
-                .stopToken = stopSource.token(),
+                .web_socket_ = std::move(control_web_socket),
+                .stop_token_ = stop_source.token(),
             },
-            flexedge::node::StateStore{stateDirectory, credentials.secret()}, credentials, runtime,
-            dataPlane, logBuffer, selfUpdater);
-        flexedge::node::LogChannel logChannel(loop,
-                                              {
-                                                  .webSocket = std::move(webSocket),
-                                                  .stopToken = stopSource.token(),
-                                              },
-                                              credentials, logBuffer, std::move(logQueuedReceiver));
-        flexedge::node::LoopShutdown loopShutdown(workerLoops, controlLoops);
-        workerLoops.start();
-        controlLoops.start();
-        dataPlane.start();
+            flexedge::node::state_store{state_directory, credentials.secret()}, credentials, runtime,
+            data_plane, log_buffer, self_updater);
+        flexedge::node::log_channel log_channel(loop,
+            {
+                .web_socket_ = std::move(web_socket),
+                .stop_token_ = stop_source.token(),
+            },
+            credentials, log_buffer, std::move(log_queued_receiver));
+        flexedge::node::loop_shutdown loop_shutdown(worker_loops, control_loops);
+        worker_loops.start();
+        control_loops.start();
+        data_plane.start();
         auto task = loop.start(channel.run());
-        auto logTask = loop.start(logChannel.run());
+        auto log_task = loop.start(log_channel.run());
         try {
             task.get();
         } catch (...) {
-            loopShutdown.stopAndJoin();
-            if (!shuttingDown.load()) {
+            loop_shutdown.stop_and_join();
+            if (!shutting_down.load()) {
                 throw;
             }
             return 0;
         }
-        if (shuttingDown.load()) {
-            const auto drainDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-            while (!dataPlane.drained() && std::chrono::steady_clock::now() < drainDeadline) {
+        if (shutting_down.load()) {
+            const auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (!data_plane.drained() && std::chrono::steady_clock::now() < drain_deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
-            logTask.get();
+            log_task.get();
         }
-        loopShutdown.stopAndJoin();
+        loop_shutdown.stop_and_join();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "flexedge node failed: " << error.what() << '\n';

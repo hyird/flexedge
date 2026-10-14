@@ -1,5 +1,9 @@
 #pragma once
 
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
+#include <google/protobuf/message_lite.h>
+
 #include <array>
 #include <cstddef>
 #include <limits>
@@ -7,25 +11,21 @@
 #include <string>
 #include <string_view>
 
-#include "common/sha256.h"
-#include "common/hex.h"
-
 #include <openssl/evp.h>
 
-#include <google/protobuf/io/coded_stream.h>
-#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
-#include <google/protobuf/message_lite.h>
+#include "common/hex.h"
+#include "common/sha256.h"
 
 namespace flexedge::node {
 
-inline bool parseArtifact(std::string_view bytes, google::protobuf::MessageLite& message) {
+inline bool parse_artifact(std::string_view bytes, google::protobuf::MessageLite& message) {
     if (bytes.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
         return false;
     }
     return message.ParseFromArray(bytes.data(), static_cast<int>(bytes.size()));
 }
 
-inline std::string serializeArtifact(const google::protobuf::MessageLite& message) {
+inline std::string serialize_artifact(const google::protobuf::MessageLite& message) {
     std::string bytes;
     bytes.reserve(message.ByteSizeLong());
     {
@@ -39,19 +39,19 @@ inline std::string serializeArtifact(const google::protobuf::MessageLite& messag
     return bytes;
 }
 
-inline std::string artifactDigest(std::string_view bytes) {
+inline std::string artifact_digest(std::string_view bytes) {
     std::array<unsigned char, 32> digest{};
-    unsigned int digestSize{};
-    if (EVP_Digest(bytes.data(), bytes.size(), digest.data(), &digestSize, EVP_sha256(), nullptr) !=
+    unsigned int digest_size{};
+    if (EVP_Digest(bytes.data(), bytes.size(), digest.data(), &digest_size, EVP_sha256(), nullptr) !=
             1 ||
-        digestSize != digest.size()) {
+        digest_size != digest.size()) {
         throw std::runtime_error("could not hash node protocol artifact");
     }
-    return flexedge::crypto::hexEncode(digest);
+    return flexedge::crypto::hex_encode(digest);
 }
 
-inline std::string artifactDigest(const google::protobuf::MessageLite& message) {
-    return artifactDigest(serializeArtifact(message));
+inline std::string artifact_digest(const google::protobuf::MessageLite& message) {
+    return artifact_digest(serialize_artifact(message));
 }
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

@@ -1,5 +1,9 @@
 #pragma once
 
+#include <ruvia/core/channel.h>
+#include <ruvia/core/task.h>
+#include <ruvia/web/web_worker.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -14,44 +18,47 @@
 #include <utility>
 #include <vector>
 
-#include <ruvia/core/Channel.h>
-#include <ruvia/core/Task.h>
-#include <ruvia/web/WebWorker.h>
-
 namespace service::node_dispatch::fanout {
 
-inline constexpr auto kSseHeartbeatInterval = std::chrono::seconds(15);
-inline constexpr std::size_t kSubscriberSignalCapacity{1};
+inline constexpr auto sse_heartbeat_interval = std::chrono::seconds(15);
+inline constexpr std::size_t subscriber_signal_capacity{1};
 
-class Hub final {
-  public:
-    class Subscription final {
-      public:
-        Subscription(const Subscription&) = delete;
-        Subscription& operator=(const Subscription&) = delete;
+class hub final {
+public:
+    class subscription final {
+    public:
+        subscription(const subscription&) = delete;
+        subscription& operator=(const subscription&) = delete;
 
-        Subscription(Subscription&& other) noexcept
-            : owner_(std::exchange(other.owner_, nullptr)), tenantId_(std::move(other.tenantId_)),
-              id_(std::exchange(other.id_, 0)), receiver_(std::move(other.receiver_)) {}
+        subscription(subscription&& other) noexcept
+            : owner_(std::exchange(other.owner_, nullptr)),
+              tenant_id_(std::move(other.tenant_id_)),
+              id_(std::exchange(other.id_, 0)),
+              receiver_(std::move(other.receiver_)) {}
 
-        Subscription& operator=(Subscription&&) = delete;
+        subscription& operator=(subscription&&) = delete;
 
-        ~Subscription() { close(); }
+        ~subscription() {
+            close();
+        }
 
-        [[nodiscard]] ruvia::Task<ruvia::WorkerWaitResult<std::uint64_t>>
-        receiveFor(std::chrono::steady_clock::duration timeout, ruvia::StopToken stopToken) const {
+        [[nodiscard]] ruvia::task<ruvia::worker_wait_result<std::uint64_t>>
+        receive_for(std::chrono::steady_clock::duration timeout, ruvia::stop_token stop_token) const {
             if (!receiver_) {
                 throw std::logic_error("node dispatch subscription receiver is not initialized");
             }
-            return receiver_->receiveFor(timeout, std::move(stopToken));
+            return receiver_->receive_for(timeout, std::move(stop_token));
         }
 
-      private:
-        friend class Hub;
+    private:
+        friend class hub;
 
-        Subscription(Hub& owner, std::string tenantId, std::uint64_t id,
-                     ruvia::ChannelReceiver<std::uint64_t> receiver)
-            : owner_(&owner), tenantId_(std::move(tenantId)), id_(id), receiver_(std::move(receiver)) {}
+        subscription(hub& owner, std::string tenant_id, std::uint64_t id,
+            ruvia::channel_receiver<std::uint64_t> receiver)
+            : owner_(&owner),
+              tenant_id_(std::move(tenant_id)),
+              id_(id),
+              receiver_(std::move(receiver)) {}
 
         void close() noexcept {
             if (owner_ == nullptr) {
@@ -60,84 +67,84 @@ class Hub final {
             if (receiver_) {
                 receiver_->close();
             }
-            owner_->unsubscribe(tenantId_, id_);
+            owner_->unsubscribe(tenant_id_, id_);
             owner_ = nullptr;
             receiver_.reset();
         }
 
-        Hub* owner_{};
-        std::string tenantId_;
+        hub* owner_{};
+        std::string tenant_id_;
         std::uint64_t id_{};
-        std::optional<ruvia::ChannelReceiver<std::uint64_t>> receiver_;
+        std::optional<ruvia::channel_receiver<std::uint64_t>> receiver_;
     };
 
-    [[nodiscard]] Subscription subscribe(const ruvia::WorkerHandle& worker,
-                                         std::string_view tenantId) {
-        if (tenantId.empty()) {
+    [[nodiscard]] subscription subscribe(const ruvia::worker_handle& worker,
+        std::string_view tenant_id) {
+        if (tenant_id.empty()) {
             throw std::invalid_argument("node dispatch subscription requires a tenant");
         }
         auto [sender, receiver] =
-            ruvia::makeChannel<std::uint64_t>(worker, {.capacity = kSubscriberSignalCapacity});
+            ruvia::make_channel<std::uint64_t>(worker, {.capacity_ = subscriber_signal_capacity});
         const std::lock_guard lock(mutex_);
-        const auto id = nextSubscriptionId_++;
-        auto key = std::string(tenantId);
-        subscribers_[key].push_back({.id = id, .sender = std::move(sender)});
-        return Subscription(*this, std::move(key), id, std::move(receiver));
+        const auto id = next_subscription_id_++;
+        auto key = std::string(tenant_id);
+        subscribers_[key].push_back({.id_ = id, .sender_ = std::move(sender)});
+        return subscription(*this, std::move(key), id, std::move(receiver));
     }
 
-    void publish(std::string_view tenantId) {
-        std::vector<Subscriber> subscribers;
+    void publish(std::string_view tenant_id) {
+        std::vector<subscriber> subscribers;
         {
             const std::lock_guard lock(mutex_);
-            const auto found = subscribers_.find(std::string(tenantId));
+            const auto found = subscribers_.find(std::string(tenant_id));
             if (found == subscribers_.end()) {
                 return;
             }
             subscribers = found->second;
         }
 
-        const auto signal = nextSignal_.fetch_add(1, std::memory_order_relaxed);
+        const auto signal = next_signal_.fetch_add(1, std::memory_order_relaxed);
         std::vector<std::uint64_t> closed;
         for (const auto& subscriber : subscribers) {
-            const auto result = subscriber.sender.send(signal);
-            if (result.status() == ruvia::ChannelSendStatus::kClosed ||
-                result.status() == ruvia::ChannelSendStatus::kWorkerStopping) {
-                closed.push_back(subscriber.id);
+            const auto result = subscriber.sender_.send(signal);
+            if (result.status() == ruvia::channel_send_status::closed ||
+                result.status() == ruvia::channel_send_status::worker_stopping) {
+                closed.push_back(subscriber.id_);
             }
         }
         if (!closed.empty()) {
-            removeClosed(tenantId, closed);
+            remove_closed(tenant_id, closed);
         }
     }
 
-  private:
-    struct Subscriber final {
-        std::uint64_t id;
-        ruvia::ChannelSender<std::uint64_t> sender;
+private:
+    struct subscriber final {
+        std::uint64_t id_;
+        ruvia::channel_sender<std::uint64_t> sender_;
     };
 
-    void unsubscribe(std::string_view tenantId, std::uint64_t id) noexcept {
+    void unsubscribe(std::string_view tenant_id, std::uint64_t id) noexcept {
         const std::lock_guard lock(mutex_);
-        const auto found = subscribers_.find(std::string(tenantId));
+        const auto found = subscribers_.find(std::string(tenant_id));
         if (found == subscribers_.end()) {
             return;
         }
         auto& values = found->second;
-        std::erase_if(values, [id](const Subscriber& subscriber) { return subscriber.id == id; });
+        std::erase_if(values, [id](const subscriber& subscriber) { return subscriber.id_ == id; });
         if (values.empty()) {
             subscribers_.erase(found);
         }
     }
 
-    void removeClosed(std::string_view tenantId, const std::vector<std::uint64_t>& closed) noexcept {
+    void remove_closed(std::string_view tenant_id, const std::vector<std::uint64_t>& closed) noexcept {
         const std::lock_guard lock(mutex_);
-        const auto found = subscribers_.find(std::string(tenantId));
+        const auto found = subscribers_.find(std::string(tenant_id));
         if (found == subscribers_.end()) {
             return;
         }
         auto& values = found->second;
-        std::erase_if(values, [&closed](const Subscriber& subscriber) {
-            return std::ranges::find(closed, subscriber.id) != closed.end();
+        std::erase_if(values, [&closed](const subscriber& subscriber) {
+            return std::ranges::find(closed, subscriber.id_) != closed.end();
         });
         if (values.empty()) {
             subscribers_.erase(found);
@@ -145,14 +152,14 @@ class Hub final {
     }
 
     std::mutex mutex_;
-    std::unordered_map<std::string, std::vector<Subscriber>> subscribers_;
-    std::atomic<std::uint64_t> nextSignal_{1};
-    std::uint64_t nextSubscriptionId_{1};
+    std::unordered_map<std::string, std::vector<subscriber>> subscribers_;
+    std::atomic<std::uint64_t> next_signal_{1};
+    std::uint64_t next_subscription_id_{1};
 };
 
-inline Hub& hub() {
-    static Hub value;
+inline hub& get_hub() {
+    static hub value;
     return value;
 }
 
-} // namespace service::node_dispatch::fanout
+}  // namespace service::node_dispatch::fanout

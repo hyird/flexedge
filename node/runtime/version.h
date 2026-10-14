@@ -9,12 +9,12 @@
 
 namespace flexedge::node {
 
-inline constexpr std::string_view kNodeVersion{FLEXEDGE_NODE_VERSION};
+inline constexpr std::string_view node_version{FLEXEDGE_NODE_VERSION};
 
-inline std::string nodeUserAgent() {
+inline std::string node_user_agent() {
     std::string value{"FlexEdge-Node/"};
-    value += kNodeVersion;
+    value += node_version;
     return value;
 }
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

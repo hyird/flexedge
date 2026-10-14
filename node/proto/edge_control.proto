@@ -287,7 +287,11 @@ message Website {
     bool https_enabled = 11;
     string minimum_tls_version = 12;
     bool force_https = 13;
-    bool http2_enabled = 14;
+    // Retired: never set and ignored. Delivery objects are content-addressed by the
+    // SHA-256 of their deterministic serialization, and objects published while this
+    // field was live still carry it. Keeping it known re-serializes them byte-identically;
+    // as an unknown field it would be re-emitted after all known fields and fail verification.
+    bool http2_enabled = 14 [deprecated = true];
     bool hsts_enabled = 15;
     string health_check_path = 16;
     uint32 health_check_interval_seconds = 17;

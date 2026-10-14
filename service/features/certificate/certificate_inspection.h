@@ -25,31 +25,31 @@
 
 namespace service::certificate_issuance::detail {
 
-using CertificateX509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
-using CertificateBioPtr = std::unique_ptr<BIO, decltype(&BIO_free)>;
-using CertificateBnPtr = std::unique_ptr<BIGNUM, decltype(&BN_free)>;
+using certificate_x509_ptr = std::unique_ptr<X509, decltype(&X509_free)>;
+using certificate_bio_ptr = std::unique_ptr<BIO, decltype(&BIO_free)>;
+using certificate_bn_ptr = std::unique_ptr<BIGNUM, decltype(&BN_free)>;
 
-inline std::string formatAsn1Time(const ASN1_TIME* value) {
+inline std::string format_asn1_time(const ASN1_TIME* value) {
     std::tm time{};
     if (value == nullptr || ASN1_TIME_to_tm(value, &time) != 1) {
-        throw AcmeError("证书有效期解析失败", true);
+        throw acme_error("证书有效期解析失败", true);
     }
     std::array<char, 32> output{};
     if (std::strftime(output.data(), output.size(), "%Y-%m-%dT%H:%M:%SZ", &time) == 0) {
-        throw AcmeError("证书有效期格式化失败", true);
+        throw acme_error("证书有效期格式化失败", true);
     }
     return output.data();
 }
 
-inline std::string serialNumber(X509* certificate) {
-    CertificateBnPtr number(ASN1_INTEGER_to_BN(X509_get_serialNumber(certificate), nullptr),
-                            BN_free);
+inline std::string serial_number(X509* certificate) {
+    certificate_bn_ptr number(ASN1_INTEGER_to_BN(X509_get_serialNumber(certificate), nullptr),
+        BN_free);
     if (!number) {
-        throw AcmeError("证书序列号读取失败", true);
+        throw acme_error("证书序列号读取失败", true);
     }
     char* raw = BN_bn2hex(number.get());
     if (raw == nullptr) {
-        throw AcmeError("证书序列号编码失败", true);
+        throw acme_error("证书序列号编码失败", true);
     }
     std::string result(raw);
     OPENSSL_free(raw);
@@ -60,7 +60,7 @@ inline std::string fingerprint(X509* certificate) {
     std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
     unsigned int size = 0;
     if (X509_digest(certificate, EVP_sha256(), digest.data(), &size) != 1) {
-        throw AcmeError("证书指纹计算失败", true);
+        throw acme_error("证书指纹计算失败", true);
     }
     std::ostringstream output;
     output << std::uppercase << std::hex << std::setfill('0');
@@ -73,12 +73,12 @@ inline std::string fingerprint(X509* certificate) {
     return output.str();
 }
 
-inline void validateCertificateDomains(X509* certificate,
-                                       const std::vector<std::string>& expectedDomains) {
+inline void validate_certificate_domains(X509* certificate,
+    const std::vector<std::string>& expected_domains) {
     auto* names = static_cast<GENERAL_NAMES*>(
         X509_get_ext_d2i(certificate, NID_subject_alt_name, nullptr, nullptr));
     if (names == nullptr) {
-        throw AcmeError("签发证书缺少 SAN", true);
+        throw acme_error("签发证书缺少 SAN", true);
     }
     std::set<std::string> actual;
     const auto count = sk_GENERAL_NAME_num(names);
@@ -94,39 +94,39 @@ inline void validateCertificateDomains(X509* certificate,
         }
     }
     GENERAL_NAMES_free(names);
-    const std::set<std::string> expected(expectedDomains.begin(), expectedDomains.end());
+    const std::set<std::string> expected(expected_domains.begin(), expected_domains.end());
     if (actual != expected) {
-        throw AcmeError("签发证书的域名集合与申请不一致", true);
+        throw acme_error("签发证书的域名集合与申请不一致", true);
     }
 }
 
-inline IssuedCertificate inspectCertificate(service::utils::SensitiveString privateKey,
-                                            std::string certificateChain,
-                                            const std::vector<std::string>& domains) {
-    auto key = loadPrivateKey(privateKey.view());
-    CertificateBioPtr bio(
-        BIO_new_mem_buf(certificateChain.data(), static_cast<int>(certificateChain.size())),
+inline issued_certificate inspect_certificate(service::utils::sensitive_string private_key,
+    std::string certificate_chain,
+    const std::vector<std::string>& domains) {
+    auto key = load_private_key(private_key.view());
+    certificate_bio_ptr bio(
+        BIO_new_mem_buf(certificate_chain.data(), static_cast<int>(certificate_chain.size())),
         BIO_free);
     if (!bio) {
-        throw AcmeError("证书链读取失败", true);
+        throw acme_error("证书链读取失败", true);
     }
-    CertificateX509Ptr certificate(PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr),
-                                   X509_free);
+    certificate_x509_ptr certificate(PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr),
+        X509_free);
     if (!certificate) {
-        throw AcmeError("ACME 返回的证书链格式无效", true);
+        throw acme_error("ACME 返回的证书链格式无效", true);
     }
     if (X509_check_private_key(certificate.get(), key.get()) != 1) {
-        throw AcmeError("签发证书与私钥不匹配", true);
+        throw acme_error("签发证书与私钥不匹配", true);
     }
-    validateCertificateDomains(certificate.get(), domains);
-    return IssuedCertificate{
-        std::move(privateKey),
-        std::move(certificateChain),
-        formatAsn1Time(X509_get0_notBefore(certificate.get())),
-        formatAsn1Time(X509_get0_notAfter(certificate.get())),
-        serialNumber(certificate.get()),
+    validate_certificate_domains(certificate.get(), domains);
+    return issued_certificate{
+        std::move(private_key),
+        std::move(certificate_chain),
+        format_asn1_time(X509_get0_notBefore(certificate.get())),
+        format_asn1_time(X509_get0_notAfter(certificate.get())),
+        serial_number(certificate.get()),
         fingerprint(certificate.get()),
     };
 }
 
-} // namespace service::certificate_issuance::detail
+}  // namespace service::certificate_issuance::detail

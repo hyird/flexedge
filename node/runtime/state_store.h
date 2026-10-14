@@ -11,110 +11,153 @@
 #include "node/proto/artifact.h"
 #include "node/proto/edge_control.pb.h"
 #include "node/proto/schema_version.h"
-#include "node/runtime/state_cipher.h"
 #include "node/runtime/secure_file.h"
+#include "node/runtime/state_cipher.h"
 
 namespace flexedge::node {
 
-struct PersistentState final {
-    v2::ActiveState active;
-    std::vector<v2::DeliveryObject> objects;
+// The local copy of applied state cannot be used by this build: it does not decrypt, parse,
+// or reproduce its content digest, or it is incomplete. Only the on-disk cache is affected;
+// the control plane resends desired state after the cache is discarded.
+class stored_state_unusable final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
 };
 
-class StateStore final {
-  public:
-    StateStore(std::filesystem::path directory, std::string_view credentialSecret)
-        : directory_(std::move(directory)),
-          cipher_(std::make_shared<StateCipher>(credentialSecret)) {}
+struct persistent_state final {
+    v2::ActiveState active_;
+    std::vector<v2::DeliveryObject> objects_;
+};
 
-    [[nodiscard]] PersistentState load() const {
-        PersistentState state;
-        const auto activeBytes = readEncrypted(directory_ / "active" / "state.pb");
-        if (!activeBytes) {
+class state_store final {
+public:
+    state_store(std::filesystem::path directory, std::string_view credential_secret)
+        : directory_(std::move(directory)),
+          cipher_(std::make_shared<state_cipher>(credential_secret)) {}
+
+    [[nodiscard]] persistent_state load() const {
+        persistent_state state;
+        const auto active_bytes = read_encrypted(directory_ / "active" / "state.pb");
+        if (!active_bytes) {
             return state;
         }
-        if (!state.active.ParseFromString(*activeBytes)) {
-            throw std::runtime_error("stored active state is not valid protobuf");
+        if (!state.active_.ParseFromString(*active_bytes)) {
+            throw stored_state_unusable("stored active state is not valid protobuf");
         }
-        if (!state.active.has_node_spec() || !state.active.has_release()) {
-            throw std::runtime_error("stored active state is incomplete");
+        if (!state.active_.has_node_spec() || !state.active_.has_release()) {
+            throw stored_state_unusable("stored active state is incomplete");
         }
-        if (state.active.node_spec().content().schema_version() != kNodeSpecSchemaVersion ||
-            !supportedClusterReleaseSchema(state.active.release().content().schema_version())) {
+        if (state.active_.node_spec().content().schema_version() != node_spec_schema_version ||
+            !supported_cluster_release_schema(state.active_.release().content().schema_version())) {
             return {};
         }
-        state.objects.reserve(
-            static_cast<std::size_t>(state.active.release().content().objects_size()));
-        for (const auto& reference : state.active.release().content().objects()) {
-            auto object = loadObject(reference.digest_sha256());
-            if (!object) {
-                throw std::runtime_error("stored active release object is missing");
+        state.objects_.reserve(
+            static_cast<std::size_t>(state.active_.release().content().objects_size()));
+        for (const auto& reference : state.active_.release().content().objects()) {
+            if (!safe_digest(reference.digest_sha256())) {
+                throw stored_state_unusable("stored active release references an invalid digest");
             }
-            state.objects.push_back(std::move(*object));
+            auto object = load_object(reference.digest_sha256());
+            if (!object) {
+                throw stored_state_unusable(
+                    "stored active release object " + reference.digest_sha256() + " is missing");
+            }
+            state.objects_.push_back(std::move(*object));
         }
         return state;
     }
 
-    [[nodiscard]] std::optional<v2::DeliveryObject> loadObject(std::string_view digest) const {
-        if (!safeDigest(digest)) {
+    [[nodiscard]] std::optional<v2::DeliveryObject> load_object(std::string_view digest) const {
+        if (!safe_digest(digest)) {
             throw std::runtime_error("invalid release object digest");
         }
-        const auto bytes = readEncrypted(directory_ / "objects" / (std::string(digest) + ".pb"));
+        const auto bytes = read_encrypted(object_path(digest));
         if (!bytes) {
             return std::nullopt;
         }
         v2::DeliveryObject object;
         if (!object.ParseFromString(*bytes) || object.digest_sha256() != digest ||
-            !object.has_content() || artifactDigest(object.content()) != digest) {
-            throw std::runtime_error("stored release object failed content verification");
+            !object.has_content() || artifact_digest(object.content()) != digest) {
+            throw stored_state_unusable(
+                "stored release object " + std::string(digest) + " failed content verification");
         }
         return object;
     }
 
+    // Moves an unusable active state into the single previous slot, like activate_staged
+    // does for a replaced state, so the next session starts without local state.
+    void discard_active() const {
+        const auto active = directory_ / "active" / "state.pb";
+        if (const auto bytes = read_secure_file(active); bytes) {
+            write_secure_file_atomic(directory_ / "previous" / "state.pb", *bytes);
+        }
+        std::filesystem::remove(active);
+    }
+
+    // Objects are content-addressed; a verified copy is fetched again under the same name.
+    void discard_object(std::string_view digest) const {
+        if (!safe_digest(digest)) {
+            throw std::runtime_error("invalid release object digest");
+        }
+        std::filesystem::remove(object_path(digest));
+    }
+
     void stage(const v2::ActiveState& active,
-               const std::vector<v2::DeliveryObject>& objects) const {
+        const std::vector<v2::DeliveryObject>& objects) const {
         if (!active.has_node_spec() || !active.has_release()) {
             throw std::invalid_argument("cannot stage an incomplete node state");
         }
         for (const auto& object : objects) {
-            if (!safeDigest(object.digest_sha256()) || !object.has_content() ||
-                artifactDigest(object.content()) != object.digest_sha256()) {
+            if (!safe_digest(object.digest_sha256()) || !object.has_content() ||
+                artifact_digest(object.content()) != object.digest_sha256()) {
                 throw std::runtime_error("cannot stage an invalid release object");
             }
-            writeEncrypted(directory_ / "objects" / (object.digest_sha256() + ".pb"),
-                           serializeArtifact(object));
+            write_encrypted(object_path(object.digest_sha256()), serialize_artifact(object));
         }
-        writeEncrypted(directory_ / "staged" / "state.pb", serializeArtifact(active));
+        write_encrypted(directory_ / "staged" / "state.pb", serialize_artifact(active));
     }
 
-    void activateStaged() const {
-        const auto staged = readSecureFile(directory_ / "staged" / "state.pb");
+    void activate_staged() const {
+        const auto staged = read_secure_file(directory_ / "staged" / "state.pb");
         if (!staged) {
             throw std::runtime_error("staged node state does not exist");
         }
-        if (const auto active = readSecureFile(directory_ / "active" / "state.pb"); active) {
-            writeSecureFileAtomic(directory_ / "previous" / "state.pb", *active);
+        if (const auto active = read_secure_file(directory_ / "active" / "state.pb"); active) {
+            write_secure_file_atomic(directory_ / "previous" / "state.pb", *active);
         }
-        writeSecureFileAtomic(directory_ / "active" / "state.pb", *staged);
+        write_secure_file_atomic(directory_ / "active" / "state.pb", *staged);
         std::error_code ignored;
         std::filesystem::remove(directory_ / "staged" / "state.pb", ignored);
     }
 
-  private:
-    [[nodiscard]] static bool safeDigest(std::string_view value) { return flexedge::crypto::isSha256Digest(value); }
-
-    [[nodiscard]] std::optional<std::string>
-    readEncrypted(const std::filesystem::path& path) const {
-        const auto bytes = readSecureFile(path);
-        return bytes ? std::optional<std::string>{cipher_->open(*bytes)} : std::nullopt;
+private:
+    [[nodiscard]] static bool safe_digest(std::string_view value) {
+        return flexedge::crypto::is_sha256_digest(value);
     }
 
-    void writeEncrypted(const std::filesystem::path& path, std::string_view bytes) const {
-        writeSecureFileAtomic(path, cipher_->seal(bytes));
+    [[nodiscard]] std::filesystem::path object_path(std::string_view digest) const {
+        return directory_ / "objects" / (std::string(digest) + ".pb");
+    }
+
+    [[nodiscard]] std::optional<std::string>
+    read_encrypted(const std::filesystem::path& path) const {
+        const auto bytes = read_secure_file(path);
+        if (!bytes) {
+            return std::nullopt;
+        }
+        try {
+            return cipher_->open(*bytes);
+        } catch (const std::runtime_error& error) {
+            throw stored_state_unusable(path.filename().string() + ": " + error.what());
+        }
+    }
+
+    void write_encrypted(const std::filesystem::path& path, std::string_view bytes) const {
+        write_secure_file_atomic(path, cipher_->seal(bytes));
     }
 
     std::filesystem::path directory_;
-    std::shared_ptr<const StateCipher> cipher_;
+    std::shared_ptr<const state_cipher> cipher_;
 };
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

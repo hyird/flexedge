@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ruvia/web/Model.h"
+#include <ruvia/http/http_known_method.h>
 
 #include <algorithm>
 #include <array>
@@ -10,7 +10,7 @@
 #include <string>
 #include <string_view>
 
-#include <ruvia/http/HttpKnownMethod.h>
+#include "ruvia/web/model.h"
 
 #include "service/config/outbound.h"
 #include "service/features/background/worker_pool.h"
@@ -18,34 +18,34 @@
 
 namespace service::website_dns {
 
-RUVIA_MODEL(DnsDohAnswerInput, RUVIA_OPTIONAL_FIELD(type, ruvia::Int64),
-                    RUVIA_OPTIONAL_FIELD(data, ruvia::String));
-RUVIA_MODEL(DnsDohEnvelopeInput, RUVIA_OPTIONAL_FIELD_NAME("Status", status, ruvia::Int64),
-                    RUVIA_OPTIONAL_FIELD_NAME("Answer", answer, ruvia::Array<DnsDohAnswerInput>));
+RUVIA_MODEL(dns_doh_answer_input, RUVIA_OPTIONAL_FIELD(type, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD(data, ruvia::string));
+RUVIA_MODEL(dns_doh_envelope_input, RUVIA_OPTIONAL_FIELD_NAME("Status", status, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD_NAME("Answer", answer, ruvia::array<dns_doh_answer_input>));
 
-struct ProbeResult final {
-    bool matched;
-    std::string queryName;
-    std::string observedTarget;
+struct probe_result final {
+    bool matched_;
+    std::string query_name_;
+    std::string observed_target_;
 };
 
-inline std::string normalizeDnsName(std::string_view value) {
+inline std::string normalize_dns_name(std::string_view value) {
     while (!value.empty() && value.back() == '.') {
         value.remove_suffix(1);
     }
     std::string result(value);
     std::transform(result.begin(), result.end(), result.begin(),
-                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     return result;
 }
 
-inline std::string probeName(std::string_view hostname, std::string_view websiteDomainId) {
+inline std::string probe_name(std::string_view hostname, std::string_view website_domain_id) {
     if (!hostname.starts_with("*.")) {
         return std::string(hostname);
     }
     std::string token;
     token.reserve(8);
-    for (const auto ch : websiteDomainId) {
+    for (const auto ch : website_domain_id) {
         if (ch == '-') {
             continue;
         }
@@ -57,34 +57,34 @@ inline std::string probeName(std::string_view hostname, std::string_view website
     return "flexedge-" + token + "." + std::string(hostname.substr(2));
 }
 
-inline ruvia::Task<ProbeResult> probeCname(service::background::WorkerContext& context,
-                                           std::string_view hostname,
-                                           std::string_view expectedTarget,
-                                           std::string_view websiteDomainId) {
-    const auto queryName = probeName(hostname, websiteDomainId);
-    auto&& client = context.httpClient(service::config::kAliDnsDohOriginAlias);
-    std::array<ruvia::HttpHeaderView, 1> headers{
-        ruvia::HttpHeaderView{"accept", "application/dns-json"}};
-    const auto target = "/resolve?name=" + queryName + "&type=CNAME&cd=0&do=0";
-    const auto response = co_await service::outbound_http::sendBuffered(
+inline ruvia::task<probe_result> probe_cname(service::background::worker_context& context,
+    std::string_view hostname,
+    std::string_view expected_target,
+    std::string_view website_domain_id) {
+    const auto query_name = probe_name(hostname, website_domain_id);
+    auto&& client = context.get_http_client(service::config::ali_dns_doh_origin_alias);
+    std::array<ruvia::http_header_view, 1> headers{
+        ruvia::http_header_view{"accept", "application/dns-json"}};
+    const auto target = "/resolve?name=" + query_name + "&type=CNAME&cd=0&do=0";
+    const auto response = co_await service::outbound_http::send_buffered(
         client,
         {
-            .method = ruvia::knownHttpMethodToken(ruvia::HttpKnownMethod::kGet),
-            .target = target,
-            .headers = headers,
-            .content = ruvia::HttpClientRequestContentView::none(),
+            .method_ = ruvia::known_http_method_token(ruvia::http_known_method::get),
+            .target_ = target,
+            .headers_ = headers,
+            .content_ = ruvia::http_client_request_content_view::none(),
         },
-        {.timeout = std::chrono::seconds(10), .stopToken = context.stopToken()});
-    if (!response.status().isSuccessful()) {
+        {.timeout_ = std::chrono::seconds(10), .stop_token_ = context.get_stop_token()});
+    if (!response.status().is_successful()) {
         throw std::runtime_error("公共 DNS 探测服务返回异常");
     }
-    const std::optional<DnsDohEnvelopeInput> parsed =
-        ruvia::fromJson<DnsDohEnvelopeInput>(response.body(), {.resource = context.pool()});
+    const std::optional<dns_doh_envelope_input> parsed =
+        ruvia::from_json<dns_doh_envelope_input>(response.body(), {.resource_ = context.pool()});
     if (!parsed || !parsed->get<"status">()) {
         throw std::runtime_error("公共 DNS 探测响应无效");
     }
 
-    const auto expected = normalizeDnsName(expectedTarget);
+    const auto expected = normalize_dns_name(expected_target);
     std::string observed;
     if (const auto& answers = parsed->get<"answer">(); answers) {
         for (const auto& answer : *answers) {
@@ -93,16 +93,16 @@ inline ruvia::Task<ProbeResult> probeCname(service::background::WorkerContext& c
             if (!type || static_cast<std::int64_t>(*type) != 5 || !data) {
                 continue;
             }
-            const auto answerTarget = normalizeDnsName(data->view());
+            const auto answer_target = normalize_dns_name(data->view());
             if (observed.empty()) {
-                observed = answerTarget;
+                observed = answer_target;
             }
-            if (answerTarget == expected) {
-                co_return ProbeResult{true, queryName, answerTarget};
+            if (answer_target == expected) {
+                co_return probe_result{true, query_name, answer_target};
             }
         }
     }
-    co_return ProbeResult{false, queryName, observed};
+    co_return probe_result{false, query_name, observed};
 }
 
-} // namespace service::website_dns
+}  // namespace service::website_dns

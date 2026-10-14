@@ -13,65 +13,68 @@
 #include <utility>
 #include <vector>
 
+#include "node/data/route_rules.h"
 #include "node/proto/artifact.h"
 #include "node/proto/edge_control.pb.h"
 #include "node/proto/schema_version.h"
-#include "node/data/route_rules.h"
 #include "node/runtime/compression_validation.h"
 
 namespace flexedge::node {
 
-inline std::string normalizeHostname(std::string_view value) {
+inline std::string normalize_hostname(std::string_view value) {
     while (!value.empty() && value.back() == '.') {
         value.remove_suffix(1);
     }
-    const auto firstColon = value.find(':');
-    if (firstColon != std::string_view::npos && firstColon == value.rfind(':')) {
-        value = value.substr(0, firstColon);
+    const auto first_colon = value.find(':');
+    if (first_colon != std::string_view::npos && first_colon == value.rfind(':')) {
+        value = value.substr(0, first_colon);
     }
     if (value.empty() || value.size() > 253) {
         throw std::runtime_error("invalid hostname in node config");
     }
     std::string result(value);
     std::ranges::transform(result, result.begin(),
-                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     return result;
 }
 
-struct CompiledRoute final {
-    const v2::Website* website{};
-    const v2::Domain* domain{};
+struct compiled_route final {
+    const v2::Website* website_{};
+    const v2::Domain* domain_{};
 };
 
-class CompiledConfig final {
-  public:
-    CompiledConfig(std::shared_ptr<const v2::ActiveState> state,
-                   std::vector<v2::DeliveryObject> objects)
-        : state_(std::move(state)), objects_(std::move(objects)) {
-        validateState();
-        indexObjects();
-        validateEndpoints();
-        validateWebsites();
+class compiled_config final {
+public:
+    compiled_config(std::shared_ptr<const v2::ActiveState> state,
+        std::vector<v2::DeliveryObject> objects)
+        : state_(std::move(state)),
+          objects_(std::move(objects)) {
+        validate_state();
+        index_objects();
+        validate_endpoints();
+        validate_websites();
     }
 
     // Index pointers refer to objects owned by this immutable snapshot.
-    CompiledConfig(const CompiledConfig&) = delete;
-    CompiledConfig& operator=(const CompiledConfig&) = delete;
-    CompiledConfig(CompiledConfig&&) = delete;
-    CompiledConfig& operator=(CompiledConfig&&) = delete;
+    compiled_config(const compiled_config&) = delete;
+    compiled_config& operator=(const compiled_config&) = delete;
+    compiled_config(compiled_config&&) = delete;
+    compiled_config& operator=(compiled_config&&) = delete;
 
-    [[nodiscard]] const v2::NodeSpec& nodeSpec() const noexcept { return state_->node_spec(); }
+    [[nodiscard]] const v2::NodeSpec& node_spec() const noexcept {
+        return state_->node_spec();
+    }
 
     [[nodiscard]] const v2::ClusterReleaseManifest& release() const noexcept {
         return state_->release();
     }
 
     [[nodiscard]] bool enabled() const noexcept {
-        return nodeSpec().content().enabled() && release().content().enabled();
+        return node_spec().content().enabled() && release().content().enabled();
     }
 
     [[nodiscard]] const auto& endpoints() const noexcept {
-        return nodeSpec().content().endpoints();
+        return node_spec().content().endpoints();
     }
 
     [[nodiscard]] const std::vector<const v2::Website*>& websites() const noexcept {
@@ -84,48 +87,50 @@ class CompiledConfig final {
     }
 
     [[nodiscard]] const v2::Website* website(std::string_view host) const {
-        const auto found = routes_.find(normalizeHostname(host));
-        return found == routes_.end() ? nullptr : found->second.website;
+        const auto found = routes_.find(normalize_hostname(host));
+        return found == routes_.end() ? nullptr : found->second.website_;
     }
 
     [[nodiscard]] const v2::Domain* domain(std::string_view host) const {
-        const auto found = routes_.find(normalizeHostname(host));
-        return found == routes_.end() ? nullptr : found->second.domain;
+        const auto found = routes_.find(normalize_hostname(host));
+        return found == routes_.end() ? nullptr : found->second.domain_;
     }
 
-    [[nodiscard]] const RoutePatterns& routePatterns() const noexcept { return routePatterns_; }
+    [[nodiscard]] const flexedge::node::route_patterns& route_patterns() const noexcept {
+        return route_patterns_;
+    }
 
-  private:
-    void validateState() const {
+private:
+    void validate_state() const {
         if (!state_ || !state_->has_node_spec() || !state_->has_release()) {
             throw std::runtime_error("node active state is incomplete");
         }
-        const auto& spec = nodeSpec();
-        const auto& specContent = spec.content();
-        if (!spec.has_content() || specContent.node_id().empty() ||
-            specContent.schema_version() != kNodeSpecSchemaVersion || specContent.revision() <= 0 ||
-            !flexedge::crypto::isSha256Digest(spec.digest_sha256()) ||
-            artifactDigest(specContent) != spec.digest_sha256()) {
+        const auto& spec = node_spec();
+        const auto& spec_content = spec.content();
+        if (!spec.has_content() || spec_content.node_id().empty() ||
+            spec_content.schema_version() != node_spec_schema_version || spec_content.revision() <= 0 ||
+            !flexedge::crypto::is_sha256_digest(spec.digest_sha256()) ||
+            artifact_digest(spec_content) != spec.digest_sha256()) {
             throw std::runtime_error("invalid node spec");
         }
         const auto& manifest = release();
-        const auto& releaseContent = manifest.content();
-        if (!manifest.has_content() || releaseContent.cluster_id().empty() ||
-            releaseContent.release_id().empty() || releaseContent.generation() <= 0 ||
-            !supportedClusterReleaseSchema(releaseContent.schema_version()) ||
-            releaseContent.access_domain().empty() || !flexedge::crypto::isSha256Digest(manifest.digest_sha256()) ||
-            artifactDigest(releaseContent) != manifest.digest_sha256()) {
+        const auto& release_content = manifest.content();
+        if (!manifest.has_content() || release_content.cluster_id().empty() ||
+            release_content.release_id().empty() || release_content.generation() <= 0 ||
+            !supported_cluster_release_schema(release_content.schema_version()) ||
+            release_content.access_domain().empty() || !flexedge::crypto::is_sha256_digest(manifest.digest_sha256()) ||
+            artifact_digest(release_content) != manifest.digest_sha256()) {
             throw std::runtime_error("invalid cluster release manifest");
         }
     }
 
-    void indexObjects() {
+    void index_objects() {
         std::unordered_map<std::string, v2::ObjectKind> expected;
         expected.reserve(static_cast<std::size_t>(release().content().objects_size()));
         for (const auto& reference : release().content().objects()) {
-            if (!flexedge::crypto::isSha256Digest(reference.digest_sha256()) ||
+            if (!flexedge::crypto::is_sha256_digest(reference.digest_sha256()) ||
                 (reference.kind() != v2::OBJECT_KIND_WEBSITE &&
-                 reference.kind() != v2::OBJECT_KIND_CERTIFICATE) ||
+                    reference.kind() != v2::OBJECT_KIND_CERTIFICATE) ||
                 !expected.emplace(reference.digest_sha256(), reference.kind()).second) {
                 throw std::runtime_error("invalid object reference in release manifest");
             }
@@ -136,17 +141,17 @@ class CompiledConfig final {
         std::unordered_set<std::string> received;
         received.reserve(objects_.size());
         for (const auto& object : objects_) {
-            const auto expectedObject = expected.find(object.digest_sha256());
-            if (expectedObject == expected.end() || !object.has_content() ||
-                artifactDigest(object.content()) != object.digest_sha256() ||
+            const auto expected_object = expected.find(object.digest_sha256());
+            if (expected_object == expected.end() || !object.has_content() ||
+                artifact_digest(object.content()) != object.digest_sha256() ||
                 !received.emplace(object.digest_sha256()).second) {
                 throw std::runtime_error("invalid content-addressed release object");
             }
             if (object.content().has_website() &&
-                expectedObject->second == v2::OBJECT_KIND_WEBSITE) {
+                expected_object->second == v2::OBJECT_KIND_WEBSITE) {
                 websites_.push_back(&object.content().website());
             } else if (object.content().has_certificate() &&
-                       expectedObject->second == v2::OBJECT_KIND_CERTIFICATE) {
+                       expected_object->second == v2::OBJECT_KIND_CERTIFICATE) {
                 certificates_.emplace(object.digest_sha256(), &object.content().certificate());
             } else {
                 throw std::runtime_error("release object kind does not match manifest");
@@ -154,8 +159,8 @@ class CompiledConfig final {
         }
     }
 
-    void validateEndpoints() const {
-        std::unordered_set<std::string> endpointBindings;
+    void validate_endpoints() const {
+        std::unordered_set<std::string> endpoint_bindings;
         for (const auto& endpoint : endpoints()) {
             if (endpoint.id().empty() || endpoint.ip_address().empty() ||
                 endpoint.http_port() == 0 || endpoint.http_port() > 65535 ||
@@ -164,14 +169,14 @@ class CompiledConfig final {
                 throw std::runtime_error("invalid node endpoint");
             }
             const auto prefix = endpoint.ip_address() + ':';
-            if (!endpointBindings.emplace(prefix + std::to_string(endpoint.http_port())).second ||
-                !endpointBindings.emplace(prefix + std::to_string(endpoint.https_port())).second) {
+            if (!endpoint_bindings.emplace(prefix + std::to_string(endpoint.http_port())).second ||
+                !endpoint_bindings.emplace(prefix + std::to_string(endpoint.https_port())).second) {
                 throw std::runtime_error("duplicate node endpoint binding");
             }
         }
     }
 
-    static void validateWebsiteBasics(const v2::Website& website) {
+    static void validate_website_basics(const v2::Website& website) {
         if (website.id().empty() || website.revision() <= 0 || website.domains().empty()) {
             throw std::runtime_error("invalid enabled website");
         }
@@ -181,31 +186,31 @@ class CompiledConfig final {
         }
         if (website.health_check_enabled() &&
             (website.health_check_path().empty() || website.health_check_path().front() != '/' ||
-             website.health_check_interval_seconds() == 0 ||
-             website.health_check_timeout_seconds() == 0 ||
-             (website.health_check_expected_status() != 0 &&
-              website.health_check_expected_status() < 100) ||
-             website.health_check_expected_status() > 599 || website.healthy_threshold() == 0 ||
-             website.unhealthy_threshold() == 0)) {
+                website.health_check_interval_seconds() == 0 ||
+                website.health_check_timeout_seconds() == 0 ||
+                (website.health_check_expected_status() != 0 &&
+                    website.health_check_expected_status() < 100) ||
+                website.health_check_expected_status() > 599 || website.healthy_threshold() == 0 ||
+                website.unhealthy_threshold() == 0)) {
             throw std::runtime_error("invalid origin health check policy");
         }
         if (website.force_https() && !website.https_enabled()) {
             throw std::runtime_error("force_https requires https_enabled");
         }
-        if ((website.hsts_enabled() || website.http2_enabled()) && !website.https_enabled()) {
+        if (website.hsts_enabled() && !website.https_enabled()) {
             throw std::runtime_error("HTTPS feature requires https_enabled");
         }
         if (website.https_enabled() && website.minimum_tls_version() != "1.2" &&
             website.minimum_tls_version() != "1.3") {
             throw std::runtime_error("unsupported minimum TLS version");
         }
-        validateAccessLog(website);
-        validateResponseCompression(website);
+        validate_access_log(website);
+        validate_response_compression(website);
     }
 
-    static void validateWebsiteOrigins(const v2::Website& website) {
-        std::unordered_set<std::string_view> enabledGroups;
-        std::unordered_set<std::string_view> primaryGroups;
+    static void validate_website_origins(const v2::Website& website) {
+        std::unordered_set<std::string_view> enabled_groups;
+        std::unordered_set<std::string_view> primary_groups;
         for (const auto& origin : website.origins()) {
             if (!origin.enabled()) {
                 continue;
@@ -218,60 +223,60 @@ class CompiledConfig final {
             }
             const auto group = origin.group().empty() ? std::string_view{"default"}
                                                       : std::string_view(origin.group());
-            enabledGroups.emplace(group);
+            enabled_groups.emplace(group);
             if (origin.role() == "primary") {
-                primaryGroups.emplace(group);
+                primary_groups.emplace(group);
             }
         }
-        const auto defaultGroup = website.default_origin_group().empty()
-                                      ? std::string_view{"default"}
-                                      : std::string_view(website.default_origin_group());
-        if (enabledGroups.empty() || enabledGroups != primaryGroups ||
-            !enabledGroups.contains(defaultGroup)) {
+        const auto default_group = website.default_origin_group().empty()
+                                       ? std::string_view{"default"}
+                                       : std::string_view(website.default_origin_group());
+        if (enabled_groups.empty() || enabled_groups != primary_groups ||
+            !enabled_groups.contains(default_group)) {
             throw std::runtime_error("enabled website requires an enabled origin");
         }
     }
 
-    void validateWebsiteDomains(const v2::Website& website) {
-        bool hasHttpsDomain = false;
+    void validate_website_domains(const v2::Website& website) {
+        bool has_https_domain = false;
         for (const auto& domain : website.domains()) {
             if (domain.https_enabled() && !website.https_enabled()) {
                 throw std::runtime_error("HTTPS domain requires HTTPS website");
             }
             if (domain.https_enabled() && (domain.certificate_digest().empty() ||
-                                           certificate(domain.certificate_digest()) == nullptr)) {
+                                              certificate(domain.certificate_digest()) == nullptr)) {
                 throw std::runtime_error("HTTPS domain requires certificate material");
             }
-            hasHttpsDomain = hasHttpsDomain || domain.https_enabled();
-            const auto hostname = normalizeHostname(domain.hostname());
+            has_https_domain = has_https_domain || domain.https_enabled();
+            const auto hostname = normalize_hostname(domain.hostname());
             const auto [_, inserted] =
-                routes_.emplace(hostname, CompiledRoute{.website = &website, .domain = &domain});
+                routes_.emplace(hostname, compiled_route{.website_ = &website, .domain_ = &domain});
             if (!inserted) {
                 throw std::runtime_error("duplicate hostname in node config");
             }
         }
-        if (website.https_enabled() && !hasHttpsDomain) {
+        if (website.https_enabled() && !has_https_domain) {
             throw std::runtime_error("HTTPS website requires an HTTPS domain");
         }
     }
 
-    void validateWebsites() {
+    void validate_websites() {
         for (const auto* website : websites_) {
             if (!website->enabled()) {
                 continue;
             }
-            validateWebsiteBasics(*website);
-            validateRouteRules(*website, &routePatterns_);
-            validateWebsiteOrigins(*website);
-            validateWebsiteDomains(*website);
+            validate_website_basics(*website);
+            validate_route_rules(*website, &route_patterns_);
+            validate_website_origins(*website);
+            validate_website_domains(*website);
         }
     }
 
-    static void validateAccessLog(const v2::Website& website) {
+    static void validate_access_log(const v2::Website& website) {
         std::unordered_set<std::string> ranges;
         for (const auto& value : website.access_log_status_code_ranges()) {
             if ((value != "1xx" && value != "2xx" && value != "3xx" && value != "4xx" &&
-                 value != "5xx") ||
+                    value != "5xx") ||
                 !ranges.emplace(value).second) {
                 throw std::runtime_error("invalid access log status code range");
             }
@@ -282,8 +287,8 @@ class CompiledConfig final {
     std::vector<v2::DeliveryObject> objects_;
     std::vector<const v2::Website*> websites_;
     std::unordered_map<std::string, const v2::Certificate*> certificates_;
-    std::unordered_map<std::string, CompiledRoute> routes_;
-    RoutePatterns routePatterns_;
+    std::unordered_map<std::string, compiled_route> routes_;
+    flexedge::node::route_patterns route_patterns_;
 };
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

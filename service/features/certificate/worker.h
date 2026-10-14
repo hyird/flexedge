@@ -1,5 +1,8 @@
 #pragma once
 
+#include <ruvia/core/task.h>
+#include <ruvia/core/timer.h>
+
 #include <chrono>
 #include <cstddef>
 #include <exception>
@@ -7,9 +10,6 @@
 #include <string>
 #include <string_view>
 #include <utility>
-
-#include <ruvia/core/Task.h>
-#include <ruvia/core/Timer.h>
 
 #include "service/features/background/marker_worker_loop.h"
 #include "service/features/background/worker_pool.h"
@@ -26,104 +26,105 @@ namespace service::certificate_issuance {
 
 namespace worker_detail {
 
-inline constexpr std::chrono::seconds kIdlePollInterval{2};
-inline constexpr std::chrono::seconds kLeaseRecoveryInterval{15};
-inline constexpr std::chrono::minutes kReconciliationInterval{15};
-inline constexpr std::size_t kMaxJobsPerTick{4};
+inline constexpr std::chrono::seconds idle_poll_interval{2};
+inline constexpr std::chrono::seconds lease_recovery_interval{15};
+inline constexpr std::chrono::minutes reconciliation_interval{15};
+inline constexpr std::size_t max_jobs_per_tick{4};
 
-inline ruvia::Task<void> recoverStaleMarkers(service::background::WorkerContext& context) {
-    co_await service::sync_runtime::recoverStaleRunning(
-        context.db(), service::sync_runtime::MarkerResourceType::certificate);
+inline ruvia::task<void> recover_stale_markers(service::background::worker_context& context) {
+    auto db = context.db();
+    co_await service::sync_runtime::recover_stale_running(
+        db, service::sync_runtime::marker_resource_type::certificate);
     co_return;
 }
 
-inline ruvia::Task<void> execute(service::background::WorkerContext& context,
-                                 const CertificateTask& task) {
-    const auto lease = service::sync_runtime::makeRunningLease(
-        task.tenantId, task.id, task.version, context.leaseOwner(),
-        service::sync_runtime::MarkerResourceType::certificate, task.certificateId);
-    auto work = co_await loadWork(context, task);
-    const auto settings = settingsForProvider(work.provider);
+inline ruvia::task<void> execute(service::background::worker_context& context,
+    const certificate_task& task) {
+    const auto lease = service::sync_runtime::make_running_lease(
+        task.tenant_id_, task.id_, task.version_, context.lease_owner(),
+        service::sync_runtime::marker_resource_type::certificate, task.certificate_id_);
+    auto work = co_await load_work(context, task);
+    const auto settings = settings_for_provider(work.provider_);
     if (!settings) {
-        throw AcmeError("不支持的证书供应商", true);
+        throw acme_error("不支持的证书供应商", true);
     }
-    AcmeClient client(*settings);
-    const auto accountEmail =
-        work.accountEmail ? std::optional<std::string_view>{*work.accountEmail} : std::nullopt;
+    acme_client client(*settings);
+    const auto account_email =
+        work.account_email_ ? std::optional<std::string_view>{*work.account_email_} : std::nullopt;
     auto account =
-        co_await ensureAcmeAccount(context, work.tenantId, work.providerId, work.providerRevision,
-                                   accountEmail, client, work.eab);
-    if (!co_await markIssuanceStarted(context, task, lease)) {
+        co_await ensure_acme_account(context, work.tenant_id_, work.provider_id_, work.provider_revision_,
+            account_email, client, work.eab_);
+    if (!co_await mark_issuance_started(context, task, lease)) {
         co_return;
     }
 
-    const DnsChallengeConfigView dnsConfig{.dnsZoneId = work.dnsZoneId,
-                                           .zoneDomain = work.zoneDomain,
-                                           .certificateId = task.certificateId,
-                                           .minimumRecordTtl = work.dnsMinimumRecordTtl};
-    auto issued = co_await client.issue(context, account.privateKeyPem.view(), account.accountUrl,
-                                        work.domains, dnsConfig, lease);
-    co_await persistIssuedCertificate(context, task, lease, issued);
+    const dns_challenge_config_view dns_config{.dns_zone_id_ = work.dns_zone_id_,
+        .zone_domain_ = work.zone_domain_,
+        .certificate_id_ = task.certificate_id_,
+        .minimum_record_ttl_ = work.dns_minimum_record_ttl_};
+    auto issued = co_await client.issue(context, account.private_key_pem_.view(), account.account_url_,
+        work.domains_, dns_config, lease);
+    co_await persist_issued_certificate(context, task, lease, issued);
     co_return;
 }
 
-inline ruvia::Task<void> processClaimedTask(service::background::WorkerContext& context,
-                                            const CertificateTask& task) {
-    std::string taskError;
+inline ruvia::task<void> process_claimed_task(service::background::worker_context& context,
+    const certificate_task& task) {
+    std::string task_error;
     bool permanent = false;
     try {
         co_await execute(context, task);
-    } catch (const AcmeError& error) {
-        taskError = service::sync_runtime::boundedError(error.what());
+    } catch (const acme_error& error) {
+        task_error = service::sync_runtime::bounded_error(error.what());
         permanent = error.permanent();
     } catch (const std::exception& error) {
-        taskError = service::sync_runtime::boundedError(error.what());
+        task_error = service::sync_runtime::bounded_error(error.what());
     } catch (...) {
-        taskError = "证书任务发生未知错误";
+        task_error = "证书任务发生未知错误";
     }
-    if (!taskError.empty()) {
-        co_await failCertificateTask(context, task, taskError, permanent);
+    if (!task_error.empty()) {
+        co_await fail_certificate_task(context, task, task_error, permanent);
     }
     co_return;
 }
 
-inline ruvia::Task<void> processAvailableTasks(service::background::WorkerContext& context,
-                                               std::size_t& processed) {
-    for (; processed < kMaxJobsPerTick; ++processed) {
+inline ruvia::task<void> process_available_tasks(service::background::worker_context& context,
+    std::size_t& processed) {
+    for (; processed < max_jobs_per_tick; ++processed) {
         const auto task = co_await claim(context);
         if (!task) {
             break;
         }
-        co_await processClaimedTask(context, *task);
+        co_await process_claimed_task(context, *task);
     }
     co_return;
 }
 
-inline ruvia::Task<void> runMaintenance(service::background::WorkerContext& context,
-                                        std::chrono::steady_clock::time_point& nextLeaseRecovery,
-                                        std::chrono::steady_clock::time_point& nextReconciliation) {
-    if (std::chrono::steady_clock::now() >= nextLeaseRecovery) {
-        co_await recoverStaleMarkers(context);
-        nextLeaseRecovery = std::chrono::steady_clock::now() + kLeaseRecoveryInterval;
+inline ruvia::task<void> run_maintenance(service::background::worker_context& context,
+    std::chrono::steady_clock::time_point& next_lease_recovery,
+    std::chrono::steady_clock::time_point& next_reconciliation) {
+    if (std::chrono::steady_clock::now() >= next_lease_recovery) {
+        co_await recover_stale_markers(context);
+        next_lease_recovery = std::chrono::steady_clock::now() + lease_recovery_interval;
     }
-    if (std::chrono::steady_clock::now() >= nextReconciliation) {
-        co_await reconcileCertificateMaintenance(context);
-        nextReconciliation = std::chrono::steady_clock::now() + kReconciliationInterval;
+    if (std::chrono::steady_clock::now() >= next_reconciliation) {
+        co_await reconcile_certificate_maintenance(context);
+        next_reconciliation = std::chrono::steady_clock::now() + reconciliation_interval;
     }
     co_return;
 }
 
-inline ruvia::Task<void> run(service::background::WorkerContext& context) {
-    co_await service::background::runMarkerWorkerLoop(
-        context, kIdlePollInterval, "Certificate worker failure: ", "未知证书同步错误",
-        runMaintenance, processAvailableTasks, service::sync_runtime::boundedError);
+inline ruvia::task<void> run(service::background::worker_context& context) {
+    co_await service::background::run_marker_worker_loop(
+        context, idle_poll_interval, "Certificate worker failure: ", "未知证书同步错误",
+        run_maintenance, process_available_tasks, service::sync_runtime::bounded_error);
     co_return;
 }
 
-} // namespace worker_detail
+}  // namespace worker_detail
 
-inline ruvia::Task<void> runWorker(service::background::WorkerContext& context) {
+inline ruvia::task<void> run_worker(service::background::worker_context& context) {
     co_await worker_detail::run(context);
 }
 
-} // namespace service::certificate_issuance
+}  // namespace service::certificate_issuance

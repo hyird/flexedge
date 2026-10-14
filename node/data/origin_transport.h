@@ -1,8 +1,8 @@
 #pragma once
 
-#include <functional>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -20,45 +20,46 @@
 
 namespace flexedge::node {
 
-class OriginTransport final {
-  public:
-    using Completion = std::function<void(const std::error_code&, HttpWireProtocol)>;
+class origin_transport final {
+public:
+    using completion = std::function<void(const std::error_code&)>;
 
-    OriginTransport(asio::any_io_executor executor, OriginTlsContext& tlsContext)
-        : executor_(std::move(executor)), resolver_(executor_), socket_(executor_),
-          tlsContext_(tlsContext) {}
+    origin_transport(asio::any_io_executor executor, origin_tls_context& tls_context)
+        : executor_(std::move(executor)),
+          resolver_(executor_),
+          socket_(executor_),
+          tls_context_(tls_context) {}
 
-    void connect(std::string host, std::uint16_t port, bool secure, bool http2Enabled,
-                 Completion completion) {
+    void connect(std::string host, std::uint16_t port, bool secure, completion completion_value) {
         reset();
         const auto generation = generation_;
-        auto sharedCompletion = std::make_shared<Completion>(std::move(completion));
-        auto sharedHost = std::make_shared<std::string>(std::move(host));
+        auto shared_completion = std::make_shared<completion>(std::move(completion_value));
+        auto shared_host = std::make_shared<std::string>(std::move(host));
         resolver_.async_resolve(
-            *sharedHost, std::to_string(port),
-            [this, sharedHost, secure, http2Enabled, generation,
-             sharedCompletion](const std::error_code& error,
-                               const asio::ip::tcp::resolver::results_type& endpoints) mutable {
-                handleResolved(std::move(sharedHost), secure, http2Enabled, generation,
-                               std::move(sharedCompletion), error, endpoints);
+            *shared_host, std::to_string(port),
+            [this, shared_host, secure, generation,
+                shared_completion](const std::error_code& error,
+                const asio::ip::tcp::resolver::results_type& endpoints) mutable {
+                handle_resolved(std::move(shared_host), secure, generation,
+                    std::move(shared_completion), error, endpoints);
             });
     }
 
-    template <typename ConstBuffer, typename Handler>
-    void write(const ConstBuffer& buffer, Handler&& handler) {
-        if (tlsStream_) {
-            asio::async_write(*tlsStream_, buffer, std::forward<Handler>(handler));
+    template <typename const_buffer_type, typename handler_type>
+    void write(const const_buffer_type& buffer, handler_type&& handler) {
+        if (tls_stream_) {
+            asio::async_write(*tls_stream_, buffer, std::forward<handler_type>(handler));
         } else {
-            asio::async_write(socket_, buffer, std::forward<Handler>(handler));
+            asio::async_write(socket_, buffer, std::forward<handler_type>(handler));
         }
     }
 
-    template <typename MutableBuffer, typename Handler>
-    void read(const MutableBuffer& buffer, Handler&& handler) {
-        if (tlsStream_) {
-            tlsStream_->async_read_some(buffer, std::forward<Handler>(handler));
+    template <typename mutable_buffer_type, typename handler_type>
+    void read(const mutable_buffer_type& buffer, handler_type&& handler) {
+        if (tls_stream_) {
+            tls_stream_->async_read_some(buffer, std::forward<handler_type>(handler));
         } else {
-            socket_.async_read_some(buffer, std::forward<Handler>(handler));
+            socket_.async_read_some(buffer, std::forward<handler_type>(handler));
         }
     }
 
@@ -67,9 +68,9 @@ class OriginTransport final {
         connected_ = false;
         resolver_.cancel();
         std::error_code ignored;
-        if (tlsStream_) {
-            ignored = tlsStream_->lowest_layer().close(ignored);
-            tlsStream_.reset();
+        if (tls_stream_) {
+            ignored = tls_stream_->lowest_layer().close(ignored);
+            tls_stream_.reset();
         }
         ignored = socket_.close(ignored);
         socket_ = asio::ip::tcp::socket(executor_);
@@ -79,114 +80,112 @@ class OriginTransport final {
         connected_ = false;
         resolver_.cancel();
         std::error_code ignored;
-        if (tlsStream_) {
-            ignored = tlsStream_->lowest_layer().close(ignored);
+        if (tls_stream_) {
+            ignored = tls_stream_->lowest_layer().close(ignored);
         }
         ignored = socket_.close(ignored);
     }
 
-    [[nodiscard]] bool connected() const noexcept { return connected_; }
+    [[nodiscard]] bool connected() const noexcept {
+        return connected_;
+    }
 
-  private:
-    using SharedCompletion = std::shared_ptr<Completion>;
+private:
+    using shared_completion = std::shared_ptr<completion>;
 
-    void handleResolved(std::shared_ptr<std::string> host, bool secure, bool http2Enabled,
-                        std::uint64_t generation, SharedCompletion completion,
-                        const std::error_code& error,
-                        const asio::ip::tcp::resolver::results_type& endpoints) {
+    void handle_resolved(std::shared_ptr<std::string> host, bool secure,
+        std::uint64_t generation, shared_completion completion,
+        const std::error_code& error,
+        const asio::ip::tcp::resolver::results_type& endpoints) {
         if (generation != generation_) {
-            (*completion)(asio::error::operation_aborted, HttpWireProtocol::kHttp1);
+            (*completion)(asio::error::operation_aborted);
             return;
         }
         if (error) {
-            (*completion)(error, HttpWireProtocol::kHttp1);
+            (*completion)(error);
             return;
         }
         asio::async_connect(
             socket_, endpoints,
-            [this, host = std::move(host), secure, http2Enabled, generation,
-             completion = std::move(completion)](const std::error_code& connectError,
-                                                 const asio::ip::tcp::endpoint&) mutable {
-                handleConnected(host, secure, http2Enabled, generation, std::move(completion),
-                                connectError);
+            [this, host = std::move(host), secure, generation,
+                completion = std::move(completion)](const std::error_code& connect_error,
+                const asio::ip::tcp::endpoint&) mutable {
+                handle_connected(host, secure, generation, std::move(completion), connect_error);
             });
     }
 
-    OriginTlsContext::Stream* prepareTls(const std::string& host, bool http2Enabled,
-                                         const SharedCompletion& completion) {
+    origin_tls_context::stream* prepare_tls(const std::string& host,
+        const shared_completion& completion) {
         try {
-            tlsStream_.emplace(tlsContext_.stream(std::move(socket_), host, http2Enabled));
+            tls_stream_.emplace(tls_context_.get_stream(std::move(socket_), host));
         } catch (const std::exception& error) {
             std::cerr << "flexedge node origin transport: TLS stream preparation failed for "
                       << host << ": " << error.what() << '\n';
-            (*completion)(std::make_error_code(std::errc::protocol_error),
-                          HttpWireProtocol::kHttp1);
+            (*completion)(std::make_error_code(std::errc::protocol_error));
             return nullptr;
         } catch (...) {
             std::cerr << "flexedge node origin transport: TLS stream preparation failed for "
                       << host << " with unknown exception\n";
-            (*completion)(std::make_error_code(std::errc::protocol_error),
-                          HttpWireProtocol::kHttp1);
+            (*completion)(std::make_error_code(std::errc::protocol_error));
             return nullptr;
         }
-        return &*tlsStream_;
+        return &*tls_stream_;
     }
 
-    void handleConnected(const std::shared_ptr<std::string>& host, bool secure, bool http2Enabled,
-                         std::uint64_t generation, SharedCompletion completion,
-                         const std::error_code& error) {
+    void handle_connected(const std::shared_ptr<std::string>& host, bool secure,
+        std::uint64_t generation, shared_completion completion,
+        const std::error_code& error) {
         if (generation != generation_) {
-            (*completion)(asio::error::operation_aborted, HttpWireProtocol::kHttp1);
+            (*completion)(asio::error::operation_aborted);
             return;
         }
         if (error) {
-            (*completion)(error, HttpWireProtocol::kHttp1);
+            (*completion)(error);
             return;
         }
         if (!secure) {
             connected_ = true;
-            (*completion)({}, HttpWireProtocol::kHttp1);
+            (*completion)({});
             return;
         }
-        auto* stream = prepareTls(*host, http2Enabled, completion);
+        auto* stream = prepare_tls(*host, completion);
         if (stream == nullptr) {
             return;
         }
         stream->async_handshake(asio::ssl::stream_base::client,
-                                [this, generation, completion = std::move(completion)](
-                                    const std::error_code& handshakeError) mutable {
-                                    handleHandshake(generation, completion, handshakeError);
-                                });
+            [this, generation, completion = std::move(completion)](
+                const std::error_code& handshake_error) mutable {
+                handle_handshake(generation, completion, handshake_error);
+            });
     }
 
-    void handleHandshake(std::uint64_t generation, const SharedCompletion& completion,
-                         const std::error_code& error) {
+    void handle_handshake(std::uint64_t generation, const shared_completion& completion,
+        const std::error_code& error) {
         if (generation != generation_) {
-            (*completion)(asio::error::operation_aborted, HttpWireProtocol::kHttp1);
+            (*completion)(asio::error::operation_aborted);
             return;
         }
         if (error) {
             connected_ = false;
-            (*completion)(error, HttpWireProtocol::kHttp1);
+            (*completion)(error);
             return;
         }
-        if (!tlsStream_) {
+        if (!tls_stream_) {
             connected_ = false;
-            (*completion)(std::make_error_code(std::errc::protocol_error),
-                          HttpWireProtocol::kHttp1);
+            (*completion)(std::make_error_code(std::errc::protocol_error));
             return;
         }
         connected_ = true;
-        (*completion)({}, negotiatedHttpProtocol(tlsStream_->native_handle()));
+        (*completion)({});
     }
 
     asio::any_io_executor executor_;
     asio::ip::tcp::resolver resolver_;
     asio::ip::tcp::socket socket_;
-    OriginTlsContext& tlsContext_;
-    std::optional<OriginTlsContext::Stream> tlsStream_;
+    origin_tls_context& tls_context_;
+    std::optional<origin_tls_context::stream> tls_stream_;
     std::uint64_t generation_{};
     bool connected_{};
 };
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

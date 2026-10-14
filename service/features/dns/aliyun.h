@@ -1,6 +1,9 @@
 #pragma once
 
-#include "ruvia/web/Model.h"
+#include <ruvia/core/task.h>
+#include <ruvia/http/http_known_method.h>
+#include <ruvia/web/context.h>
+#include <ruvia/web/http_client_handle.h>
 
 #include <array>
 #include <chrono>
@@ -21,10 +24,7 @@
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 
-#include <ruvia/core/Task.h>
-#include <ruvia/http/HttpKnownMethod.h>
-#include <ruvia/web/Context.h>
-#include <ruvia/web/HttpClientHandle.h>
+#include "ruvia/web/model.h"
 
 #include "service/config/outbound.h"
 #include "service/features/outbound_http/client.h"
@@ -32,107 +32,110 @@
 
 namespace service::dns {
 
-RUVIA_MODEL(AliyunErrorEnvelope, RUVIA_OPTIONAL_FIELD_NAME("Code", code, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("Message", message, ruvia::String));
+RUVIA_MODEL(aliyun_error_envelope, RUVIA_OPTIONAL_FIELD_NAME("Code", code, ruvia::string),
+    RUVIA_OPTIONAL_FIELD_NAME("Message", message, ruvia::string));
 
-RUVIA_MODEL(AliyunDomainPayload,
-                    RUVIA_OPTIONAL_FIELD_NAME("DomainId", domainId, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("DomainName", domainName, ruvia::String));
-RUVIA_MODEL(AliyunDomainListPayload,
-                    RUVIA_OPTIONAL_FIELD_NAME("Domain", domain, ruvia::Array<AliyunDomainPayload>));
-RUVIA_MODEL(AliyunDomainListEnvelope,
-                    RUVIA_OPTIONAL_FIELD_NAME("Domains", domains, AliyunDomainListPayload),
-                    RUVIA_OPTIONAL_FIELD_NAME("TotalCount", totalCount, ruvia::Int64));
+RUVIA_MODEL(aliyun_domain_payload,
+    RUVIA_OPTIONAL_FIELD_NAME("DomainId", domain_id, ruvia::string),
+    RUVIA_OPTIONAL_FIELD_NAME("DomainName", domain_name, ruvia::string));
+RUVIA_MODEL(aliyun_domain_list_payload,
+    RUVIA_OPTIONAL_FIELD_NAME("Domain", domain, ruvia::array<aliyun_domain_payload>));
+RUVIA_MODEL(aliyun_domain_list_envelope,
+    RUVIA_OPTIONAL_FIELD_NAME("Domains", domains, aliyun_domain_list_payload),
+    RUVIA_OPTIONAL_FIELD_NAME("TotalCount", total_count, ruvia::int64));
 
-RUVIA_MODEL(AliyunLinePayload,
-                    RUVIA_OPTIONAL_FIELD_NAME("LineCode", lineCode, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("LineName", lineName, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("LineDisplayName", lineDisplayName, ruvia::String));
-RUVIA_MODEL(AliyunLineListPayload,
-                    RUVIA_OPTIONAL_FIELD_NAME("RecordLine", recordLine,
-                                              ruvia::Array<AliyunLinePayload>));
-RUVIA_MODEL(AliyunLineListEnvelope,
-                    RUVIA_OPTIONAL_FIELD_NAME("RecordLines", recordLines, AliyunLineListPayload));
+RUVIA_MODEL(aliyun_line_payload,
+    RUVIA_OPTIONAL_FIELD_NAME("LineCode", line_code, ruvia::string),
+    RUVIA_OPTIONAL_FIELD_NAME("LineName", line_name, ruvia::string),
+    RUVIA_OPTIONAL_FIELD_NAME("LineDisplayName", line_display_name, ruvia::string));
+RUVIA_MODEL(aliyun_line_list_payload,
+    RUVIA_OPTIONAL_FIELD_NAME("RecordLine", record_line,
+        ruvia::array<aliyun_line_payload>));
+RUVIA_MODEL(aliyun_line_list_envelope,
+    RUVIA_OPTIONAL_FIELD_NAME("RecordLines", record_lines, aliyun_line_list_payload));
 
-RUVIA_MODEL(AliyunRecordPayload,
-                    RUVIA_OPTIONAL_FIELD_NAME("RecordId", recordId, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("RR", rr, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("Type", type, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("Value", value, ruvia::String),
-                    RUVIA_OPTIONAL_FIELD_NAME("TTL", ttl, ruvia::Int64),
-                    RUVIA_OPTIONAL_FIELD_NAME("Priority", priority, ruvia::Int64),
-                    RUVIA_OPTIONAL_FIELD_NAME("Line", line, ruvia::String));
-RUVIA_MODEL(AliyunRecordListPayload,
-                    RUVIA_OPTIONAL_FIELD_NAME("Record", record, ruvia::Array<AliyunRecordPayload>));
-RUVIA_MODEL(AliyunRecordListEnvelope,
-                    RUVIA_OPTIONAL_FIELD_NAME("DomainRecords", domainRecords,
-                                              AliyunRecordListPayload),
-                    RUVIA_OPTIONAL_FIELD_NAME("TotalCount", totalCount, ruvia::Int64));
-RUVIA_MODEL(AliyunRecordIdEnvelope,
-                    RUVIA_OPTIONAL_FIELD_NAME("RecordId", recordId, ruvia::String));
+RUVIA_MODEL(aliyun_record_payload,
+    RUVIA_OPTIONAL_FIELD_NAME("RecordId", record_id, ruvia::string),
+    RUVIA_OPTIONAL_FIELD_NAME("RR", rr, ruvia::string),
+    RUVIA_OPTIONAL_FIELD_NAME("Type", type, ruvia::string),
+    RUVIA_OPTIONAL_FIELD_NAME("Value", value, ruvia::string),
+    RUVIA_OPTIONAL_FIELD_NAME("TTL", ttl, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD_NAME("Priority", priority, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD_NAME("Line", line, ruvia::string));
+RUVIA_MODEL(aliyun_record_list_payload,
+    RUVIA_OPTIONAL_FIELD_NAME("Record", record, ruvia::array<aliyun_record_payload>));
+RUVIA_MODEL(aliyun_record_list_envelope,
+    RUVIA_OPTIONAL_FIELD_NAME("DomainRecords", domain_records,
+        aliyun_record_list_payload),
+    RUVIA_OPTIONAL_FIELD_NAME("TotalCount", total_count, ruvia::int64));
+RUVIA_MODEL(aliyun_record_id_envelope,
+    RUVIA_OPTIONAL_FIELD_NAME("RecordId", record_id, ruvia::string));
 
-enum class AliyunErrorCode {
-    credentialInvalid,
-    authorizationFailed,
-    upstreamFailed,
-    domainNotFound,
-    dnsFailed,
-    recordConflict,
-    recordNotFound,
+enum class aliyun_error_code {
+    credential_invalid,
+    authorization_failed,
+    upstream_failed,
+    domain_not_found,
+    dns_failed,
+    record_conflict,
+    record_not_found,
 };
 
-class AliyunError final : public std::runtime_error {
-  public:
-    AliyunError(AliyunErrorCode code, std::string_view message)
-        : std::runtime_error(std::string(message)), code_(code) {}
+class aliyun_error final : public std::runtime_error {
+public:
+    aliyun_error(aliyun_error_code code, std::string_view message)
+        : std::runtime_error(std::string(message)),
+          code_(code) {}
 
-    [[nodiscard]] AliyunErrorCode code() const noexcept { return code_; }
+    [[nodiscard]] aliyun_error_code code() const noexcept {
+        return code_;
+    }
 
-  private:
-    AliyunErrorCode code_;
+private:
+    aliyun_error_code code_;
 };
 
-struct AliyunDomain {
-    std::string id;
-    std::string name;
-    std::string status;
+struct aliyun_domain {
+    std::string id_;
+    std::string name_;
+    std::string status_;
 };
 
-struct AliyunLine {
-    std::string code;
-    std::string name;
-    std::string displayName;
+struct aliyun_line {
+    std::string code_;
+    std::string name_;
+    std::string display_name_;
 };
 
-struct AliyunRecord {
-    std::string id;
-    std::string rr;
-    std::string type;
-    std::string value;
-    std::int64_t ttl;
-    std::optional<std::int64_t> priority;
-    std::string line;
+struct aliyun_record {
+    std::string id_;
+    std::string rr_;
+    std::string type_;
+    std::string value_;
+    std::int64_t ttl_;
+    std::optional<std::int64_t> priority_;
+    std::string line_;
 };
 
 namespace detail {
 
-inline void appendAliyunDomains(const AliyunDomainListEnvelope& envelope,
-                                std::vector<AliyunDomain>& result) {
+inline void append_aliyun_domains(const aliyun_domain_list_envelope& envelope,
+    std::vector<aliyun_domain>& result) {
     const auto& domains = envelope.get<"domains">();
     if (!domains) {
         return;
     }
-    const auto& domainList = domains->get<"domain">();
-    if (!domainList) {
+    const auto& domain_list = domains->get<"domain">();
+    if (!domain_list) {
         return;
     }
-    for (const auto& domain : *domainList) {
-        const auto& name = domain.get<"domainName">();
+    for (const auto& domain : *domain_list) {
+        const auto& name = domain.get<"domain_name">();
         if (!name || name->view().empty()) {
             continue;
         }
-        const auto& id = domain.get<"domainId">();
-        result.push_back(AliyunDomain{
+        const auto& id = domain.get<"domain_id">();
+        result.push_back(aliyun_domain{
             id && !id->view().empty() ? std::string(id->view()) : std::string(name->view()),
             std::string(name->view()),
             "active",
@@ -140,48 +143,48 @@ inline void appendAliyunDomains(const AliyunDomainListEnvelope& envelope,
     }
 }
 
-inline std::vector<AliyunLine> parseAliyunLines(const AliyunLineListEnvelope& envelope) {
-    std::vector<AliyunLine> result;
-    const auto& lines = envelope.get<"recordLines">();
+inline std::vector<aliyun_line> parse_aliyun_lines(const aliyun_line_list_envelope& envelope) {
+    std::vector<aliyun_line> result;
+    const auto& lines = envelope.get<"record_lines">();
     if (lines) {
-        const auto& lineList = lines->get<"recordLine">();
-        if (lineList) {
-            for (const auto& line : *lineList) {
-                const auto& code = line.get<"lineCode">();
+        const auto& line_list = lines->get<"record_line">();
+        if (line_list) {
+            for (const auto& line : *line_list) {
+                const auto& code = line.get<"line_code">();
                 if (!code || code->view().empty()) {
                     continue;
                 }
-                const auto& name = line.get<"lineName">();
-                const auto& display = line.get<"lineDisplayName">();
-                auto resolvedName = name && !name->view().empty() ? std::string(name->view())
-                                                                  : std::string(code->view());
-                auto resolvedDisplay = display && !display->view().empty()
-                                           ? std::string(display->view())
-                                           : resolvedName;
-                result.push_back(AliyunLine{std::string(code->view()), std::move(resolvedName),
-                                            std::move(resolvedDisplay)});
+                const auto& name = line.get<"line_name">();
+                const auto& display = line.get<"line_display_name">();
+                auto resolved_name = name && !name->view().empty() ? std::string(name->view())
+                                                                   : std::string(code->view());
+                auto resolved_display = display && !display->view().empty()
+                                            ? std::string(display->view())
+                                            : resolved_name;
+                result.push_back(aliyun_line{std::string(code->view()), std::move(resolved_name),
+                    std::move(resolved_display)});
             }
         }
     }
     if (std::none_of(result.begin(), result.end(),
-                     [](const auto& line) { return line.code == "default"; })) {
-        result.insert(result.begin(), AliyunLine{"default", "默认", "默认"});
+            [](const auto& line) { return line.code_ == "default"; })) {
+        result.insert(result.begin(), aliyun_line{"default", "默认", "默认"});
     }
     return result;
 }
 
-inline void appendAliyunRecords(const AliyunRecordListEnvelope& envelope,
-                                std::vector<AliyunRecord>& result) {
-    const auto& records = envelope.get<"domainRecords">();
+inline void append_aliyun_records(const aliyun_record_list_envelope& envelope,
+    std::vector<aliyun_record>& result) {
+    const auto& records = envelope.get<"domain_records">();
     if (!records) {
         return;
     }
-    const auto& recordList = records->get<"record">();
-    if (!recordList) {
+    const auto& record_list = records->get<"record">();
+    if (!record_list) {
         return;
     }
-    for (const auto& record : *recordList) {
-        const auto& id = record.get<"recordId">();
+    for (const auto& record : *record_list) {
+        const auto& id = record.get<"record_id">();
         const auto& rr = record.get<"rr">();
         const auto& type = record.get<"type">();
         const auto& value = record.get<"value">();
@@ -189,176 +192,176 @@ inline void appendAliyunRecords(const AliyunRecordListEnvelope& envelope,
         if (!id || !rr || !type || !value || !ttl) {
             continue;
         }
-        AliyunRecord item{std::string(id->view()),
-                          std::string(rr->view()),
-                          std::string(type->view()),
-                          std::string(value->view()),
-                          static_cast<std::int64_t>(*ttl),
-                          std::nullopt,
-                          "default"};
+        aliyun_record item{std::string(id->view()),
+            std::string(rr->view()),
+            std::string(type->view()),
+            std::string(value->view()),
+            static_cast<std::int64_t>(*ttl),
+            std::nullopt,
+            "default"};
         const auto& priority = record.get<"priority">();
         if (priority) {
-            item.priority = static_cast<std::int64_t>(*priority);
+            item.priority_ = static_cast<std::int64_t>(*priority);
         }
         const auto& line = record.get<"line">();
         if (line && !line->view().empty()) {
-            item.line = std::string(line->view());
+            item.line_ = std::string(line->view());
         }
         result.push_back(std::move(item));
     }
 }
 
-template <typename Envelope>
-inline std::int64_t aliyunPageCount(const Envelope& envelope, std::size_t fallback) {
-    const auto& totalCount = envelope.template get<"totalCount">();
+template <typename envelope_type>
+inline std::int64_t aliyun_page_count(const envelope_type& envelope, std::size_t fallback) {
+    const auto& total_count = envelope.template get<"total_count">();
     const auto total =
-        totalCount ? static_cast<std::int64_t>(*totalCount) : static_cast<std::int64_t>(fallback);
+        total_count ? static_cast<std::int64_t>(*total_count) : static_cast<std::int64_t>(fallback);
     return std::max<std::int64_t>(1, (total + 99) / 100);
 }
 
-} // namespace detail
+}  // namespace detail
 
-class AliyunClient final {
-  public:
-    template <typename Runtime>
-    ruvia::Task<std::vector<AliyunDomain>> verifyAccessKey(Runtime& c, std::string_view accessKeyId,
-                                                           std::string_view accessKeySecret) const {
-        auto domains = co_await listDomains(c, accessKeyId, accessKeySecret);
-        (void)co_await listSupportLines(c, accessKeyId, accessKeySecret, std::nullopt);
+class aliyun_client final {
+public:
+    template <typename runtime_type>
+    ruvia::task<std::vector<aliyun_domain>> verify_access_key(runtime_type& c, std::string_view access_key_id,
+        std::string_view access_key_secret) const {
+        auto domains = co_await list_domains(c, access_key_id, access_key_secret);
+        (void)co_await list_support_lines(c, access_key_id, access_key_secret, std::nullopt);
         co_return domains;
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::vector<AliyunDomain>> listDomains(Runtime& c, std::string_view accessKeyId,
-                                                       std::string_view accessKeySecret) const {
-        std::vector<AliyunDomain> result;
+    template <typename runtime_type>
+    ruvia::task<std::vector<aliyun_domain>> list_domains(runtime_type& c, std::string_view access_key_id,
+        std::string_view access_key_secret) const {
+        std::vector<aliyun_domain> result;
         std::int64_t page = 1;
-        std::int64_t totalPages = 1;
+        std::int64_t total_pages = 1;
         do {
             std::map<std::string, std::string> params{
                 {"PageNumber", std::to_string(page)},
                 {"PageSize", "100"},
             };
             const auto response =
-                co_await send(c, "DescribeDomains", params, accessKeyId, accessKeySecret);
-            const std::optional<AliyunDomainListEnvelope> parsed =
-                ruvia::fromJson<AliyunDomainListEnvelope>(response.body(),
-                                                          {.resource = c.pool()});
-            if (!response.status().isSuccessful() || !parsed) {
-                fail(c, response.body(), AliyunErrorCode::upstreamFailed,
-                     "阿里云 DNS 域名查询失败");
+                co_await send(c, "DescribeDomains", params, access_key_id, access_key_secret);
+            const std::optional<aliyun_domain_list_envelope> parsed =
+                ruvia::from_json<aliyun_domain_list_envelope>(response.body(),
+                    {.resource_ = c.pool()});
+            if (!response.status().is_successful() || !parsed) {
+                fail(c, response.body(), aliyun_error_code::upstream_failed,
+                    "阿里云 DNS 域名查询失败");
             }
-            detail::appendAliyunDomains(*parsed, result);
-            totalPages = detail::aliyunPageCount(*parsed, result.size());
+            detail::append_aliyun_domains(*parsed, result);
+            total_pages = detail::aliyun_page_count(*parsed, result.size());
             ++page;
-        } while (page <= totalPages);
+        } while (page <= total_pages);
         co_return result;
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::vector<AliyunLine>>
-    listSupportLines(Runtime& c, std::string_view accessKeyId, std::string_view accessKeySecret,
-                     std::optional<std::string_view> domainName) const {
+    template <typename runtime_type>
+    ruvia::task<std::vector<aliyun_line>>
+    list_support_lines(runtime_type& c, std::string_view access_key_id, std::string_view access_key_secret,
+        std::optional<std::string_view> domain_name) const {
         std::map<std::string, std::string> params;
-        if (domainName && !domainName->empty()) {
-            params.emplace("DomainName", std::string(*domainName));
+        if (domain_name && !domain_name->empty()) {
+            params.emplace("DomainName", std::string(*domain_name));
         }
         const auto response =
-            co_await send(c, "DescribeSupportLines", params, accessKeyId, accessKeySecret);
-        const std::optional<AliyunLineListEnvelope> parsed =
-            ruvia::fromJson<AliyunLineListEnvelope>(response.body(), {.resource = c.pool()});
-        if (!response.status().isSuccessful() || !parsed) {
-            fail(c, response.body(), AliyunErrorCode::upstreamFailed, "阿里云 DNS 线路查询失败");
+            co_await send(c, "DescribeSupportLines", params, access_key_id, access_key_secret);
+        const std::optional<aliyun_line_list_envelope> parsed =
+            ruvia::from_json<aliyun_line_list_envelope>(response.body(), {.resource_ = c.pool()});
+        if (!response.status().is_successful() || !parsed) {
+            fail(c, response.body(), aliyun_error_code::upstream_failed, "阿里云 DNS 线路查询失败");
         }
 
-        co_return detail::parseAliyunLines(*parsed);
+        co_return detail::parse_aliyun_lines(*parsed);
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::vector<AliyunRecord>> listAllRecords(Runtime& c, std::string_view accessKeyId,
-                                                          std::string_view accessKeySecret,
-                                                          std::string_view domainName) const {
-        std::vector<AliyunRecord> result;
+    template <typename runtime_type>
+    ruvia::task<std::vector<aliyun_record>> list_all_records(runtime_type& c, std::string_view access_key_id,
+        std::string_view access_key_secret,
+        std::string_view domain_name) const {
+        std::vector<aliyun_record> result;
         std::int64_t page = 1;
-        std::int64_t totalPages = 1;
+        std::int64_t total_pages = 1;
         do {
             std::map<std::string, std::string> params{
-                {"DomainName", std::string(domainName)},
+                {"DomainName", std::string(domain_name)},
                 {"PageNumber", std::to_string(page)},
                 {"PageSize", "100"},
             };
             const auto response =
-                co_await send(c, "DescribeDomainRecords", params, accessKeyId, accessKeySecret);
-            const std::optional<AliyunRecordListEnvelope> parsed =
-                ruvia::fromJson<AliyunRecordListEnvelope>(response.body(),
-                                                          {.resource = c.pool()});
-            if (!response.status().isSuccessful() || !parsed) {
-                fail(c, response.body(), AliyunErrorCode::dnsFailed, "阿里云 DNS 记录查询失败");
+                co_await send(c, "DescribeDomainRecords", params, access_key_id, access_key_secret);
+            const std::optional<aliyun_record_list_envelope> parsed =
+                ruvia::from_json<aliyun_record_list_envelope>(response.body(),
+                    {.resource_ = c.pool()});
+            if (!response.status().is_successful() || !parsed) {
+                fail(c, response.body(), aliyun_error_code::dns_failed, "阿里云 DNS 记录查询失败");
             }
-            detail::appendAliyunRecords(*parsed, result);
-            totalPages = detail::aliyunPageCount(*parsed, result.size());
+            detail::append_aliyun_records(*parsed, result);
+            total_pages = detail::aliyun_page_count(*parsed, result.size());
             ++page;
-        } while (page <= totalPages);
+        } while (page <= total_pages);
         co_return result;
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::string>
-    createRecord(Runtime& c, std::string_view accessKeyId, std::string_view accessKeySecret,
-                 std::string_view domainName, std::string_view type, std::string_view rr,
-                 std::string_view value, std::int64_t ttl, std::optional<std::int64_t> priority,
-                 std::string_view line) const {
-        auto params = recordParams(domainName, type, rr, value, ttl, priority, line);
+    template <typename runtime_type>
+    ruvia::task<std::string>
+    create_record(runtime_type& c, std::string_view access_key_id, std::string_view access_key_secret,
+        std::string_view domain_name, std::string_view type, std::string_view rr,
+        std::string_view value, std::int64_t ttl, std::optional<std::int64_t> priority,
+        std::string_view line) const {
+        auto params = record_params(domain_name, type, rr, value, ttl, priority, line);
         const auto response =
-            co_await send(c, "AddDomainRecord", params, accessKeyId, accessKeySecret);
-        const std::optional<AliyunRecordIdEnvelope> parsed =
-            ruvia::fromJson<AliyunRecordIdEnvelope>(response.body(), {.resource = c.pool()});
-        if (!response.status().isSuccessful() || !parsed) {
-            fail(c, response.body(), AliyunErrorCode::dnsFailed, "阿里云 DNS 记录创建失败");
+            co_await send(c, "AddDomainRecord", params, access_key_id, access_key_secret);
+        const std::optional<aliyun_record_id_envelope> parsed =
+            ruvia::from_json<aliyun_record_id_envelope>(response.body(), {.resource_ = c.pool()});
+        if (!response.status().is_successful() || !parsed) {
+            fail(c, response.body(), aliyun_error_code::dns_failed, "阿里云 DNS 记录创建失败");
         }
-        const auto& recordIdValue = parsed->get<"recordId">();
-        if (!recordIdValue) {
-            fail(c, response.body(), AliyunErrorCode::dnsFailed, "阿里云 DNS 记录创建失败");
+        const auto& record_id_value = parsed->get<"record_id">();
+        if (!record_id_value) {
+            fail(c, response.body(), aliyun_error_code::dns_failed, "阿里云 DNS 记录创建失败");
         }
-        co_return std::string(recordIdValue->view());
+        co_return std::string(record_id_value->view());
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::string>
-    updateRecord(Runtime& c, std::string_view accessKeyId, std::string_view accessKeySecret,
-                 std::string_view recordId, std::string_view domainName, std::string_view type,
-                 std::string_view rr, std::string_view value, std::int64_t ttl,
-                 std::optional<std::int64_t> priority, std::string_view line) const {
-        auto params = recordParams(domainName, type, rr, value, ttl, priority, line);
-        params.emplace("RecordId", std::string(recordId));
+    template <typename runtime_type>
+    ruvia::task<std::string>
+    update_record(runtime_type& c, std::string_view access_key_id, std::string_view access_key_secret,
+        std::string_view record_id, std::string_view domain_name, std::string_view type,
+        std::string_view rr, std::string_view value, std::int64_t ttl,
+        std::optional<std::int64_t> priority, std::string_view line) const {
+        auto params = record_params(domain_name, type, rr, value, ttl, priority, line);
+        params.emplace("RecordId", std::string(record_id));
         const auto response =
-            co_await send(c, "UpdateDomainRecord", params, accessKeyId, accessKeySecret);
-        const std::optional<AliyunRecordIdEnvelope> parsed =
-            ruvia::fromJson<AliyunRecordIdEnvelope>(response.body(), {.resource = c.pool()});
-        if (!response.status().isSuccessful() || !parsed) {
-            fail(c, response.body(), AliyunErrorCode::dnsFailed, "阿里云 DNS 记录更新失败");
+            co_await send(c, "UpdateDomainRecord", params, access_key_id, access_key_secret);
+        const std::optional<aliyun_record_id_envelope> parsed =
+            ruvia::from_json<aliyun_record_id_envelope>(response.body(), {.resource_ = c.pool()});
+        if (!response.status().is_successful() || !parsed) {
+            fail(c, response.body(), aliyun_error_code::dns_failed, "阿里云 DNS 记录更新失败");
         }
-        const auto& recordIdValue = parsed->get<"recordId">();
-        if (!recordIdValue) {
-            fail(c, response.body(), AliyunErrorCode::dnsFailed, "阿里云 DNS 记录更新失败");
+        const auto& record_id_value = parsed->get<"record_id">();
+        if (!record_id_value) {
+            fail(c, response.body(), aliyun_error_code::dns_failed, "阿里云 DNS 记录更新失败");
         }
-        co_return std::string(recordIdValue->view());
+        co_return std::string(record_id_value->view());
     }
 
-    template <typename Runtime>
-    ruvia::Task<void> deleteRecord(Runtime& c, std::string_view accessKeyId,
-                                   std::string_view accessKeySecret,
-                                   std::string_view recordId) const {
-        std::map<std::string, std::string> params{{"RecordId", std::string(recordId)}};
+    template <typename runtime_type>
+    ruvia::task<void> delete_record(runtime_type& c, std::string_view access_key_id,
+        std::string_view access_key_secret,
+        std::string_view record_id) const {
+        std::map<std::string, std::string> params{{"RecordId", std::string(record_id)}};
         try {
             const auto response =
-                co_await send(c, "DeleteDomainRecord", params, accessKeyId, accessKeySecret);
-            if (!response.status().isSuccessful()) {
-                fail(c, response.body(), AliyunErrorCode::dnsFailed, "阿里云 DNS 记录删除失败");
+                co_await send(c, "DeleteDomainRecord", params, access_key_id, access_key_secret);
+            if (!response.status().is_successful()) {
+                fail(c, response.body(), aliyun_error_code::dns_failed, "阿里云 DNS 记录删除失败");
             }
-        } catch (const AliyunError& error) {
+        } catch (const aliyun_error& error) {
             const auto message = std::string_view(error.what());
-            if (error.code() != AliyunErrorCode::recordNotFound &&
+            if (error.code() != aliyun_error_code::record_not_found &&
                 message.find("does not exist") == std::string_view::npos) {
                 throw;
             }
@@ -366,63 +369,63 @@ class AliyunClient final {
         co_return;
     }
 
-  private:
-    template <typename Runtime>
-    ruvia::Task<service::outbound_http::BufferedResponse>
-    send(Runtime& c, std::string_view action, const std::map<std::string, std::string>& params,
-         std::string_view accessKeyId, std::string_view accessKeySecret) const {
-        auto&& client = c.httpClient(service::config::kAliyunDnsOriginAlias);
-        const auto target = "/?" + signedQuery(action, params, accessKeyId, accessKeySecret);
-        std::array<ruvia::HttpHeaderView, 1> headers{
-            ruvia::HttpHeaderView{"accept", "application/json"},
+private:
+    template <typename runtime_type>
+    ruvia::task<service::outbound_http::buffered_response>
+    send(runtime_type& c, std::string_view action, const std::map<std::string, std::string>& params,
+        std::string_view access_key_id, std::string_view access_key_secret) const {
+        auto&& client = c.get_http_client(service::config::aliyun_dns_origin_alias);
+        const auto target = "/?" + signed_query(action, params, access_key_id, access_key_secret);
+        std::array<ruvia::http_header_view, 1> headers{
+            ruvia::http_header_view{"accept", "application/json"},
         };
         try {
-            co_return co_await service::outbound_http::sendBuffered(
+            co_return co_await service::outbound_http::send_buffered(
                 client,
                 {
-                    .method = ruvia::knownHttpMethodToken(ruvia::HttpKnownMethod::kGet),
-                    .target = target,
-                    .headers = headers,
-                    .content = ruvia::HttpClientRequestContentView::none(),
+                    .method_ = ruvia::known_http_method_token(ruvia::http_known_method::get),
+                    .target_ = target,
+                    .headers_ = headers,
+                    .content_ = ruvia::http_client_request_content_view::none(),
                 },
-                {.timeout = std::chrono::seconds(10), .stopToken = c.stopToken()});
-        } catch (const ruvia::HttpClientError& error) {
-            using Code = ruvia::HttpClientError::Code;
+                {.timeout_ = std::chrono::seconds(10), .stop_token_ = c.get_stop_token()});
+        } catch (const ruvia::http_client_error& error) {
+            using code = ruvia::http_client_error::code_type;
             switch (error.code()) {
-            case Code::kTimeout:
-                throw AliyunError(AliyunErrorCode::upstreamFailed,
-                                  "阿里云 DNS API 请求超时（10 秒）");
-            case Code::kResolveFailed:
-                throw AliyunError(AliyunErrorCode::upstreamFailed, "阿里云 DNS API 域名解析失败");
-            case Code::kConnectFailed:
-                throw AliyunError(AliyunErrorCode::upstreamFailed, "阿里云 DNS API 连接失败");
-            case Code::kTlsFailed:
-                throw AliyunError(AliyunErrorCode::upstreamFailed, "阿里云 DNS API TLS 连接失败");
-            case Code::kResponseTooLarge:
-                throw AliyunError(AliyunErrorCode::upstreamFailed,
-                                  "阿里云 DNS API 响应超过大小限制");
-            case Code::kIoError:
-                throw AliyunError(AliyunErrorCode::upstreamFailed, "阿里云 DNS API 网络读写失败");
-            case Code::kProtocolUnavailable:
-            case Code::kProtocolError:
-                throw AliyunError(AliyunErrorCode::upstreamFailed, "阿里云 DNS API 响应协议错误");
-            case Code::kQueueFull:
-                throw AliyunError(AliyunErrorCode::upstreamFailed, "阿里云 DNS API 请求队列繁忙");
-            case Code::kCancelled:
-            case Code::kClosing:
-                throw AliyunError(AliyunErrorCode::upstreamFailed, "阿里云 DNS API 请求已取消");
-            default:
-                throw AliyunError(AliyunErrorCode::upstreamFailed, "阿里云 DNS API 请求失败");
+                case code::timeout:
+                    throw aliyun_error(aliyun_error_code::upstream_failed,
+                        "阿里云 DNS API 请求超时（10 秒）");
+                case code::resolve_failed:
+                    throw aliyun_error(aliyun_error_code::upstream_failed, "阿里云 DNS API 域名解析失败");
+                case code::connect_failed:
+                    throw aliyun_error(aliyun_error_code::upstream_failed, "阿里云 DNS API 连接失败");
+                case code::tls_failed:
+                    throw aliyun_error(aliyun_error_code::upstream_failed, "阿里云 DNS API TLS 连接失败");
+                case code::response_too_large:
+                    throw aliyun_error(aliyun_error_code::upstream_failed,
+                        "阿里云 DNS API 响应超过大小限制");
+                case code::io_error:
+                    throw aliyun_error(aliyun_error_code::upstream_failed, "阿里云 DNS API 网络读写失败");
+                case code::protocol_unavailable:
+                case code::protocol_error:
+                    throw aliyun_error(aliyun_error_code::upstream_failed, "阿里云 DNS API 响应协议错误");
+                case code::queue_full:
+                    throw aliyun_error(aliyun_error_code::upstream_failed, "阿里云 DNS API 请求队列繁忙");
+                case code::cancelled:
+                case code::closing:
+                    throw aliyun_error(aliyun_error_code::upstream_failed, "阿里云 DNS API 请求已取消");
+                default:
+                    throw aliyun_error(aliyun_error_code::upstream_failed, "阿里云 DNS API 请求失败");
             }
         }
     }
 
     [[nodiscard]] static std::map<std::string, std::string>
-    recordParams(std::string_view domainName, std::string_view type, std::string_view rr,
-                 std::string_view value, std::int64_t ttl, std::optional<std::int64_t> priority,
-                 std::string_view line) {
+    record_params(std::string_view domain_name, std::string_view type, std::string_view rr,
+        std::string_view value, std::int64_t ttl, std::optional<std::int64_t> priority,
+        std::string_view line) {
         std::map<std::string, std::string> params{
-            {"DomainName", std::string(domainName)},
+            {"DomainName", std::string(domain_name)},
             {"RR", std::string(rr)},
             {"Type", std::string(type)},
             {"Value", std::string(value)},
@@ -435,13 +438,13 @@ class AliyunClient final {
         return params;
     }
 
-    [[nodiscard]] static std::string signedQuery(std::string_view action,
-                                                 const std::map<std::string, std::string>& params,
-                                                 std::string_view accessKeyId,
-                                                 std::string_view accessKeySecret) {
+    [[nodiscard]] static std::string signed_query(std::string_view action,
+        const std::map<std::string, std::string>& params,
+        std::string_view access_key_id,
+        std::string_view access_key_secret) {
         std::map<std::string, std::string> all = params;
         all.emplace("Action", std::string(action));
-        all.emplace("AccessKeyId", std::string(accessKeyId));
+        all.emplace("AccessKeyId", std::string(access_key_id));
         all.emplace("Format", "JSON");
         all.emplace("SignatureMethod", "HMAC-SHA1");
         all.emplace("SignatureNonce", nonce());
@@ -449,21 +452,21 @@ class AliyunClient final {
         all.emplace("Timestamp", timestamp());
         all.emplace("Version", "2015-01-09");
 
-        const auto canonical = canonicalQuery(all);
-        const auto stringToSign = "GET&%2F&" + percentEncode(canonical);
-        all.emplace("Signature", hmacSha1Base64(accessKeySecret, stringToSign));
-        return canonicalQuery(all);
+        const auto canonical = canonical_query(all);
+        const auto string_to_sign = "GET&%2F&" + percent_encode(canonical);
+        all.emplace("Signature", hmac_sha1_base64(access_key_secret, string_to_sign));
+        return canonical_query(all);
     }
 
-    [[nodiscard]] static std::string canonicalQuery(const std::map<std::string, std::string>& all) {
+    [[nodiscard]] static std::string canonical_query(const std::map<std::string, std::string>& all) {
         std::string result;
         for (const auto& [key, value] : all) {
             if (!result.empty()) {
                 result.push_back('&');
             }
-            result += percentEncode(key);
+            result += percent_encode(key);
             result.push_back('=');
-            result += percentEncode(value);
+            result += percent_encode(value);
         }
         return result;
     }
@@ -484,9 +487,9 @@ class AliyunClient final {
 
     [[nodiscard]] static std::string nonce() {
         std::array<unsigned char, 16> bytes{};
-        const service::utils::SensitiveBufferGuard cleanseBytes(bytes);
+        const service::utils::sensitive_buffer_guard cleanse_bytes(bytes);
         if (RAND_bytes(bytes.data(), static_cast<int>(bytes.size())) != 1) {
-            throw AliyunError(AliyunErrorCode::upstreamFailed, "阿里云 DNS 签名随机数生成失败");
+            throw aliyun_error(aliyun_error_code::upstream_failed, "阿里云 DNS 签名随机数生成失败");
         }
         constexpr char hex[] = "0123456789abcdef";
         std::string result;
@@ -498,28 +501,28 @@ class AliyunClient final {
         return result;
     }
 
-    [[nodiscard]] static std::string hmacSha1Base64(std::string_view secret,
-                                                    std::string_view payload) {
-        service::utils::SensitiveString key(std::string(secret) + "&");
+    [[nodiscard]] static std::string hmac_sha1_base64(std::string_view secret,
+        std::string_view payload) {
+        service::utils::sensitive_string key(std::string(secret) + "&");
         std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
-        const service::utils::SensitiveBufferGuard cleanseDigest(digest);
-        unsigned int digestSize = 0;
+        const service::utils::sensitive_buffer_guard cleanse_digest(digest);
+        unsigned int digest_size = 0;
         if (HMAC(EVP_sha1(), key.view().data(), static_cast<int>(key.view().size()),
-                 reinterpret_cast<const unsigned char*>(payload.data()), payload.size(),
-                 digest.data(), &digestSize) == nullptr) {
-            throw AliyunError(AliyunErrorCode::upstreamFailed, "阿里云 DNS 请求签名失败");
+                reinterpret_cast<const unsigned char*>(payload.data()), payload.size(),
+                digest.data(), &digest_size) == nullptr) {
+            throw aliyun_error(aliyun_error_code::upstream_failed, "阿里云 DNS 请求签名失败");
         }
-        std::string output(4 * ((digestSize + 2) / 3), '\0');
+        std::string output(4 * ((digest_size + 2) / 3), '\0');
         const auto size = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(output.data()),
-                                          digest.data(), static_cast<int>(digestSize));
+            digest.data(), static_cast<int>(digest_size));
         if (size < 0) {
-            throw AliyunError(AliyunErrorCode::upstreamFailed, "阿里云 DNS 请求签名编码失败");
+            throw aliyun_error(aliyun_error_code::upstream_failed, "阿里云 DNS 请求签名编码失败");
         }
         output.resize(static_cast<std::size_t>(size));
         return output;
     }
 
-    [[nodiscard]] static std::string percentEncode(std::string_view input) {
+    [[nodiscard]] static std::string percent_encode(std::string_view input) {
         constexpr char hex[] = "0123456789ABCDEF";
         std::string result;
         result.reserve(input.size());
@@ -536,46 +539,46 @@ class AliyunClient final {
         return result;
     }
 
-    template <typename Runtime>
-    [[noreturn]] static void fail(Runtime& c, std::string_view body, AliyunErrorCode fallbackCode,
-                                  std::string_view fallbackMessage) {
-        auto code = fallbackCode;
-        auto message = std::string(fallbackMessage);
-        const std::optional<AliyunErrorEnvelope> parsed =
-            ruvia::fromJson<AliyunErrorEnvelope>(body, {.resource = c.pool()});
+    template <typename runtime_type>
+    [[noreturn]] static void fail(runtime_type& c, std::string_view body, aliyun_error_code fallback_code,
+        std::string_view fallback_message) {
+        auto code = fallback_code;
+        auto message = std::string(fallback_message);
+        const std::optional<aliyun_error_envelope> parsed =
+            ruvia::from_json<aliyun_error_envelope>(body, {.resource_ = c.pool()});
         if (parsed) {
-            const auto& remoteCode = parsed->get<"code">();
-            const auto& remoteMessage = parsed->get<"message">();
-            if (remoteMessage && !remoteMessage->view().empty()) {
-                message = std::string(remoteMessage->view());
+            const auto& remote_code = parsed->get<"code">();
+            const auto& remote_message = parsed->get<"message">();
+            if (remote_message && !remote_message->view().empty()) {
+                message = std::string(remote_message->view());
             }
-            if (remoteCode) {
-                const auto value = std::string(remoteCode->view());
+            if (remote_code) {
+                const auto value = std::string(remote_code->view());
                 if (value.find("InvalidAccessKeyId") != std::string::npos ||
                     value.find("Signature") != std::string::npos) {
-                    code = AliyunErrorCode::credentialInvalid;
+                    code = aliyun_error_code::credential_invalid;
                 } else if (value.find("Forbidden") != std::string::npos ||
                            value.find("Unauthorized") != std::string::npos) {
-                    code = AliyunErrorCode::authorizationFailed;
+                    code = aliyun_error_code::authorization_failed;
                 } else if (value.find("DomainRecord") != std::string::npos &&
                            value.find("NotFound") != std::string::npos) {
-                    code = AliyunErrorCode::recordNotFound;
+                    code = aliyun_error_code::record_not_found;
                 } else if (value.find("Domain") != std::string::npos &&
                            value.find("NotFound") != std::string::npos) {
-                    code = AliyunErrorCode::domainNotFound;
+                    code = aliyun_error_code::domain_not_found;
                 } else if (value.find("Duplicate") != std::string::npos ||
                            value.find("RecordForbidden") != std::string::npos) {
-                    code = AliyunErrorCode::recordConflict;
+                    code = aliyun_error_code::record_conflict;
                 }
             }
         }
-        throw AliyunError(code, std::move(message));
+        throw aliyun_error(code, std::move(message));
     }
 };
 
-inline const AliyunClient& aliyunClient() {
-    static const AliyunClient client;
+inline const aliyun_client& get_aliyun_client() {
+    static const aliyun_client client;
     return client;
 }
 
-} // namespace service::dns
+}  // namespace service::dns

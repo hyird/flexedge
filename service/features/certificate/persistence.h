@@ -1,18 +1,17 @@
 #pragma once
 
-#include "service/features/node_dispatch/notifications.h"
+#include <ruvia/core/task.h>
 
 #include <stdexcept>
 #include <string>
 #include <string_view>
-
-#include <ruvia/core/Task.h>
 
 #include "service/features/background/worker_pool.h"
 #include "service/features/certificate/acme_types.h"
 #include "service/features/certificate/task.h"
 #include "service/features/certificate_material/model.h"
 #include "service/features/logging/logger.h"
+#include "service/features/node_dispatch/notifications.h"
 #include "service/features/node_dispatch/queue.h"
 #include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
@@ -20,105 +19,105 @@
 
 namespace service::certificate_issuance::worker_detail {
 
-inline ruvia::Task<bool>
-markIssuanceStarted(service::background::WorkerContext& context, const CertificateTask& task,
-                    const service::sync_runtime::RunningMarkerLease& lease) {
-    auto transaction = co_await context.db().beginTransaction();
+inline ruvia::task<bool>
+mark_issuance_started(service::background::worker_context& context, const certificate_task& task,
+    const service::sync_runtime::running_marker_lease& lease) {
+    auto transaction = co_await context.db().begin_transaction();
     const auto updated = co_await transaction.execute(
         "UPDATE sys_certificate SET status = CASE WHEN issued_revision = 0 THEN 'issuing' ELSE "
         "'renewing' END, last_error = NULL, updated_at = NOW() WHERE id = $1 AND tenant_id = "
         "$2 AND issuance_revision = $3 AND deleted_at IS NULL",
-        task.certificateId, task.tenantId, task.version);
-    if (updated.affectedRows() == 0) {
-        (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
+        task.certificate_id_, task.tenant_id_, task.version_);
+    if (updated.affected_rows() == 0) {
+        (void)co_await service::sync_runtime::release_running(transaction, lease);
         co_await transaction.commit();
         co_return false;
     }
-    if (!co_await service::sync_runtime::renewRunningLease(transaction, lease)) {
+    if (!co_await service::sync_runtime::renew_running_lease(transaction, lease)) {
         throw std::runtime_error("证书同步标记 lease 已失效");
     }
     co_await transaction.commit();
     co_return true;
 }
 
-inline ruvia::Task<void>
-persistIssuedCertificate(service::background::WorkerContext& context, const CertificateTask& task,
-                         const service::sync_runtime::RunningMarkerLease& lease,
-                         const IssuedCertificate& issued) {
-    const auto nowRows =
+inline ruvia::task<void>
+persist_issued_certificate(service::background::worker_context& context, const certificate_task& task,
+    const service::sync_runtime::running_marker_lease& lease,
+    const issued_certificate& issued) {
+    const auto now_rows =
         co_await context.db().query("SELECT TO_CHAR(NOW(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')");
-    service::certificate_material::CertificateMaterialOutput material(
-        {.resource = context.pool()});
-    material.set<"certificateChainPem">(issued.certificateChainPem);
-    material.set<"privateKeyEnvelope">(service::utils::sealSecret(issued.privateKeyPem.view()));
-    material.set<"notBefore">(issued.notBefore);
-    material.set<"serialNumber">(issued.serialNumber);
-    material.set<"fingerprintSha256">(issued.fingerprintSha256);
-    material.set<"lastIssuedAt">(nowRows.front()[0].value().value_or(""));
-    const auto materialJson = ruvia::toJson(material, {.resource = context.pool()});
+    service::certificate_material::certificate_material_output material(
+        {.resource_ = context.pool()});
+    material.set<"certificate_chain_pem">(issued.certificate_chain_pem_);
+    material.set<"private_key_envelope">(service::utils::seal_secret(issued.private_key_pem_.view()));
+    material.set<"not_before">(issued.not_before_);
+    material.set<"serial_number">(issued.serial_number_);
+    material.set<"fingerprint_sha256">(issued.fingerprint_sha256_);
+    material.set<"last_issued_at">(now_rows.front()[0].value().value_or(""));
+    const auto material_json = ruvia::to_json(material, {.resource_ = context.pool()});
 
-    auto transaction = co_await context.db().beginTransaction();
+    auto transaction = co_await context.db().begin_transaction();
     const auto updated = co_await transaction.execute(
         "UPDATE sys_certificate SET material = $1::jsonb, expires_at = $2::timestamptz, "
         "issued_revision = $3, status = 'valid', last_error = NULL, updated_at = NOW() WHERE id = "
         "$4 AND tenant_id = $5 AND issuance_revision = $3 AND deleted_at IS NULL",
-        std::string_view(materialJson), std::string_view(issued.expiresAt), task.version,
-        task.certificateId, task.tenantId);
-    service::sync_runtime::RunningResultTransition resultTransition;
-    if (updated.affectedRows() != 0) {
-        if (!co_await service::sync_runtime::renewRunningLease(transaction, lease)) {
+        std::string_view(material_json), std::string_view(issued.expires_at_), task.version_,
+        task.certificate_id_, task.tenant_id_);
+    service::sync_runtime::running_result_transition result_transition;
+    if (updated.affected_rows() != 0) {
+        if (!co_await service::sync_runtime::renew_running_lease(transaction, lease)) {
             throw std::runtime_error("证书同步标记 lease 已失效");
         }
-        co_await service::node_dispatch::enqueueCertificateConsumers(transaction, task.tenantId,
-                                                                     task.certificateId);
-        resultTransition =
-            co_await service::sync_runtime::completeRunningAndRecordEvent(transaction, lease);
-        if (!resultTransition.markerTransitioned) {
+        co_await service::node_dispatch::enqueue_certificate_consumers(transaction, task.tenant_id_,
+            task.certificate_id_);
+        result_transition =
+            co_await service::sync_runtime::complete_running_and_record_event(transaction, lease);
+        if (!result_transition.marker_transitioned_) {
             throw std::runtime_error("证书同步标记 lease 已失效");
         }
     } else {
-        (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
+        (void)co_await service::sync_runtime::release_running(transaction, lease);
     }
-    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
-                                                                resultTransition);
-    service::node_dispatch::notifications::published(task.tenantId);
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, lease,
+        result_transition);
+    service::node_dispatch::notifications::published(task.tenant_id_);
     co_return;
 }
 
-inline ruvia::Task<void> failCertificateTask(service::background::WorkerContext& context,
-                                             const CertificateTask& task, std::string_view error,
-                                             bool permanent) {
-    const auto message = service::sync_runtime::boundedError(error);
-    const auto lease = service::sync_runtime::makeRunningLease(
-        task.tenantId, task.id, task.version, context.leaseOwner(),
-        service::sync_runtime::MarkerResourceType::certificate, task.certificateId);
-    auto transaction = co_await context.db().beginTransaction();
+inline ruvia::task<void> fail_certificate_task(service::background::worker_context& context,
+    const certificate_task& task, std::string_view error,
+    bool permanent) {
+    const auto message = service::sync_runtime::bounded_error(error);
+    const auto lease = service::sync_runtime::make_running_lease(
+        task.tenant_id_, task.id_, task.version_, context.lease_owner(),
+        service::sync_runtime::marker_resource_type::certificate, task.certificate_id_);
+    auto transaction = co_await context.db().begin_transaction();
     (void)co_await transaction.query(
         "SELECT id FROM sys_certificate WHERE tenant_id = $1 AND id = $2 LIMIT 1 FOR UPDATE",
-        task.tenantId, task.certificateId);
-    const auto resultTransition =
-        co_await service::sync_runtime::failRunningAndRecordEvent(transaction, lease, message);
-    if (resultTransition.markerTransitioned) {
+        task.tenant_id_, task.certificate_id_);
+    const auto result_transition =
+        co_await service::sync_runtime::fail_running_and_record_event(transaction, lease, message);
+    if (result_transition.marker_transitioned_) {
         const auto updated = co_await transaction.query(
             "UPDATE sys_certificate SET status = CASE WHEN expires_at > NOW() THEN CASE WHEN $3 "
             "THEN 'valid' ELSE 'renewing' END WHEN $3 THEN 'failed' ELSE 'pending' END, "
             "last_error = $4, updated_at = NOW() WHERE id = $1 AND tenant_id = $5 AND "
             "issuance_revision = $2 AND deleted_at IS NULL RETURNING issued_revision > 0 AND "
             "expires_at <= NOW()",
-            task.certificateId, task.version, permanent, std::string_view(message), task.tenantId);
+            task.certificate_id_, task.version_, permanent, std::string_view(message), task.tenant_id_);
         if (!updated.empty() && updated.front()[0].as<bool>().value_or(false)) {
-            co_await service::node_dispatch::enqueueCertificateConsumers(transaction, task.tenantId,
-                                                                         task.certificateId);
+            co_await service::node_dispatch::enqueue_certificate_consumers(transaction, task.tenant_id_,
+                task.certificate_id_);
         }
     }
-    co_await service::sync_runtime::commitAndPublishResultEvent(transaction, lease,
-                                                                resultTransition);
-    service::node_dispatch::notifications::published(task.tenantId);
-    if (!resultTransition.markerTransitioned) {
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, lease,
+        result_transition);
+    service::node_dispatch::notifications::published(task.tenant_id_);
+    if (!result_transition.marker_transitioned_) {
         co_return;
     }
-    service::logging::error("Certificate sync marker " + task.id + " failed: " + message);
+    service::logging::error("Certificate sync marker " + task.id_ + " failed: " + message);
     co_return;
 }
 
-} // namespace service::certificate_issuance::worker_detail
+}  // namespace service::certificate_issuance::worker_detail

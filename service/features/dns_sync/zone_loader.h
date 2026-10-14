@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ruvia/core/task.h>
+
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -8,44 +10,43 @@
 #include <utility>
 #include <vector>
 
-#include <ruvia/core/Task.h>
-
 #include "service/features/background/worker_pool.h"
 #include "service/features/dns/driver.h"
 #include "service/features/dns/provider_config_mapper.h"
-#include "service/features/dns_sync/queue.h"
 #include "service/features/dns_sync/mapper.h"
-#include "service/features/sync_runtime/state.h"
+#include "service/features/dns_sync/queue.h"
 #include "service/features/dns_sync/task.h"
+#include "service/features/sync_runtime/state.h"
 
 namespace service::dns_sync::detail {
 
-struct ZoneSyncState final {
-    ZoneRuntimeData runtime;
-    ZoneConfigData config;
-    ZoneConfigData desired;
-    service::dns::DnsProviderConfigData providerConfig;
-    std::string domain;
-    std::string provider;
-    std::string accountId;
-    std::int64_t revision;
-    std::int64_t configRevision;
-    bool deleted;
+struct zone_sync_state final {
+    zone_runtime_data runtime_;
+    zone_config_data config_;
+    zone_config_data desired_;
+    service::dns::dns_provider_config_data provider_config_;
+    std::string domain_;
+    std::string provider_;
+    std::string account_id_;
+    std::int64_t revision_;
+    std::int64_t config_revision_;
+    bool deleted_;
 };
 
-struct RemoteZoneData final {
-    std::string id;
-    std::vector<service::dns::ProviderRecord> records;
-    std::vector<service::dns::ProviderLine> lines;
+struct remote_zone_data final {
+    std::string id_;
+    std::vector<service::dns::provider_record> records_;
+    std::vector<service::dns::provider_line> lines_;
 };
 
-inline ruvia::Task<std::optional<ZoneSyncState>>
-loadZoneSyncState(service::background::WorkerContext& context, const DnsTask& task,
-                  const service::sync_runtime::RunningMarkerLease& lease) {
-    if (!co_await service::sync_runtime::renewRunningLease(context.db(), lease)) {
+inline ruvia::task<std::optional<zone_sync_state>>
+load_zone_sync_state(service::background::worker_context& context, const dns_task& task,
+    const service::sync_runtime::running_marker_lease& lease) {
+    auto db = context.db();
+    if (!co_await service::sync_runtime::renew_running_lease(db, lease)) {
         throw std::runtime_error("DNS 同步标记 lease 已失效");
     }
-    const auto rows = co_await context.db().query(
+    const auto rows = co_await db.query(
         "SELECT zone.desired_revision, zone.domain, zone.runtime::text, zone.deleted_at IS NOT "
         "NULL, provider.provider, provider.account_id, provider.config::text, provider.status, "
         "zone.config::text, zone.revision FROM "
@@ -53,97 +54,98 @@ loadZoneSyncState(service::background::WorkerContext& context, const DnsTask& ta
         "JOIN sys_provider provider ON provider.tenant_id = zone.tenant_id AND provider.id "
         "= zone.provider_id AND provider.kind = 'dns' WHERE zone.id = $1 AND zone.tenant_id = "
         "$2 AND provider.deleted_at IS NULL LIMIT 1",
-        task.resourceId, task.tenantId);
+        task.resource_id_, task.tenant_id_);
     if (rows.empty()) {
         throw std::runtime_error("DNS 聚合根或服务商不存在");
     }
     const auto& row = rows.front();
-    const auto revision = row[0].as<std::int64_t>().value_or(task.version);
-    if (revision != task.version) {
-        auto transaction = co_await context.db().beginTransaction();
-        (void)co_await service::sync_runtime::releaseRunning(transaction, lease);
+    const auto revision = row[0].as<std::int64_t>().value_or(task.version_);
+    if (revision != task.version_) {
+        auto transaction = co_await db.begin_transaction();
+        (void)co_await service::sync_runtime::release_running(transaction, lease);
         co_await transaction.commit();
         co_return std::nullopt;
     }
 
     const auto runtime =
-        parseStoredRuntime(row[2].value().value_or("{}"), {.resource = context.pool()});
+        parse_stored_runtime(row[2].value().value_or("{}"), {.resource_ = context.pool()});
     if (!runtime) {
         throw std::runtime_error("DNS runtime 损坏");
     }
     const bool deleted = row[3].as<bool>().value_or(false) ||
-                         task.operation == service::sync_runtime::MarkerOperation::remove;
+                         task.operation_ == service::sync_runtime::marker_operation::remove;
     const std::string provider = std::string(row[4].value().value_or(""));
-    const std::string accountId = std::string(row[5].value().value_or(""));
-    auto providerConfig =
-        service::dns::parseDnsProviderConfig(row[6].value().value_or("{}"), context.pool());
+    const std::string account_id = std::string(row[5].value().value_or(""));
+    auto provider_config =
+        service::dns::parse_dns_provider_config(row[6].value().value_or("{}"), context.pool());
     if (row[7].value().value_or("") != "verified") {
         throw std::runtime_error("DNS 服务商账号尚未通过检测");
     }
 
-    const std::optional<ZoneConfigData> config =
-        parseStored(row[8].value().value_or("{}"), {.resource = context.pool()});
+    const std::optional<zone_config_data> config =
+        parse_stored(row[8].value().value_or("{}"), {.resource_ = context.pool()});
     if (!config) {
         throw std::runtime_error("DNS 聚合配置损坏");
     }
 
-    ZoneConfigData desired = *config;
+    zone_config_data desired = *config;
     const auto projected =
-        co_await loadProjectedRecords(context.db(), task.tenantId, task.resourceId);
+        co_await load_projected_records(db, task.tenant_id_, task.resource_id_);
     for (const auto& record : projected) {
-        desired.records.push_back({.id = record.id,
-                                   .type = record.type,
-                                   .name = record.name,
-                                   .content = record.content,
-                                   .ttl = record.ttl,
-                                   .priority = record.priority,
-                                   .proxied = record.proxied,
-                                   .lineCode = record.lineCode});
+        desired.records_.push_back({.id_ = record.id_,
+            .type_ = record.type_,
+            .name_ = record.name_,
+            .content_ = record.content_,
+            .ttl_ = record.ttl_,
+            .priority_ = record.priority_,
+            .proxied_ = record.proxied_,
+            .line_code_ = record.line_code_});
     }
-    for (const auto& challenge : runtime->challengeRecords) {
-        desired.records.push_back({.id = challenge.id,
-                                   .type = "TXT",
-                                   .name = challenge.name,
-                                   .content = challenge.content,
-                                   .ttl = challenge.ttl,
-                                   .priority = std::nullopt,
-                                   .proxied = false,
-                                   .lineCode = "default"});
+    for (const auto& challenge : runtime->challenge_records_) {
+        desired.records_.push_back({.id_ = challenge.id_,
+            .type_ = "TXT",
+            .name_ = challenge.name_,
+            .content_ = challenge.content_,
+            .ttl_ = challenge.ttl_,
+            .priority_ = std::nullopt,
+            .proxied_ = false,
+            .line_code_ = "default"});
     }
 
-    co_return ZoneSyncState{
-        .runtime = std::move(*runtime),
-        .config = std::move(*config),
-        .desired = std::move(desired),
-        .providerConfig = std::move(providerConfig),
-        .domain = std::string(row[1].value().value_or("")),
-        .provider = provider,
-        .accountId = accountId,
-        .revision = revision,
-        .configRevision = row[9].as<std::int64_t>().value_or(0),
-        .deleted = deleted,
+    co_return zone_sync_state{
+        .runtime_ = std::move(*runtime),
+        .config_ = std::move(*config),
+        .desired_ = std::move(desired),
+        .provider_config_ = std::move(provider_config),
+        .domain_ = std::string(row[1].value().value_or("")),
+        .provider_ = provider,
+        .account_id_ = account_id,
+        .revision_ = revision,
+        .config_revision_ = row[9].as<std::int64_t>().value_or(0),
+        .deleted_ = deleted,
     };
 }
 
-inline ruvia::Task<RemoteZoneData>
-loadRemoteZoneData(service::background::WorkerContext& context,
-                   const service::sync_runtime::RunningMarkerLease& lease,
-                   const service::dns::DnsProviderDriver& driver, std::string_view accountId,
-                   std::string_view secret, std::string_view domain) {
-    const auto remoteZone = co_await driver.findZone(context, accountId, secret, domain);
-    if (!co_await service::sync_runtime::renewRunningLease(context.db(), lease)) {
+inline ruvia::task<remote_zone_data>
+load_remote_zone_data(service::background::worker_context& context,
+    const service::sync_runtime::running_marker_lease& lease,
+    const service::dns::dns_provider_driver& driver, std::string_view account_id,
+    std::string_view secret, std::string_view domain) {
+    const auto remote_zone = co_await driver.find_zone(context, account_id, secret, domain);
+    auto db = context.db();
+    if (!co_await service::sync_runtime::renew_running_lease(db, lease)) {
         throw std::runtime_error("DNS 同步标记 lease 已失效");
     }
-    auto records = co_await driver.listRecords(context, accountId, secret, remoteZone.id, domain);
-    if (!co_await service::sync_runtime::renewRunningLease(context.db(), lease)) {
+    auto records = co_await driver.list_records(context, account_id, secret, remote_zone.id_, domain);
+    if (!co_await service::sync_runtime::renew_running_lease(db, lease)) {
         throw std::runtime_error("DNS 同步标记 lease 已失效");
     }
-    auto lines = co_await driver.listLines(context, accountId, secret, domain);
-    co_return RemoteZoneData{
-        .id = remoteZone.id,
-        .records = std::move(records),
-        .lines = std::move(lines),
+    auto lines = co_await driver.list_lines(context, account_id, secret, domain);
+    co_return remote_zone_data{
+        .id_ = remote_zone.id_,
+        .records_ = std::move(records),
+        .lines_ = std::move(lines),
     };
 }
 
-} // namespace service::dns_sync::detail
+}  // namespace service::dns_sync::detail

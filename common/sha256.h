@@ -4,7 +4,7 @@
 
 namespace flexedge::crypto {
 
-inline constexpr bool isSha256Digest(std::string_view value) noexcept {
+inline constexpr bool is_sha256_digest(std::string_view value) noexcept {
     if (value.size() != 64) {
         return false;
     }
@@ -16,4 +16,4 @@ inline constexpr bool isSha256Digest(std::string_view value) noexcept {
     return true;
 }
 
-} // namespace flexedge::crypto
+}  // namespace flexedge::crypto

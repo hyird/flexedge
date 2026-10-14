@@ -6,7 +6,7 @@
 #include <string_view>
 
 namespace service::common {
-inline std::optional<std::string> parseUuid(std::optional<std::string_view> input) {
+inline std::optional<std::string> parse_uuid(std::optional<std::string_view> input) {
     if (!input || input->size() != 36) {
         return std::nullopt;
     }
@@ -30,4 +30,4 @@ inline std::optional<std::string> parseUuid(std::optional<std::string_view> inpu
     return value;
 }
 
-} // namespace service::common
+}  // namespace service::common

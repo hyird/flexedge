@@ -1,11 +1,12 @@
 #pragma once
 
 #include <cstdlib>
+
 #include "service/features/geoip/xdb_database.h"
 
 namespace service::geoip {
 namespace detail {
-[[nodiscard]] inline std::optional<std::string> environmentValue(const char* name) {
+[[nodiscard]] inline std::optional<std::string> environment_value(const char* name) {
 #ifdef _WIN32
     char* raw{};
     std::size_t length{};
@@ -24,13 +25,13 @@ namespace detail {
 #endif
 }
 
-} // namespace detail
+}  // namespace detail
 
-[[nodiscard]] inline const XdbDatabase& xdbDatabase() {
-    static const XdbDatabase database(
-        detail::environmentValue("FLEXEDGE_XDB_V4_PATH").value_or(""),
-        detail::environmentValue("FLEXEDGE_XDB_V6_PATH").value_or(""));
+[[nodiscard]] inline const xdb_database& get_xdb_database() {
+    static const xdb_database database(
+        detail::environment_value("FLEXEDGE_XDB_V4_PATH").value_or(""),
+        detail::environment_value("FLEXEDGE_XDB_V6_PATH").value_or(""));
     return database;
 }
 
-} // namespace service::geoip
+}  // namespace service::geoip

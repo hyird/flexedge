@@ -15,20 +15,9 @@
 
 namespace flexedge::node {
 
-enum class HttpWireProtocol { kHttp1, kHttp2 };
-
-inline HttpWireProtocol negotiatedHttpProtocol(const SSL* ssl) noexcept {
-    const unsigned char* selected = nullptr;
-    unsigned int size = 0;
-    SSL_get0_alpn_selected(ssl, &selected, &size);
-    return size == 2 && std::string_view(reinterpret_cast<const char*>(selected), size) == "h2"
-               ? HttpWireProtocol::kHttp2
-               : HttpWireProtocol::kHttp1;
-}
-
 namespace detail {
 
-inline int tlsFingerprintExIndex() noexcept {
+inline int tls_fingerprint_ex_index() noexcept {
     static const int index = SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
     return index;
 }
@@ -43,7 +32,7 @@ inline std::uint16_t u16(const unsigned char* data) noexcept {
                                       static_cast<std::uint16_t>(data[1]));
 }
 
-inline void appendNumberList(std::string& result, const std::vector<std::uint16_t>& values) {
+inline void append_number_list(std::string& result, const std::vector<std::uint16_t>& values) {
     for (std::size_t index = 0; index < values.size(); ++index) {
         if (index > 0) {
             result.push_back('-');
@@ -52,22 +41,22 @@ inline void appendNumberList(std::string& result, const std::vector<std::uint16_
     }
 }
 
-inline std::string md5Hex(std::string_view value) {
+inline std::string md5_hex(std::string_view value) {
     std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
-    unsigned int digestSize{};
-    if (EVP_Digest(value.data(), value.size(), digest.data(), &digestSize, EVP_md5(), nullptr) !=
+    unsigned int digest_size{};
+    if (EVP_Digest(value.data(), value.size(), digest.data(), &digest_size, EVP_md5(), nullptr) !=
             1 ||
-        digestSize != 16) {
+        digest_size != 16) {
         return {};
     }
     std::array<char, 33> output{};
-    for (unsigned int index = 0; index < digestSize; ++index) {
+    for (unsigned int index = 0; index < digest_size; ++index) {
         std::snprintf(output.data() + index * 2, 3, "%02x", digest[index]);
     }
     return std::string(output.data(), 32);
 }
 
-inline std::vector<std::uint16_t> cipherSuites(SSL* ssl) {
+inline std::vector<std::uint16_t> cipher_suites(SSL* ssl) {
     const unsigned char* data = nullptr;
     const auto size = SSL_client_hello_get0_ciphers(ssl, &data);
     std::vector<std::uint16_t> values;
@@ -81,22 +70,22 @@ inline std::vector<std::uint16_t> cipherSuites(SSL* ssl) {
     return values;
 }
 
-inline std::vector<std::uint16_t> extensionTypes(SSL* ssl) {
+inline std::vector<std::uint16_t> extension_types(SSL* ssl) {
     int* present = nullptr;
-    std::size_t presentSize{};
-    if (SSL_client_hello_get1_extensions_present(ssl, &present, &presentSize) != 1) {
+    std::size_t present_size{};
+    if (SSL_client_hello_get1_extensions_present(ssl, &present, &present_size) != 1) {
         return {};
     }
     std::vector<std::uint16_t> ordered;
-    if (presentSize > 0) {
-        ordered.resize(presentSize);
-        auto orderedSize = presentSize;
-        if (SSL_client_hello_get_extension_order(ssl, ordered.data(), &orderedSize) == 1) {
-            ordered.resize(orderedSize);
+    if (present_size > 0) {
+        ordered.resize(present_size);
+        auto ordered_size = present_size;
+        if (SSL_client_hello_get_extension_order(ssl, ordered.data(), &ordered_size) == 1) {
+            ordered.resize(ordered_size);
         } else {
             ordered.clear();
-            ordered.reserve(presentSize);
-            for (std::size_t index = 0; index < presentSize; ++index) {
+            ordered.reserve(present_size);
+            for (std::size_t index = 0; index < present_size; ++index) {
                 ordered.push_back(static_cast<std::uint16_t>(present[index]));
             }
         }
@@ -106,17 +95,17 @@ inline std::vector<std::uint16_t> extensionTypes(SSL* ssl) {
     return ordered;
 }
 
-inline std::vector<std::uint16_t> supportedGroups(SSL* ssl) {
+inline std::vector<std::uint16_t> supported_groups(SSL* ssl) {
     const unsigned char* data = nullptr;
     std::size_t size{};
     if (SSL_client_hello_get0_ext(ssl, TLSEXT_TYPE_supported_groups, &data, &size) != 1 ||
         data == nullptr || size < 2) {
         return {};
     }
-    const auto listSize = (std::min)(static_cast<std::size_t>(u16(data)), size - 2);
+    const auto list_size = (std::min)(static_cast<std::size_t>(u16(data)), size - 2);
     std::vector<std::uint16_t> values;
-    values.reserve(listSize / 2);
-    for (std::size_t offset = 2; offset + 1 < 2 + listSize; offset += 2) {
+    values.reserve(list_size / 2);
+    for (std::size_t offset = 2; offset + 1 < 2 + list_size; offset += 2) {
         const auto value = u16(data + offset);
         if (!grease(value)) {
             values.push_back(value);
@@ -125,64 +114,64 @@ inline std::vector<std::uint16_t> supportedGroups(SSL* ssl) {
     return values;
 }
 
-inline std::vector<std::uint16_t> pointFormats(SSL* ssl) {
+inline std::vector<std::uint16_t> point_formats(SSL* ssl) {
     const unsigned char* data = nullptr;
     std::size_t size{};
     if (SSL_client_hello_get0_ext(ssl, TLSEXT_TYPE_ec_point_formats, &data, &size) != 1 ||
         data == nullptr || size < 1) {
         return {};
     }
-    const auto listSize = (std::min)(static_cast<std::size_t>(data[0]), size - 1);
+    const auto list_size = (std::min)(static_cast<std::size_t>(data[0]), size - 1);
     std::vector<std::uint16_t> values;
-    values.reserve(listSize);
-    for (std::size_t offset = 1; offset < 1 + listSize; ++offset) {
+    values.reserve(list_size);
+    for (std::size_t offset = 1; offset < 1 + list_size; ++offset) {
         values.push_back(data[offset]);
     }
     return values;
 }
 
-inline std::string ja3Fingerprint(SSL* ssl) {
+inline std::string ja3_fingerprint(SSL* ssl) {
     std::string value = std::to_string(SSL_client_hello_get0_legacy_version(ssl));
     value.push_back(',');
-    appendNumberList(value, cipherSuites(ssl));
+    append_number_list(value, cipher_suites(ssl));
     value.push_back(',');
-    appendNumberList(value, extensionTypes(ssl));
+    append_number_list(value, extension_types(ssl));
     value.push_back(',');
-    appendNumberList(value, supportedGroups(ssl));
+    append_number_list(value, supported_groups(ssl));
     value.push_back(',');
-    appendNumberList(value, pointFormats(ssl));
-    const auto digest = md5Hex(value);
+    append_number_list(value, point_formats(ssl));
+    const auto digest = md5_hex(value);
     return digest.empty() ? std::string{} : "ja3:" + digest;
 }
 
-inline int tlsFingerprintCallback(SSL* ssl, int*, void*) noexcept {
+inline int tls_fingerprint_callback(SSL* ssl, int*, void*) noexcept {
     try {
-        const auto index = tlsFingerprintExIndex();
+        const auto index = tls_fingerprint_ex_index();
         auto* output = index < 0 ? nullptr : static_cast<std::string*>(SSL_get_ex_data(ssl, index));
         if (output != nullptr) {
-            *output = ja3Fingerprint(ssl);
+            *output = ja3_fingerprint(ssl);
         }
     } catch (...) {
     }
     return SSL_CLIENT_HELLO_SUCCESS;
 }
 
-} // namespace detail
+}  // namespace detail
 
-inline void captureTlsClientFingerprint(SSL* ssl, std::string& output) noexcept {
-    const auto index = detail::tlsFingerprintExIndex();
+inline void capture_tls_client_fingerprint(SSL* ssl, std::string& output) noexcept {
+    const auto index = detail::tls_fingerprint_ex_index();
     if (index < 0) {
         return;
     }
     SSL_set_ex_data(ssl, index, &output);
-    SSL_CTX_set_client_hello_cb(SSL_get_SSL_CTX(ssl), &detail::tlsFingerprintCallback, nullptr);
+    SSL_CTX_set_client_hello_cb(SSL_get_SSL_CTX(ssl), &detail::tls_fingerprint_callback, nullptr);
 }
 
-inline void releaseTlsClientFingerprint(SSL* ssl) noexcept {
-    const auto index = detail::tlsFingerprintExIndex();
+inline void release_tls_client_fingerprint(SSL* ssl) noexcept {
+    const auto index = detail::tls_fingerprint_ex_index();
     if (index >= 0) {
         SSL_set_ex_data(ssl, index, nullptr);
     }
 }
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

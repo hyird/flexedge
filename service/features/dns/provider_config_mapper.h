@@ -1,19 +1,20 @@
 #pragma once
 
+#include <ruvia/web/model_json.h>
+
 #include <memory_resource>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <ruvia/web/ModelJson.h>
 
 #include "service/features/dns/provider_config_model.h"
 #include "service/features/dns/provider_config_transport.h"
 
 namespace service::dns {
 
-[[nodiscard]] inline std::optional<DnsProviderConfigData>
-normalize(const DnsProviderConfigInput& input) {
+[[nodiscard]] inline std::optional<dns_provider_config_data>
+normalize(const dns_provider_config_input& input) {
     const auto& credential = input.get<"credential">();
     if (!credential) {
         return std::nullopt;
@@ -23,15 +24,15 @@ normalize(const DnsProviderConfigInput& input) {
     if (!envelope || !hint) {
         return std::nullopt;
     }
-    return DnsProviderConfigData{.credentialEnvelope = std::string(envelope->view()),
-                                 .credentialHint = std::string(hint->view())};
+    return dns_provider_config_data{.credential_envelope_ = std::string(envelope->view()),
+        .credential_hint_ = std::string(hint->view())};
 }
 
-inline DnsProviderConfigData
-parseDnsProviderConfig(std::string_view json,
-                       std::pmr::memory_resource* resource = std::pmr::get_default_resource()) {
-    const std::optional<DnsProviderConfigInput> config =
-        ruvia::fromJson<DnsProviderConfigInput>(json, {.resource = resource});
+inline dns_provider_config_data
+parse_dns_provider_config(std::string_view json,
+    std::pmr::memory_resource* resource = std::pmr::get_default_resource()) {
+    const std::optional<dns_provider_config_input> config =
+        ruvia::from_json<dns_provider_config_input>(json, {.resource_ = resource});
     if (!config) {
         throw std::runtime_error("stored DNS provider config is incomplete");
     }
@@ -42,24 +43,23 @@ parseDnsProviderConfig(std::string_view json,
     return *normalized;
 }
 
-[[nodiscard]] inline DnsProviderConfigOutput toOutput(const DnsProviderConfigData& input,
-                                                      ruvia::ModelOptions options = {}) {
-    DnsProviderConfigOutput output(options);
+[[nodiscard]] inline dns_provider_config_output to_output(const dns_provider_config_data& input,
+    ruvia::model_options options = {}) {
+    dns_provider_config_output output(options);
     auto& credential = output.ensure<"credential">();
-    credential.set<"envelope">(input.credentialEnvelope);
-    credential.set<"hint">(input.credentialHint);
+    credential.set<"envelope">(input.credential_envelope_);
+    credential.set<"hint">(input.credential_hint_);
     return output;
 }
 
 inline std::string
-serializeDnsProviderConfig(std::string_view envelope, std::string_view hint,
-                           std::pmr::memory_resource* resource = std::pmr::get_default_resource()) {
-    const auto config = toOutput(DnsProviderConfigData{.credentialEnvelope = std::string(envelope),
-                                                       .credentialHint = std::string(hint)},
-                                 {.resource = resource});
-    const auto json = ruvia::toJson(config, {.resource = resource});
+serialize_dns_provider_config(std::string_view envelope, std::string_view hint,
+    std::pmr::memory_resource* resource = std::pmr::get_default_resource()) {
+    const auto config = to_output(dns_provider_config_data{.credential_envelope_ = std::string(envelope),
+                                      .credential_hint_ = std::string(hint)},
+        {.resource_ = resource});
+    const auto json = ruvia::to_json(config, {.resource_ = resource});
     return std::string(json.data(), json.size());
 }
 
-
-} // namespace service::dns
+}  // namespace service::dns

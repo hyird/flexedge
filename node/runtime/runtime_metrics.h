@@ -25,169 +25,174 @@
 
 namespace flexedge::node {
 
-struct RuntimeMetricsSnapshot final {
-    double cpuUsage{};
-    double memoryUsage{};
-    std::int64_t trafficOutBps{};
-    std::int64_t connectionCount{};
-    double load1m{};
+struct runtime_metrics_snapshot final {
+    double cpu_usage_{};
+    double memory_usage_{};
+    std::int64_t traffic_out_bps_{};
+    std::int64_t connection_count_{};
+    double load1m_{};
 };
 
-class RuntimeMetrics final {
-  public:
-    void connectionOpened() noexcept { activeConnections_.fetch_add(1); }
-    void connectionClosed() noexcept { activeConnections_.fetch_sub(1); }
-    void trafficOut(std::size_t bytes) noexcept { trafficOutBytes_.fetch_add(bytes); }
-
-    [[nodiscard]] std::int64_t connectionCount() const noexcept {
-        return activeConnections_.load();
+class runtime_metrics final {
+public:
+    void connection_opened() noexcept {
+        active_connections_.fetch_add(1);
+    }
+    void connection_closed() noexcept {
+        active_connections_.fetch_sub(1);
+    }
+    void traffic_out(std::size_t bytes) noexcept {
+        traffic_out_bytes_.fetch_add(bytes);
     }
 
-    [[nodiscard]] RuntimeMetricsSnapshot sample() {
-        const std::lock_guard lock(sampleMutex_);
-        RuntimeMetricsSnapshot result;
-        result.connectionCount = activeConnections_.load();
+    [[nodiscard]] std::int64_t connection_count() const noexcept {
+        return active_connections_.load();
+    }
+
+    [[nodiscard]] runtime_metrics_snapshot sample() {
+        const std::lock_guard lock(sample_mutex_);
+        runtime_metrics_snapshot result;
+        result.connection_count_ = active_connections_.load();
         const auto now = std::chrono::steady_clock::now();
-        const auto bytes = trafficOutBytes_.load();
-        const auto elapsed = std::chrono::duration<double>(now - lastTrafficSample_).count();
+        const auto bytes = traffic_out_bytes_.load();
+        const auto elapsed = std::chrono::duration<double>(now - last_traffic_sample_).count();
         if (elapsed > 0) {
-            result.trafficOutBps = static_cast<std::int64_t>(
-                std::llround(static_cast<double>(bytes - lastTrafficBytes_) * 8.0 / elapsed));
+            result.traffic_out_bps_ = static_cast<std::int64_t>(
+                std::llround(static_cast<double>(bytes - last_traffic_bytes_) * 8.0 / elapsed));
         }
-        lastTrafficBytes_ = bytes;
-        lastTrafficSample_ = now;
-        sampleSystem(result);
+        last_traffic_bytes_ = bytes;
+        last_traffic_sample_ = now;
+        sample_system(result);
         return result;
     }
 
-  private:
+private:
 #ifdef _WIN32
-    static std::uint64_t fileTime(const FILETIME& value) noexcept {
+    static std::uint64_t file_time(const FILETIME& value) noexcept {
         ULARGE_INTEGER result;
         result.LowPart = value.dwLowDateTime;
         result.HighPart = value.dwHighDateTime;
         return result.QuadPart;
     }
 
-    void sampleSystem(RuntimeMetricsSnapshot& result) noexcept {
+    void sample_system(runtime_metrics_snapshot& result) noexcept {
         FILETIME idle{};
         FILETIME kernel{};
         FILETIME user{};
         if (GetSystemTimes(&idle, &kernel, &user)) {
-            const auto idleValue = fileTime(idle);
-            const auto totalValue = fileTime(kernel) + fileTime(user);
-            if (lastCpuTotal_ != 0 && totalValue > lastCpuTotal_) {
-                const auto totalDelta = totalValue - lastCpuTotal_;
-                const auto idleDelta = idleValue - lastCpuIdle_;
-                result.cpuUsage = totalDelta > idleDelta
-                                      ? static_cast<double>(totalDelta - idleDelta) /
-                                            static_cast<double>(totalDelta)
-                                      : 0;
+            const auto idle_value = file_time(idle);
+            const auto total_value = file_time(kernel) + file_time(user);
+            if (last_cpu_total_ != 0 && total_value > last_cpu_total_) {
+                const auto total_delta = total_value - last_cpu_total_;
+                const auto idle_delta = idle_value - last_cpu_idle_;
+                result.cpu_usage_ = total_delta > idle_delta
+                                        ? static_cast<double>(total_delta - idle_delta) /
+                                              static_cast<double>(total_delta)
+                                        : 0;
             }
-            lastCpuIdle_ = idleValue;
-            lastCpuTotal_ = totalValue;
+            last_cpu_idle_ = idle_value;
+            last_cpu_total_ = total_value;
         }
         MEMORYSTATUSEX memory{.dwLength = sizeof(memory)};
         if (GlobalMemoryStatusEx(&memory)) {
-            result.memoryUsage = static_cast<double>(memory.dwMemoryLoad) / 100.0;
+            result.memory_usage_ = static_cast<double>(memory.dwMemoryLoad) / 100.0;
         }
-        result.load1m = result.cpuUsage * (std::max)(1U, std::thread::hardware_concurrency());
+        result.load1m_ = result.cpu_usage_ * (std::max)(1U, std::thread::hardware_concurrency());
     }
 #elif defined(__APPLE__)
-    void sampleSystem(RuntimeMetricsSnapshot& result) noexcept {
+    void sample_system(runtime_metrics_snapshot& result) noexcept {
         host_cpu_load_info_data_t cpu{};
-        mach_msg_type_number_t cpuCount = HOST_CPU_LOAD_INFO_COUNT;
+        mach_msg_type_number_t cpu_count = HOST_CPU_LOAD_INFO_COUNT;
         if (::host_statistics(::mach_host_self(), HOST_CPU_LOAD_INFO,
-                              reinterpret_cast<host_info_t>(&cpu), &cpuCount) == KERN_SUCCESS) {
-            const auto idleValue = static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_IDLE]);
-            const auto totalValue = static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_USER]) +
-                                    static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_SYSTEM]) +
-                                    idleValue +
-                                    static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_NICE]);
-            if (lastCpuTotal_ != 0 && totalValue > lastCpuTotal_) {
-                const auto totalDelta = totalValue - lastCpuTotal_;
-                const auto idleDelta = idleValue - lastCpuIdle_;
-                result.cpuUsage = totalDelta > idleDelta
-                                      ? static_cast<double>(totalDelta - idleDelta) /
-                                            static_cast<double>(totalDelta)
-                                      : 0;
+                reinterpret_cast<host_info_t>(&cpu), &cpu_count) == KERN_SUCCESS) {
+            const auto idle_value = static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_IDLE]);
+            const auto total_value = static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_USER]) +
+                                     static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_SYSTEM]) +
+                                     idle_value +
+                                     static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_NICE]);
+            if (last_cpu_total_ != 0 && total_value > last_cpu_total_) {
+                const auto total_delta = total_value - last_cpu_total_;
+                const auto idle_delta = idle_value - last_cpu_idle_;
+                result.cpu_usage_ = total_delta > idle_delta
+                                        ? static_cast<double>(total_delta - idle_delta) /
+                                              static_cast<double>(total_delta)
+                                        : 0;
             }
-            lastCpuIdle_ = idleValue;
-            lastCpuTotal_ = totalValue;
+            last_cpu_idle_ = idle_value;
+            last_cpu_total_ = total_value;
         }
 
-        std::uint64_t totalMemory{};
-        std::size_t totalMemorySize = sizeof(totalMemory);
+        std::uint64_t total_memory{};
+        std::size_t total_memory_size = sizeof(total_memory);
         vm_statistics64_data_t memory{};
-        mach_msg_type_number_t memoryCount = HOST_VM_INFO64_COUNT;
-        vm_size_t pageSize{};
-        if (::sysctlbyname("hw.memsize", &totalMemory, &totalMemorySize, nullptr, 0) == 0 &&
-            totalMemory > 0 &&
+        mach_msg_type_number_t memory_count = HOST_VM_INFO64_COUNT;
+        vm_size_t page_size{};
+        if (::sysctlbyname("hw.memsize", &total_memory, &total_memory_size, nullptr, 0) == 0 &&
+            total_memory > 0 &&
             ::host_statistics64(::mach_host_self(), HOST_VM_INFO64,
-                                reinterpret_cast<host_info64_t>(&memory), &memoryCount) ==
+                reinterpret_cast<host_info64_t>(&memory), &memory_count) ==
                 KERN_SUCCESS &&
-            ::host_page_size(::mach_host_self(), &pageSize) == KERN_SUCCESS) {
-            const auto usedPages = static_cast<std::uint64_t>(memory.active_count) +
-                                   static_cast<std::uint64_t>(memory.inactive_count) +
-                                   static_cast<std::uint64_t>(memory.wire_count);
-            result.memoryUsage = (std::min)(
-                1.0, static_cast<double>(usedPages) * static_cast<double>(pageSize) /
-                         static_cast<double>(totalMemory));
+            ::host_page_size(::mach_host_self(), &page_size) == KERN_SUCCESS) {
+            const auto used_pages = static_cast<std::uint64_t>(memory.active_count) +
+                                    static_cast<std::uint64_t>(memory.inactive_count) +
+                                    static_cast<std::uint64_t>(memory.wire_count);
+            result.memory_usage_ = (std::min)(1.0, static_cast<double>(used_pages) * static_cast<double>(page_size) /
+                                                       static_cast<double>(total_memory));
         }
 
         double load{};
         if (::getloadavg(&load, 1) == 1 && load >= 0) {
-            result.load1m = load;
+            result.load1m_ = load;
         }
     }
 #else
-    void sampleSystem(RuntimeMetricsSnapshot& result) noexcept {
+    void sample_system(runtime_metrics_snapshot& result) noexcept {
         std::ifstream stat("/proc/stat");
         std::string label;
         std::uint64_t user{};
         std::uint64_t nice{};
         std::uint64_t system{};
         std::uint64_t idle{};
-        std::uint64_t ioWait{};
+        std::uint64_t io_wait{};
         std::uint64_t irq{};
-        std::uint64_t softIrq{};
+        std::uint64_t soft_irq{};
         std::uint64_t steal{};
-        if (stat >> label >> user >> nice >> system >> idle >> ioWait >> irq >> softIrq >> steal) {
-            const auto idleValue = idle + ioWait;
-            const auto totalValue = user + nice + system + idle + ioWait + irq + softIrq + steal;
-            if (lastCpuTotal_ != 0 && totalValue > lastCpuTotal_) {
-                const auto totalDelta = totalValue - lastCpuTotal_;
-                const auto idleDelta = idleValue - lastCpuIdle_;
-                result.cpuUsage = totalDelta > idleDelta
-                                      ? static_cast<double>(totalDelta - idleDelta) /
-                                            static_cast<double>(totalDelta)
-                                      : 0;
+        if (stat >> label >> user >> nice >> system >> idle >> io_wait >> irq >> soft_irq >> steal) {
+            const auto idle_value = idle + io_wait;
+            const auto total_value = user + nice + system + idle + io_wait + irq + soft_irq + steal;
+            if (last_cpu_total_ != 0 && total_value > last_cpu_total_) {
+                const auto total_delta = total_value - last_cpu_total_;
+                const auto idle_delta = idle_value - last_cpu_idle_;
+                result.cpu_usage_ = total_delta > idle_delta
+                                        ? static_cast<double>(total_delta - idle_delta) /
+                                              static_cast<double>(total_delta)
+                                        : 0;
             }
-            lastCpuIdle_ = idleValue;
-            lastCpuTotal_ = totalValue;
+            last_cpu_idle_ = idle_value;
+            last_cpu_total_ = total_value;
         }
         struct sysinfo info{};
         if (::sysinfo(&info) == 0) {
-            const auto memoryUnit = static_cast<double>(info.mem_unit);
-            const auto total = static_cast<double>(info.totalram) * memoryUnit;
+            const auto memory_unit = static_cast<double>(info.mem_unit);
+            const auto total = static_cast<double>(info.totalram) * memory_unit;
             const auto free =
                 (static_cast<double>(info.freeram) + static_cast<double>(info.bufferram)) *
-                memoryUnit;
+                memory_unit;
             if (total > 0) {
-                result.memoryUsage = (total - free) / total;
+                result.memory_usage_ = (total - free) / total;
             }
-            result.load1m = static_cast<double>(info.loads[0]) / (1U << SI_LOAD_SHIFT);
+            result.load1m_ = static_cast<double>(info.loads[0]) / (1U << SI_LOAD_SHIFT);
         }
     }
 #endif
 
-    std::atomic<std::int64_t> activeConnections_{};
-    std::atomic<std::uint64_t> trafficOutBytes_{};
-    std::mutex sampleMutex_;
-    std::chrono::steady_clock::time_point lastTrafficSample_{std::chrono::steady_clock::now()};
-    std::uint64_t lastTrafficBytes_{};
-    std::uint64_t lastCpuIdle_{};
-    std::uint64_t lastCpuTotal_{};
+    std::atomic<std::int64_t> active_connections_{};
+    std::atomic<std::uint64_t> traffic_out_bytes_{};
+    std::mutex sample_mutex_;
+    std::chrono::steady_clock::time_point last_traffic_sample_{std::chrono::steady_clock::now()};
+    std::uint64_t last_traffic_bytes_{};
+    std::uint64_t last_cpu_idle_{};
+    std::uint64_t last_cpu_total_{};
 };
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

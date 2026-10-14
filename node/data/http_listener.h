@@ -1,10 +1,17 @@
 #pragma once
 
+#include <ruvia/core/event_loop.h>
+#include <ruvia/core/task.h>
+#include <ruvia/core/worker_handle.h>
+#include <ruvia/core/worker_signal.h>
+#include <ruvia/http/http_header.h>
+#include <ruvia/http/http_status.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cerrno>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -31,92 +38,104 @@
 #include <asio/steady_timer.hpp>
 #include <asio/write.hpp>
 
-#include <ruvia/core/EventLoop.h>
-#include <ruvia/core/WorkerNotification.h>
-#include <ruvia/http/Http1RequestParser.h>
-
 #if defined(SO_REUSEPORT) && !defined(_WIN32)
 #include <sys/socket.h>
 #endif
 
-#include "node/runtime/http_redirect.h"
-#include "node/runtime/log_buffer.h"
-#include "node/runtime/runtime_metrics.h"
-#include "node/runtime/runtime_state.h"
-#include "node/data/origin_health.h"
-#include "node/data/buffered_origin_exchange.h"
 #include "node/data/buffered_bytes_budget.h"
+#include "node/data/buffered_origin_exchange.h"
+#include "node/data/http1_request_reader.h"
 #include "node/data/origin_connection_pool.h"
+#include "node/data/origin_health.h"
 #include "node/data/origin_request_codec.h"
 #include "node/data/origin_response_codec.h"
 #include "node/data/origin_selection.h"
 #include "node/data/origin_tls.h"
 #include "node/data/origin_transport.h"
 #include "node/data/response_compression.h"
+#include "node/runtime/http_redirect.h"
+#include "node/runtime/log_buffer.h"
+#include "node/runtime/runtime_metrics.h"
+#include "node/runtime/runtime_state.h"
 
 namespace flexedge::node {
 
-class ListenerActivationGate final {
-  public:
-    void activate() noexcept { active_.store(true, std::memory_order_release); }
+class listener_activation_gate final {
+public:
+    void activate() noexcept {
+        active_.store(true, std::memory_order_release);
+    }
 
-    [[nodiscard]] bool active() const noexcept { return active_.load(std::memory_order_acquire); }
+    [[nodiscard]] bool active() const noexcept {
+        return active_.load(std::memory_order_acquire);
+    }
 
-  private:
+private:
     std::atomic<bool> active_{};
 };
 
-template <typename ClientStream>
-class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSession<ClientStream>> {
-  public:
-    BasicHttpSession(ClientStream stream, RuntimeState& runtime, OriginHealthRegistry& health,
-                     RuntimeMetrics& metrics, NodeLogBuffer::Producer& logs,
-                     OriginConnectionPool& originConnections, BufferedBytesBudget& requestBuffers,
-                     BufferedBytesBudget& responseBuffers, std::uint64_t sequence,
-                     std::shared_ptr<const void> transportState = nullptr, bool secure = false,
-                     std::string tlsFingerprint = {}, std::function<void()> onRetired = {})
-        : stream_(std::move(stream)), originConnections_(originConnections),
-          timer_(stream_.get_executor()), runtime_(runtime), health_(health), metrics_(metrics),
-          logs_(logs), responseBuffers_(responseBuffers),
-          requestReservation_(requestBuffers.lease()), tlsFingerprint_(std::move(tlsFingerprint)),
-          sequence_(sequence), transportState_(std::move(transportState)), secure_(secure),
-          onRetired_(std::move(onRetired)) {
-        requestBytes_.reserve(8192);
-        metrics_.connectionOpened();
+template <typename client_stream_type>
+class basic_http_session final : public std::enable_shared_from_this<basic_http_session<client_stream_type>> {
+public:
+    basic_http_session(client_stream_type stream, runtime_state& runtime, origin_health_registry& health,
+        runtime_metrics& metrics, node_log_buffer::producer& logs,
+        origin_connection_pool& origin_connections, buffered_bytes_budget& request_buffers,
+        buffered_bytes_budget& response_buffers, std::uint64_t sequence,
+        std::shared_ptr<const void> transport_state = nullptr, bool secure = false,
+        std::string tls_fingerprint = {}, std::function<void()> on_retired = {})
+        : stream_(std::move(stream)),
+          origin_connections_(origin_connections),
+          timer_(stream_.get_executor()),
+          runtime_(runtime),
+          health_(health),
+          metrics_(metrics),
+          logs_(logs),
+          response_buffers_(response_buffers),
+          request_reservation_(request_buffers.lease()),
+          tls_fingerprint_(std::move(tls_fingerprint)),
+          sequence_(sequence),
+          transport_state_(std::move(transport_state)),
+          secure_(secure),
+          on_retired_(std::move(on_retired)) {
+        request_bytes_.reserve(8192);
+        metrics_.connection_opened();
     }
 
-    ~BasicHttpSession() {
-        metrics_.connectionClosed();
-        if (onRetired_) onRetired_();
+    ~basic_http_session() {
+        metrics_.connection_closed();
+        if (on_retired_) {
+            on_retired_();
+        }
     }
 
     void start() {
-        captureClientAddress();
+        capture_client_address();
         read();
     }
 
-  private:
-    static constexpr std::size_t kMaxRequestBytes = 2 * 1024 * 1024;
+private:
+    static constexpr std::size_t max_request_bytes = 2 * 1024 * 1024;
 
-    enum class TimeoutAction { kClose, kFailover };
+    enum class timeout_action { close,
+        failover };
 
-    static std::string response(std::string_view status, std::string_view extraHeaders = {}) {
+    static std::string response(std::string_view status, std::string_view extra_headers = {}) {
         std::string result = "HTTP/1.1 ";
         result.append(status);
         result.append("\r\nContent-Length: 0\r\nConnection: close\r\n");
-        result.append(extraHeaders);
+        result.append(extra_headers);
         result.append("\r\n");
         return result;
     }
 
-    static bool shouldForwardBufferedResponseHeader(std::string_view name,
-                                                    bool hstsEnabled) noexcept {
-        return !httpHeaderName(name, "Content-Length") &&
-               !httpHeaderName(name, "Transfer-Encoding") && !httpHeaderName(name, "Connection") &&
-               !(hstsEnabled && httpHeaderName(name, "Strict-Transport-Security"));
+    static bool should_forward_buffered_response_header(std::string_view name,
+        bool hsts_enabled) noexcept {
+        return !http_header_name(name, "Content-Length") &&
+               !http_header_name(name, "Transfer-Encoding") && !http_header_name(name, "Connection") &&
+               !(hsts_enabled && http_header_name(name, "Strict-Transport-Security"));
     }
 
-    static bool normalIoClose(const std::error_code& error) noexcept {
+    static bool normal_io_close(const std::error_code& error) noexcept {
         return error == asio::error::eof || error == asio::error::operation_aborted ||
                error == asio::ssl::error::stream_truncated;
     }
@@ -138,8 +157,8 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         }
     }
 
-    void logIo(std::string_view message, const std::error_code& error) const noexcept {
-        if (normalIoClose(error)) {
+    void log_io(std::string_view message, const std::error_code& error) const noexcept {
+        if (normal_io_close(error)) {
             return;
         }
         try {
@@ -150,7 +169,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         }
     }
 
-    static std::uint32_t wireStatusCode(std::string_view bytes) noexcept {
+    static std::uint32_t wire_status_code(std::string_view bytes) noexcept {
         if (!bytes.starts_with("HTTP/1.1 ") || bytes.size() < 12) {
             return 0;
         }
@@ -165,7 +184,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         return static_cast<std::uint32_t>((a - '0') * 100 + (b - '0') * 10 + (c - '0'));
     }
 
-    static void appendBounded(std::string& result, std::string_view value, std::size_t maximum) {
+    static void append_bounded(std::string& result, std::string_view value, std::size_t maximum) {
         if (result.size() >= maximum) {
             return;
         }
@@ -173,77 +192,75 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         result.append(value.substr(0, available));
     }
 
-    static std::string requestHeaderBlock(const ruvia::Http1ParsedRequest& parsed) {
+    static std::string request_header_block(const http1_request_reader& parsed) {
         std::string result;
         for (const auto& header : parsed.request().headers()) {
-            appendBounded(result, header.name(), NodeLogBuffer::kMaxRequestHeadersBytes);
-            appendBounded(result, ": ", NodeLogBuffer::kMaxRequestHeadersBytes);
-            appendBounded(result, NodeLogBuffer::requestHeaderValue(header.name(), header.value()),
-                          NodeLogBuffer::kMaxRequestHeadersBytes);
-            appendBounded(result, "\n", NodeLogBuffer::kMaxRequestHeadersBytes);
-            if (result.size() >= NodeLogBuffer::kMaxRequestHeadersBytes) {
+            append_bounded(result, header.name(), node_log_buffer::max_request_headers_bytes);
+            append_bounded(result, ": ", node_log_buffer::max_request_headers_bytes);
+            append_bounded(result, node_log_buffer::request_header_value(header.name(), header.value()),
+                node_log_buffer::max_request_headers_bytes);
+            append_bounded(result, "\n", node_log_buffer::max_request_headers_bytes);
+            if (result.size() >= node_log_buffer::max_request_headers_bytes) {
                 break;
             }
         }
         return result;
     }
 
-    static std::string headerBlockForLog(std::string_view block, std::size_t maximum) {
+    static std::string header_block_for_log(std::string_view block, std::size_t maximum) {
         std::string result;
         while (!block.empty() && result.size() < maximum) {
-            const auto lineEnd = block.find("\r\n");
-            const auto line = lineEnd == std::string_view::npos ? block : block.substr(0, lineEnd);
+            const auto line_end = block.find("\r\n");
+            const auto line = line_end == std::string_view::npos ? block : block.substr(0, line_end);
             const auto colon = line.find(':');
             if (colon == std::string_view::npos) {
-                appendBounded(result, line, maximum);
+                append_bounded(result, line, maximum);
             } else {
                 auto value = line.substr(colon + 1);
                 while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
                     value.remove_prefix(1);
                 }
                 const auto name = line.substr(0, colon);
-                appendBounded(result, name, maximum);
-                appendBounded(result, ": ", maximum);
-                appendBounded(result, NodeLogBuffer::responseHeaderValue(name, value), maximum);
+                append_bounded(result, name, maximum);
+                append_bounded(result, ": ", maximum);
+                append_bounded(result, node_log_buffer::response_header_value(name, value), maximum);
             }
-            appendBounded(result, "\n", maximum);
-            if (lineEnd == std::string_view::npos) {
+            append_bounded(result, "\n", maximum);
+            if (line_end == std::string_view::npos) {
                 break;
             }
-            block.remove_prefix(lineEnd + 2);
+            block.remove_prefix(line_end + 2);
         }
         return result;
     }
 
-    static std::pair<std::string, bool> requestBodyForLog(const ruvia::Http1ParsedRequest& parsed) {
+    static std::pair<std::string, bool> request_body_for_log(const http1_request_reader& parsed) {
         std::string body;
-        if (parsed.bodyPlan().chunked()) {
-            auto decoded = decodeChunkedBody(parsed.wireBody(), kMaxRequestBytes);
-            if (!decoded) {
+        if (parsed.has_body()) {
+            const auto framed = parsed.body();
+            if (!framed) {
                 return {};
             }
-            body = std::move(*decoded);
-        } else if (parsed.bodyPlan().knownLength()) {
-            body.assign(parsed.wireBody());
+            body.assign(*framed);
         }
-        const auto truncated = body.size() > NodeLogBuffer::kMaxRequestBodyBytes;
+        const auto truncated = body.size() > node_log_buffer::max_request_body_bytes;
         if (truncated) {
-            body.resize(NodeLogBuffer::kMaxRequestBodyBytes);
+            body.resize(node_log_buffer::max_request_body_bytes);
         }
-        return {NodeLogBuffer::requestBodyValue(body), truncated};
+        return {node_log_buffer::request_body_value(body), truncated};
     }
 
-    static std::string_view http1ResponseHeaders(std::string_view bytes) noexcept {
-        const auto headEnd = bytes.find("\r\n\r\n");
-        const auto statusLineEnd = bytes.find("\r\n");
-        if (headEnd == std::string_view::npos || statusLineEnd == std::string_view::npos ||
-            statusLineEnd + 2 > headEnd) {
+    static std::string_view http1_response_headers(std::string_view bytes) noexcept {
+        const auto head_end = bytes.find("\r\n\r\n");
+        const auto status_line_end = bytes.find("\r\n");
+        if (head_end == std::string_view::npos || status_line_end == std::string_view::npos ||
+            status_line_end + 2 > head_end) {
             return {};
         }
-        return bytes.substr(statusLineEnd + 2, headEnd - statusLineEnd - 2);
+        return bytes.substr(status_line_end + 2, head_end - status_line_end - 2);
     }
 
-    static std::string queryStringForLog(std::string_view target) {
+    static std::string query_string_for_log(std::string_view target) {
         const auto question = target.find('?');
         if (question == std::string_view::npos) {
             return {};
@@ -254,7 +271,7 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
                                                            : fragment - question - 1));
     }
 
-    static void applyStatusCodeRanges(std::array<bool, 5>& target, const v2::Website& website) {
+    static void apply_status_code_ranges(std::array<bool, 5>& target, const v2::Website& website) {
         if (website.access_log_status_code_ranges().empty()) {
             target.fill(true);
             return;
@@ -275,169 +292,164 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         }
     }
 
-    void captureRequestLog(const ruvia::Http1ParsedRequest& parsed, const v2::Website& website) {
-        requestBodyBytes_ = requestBodyBytes(parsed);
+    void capture_request_log(const http1_request_reader& parsed, const v2::Website& website) {
+        request_body_bytes_ = request_body_bytes(parsed);
         if (website.access_log_query_params()) {
-            queryString_ = queryStringForLog(parsed.request().target());
+            query_string_ = query_string_for_log(parsed.request().target());
         }
         if (website.access_log_cookies()) {
             if (const auto cookies = parsed.request().header("Cookie")) {
-                cookies_ = NodeLogBuffer::cookieValue(*cookies);
+                cookies_ = node_log_buffer::cookie_value(*cookies);
             }
         }
         if (website.access_log_referer()) {
             if (const auto referer = parsed.request().header("Referer")) {
-                requestReferer_.assign(*referer);
+                request_referer_.assign(*referer);
             }
         }
         if (website.access_log_user_agent()) {
-            if (const auto userAgent = parsed.request().header("User-Agent")) {
-                requestUserAgent_.assign(*userAgent);
+            if (const auto user_agent = parsed.request().header("User-Agent")) {
+                request_user_agent_.assign(*user_agent);
             }
         }
         if (website.access_log_request_headers()) {
-            requestHeaders_ = requestHeaderBlock(parsed);
+            request_headers_ = request_header_block(parsed);
         }
         if (website.access_log_request_body()) {
-            auto [body, truncated] = requestBodyForLog(parsed);
-            requestBody_ = std::move(body);
-            requestBodyTruncated_ = truncated;
+            auto [body, truncated] = request_body_for_log(parsed);
+            request_body_ = std::move(body);
+            request_body_truncated_ = truncated;
         }
     }
 
-    static std::uint64_t requestBodyBytes(const ruvia::Http1ParsedRequest& parsed) {
-        if (parsed.bodyPlan().chunked()) {
-            const auto decoded = decodeChunkedBody(parsed.wireBody(), kMaxRequestBytes);
-            return decoded ? static_cast<std::uint64_t>(decoded->size()) : 0;
-        }
-        return parsed.bodyPlan().knownLength()
-                   ? static_cast<std::uint64_t>(parsed.wireBody().size())
-                   : 0;
+    static std::uint64_t request_body_bytes(const http1_request_reader& parsed) {
+        const auto body = parsed.body();
+        return body ? static_cast<std::uint64_t>(body->size()) : 0;
     }
 
-    void captureResponseHeaders(std::string_view bytes) {
-        if (!accessLogResponseHeadersEnabled_ || !responseHeaders_.empty()) {
+    void capture_response_headers(std::string_view bytes) {
+        if (!access_log_response_headers_enabled_ || !response_headers_.empty()) {
             return;
         }
-        responseHeaders_ =
-            headerBlockForLog(http1ResponseHeaders(bytes), NodeLogBuffer::kMaxResponseHeadersBytes);
+        response_headers_ =
+            header_block_for_log(http1_response_headers(bytes), node_log_buffer::max_response_headers_bytes);
     }
 
-    bool accessLogStatusCodeEnabled(std::uint32_t statusCode) const noexcept {
-        if (statusCode == 499) {
-            return accessLogClientAbortEnabled_;
+    bool access_log_status_code_enabled(std::uint32_t status_code) const noexcept {
+        if (status_code == 499) {
+            return access_log_client_abort_enabled_;
         }
-        const auto range = statusCode / 100;
-        return range >= 1 && range <= 5 && accessLogStatusCodeRanges_[range - 1];
+        const auto range = status_code / 100;
+        return range >= 1 && range <= 5 && access_log_status_code_ranges_[range - 1];
     }
 
-    bool captureClientAddress() noexcept {
-        if (!clientAddress_.empty()) {
-            return clientAddress_ != "unknown";
+    bool capture_client_address() noexcept {
+        if (!client_address_.empty()) {
+            return client_address_ != "unknown";
         }
-        std::error_code endpointError;
-        const auto endpoint = clientSocket().remote_endpoint(endpointError);
-        if (endpointError) {
-            clientAddress_ = "unknown";
+        std::error_code endpoint_error;
+        const auto endpoint = client_socket().remote_endpoint(endpoint_error);
+        if (endpoint_error) {
+            client_address_ = "unknown";
             return false;
         }
-        std::error_code addressError;
-        clientAddress_ = endpoint.address().to_string(addressError);
-        if (addressError) {
-            clientAddress_ = "unknown";
+        std::error_code address_error;
+        client_address_ = endpoint.address().to_string(address_error);
+        if (address_error) {
+            client_address_ = "unknown";
             return false;
         }
         return true;
     }
 
-    std::string clientIp() const noexcept {
-        return clientAddress_.empty() ? std::string("unknown") : clientAddress_;
+    std::string client_ip() const noexcept {
+        return client_address_.empty() ? std::string("unknown") : client_address_;
     }
 
-    void recordAccess(std::uint32_t statusCode, std::uint64_t responseBytes) noexcept {
-        if (accessRecorded_ || !accessLogEnabled_ || websiteId_.empty() || statusCode == 0) {
+    void record_access(std::uint32_t status_code, std::uint64_t response_bytes) noexcept {
+        if (access_recorded_ || !access_log_enabled_ || website_id_.empty() || status_code == 0) {
             return;
         }
-        if (!accessLogStatusCodeEnabled(statusCode)) {
+        if (!access_log_status_code_enabled(status_code)) {
             return;
         }
-        accessRecorded_ = true;
+        access_recorded_ = true;
         const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - requestStartedAt_);
-        const auto durationMs =
+            std::chrono::steady_clock::now() - request_started_at_);
+        const auto duration_ms =
             duration.count() < 0 ? std::uint64_t{} : static_cast<std::uint64_t>(duration.count());
         logs_.access({
-            .websiteId = websiteId_,
-            .clientIp = clientIp(),
-            .protocol = secure_ ? "https" : "http",
-            .method = requestMethod_,
-            .host = requestHost_,
-            .target = requestTarget_,
-            .statusCode = statusCode,
-            .requestBytes = requestBodyBytes_,
-            .responseBytes = responseBytes,
-            .durationMs = durationMs,
-            .userAgent = requestUserAgent_,
-            .referer = requestReferer_,
-            .requestHeaders = requestHeaders_,
-            .requestBody = requestBody_,
-            .requestBodyTruncated = requestBodyTruncated_,
-            .tlsFingerprint = tlsFingerprint_,
-            .responseHeaders = responseHeaders_,
-            .queryString = queryString_,
-            .cookies = cookies_,
+            .website_id_ = website_id_,
+            .client_ip_ = client_ip(),
+            .protocol_ = secure_ ? "https" : "http",
+            .method_ = request_method_,
+            .host_ = request_host_,
+            .target_ = request_target_,
+            .status_code_ = status_code,
+            .request_bytes_ = request_body_bytes_,
+            .response_bytes_ = response_bytes,
+            .duration_ms_ = duration_ms,
+            .user_agent_ = request_user_agent_,
+            .referer_ = request_referer_,
+            .request_headers_ = request_headers_,
+            .request_body_ = request_body_,
+            .request_body_truncated_ = request_body_truncated_,
+            .tls_fingerprint_ = tls_fingerprint_,
+            .response_headers_ = response_headers_,
+            .query_string_ = query_string_,
+            .cookies_ = cookies_,
         });
     }
 
-  public:
+public:
     void close() noexcept {
         if (closed_) {
             return;
         }
         closed_ = true;
-        ++originAttempt_;
+        ++origin_attempt_;
         std::error_code ignored;
         timer_.cancel(ignored);
-        discardOriginTransport();
-        if (bufferedExchange_) {
-            bufferedExchange_->close();
-            bufferedExchange_.reset();
+        discard_origin_transport();
+        if (buffered_exchange_) {
+            buffered_exchange_->close();
+            buffered_exchange_.reset();
         }
-        clientSocket().shutdown(asio::ip::tcp::socket::shutdown_both, ignored);
-        ignored = clientSocket().close(ignored);
+        client_socket().shutdown(asio::ip::tcp::socket::shutdown_both, ignored);
+        ignored = client_socket().close(ignored);
     }
 
-  private:
-    void send(std::string bytes, BufferedBytesLease reservation = {}) {
-        if (closed_ || responsePending_) {
+private:
+    void send(std::string bytes, buffered_bytes_lease reservation = {}) {
+        if (closed_ || response_pending_) {
             return;
         }
-        responsePending_ = true;
-        cancelTimer();
-        discardOriginTransport();
-        if (bufferedExchange_) {
-            bufferedExchange_->close();
-            bufferedExchange_.reset();
+        response_pending_ = true;
+        cancel_timer();
+        discard_origin_transport();
+        if (buffered_exchange_) {
+            buffered_exchange_->close();
+            buffered_exchange_.reset();
         }
-        captureResponseHeaders(bytes);
-        responseReservation_ = std::move(reservation);
-        responseBytes_ = std::move(bytes);
+        capture_response_headers(bytes);
+        response_reservation_ = std::move(reservation);
+        response_bytes_ = std::move(bytes);
         const auto self = this->shared_from_this();
-        asio::async_write(stream_, asio::buffer(responseBytes_),
-                          [self](const std::error_code& error, std::size_t size) {
-                              self->metrics_.trafficOut(size);
-                              self->recordAccess(error && self->accessLogClientAbortEnabled_
-                                                     ? 499
-                                                     : wireStatusCode(self->responseBytes_),
-                                                 size);
-                              if (error) {
-                                  self->logIo("client response write failed", error);
-                              }
-                              self->close();
-                          });
+        asio::async_write(stream_, asio::buffer(response_bytes_),
+            [self](const std::error_code& error, std::size_t size) {
+                self->metrics_.traffic_out(size);
+                self->record_access(error && self->access_log_client_abort_enabled_
+                                        ? 499
+                                        : wire_status_code(self->response_bytes_),
+                    size);
+                if (error) {
+                    self->log_io("client response write failed", error);
+                }
+                self->close();
+            });
     }
 
-    void handleRequest(const ruvia::Http1ParsedRequest& parsed) {
+    void handle_request(const http1_request_reader& parsed) {
         const auto config = runtime_.config();
         if (!config) {
             send(response("503 Service Unavailable"));
@@ -448,24 +460,24 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
             send(response("400 Bad Request"));
             return;
         }
-        requestMethod_.assign(parsed.request().method());
-        requestTarget_.assign(parsed.request().target());
-        requestHost_.assign(*host);
+        request_method_.assign(parsed.request().method());
+        request_target_.assign(parsed.request().target());
+        request_host_.assign(*host);
         const auto* website = config->website(*host);
         if (website != nullptr) {
-            websiteId_ = website->id();
-            accessLogEnabled_ = website->access_log_enabled();
-            if (accessLogEnabled_) {
-                accessLogResponseHeadersEnabled_ = website->access_log_response_headers();
-                accessLogClientAbortEnabled_ = website->access_log_client_abort();
-                applyStatusCodeRanges(accessLogStatusCodeRanges_, *website);
-                captureRequestLog(parsed, *website);
+            website_id_ = website->id();
+            access_log_enabled_ = website->access_log_enabled();
+            if (access_log_enabled_) {
+                access_log_response_headers_enabled_ = website->access_log_response_headers();
+                access_log_client_abort_enabled_ = website->access_log_client_abort();
+                apply_status_code_ranges(access_log_status_code_ranges_, *website);
+                capture_request_log(parsed, *website);
             }
         }
         if (!secure_) {
-            const auto redirect = httpToHttpsRedirect(*config, *host, parsed.request().target());
+            const auto redirect = http_to_https_redirect(*config, *host, parsed.request().target());
             if (redirect) {
-                send(response("301 Moved Permanently", "Location: " + redirect->location + "\r\n"));
+                send(response("301 Moved Permanently", "Location: " + redirect->location_ + "\r\n"));
                 return;
             }
         }
@@ -473,39 +485,47 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
             send(response("421 Misdirected Request"));
             return;
         }
-        hstsEnabled_ = secure_ && website->hsts_enabled();
-        flexedge::route_policy::HeaderValues matchHeaders;
-        for (const auto& header : parsed.request().headers()) matchHeaders.emplace_back(header.name(), header.value());
-        effectiveRoute_ = evaluateRouteRules(*website, parsed.request().method(), parsed.request().target(),
-                                             *host, matchHeaders, &config->routePatterns());
-        if (!effectiveRoute_) { send(response("400 Bad Request")); return; }
-        const auto* route = &*effectiveRoute_;
+        hsts_enabled_ = secure_ && website->hsts_enabled();
+        flexedge::route_policy::header_values match_headers;
+        for (const auto& header : parsed.request().headers()) {
+            match_headers.emplace_back(header.name(), header.value());
+        }
+        effective_route_ = evaluate_route_rules(*website, parsed.request().method(), parsed.request().target(),
+            *host, match_headers, &config->route_patterns());
+        if (!effective_route_) {
+            send(response("400 Bad Request"));
+            return;
+        }
+        const auto* route = &*effective_route_;
         if (route != nullptr && route->action() == "redirect") {
             const auto location = route->redirect_url();
-            if (location.empty()) { send(response("400 Bad Request")); return; }
+            if (location.empty()) {
+                send(response("400 Bad Request"));
+                return;
+            }
             std::string headers =
                 "Location: " + location + "\r\n";
             for (const auto& header : route->response_headers()) {
                 headers.append(header.name()).append(": ").append(header.value()).append("\r\n");
             }
-            send(response(flexedge::route_policy::redirectStatusLine(route->redirect_status()),
-                          headers));
+            send(response(flexedge::route_policy::redirect_status_line(route->redirect_status()),
+                headers));
             return;
         }
-        upgradeRequested_ = parsed.request().header("Upgrade").has_value();
-        const auto consumedBytes = parsed.consumedBytes();
-        if (upgradeRequested_ && consumedBytes < requestBytes_.size()) {
-            clientUpgradeRemainder_.assign(requestBytes_.data() + consumedBytes,
-                                           requestBytes_.size() - consumedBytes);
+        upgrade_requested_ = parsed.request().header("Upgrade").has_value();
+        const auto consumed_bytes = parsed.message_bytes();
+        if (upgrade_requested_ && consumed_bytes < request_bytes_.size()) {
+            client_upgrade_remainder_.assign(request_bytes_.data() + consumed_bytes,
+                request_bytes_.size() - consumed_bytes);
         }
-        activeConfig_ = config;
-        origins_ = originCandidates(*website, sequence_, route);
+        active_config_ = config;
+        origins_ = origin_candidates(*website, sequence_, route);
         std::stable_partition(origins_.begin(), origins_.end(), [&](const v2::Origin* origin) {
             return health_.healthy(website->id(), origin->id());
         });
-        websiteId_ = website->id();
-        healthyThreshold_ = website->healthy_threshold();
-        unhealthyThreshold_ = website->unhealthy_threshold();
+        website_id_ = website->id();
+        healthy_threshold_ = website->healthy_threshold();
+        unhealthy_threshold_ = website->unhealthy_threshold();
         if (origins_.empty()) {
             send(response("502 Bad Gateway"));
             return;
@@ -514,547 +534,544 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
     }
 
     void arm(std::chrono::seconds timeout, std::uint64_t attempt,
-             TimeoutAction action = TimeoutAction::kClose) {
+        timeout_action action = timeout_action::close) {
         timer_.expires_after(timeout);
         const auto self = this->shared_from_this();
         timer_.async_wait([self, attempt, action](const std::error_code& error) {
-            if (error || !self->originAttemptCurrent(attempt)) {
+            if (error || !self->origin_attempt_current(attempt)) {
                 return;
             }
             self->log("origin attempt timed out");
-            self->currentHealth_.failure(self->unhealthyThreshold_);
-            if (action == TimeoutAction::kFailover) {
-                self->tryNextOrigin();
+            self->current_health_.failure(self->unhealthy_threshold_);
+            if (action == timeout_action::failover) {
+                self->try_next_origin();
             } else {
                 self->close();
             }
         });
     }
 
-    void cancelTimer() noexcept {
+    void cancel_timer() noexcept {
         std::error_code ignored;
         timer_.cancel(ignored);
     }
 
-    void discardOriginTransport() noexcept {
-        if (originTransport_) {
-            originTransport_->close();
+    void discard_origin_transport() noexcept {
+        if (origin_transport_) {
+            origin_transport_->close();
         }
-        originTransport_.reset();
-        originConnectionKey_.reset();
-        reusedOriginTransport_ = false;
+        origin_transport_.reset();
+        origin_connection_key_.reset();
+        reused_origin_transport_ = false;
     }
 
-    void releaseOriginTransport() noexcept {
-        if (originTransport_ && originConnectionKey_ && responseCodec_ &&
-            responseCodec_->originReusable()) {
-            originConnections_.release(std::move(*originConnectionKey_),
-                                       std::move(originTransport_));
+    void release_origin_transport() noexcept {
+        if (origin_transport_ && origin_connection_key_ && response_codec_ &&
+            response_codec_->origin_reusable()) {
+            origin_connections_.release(std::move(*origin_connection_key_),
+                std::move(origin_transport_));
         } else {
-            discardOriginTransport();
+            discard_origin_transport();
             return;
         }
-        originConnectionKey_.reset();
-        reusedOriginTransport_ = false;
+        origin_connection_key_.reset();
+        reused_origin_transport_ = false;
     }
 
-    bool retryStaleOriginTransport() {
-        if (!reusedOriginTransport_ || retriedReusedOriginTransport_ || originIndex_ == 0) {
+    bool retry_stale_origin_transport() {
+        if (!reused_origin_transport_ || retried_reused_origin_transport_ || origin_index_ == 0) {
             return false;
         }
-        retriedReusedOriginTransport_ = true;
-        discardOriginTransport();
-        --originIndex_;
-        tryNextOrigin();
+        retried_reused_origin_transport_ = true;
+        discard_origin_transport();
+        --origin_index_;
+        try_next_origin();
         return true;
     }
 
-    [[nodiscard]] bool originAttemptCurrent(std::uint64_t attempt) const noexcept {
-        return !closed_ && !responsePending_ && attempt == originAttempt_;
+    [[nodiscard]] bool origin_attempt_current(std::uint64_t attempt) const noexcept {
+        return !closed_ && !response_pending_ && attempt == origin_attempt_;
     }
 
-    bool prepareOriginRequest(const ruvia::Http1ParsedRequest& parsed, const v2::Website& website,
-                              std::string_view incomingHost, bool forceIdentityEncoding) {
-        if (!captureClientAddress()) {
+    bool prepare_origin_request(const http1_request_reader& parsed, const v2::Website& website,
+        std::string_view incoming_host, bool force_identity_encoding) {
+        if (!capture_client_address()) {
             return false;
         }
-        auto prepared = flexedge::node::prepareOriginRequest(
-            parsed, website, incomingHost, clientAddress_, secure_, upgradeRequested_, false,
-            kMaxRequestBytes, forceIdentityEncoding, activeRoute_, &activeConfig_->routePatterns());
+        auto prepared = flexedge::node::prepare_origin_request(
+            parsed, website, incoming_host, client_address_, secure_, upgrade_requested_, false,
+            force_identity_encoding, active_route_, &active_config_->route_patterns());
         if (!prepared) {
             return false;
         }
-        outboundRequest_ = std::move(prepared->bytes);
-        responseCodec_ = std::make_unique<OriginResponseCodec>(
-            std::move(prepared->responseExchange), hstsEnabled_, activeRoute_);
-        bufferedRequest_.method = parsed.request().method();
-        bufferedRequest_.target = routeTarget(parsed.request().target(), activeRoute_, &activeConfig_->routePatterns());
-        bufferedRequest_.authority =
+        outbound_request_ = std::move(prepared->bytes_);
+        response_codec_ = std::make_unique<origin_response_codec>(
+            std::move(prepared->response_exchange_), hsts_enabled_, active_route_);
+        buffered_request_.method_ = parsed.request().method();
+        buffered_request_.target_ = route_target(parsed.request().target(), active_route_, &active_config_->route_patterns());
+        buffered_request_.authority_ =
             website.origin_host_header().empty() || website.origin_host_header() == "$host"
-                ? normalizeHostname(incomingHost)
+                ? normalize_hostname(incoming_host)
                 : website.origin_host_header();
-        bufferedRequest_.headers.clear();
+        buffered_request_.headers_.clear();
         for (const auto& header : parsed.request().headers()) {
-            bufferedRequest_.headers.emplace_back(header.name(), header.value());
+            buffered_request_.headers_.emplace_back(header.name(), header.value());
         }
-        if (parsed.bodyPlan().chunked()) {
-            auto decoded = decodeChunkedBody(parsed.wireBody(), kMaxRequestBytes);
-            if (!decoded) {
+        if (parsed.has_body()) {
+            const auto body = parsed.body();
+            if (!body) {
                 return false;
             }
-            bufferedRequest_.body = std::move(*decoded);
-            bufferedRequest_.hasBody = true;
-        } else if (parsed.bodyPlan().knownLength()) {
-            bufferedRequest_.body.assign(parsed.wireBody());
-            bufferedRequest_.hasBody = true;
+            buffered_request_.body_.assign(*body);
+            buffered_request_.has_body_ = true;
         }
         return true;
     }
 
-    std::optional<PreparedOriginRequest> prepareBufferedOriginRequest() const {
-        if (activeWebsite_ == nullptr) {
+    std::optional<prepared_origin_request> prepare_buffered_origin_request() const {
+        if (active_website_ == nullptr) {
             return std::nullopt;
         }
-        std::vector<ruvia::HttpHeaderView> headers;
-        headers.reserve(bufferedRequest_.headers.size());
-        for (const auto& [name, value] : bufferedRequest_.headers) {
+        std::vector<ruvia::http_header_view> headers;
+        headers.reserve(buffered_request_.headers_.size());
+        for (const auto& [name, value] : buffered_request_.headers_) {
             headers.emplace_back(name, value);
         }
-        return flexedge::node::prepareOriginRequest({.method = bufferedRequest_.method,
-                                                     // The codec rewrites once; bufferedRequest_
-                                                     // retains the rewritten path for compression policy.
-                                                     .target = requestTarget_,
-                                                     .headers = headers,
-                                                     .body = bufferedRequest_.body,
-                                                     .hasBody = bufferedRequest_.hasBody},
-                                                    *activeWebsite_, requestHost_, clientAddress_,
-                                                    secure_, false, false, false, activeRoute_, &activeConfig_->routePatterns());
+        return flexedge::node::prepare_origin_request({.method_ = buffered_request_.method_,
+                                                          // The codec rewrites once; buffered_request_
+                                                          // retains the rewritten path for compression policy.
+                                                          .target_ = request_target_,
+                                                          .headers_ = headers,
+                                                          .body_ = buffered_request_.body_,
+                                                          .has_body_ = buffered_request_.has_body_},
+            *active_website_, request_host_, client_address_,
+            secure_, false, false, false, active_route_, &active_config_->route_patterns());
     }
 
-    void proxy(const ruvia::Http1ParsedRequest& parsed, const v2::Website& website,
-               std::string_view incomingHost, const v2::RouteRule* route) {
-        requestHost_.assign(incomingHost);
-        activeWebsite_ = &website;
-        activeRoute_ = route;
-        const auto acceptsStreamingResponse = [&] {
+    void proxy(const http1_request_reader& parsed, const v2::Website& website,
+        std::string_view incoming_host, const v2::RouteRule* route) {
+        request_host_.assign(incoming_host);
+        active_website_ = &website;
+        active_route_ = route;
+        const auto accepts_streaming_response = [&] {
             const auto accept = parsed.request().header("Accept");
-            return accept && flexedge::node::acceptsEventStream(*accept);
+            return accept && flexedge::node::accepts_event_stream(*accept);
         }();
-        bufferedOriginEnabled_ = website.response_compression_enabled() &&
-                                 parsed.request().header("Accept-Encoding").has_value() &&
-                                 !upgradeRequested_ && !acceptsStreamingResponse;
-        if (!prepareOriginRequest(parsed, website, incomingHost, acceptsStreamingResponse)) {
+        buffered_origin_enabled_ = website.response_compression_enabled() &&
+                                   parsed.request().header("Accept-Encoding").has_value() &&
+                                   !upgrade_requested_ && !accepts_streaming_response;
+        if (!prepare_origin_request(parsed, website, incoming_host, accepts_streaming_response)) {
             send(response("502 Bad Gateway"));
             return;
         }
-        connectTimeout_ = std::chrono::seconds(website.origin_connect_timeout_seconds());
-        readTimeout_ = std::chrono::seconds(website.origin_read_timeout_seconds());
-        tryNextOrigin();
+        connect_timeout_ = std::chrono::seconds(website.origin_connect_timeout_seconds());
+        read_timeout_ = std::chrono::seconds(website.origin_read_timeout_seconds());
+        try_next_origin();
     }
 
-    void sendBufferedResponse(BufferedProxyResponse bufferedResponse) {
-        const auto statusText = std::to_string(bufferedResponse.status);
-        const auto status = ruvia::HttpStatusCode::fromValue(bufferedResponse.status);
-        const auto reason = ruvia::httpReasonPhrase(status);
-        std::size_t headerBytes = std::string_view("HTTP/1.1 ").size() + statusText.size() +
-                                  std::string_view("\r\n").size();
+    void send_buffered_response(buffered_proxy_response buffered_response) {
+        const auto status_text = std::to_string(buffered_response.status_);
+        const auto status = ruvia::http_status_code::from_value(buffered_response.status_);
+        const auto reason = ruvia::http_reason_phrase(status);
+        std::size_t header_bytes = std::string_view("HTTP/1.1 ").size() + status_text.size() +
+                                   std::string_view("\r\n").size();
         if (!reason.empty()) {
-            headerBytes += 1 + reason.size();
+            header_bytes += 1 + reason.size();
         }
-        for (const auto& [name, value] : bufferedResponse.headers) {
-            if (shouldForwardBufferedResponseHeader(name, hstsEnabled_)) {
-                headerBytes += name.size() + 2 + value.size() + 2;
+        for (const auto& [name, value] : buffered_response.headers_) {
+            if (should_forward_buffered_response_header(name, hsts_enabled_)) {
+                header_bytes += name.size() + 2 + value.size() + 2;
             }
         }
-        const auto bodySize = bufferedResponse.body.size();
-        const auto sourceReservationBytes = bufferedResponse.reservation.bytes();
-        const auto lengthText = std::to_string(bodySize);
-        headerBytes += std::string_view("Content-Length: ").size() + lengthText.size() +
-                       std::string_view("\r\nConnection: close\r\n").size();
-        if (hstsEnabled_) {
-            headerBytes +=
+        const auto body_size = buffered_response.body_.size();
+        const auto source_reservation_bytes = buffered_response.reservation_.bytes();
+        const auto length_text = std::to_string(body_size);
+        header_bytes += std::string_view("Content-Length: ").size() + length_text.size() +
+                        std::string_view("\r\nConnection: close\r\n").size();
+        if (hsts_enabled_) {
+            header_bytes +=
                 std::string_view("Strict-Transport-Security: max-age=31536000\r\n").size();
         }
-        headerBytes += 2;
-        if (!bufferedResponse.reservation.tryGrow(headerBytes + bodySize)) {
+        header_bytes += 2;
+        if (!buffered_response.reservation_.try_grow(header_bytes + body_size)) {
             send(response("503 Service Unavailable"));
             return;
         }
 
         std::string wire;
-        wire.reserve(headerBytes + bodySize);
-        wire.append("HTTP/1.1 ").append(statusText);
+        wire.reserve(header_bytes + body_size);
+        wire.append("HTTP/1.1 ").append(status_text);
         if (!reason.empty()) {
             wire.push_back(' ');
             wire.append(reason);
         }
         wire.append("\r\n");
-        for (const auto& [name, value] : bufferedResponse.headers) {
-            if (shouldForwardBufferedResponseHeader(name, hstsEnabled_)) {
+        for (const auto& [name, value] : buffered_response.headers_) {
+            if (should_forward_buffered_response_header(name, hsts_enabled_)) {
                 wire.append(name).append(": ").append(value).append("\r\n");
             }
         }
-        wire.append("Content-Length: ").append(lengthText).append("\r\nConnection: close\r\n");
-        if (hstsEnabled_) {
+        wire.append("Content-Length: ").append(length_text).append("\r\nConnection: close\r\n");
+        if (hsts_enabled_) {
             wire.append("Strict-Transport-Security: max-age=31536000\r\n");
         }
-        wire.append("\r\n").append(bufferedResponse.body);
-        bufferedResponse.body.clear();
-        bufferedResponse.body.shrink_to_fit();
-        bufferedResponse.reservation.shrink(sourceReservationBytes);
-        send(std::move(wire), std::move(bufferedResponse.reservation));
+        wire.append("\r\n").append(buffered_response.body_);
+        buffered_response.body_.clear();
+        buffered_response.body_.shrink_to_fit();
+        buffered_response.reservation_.shrink(source_reservation_bytes);
+        send(std::move(wire), std::move(buffered_response.reservation_));
     }
 
-    void completeBufferedOriginAttempt(std::uint64_t attempt, std::error_code error,
-                                       BufferedProxyResponse response) {
-        if (!originAttemptCurrent(attempt)) {
+    void complete_buffered_origin_attempt(std::uint64_t attempt, std::error_code error,
+        buffered_proxy_response response) {
+        if (!origin_attempt_current(attempt)) {
             return;
         }
-        bufferedExchange_.reset();
-        cancelTimer();
+        buffered_exchange_.reset();
+        cancel_timer();
         if (error) {
-            if (bufferedBytesExhausted(error)) {
+            if (buffered_bytes_exhausted(error)) {
                 send(this->response("503 Service Unavailable"));
                 return;
             }
-            logIo("buffered origin exchange failed", error);
-            currentHealth_.failure(unhealthyThreshold_);
-            tryNextOrigin();
+            log_io("buffered origin exchange failed", error);
+            current_health_.failure(unhealthy_threshold_);
+            try_next_origin();
             return;
         }
-        currentHealth_.success(healthyThreshold_);
-        const auto* website = activeConfig_->website(bufferedRequest_.authority);
+        current_health_.success(healthy_threshold_);
+        const auto* website = active_config_->website(buffered_request_.authority_);
         if (website == nullptr) {
-            website = activeConfig_->website(requestHost_);
+            website = active_config_->website(request_host_);
         }
         if (website != nullptr) {
-            applyResponseCompression(bufferedRequest_, *website, response);
+            apply_response_compression(buffered_request_, *website, response);
         }
-        if (activeRoute_ != nullptr) {
-            applyRouteHeaders(response.headers, activeRoute_->response_headers());
+        if (active_route_ != nullptr) {
+            apply_route_headers(response.headers_, active_route_->response_headers());
         }
-        sendBufferedResponse(std::move(response));
+        send_buffered_response(std::move(response));
     }
 
-    void startBufferedOriginAttempt(std::uint64_t attempt) {
-        if (!originAttemptCurrent(attempt)) {
+    void start_buffered_origin_attempt(std::uint64_t attempt) {
+        if (!origin_attempt_current(attempt)) {
             return;
         }
-        auto prepared = prepareBufferedOriginRequest();
+        auto prepared = prepare_buffered_origin_request();
         if (!prepared) {
             send(response("502 Bad Gateway"));
             return;
         }
-        arm(connectTimeout_, attempt, TimeoutAction::kFailover);
+        arm(connect_timeout_, attempt, timeout_action::failover);
         const auto self = this->shared_from_this();
-        bufferedExchange_ = std::make_shared<BufferedOriginExchange>(
-            stream_.get_executor(), originConnections_, std::move(prepared->bytes),
-            std::move(prepared->responseExchange), originHost_, originPort_, originSecure_,
-            connectTimeout_ + readTimeout_, responseBuffers_,
-            [self, attempt](std::error_code error, BufferedProxyResponse response) {
-                self->completeBufferedOriginAttempt(attempt, std::move(error), std::move(response));
+        buffered_exchange_ = std::make_shared<buffered_origin_exchange>(
+            stream_.get_executor(), origin_connections_, std::move(prepared->bytes_),
+            std::move(prepared->response_exchange_), origin_host_, origin_port_, origin_secure_,
+            connect_timeout_ + read_timeout_, response_buffers_,
+            [self, attempt](std::error_code error, buffered_proxy_response response) {
+                self->complete_buffered_origin_attempt(attempt, std::move(error), std::move(response));
             });
-        bufferedExchange_->start();
+        buffered_exchange_->start();
     }
 
-    void completeOriginConnection(std::uint64_t attempt, const std::error_code& error) {
-        if (!originAttemptCurrent(attempt)) {
+    void complete_origin_connection(std::uint64_t attempt, const std::error_code& error) {
+        if (!origin_attempt_current(attempt)) {
             return;
         }
         if (error) {
-            logIo("origin connect failed", error);
-            currentHealth_.failure(unhealthyThreshold_);
-            tryNextOrigin();
+            log_io("origin connect failed", error);
+            current_health_.failure(unhealthy_threshold_);
+            try_next_origin();
             return;
         }
-        writeOriginRequest(attempt);
+        write_origin_request(attempt);
     }
 
-    void startDirectOriginAttempt(std::uint64_t attempt) {
-        originConnectionKey_ = {
-            .host = originHost_,
-            .port = originPort_,
-            .secure = originSecure_,
+    void start_direct_origin_attempt(std::uint64_t attempt) {
+        origin_connection_key_ = {
+            .host_ = origin_host_,
+            .port_ = origin_port_,
+            .secure_ = origin_secure_,
         };
-        originTransport_ = originConnections_.acquire(*originConnectionKey_);
-        reusedOriginTransport_ = originTransport_->connected();
-        if (reusedOriginTransport_) {
-            writeOriginRequest(attempt);
+        origin_transport_ = origin_connections_.acquire(*origin_connection_key_);
+        reused_origin_transport_ = origin_transport_->connected();
+        if (reused_origin_transport_) {
+            write_origin_request(attempt);
             return;
         }
-        arm(connectTimeout_, attempt, TimeoutAction::kFailover);
+        arm(connect_timeout_, attempt, timeout_action::failover);
         const auto self = this->shared_from_this();
-        originTransport_->connect(originHost_, originPort_, originSecure_, false,
-                                  [self, attempt](const std::error_code& error, HttpWireProtocol) {
-                                      self->completeOriginConnection(attempt, error);
-                                  });
+        origin_transport_->connect(origin_host_, origin_port_, origin_secure_,
+            [self, attempt](const std::error_code& error) {
+                self->complete_origin_connection(attempt, error);
+            });
     }
 
-    void resetOriginAttempt() {
-        ++originAttempt_;
-        cancelTimer();
-        if (bufferedExchange_) {
-            bufferedExchange_->close();
-            bufferedExchange_.reset();
+    void reset_origin_attempt() {
+        ++origin_attempt_;
+        cancel_timer();
+        if (buffered_exchange_) {
+            buffered_exchange_->close();
+            buffered_exchange_.reset();
         }
-        discardOriginTransport();
+        discard_origin_transport();
     }
 
-    void tryNextOrigin() {
-        resetOriginAttempt();
-        if (originIndex_ >= origins_.size()) {
+    void try_next_origin() {
+        reset_origin_attempt();
+        if (origin_index_ >= origins_.size()) {
             send(response("502 Bad Gateway"));
             return;
         }
-        const auto* origin = origins_[originIndex_++];
-        originHost_ = origin->host();
-        currentHealth_ = health_.target(websiteId_, origin->id());
-        originPort_ = static_cast<std::uint16_t>(origin->port());
-        originSecure_ = origin->protocol() == "https";
-        const auto attempt = originAttempt_;
-        if (bufferedOriginEnabled_) {
-            startBufferedOriginAttempt(attempt);
+        const auto* origin = origins_[origin_index_++];
+        origin_host_ = origin->host();
+        current_health_ = health_.get_target(website_id_, origin->id());
+        origin_port_ = static_cast<std::uint16_t>(origin->port());
+        origin_secure_ = origin->protocol() == "https";
+        const auto attempt = origin_attempt_;
+        if (buffered_origin_enabled_) {
+            start_buffered_origin_attempt(attempt);
             return;
         }
-        startDirectOriginAttempt(attempt);
+        start_direct_origin_attempt(attempt);
     }
 
-    void writeOriginRequest(std::uint64_t attempt) {
-        if (!originAttemptCurrent(attempt)) {
+    void write_origin_request(std::uint64_t attempt) {
+        if (!origin_attempt_current(attempt)) {
             return;
         }
-        arm(connectTimeout_, attempt, TimeoutAction::kFailover);
+        arm(connect_timeout_, attempt, timeout_action::failover);
         const auto self = this->shared_from_this();
         auto completion = [self, attempt](const std::error_code& error, std::size_t size) {
-            if (!self->originAttemptCurrent(attempt)) {
+            if (!self->origin_attempt_current(attempt)) {
                 return;
             }
             if (error) {
-                if (size == 0 && self->retryStaleOriginTransport()) {
+                if (size == 0 && self->retry_stale_origin_transport()) {
                     return;
                 }
-                self->logIo("origin request write failed", error);
-                self->currentHealth_.failure(self->unhealthyThreshold_);
-                self->tryNextOrigin();
+                self->log_io("origin request write failed", error);
+                self->current_health_.failure(self->unhealthy_threshold_);
+                self->try_next_origin();
                 return;
             }
-            self->readOriginHead(attempt);
+            self->read_origin_head(attempt);
         };
-        originTransport_->write(asio::buffer(outboundRequest_), std::move(completion));
+        origin_transport_->write(asio::buffer(outbound_request_), std::move(completion));
     }
 
-    void readOriginHead(std::uint64_t attempt) {
-        if (!originAttemptCurrent(attempt)) {
+    void read_origin_head(std::uint64_t attempt) {
+        if (!origin_attempt_current(attempt)) {
             return;
         }
-        arm(readTimeout_, attempt, TimeoutAction::kFailover);
+        arm(read_timeout_, attempt, timeout_action::failover);
         const auto self = this->shared_from_this();
         auto completion = [self, attempt](const std::error_code& error, std::size_t size) {
-            if (!self->originAttemptCurrent(attempt)) {
+            if (!self->origin_attempt_current(attempt)) {
                 return;
             }
             if (error) {
-                self->logIo("origin response head read failed", error);
-                self->currentHealth_.failure(self->unhealthyThreshold_);
-                self->tryNextOrigin();
+                self->log_io("origin response head read failed", error);
+                self->current_health_.failure(self->unhealthy_threshold_);
+                self->try_next_origin();
                 return;
             }
-            const auto status = self->responseCodec_->consumeHead(
-                std::string_view(self->originReadBuffer_.data(), size));
-            if (status == OriginResponseHeadStatus::kNeedMore) {
-                self->readOriginHead(attempt);
+            const auto status = self->response_codec_->consume_head(
+                std::string_view(self->origin_read_buffer_.data(), size));
+            if (status == origin_response_head_status::need_more) {
+                self->read_origin_head(attempt);
                 return;
             }
-            if (status == OriginResponseHeadStatus::kFailure) {
+            if (status == origin_response_head_status::failure) {
                 self->log("origin response head parse failed");
-                self->currentHealth_.failure(self->unhealthyThreshold_);
-                self->tryNextOrigin();
+                self->current_health_.failure(self->unhealthy_threshold_);
+                self->try_next_origin();
                 return;
             }
-            self->tunnel_ = self->responseCodec_->tunnel();
-            self->relayBytes_ = self->responseCodec_->takeOutput();
-            self->captureResponseHeaders(self->relayBytes_);
-            self->currentHealth_.success(self->healthyThreshold_);
-            self->relayOriginBytes(attempt);
+            self->tunnel_ = self->response_codec_->tunnel();
+            self->relay_bytes_ = self->response_codec_->take_output();
+            self->capture_response_headers(self->relay_bytes_);
+            self->current_health_.success(self->healthy_threshold_);
+            self->relay_origin_bytes(attempt);
         };
-        originTransport_->read(asio::buffer(originReadBuffer_), std::move(completion));
+        origin_transport_->read(asio::buffer(origin_read_buffer_), std::move(completion));
     }
 
-    void relayOriginBytes(std::uint64_t attempt) {
-        if (!originAttemptCurrent(attempt)) {
+    void relay_origin_bytes(std::uint64_t attempt) {
+        if (!origin_attempt_current(attempt)) {
             return;
         }
-        arm(readTimeout_, attempt);
+        arm(read_timeout_, attempt);
         const auto self = this->shared_from_this();
         asio::async_write(
-            stream_, asio::buffer(relayBytes_),
+            stream_, asio::buffer(relay_bytes_),
             [self, attempt](const std::error_code& error, std::size_t size) {
-                if (!self->originAttemptCurrent(attempt)) {
+                if (!self->origin_attempt_current(attempt)) {
                     return;
                 }
-                self->metrics_.trafficOut(size);
-                self->proxiedResponseBytes_ += size;
+                self->metrics_.traffic_out(size);
+                self->proxied_response_bytes_ += size;
                 if (error) {
-                    if (self->accessLogClientAbortEnabled_) {
-                        self->recordAccess(499, self->proxiedResponseBytes_);
+                    if (self->access_log_client_abort_enabled_) {
+                        self->record_access(499, self->proxied_response_bytes_);
                     }
-                    self->logIo("client relay write failed", error);
+                    self->log_io("client relay write failed", error);
                     self->close();
                     return;
                 }
                 if (self->tunnel_) {
-                    self->recordAccess(self->responseCodec_->statusCode().value_or(101),
-                                       self->proxiedResponseBytes_);
-                    self->startTunnel(attempt);
-                } else if (self->responseCodec_->complete()) {
-                    self->recordAccess(self->responseCodec_->statusCode().value_or(502),
-                                       self->proxiedResponseBytes_);
-                    self->releaseOriginTransport();
+                    self->record_access(self->response_codec_->status_code().value_or(101),
+                        self->proxied_response_bytes_);
+                    self->start_tunnel(attempt);
+                } else if (self->response_codec_->complete()) {
+                    self->record_access(self->response_codec_->status_code().value_or(502),
+                        self->proxied_response_bytes_);
+                    self->release_origin_transport();
                     self->close();
                 } else {
-                    self->readOriginBody(attempt);
+                    self->read_origin_body(attempt);
                 }
             });
     }
 
-    void startTunnel(std::uint64_t attempt) {
-        if (!originAttemptCurrent(attempt)) {
+    void start_tunnel(std::uint64_t attempt) {
+        if (!origin_attempt_current(attempt)) {
             return;
         }
-        cancelTimer();
-        if (clientUpgradeRemainder_.empty()) {
-            readTunnelClient(attempt);
-            readTunnelOrigin(attempt);
-            return;
-        }
-        const auto self = this->shared_from_this();
-        auto completion = [self, attempt](const std::error_code& error, std::size_t) {
-            if (!self->originAttemptCurrent(attempt)) {
-                return;
-            }
-            if (error) {
-                self->close();
-                return;
-            }
-            self->clientUpgradeRemainder_.clear();
-            self->readTunnelClient(attempt);
-            self->readTunnelOrigin(attempt);
-        };
-        originTransport_->write(asio::buffer(clientUpgradeRemainder_), std::move(completion));
-    }
-
-    void readTunnelClient(std::uint64_t attempt) {
-        if (!originAttemptCurrent(attempt)) {
-            return;
-        }
-        const auto self = this->shared_from_this();
-        stream_.async_read_some(asio::buffer(clientTunnelBuffer_),
-                                [self, attempt](const std::error_code& error, std::size_t size) {
-                                    if (!self->originAttemptCurrent(attempt)) {
-                                        return;
-                                    }
-                                    if (error) {
-                                        self->close();
-                                        return;
-                                    }
-                                    self->writeTunnelOrigin(attempt, size);
-                                });
-    }
-
-    void writeTunnelOrigin(std::uint64_t attempt, std::size_t size) {
-        if (!originAttemptCurrent(attempt)) {
+        cancel_timer();
+        if (client_upgrade_remainder_.empty()) {
+            read_tunnel_client(attempt);
+            read_tunnel_origin(attempt);
             return;
         }
         const auto self = this->shared_from_this();
         auto completion = [self, attempt](const std::error_code& error, std::size_t) {
-            if (!self->originAttemptCurrent(attempt)) {
+            if (!self->origin_attempt_current(attempt)) {
                 return;
             }
             if (error) {
                 self->close();
                 return;
             }
-            self->readTunnelClient(attempt);
+            self->client_upgrade_remainder_.clear();
+            self->read_tunnel_client(attempt);
+            self->read_tunnel_origin(attempt);
         };
-        originTransport_->write(asio::buffer(clientTunnelBuffer_.data(), size),
-                                std::move(completion));
+        origin_transport_->write(asio::buffer(client_upgrade_remainder_), std::move(completion));
     }
 
-    void readTunnelOrigin(std::uint64_t attempt) {
-        if (!originAttemptCurrent(attempt)) {
+    void read_tunnel_client(std::uint64_t attempt) {
+        if (!origin_attempt_current(attempt)) {
             return;
         }
         const auto self = this->shared_from_this();
-        auto completion = [self, attempt](const std::error_code& error, std::size_t size) {
-            if (!self->originAttemptCurrent(attempt)) {
+        stream_.async_read_some(asio::buffer(client_tunnel_buffer_),
+            [self, attempt](const std::error_code& error, std::size_t size) {
+                if (!self->origin_attempt_current(attempt)) {
+                    return;
+                }
+                if (error) {
+                    self->close();
+                    return;
+                }
+                self->write_tunnel_origin(attempt, size);
+            });
+    }
+
+    void write_tunnel_origin(std::uint64_t attempt, std::size_t size) {
+        if (!origin_attempt_current(attempt)) {
+            return;
+        }
+        const auto self = this->shared_from_this();
+        auto completion = [self, attempt](const std::error_code& error, std::size_t) {
+            if (!self->origin_attempt_current(attempt)) {
                 return;
             }
             if (error) {
                 self->close();
                 return;
             }
-            self->writeTunnelClient(attempt, size);
+            self->read_tunnel_client(attempt);
         };
-        originTransport_->read(asio::buffer(originTunnelBuffer_), std::move(completion));
+        origin_transport_->write(asio::buffer(client_tunnel_buffer_.data(), size),
+            std::move(completion));
     }
 
-    void writeTunnelClient(std::uint64_t attempt, std::size_t size) {
-        if (!originAttemptCurrent(attempt)) {
+    void read_tunnel_origin(std::uint64_t attempt) {
+        if (!origin_attempt_current(attempt)) {
             return;
         }
-        const auto self = this->shared_from_this();
-        asio::async_write(stream_, asio::buffer(originTunnelBuffer_.data(), size),
-                          [self, attempt](const std::error_code& error, std::size_t size) {
-                              if (!self->originAttemptCurrent(attempt)) {
-                                  return;
-                              }
-                              self->metrics_.trafficOut(size);
-                              if (error) {
-                                  self->close();
-                                  return;
-                              }
-                              self->readTunnelOrigin(attempt);
-                          });
-    }
-
-    void readOriginBody(std::uint64_t attempt) {
-        if (!originAttemptCurrent(attempt)) {
-            return;
-        }
-        arm(readTimeout_, attempt);
         const auto self = this->shared_from_this();
         auto completion = [self, attempt](const std::error_code& error, std::size_t size) {
-            if (!self->originAttemptCurrent(attempt)) {
+            if (!self->origin_attempt_current(attempt)) {
+                return;
+            }
+            if (error) {
+                self->close();
+                return;
+            }
+            self->write_tunnel_client(attempt, size);
+        };
+        origin_transport_->read(asio::buffer(origin_tunnel_buffer_), std::move(completion));
+    }
+
+    void write_tunnel_client(std::uint64_t attempt, std::size_t size) {
+        if (!origin_attempt_current(attempt)) {
+            return;
+        }
+        const auto self = this->shared_from_this();
+        asio::async_write(stream_, asio::buffer(origin_tunnel_buffer_.data(), size),
+            [self, attempt](const std::error_code& error, std::size_t size) {
+                if (!self->origin_attempt_current(attempt)) {
+                    return;
+                }
+                self->metrics_.traffic_out(size);
+                if (error) {
+                    self->close();
+                    return;
+                }
+                self->read_tunnel_origin(attempt);
+            });
+    }
+
+    void read_origin_body(std::uint64_t attempt) {
+        if (!origin_attempt_current(attempt)) {
+            return;
+        }
+        arm(read_timeout_, attempt);
+        const auto self = this->shared_from_this();
+        auto completion = [self, attempt](const std::error_code& error, std::size_t size) {
+            if (!self->origin_attempt_current(attempt)) {
                 return;
             }
             if (error == asio::error::eof || error == asio::ssl::error::stream_truncated) {
-                if (self->responseCodec_) {
-                    self->recordAccess(self->responseCodec_->statusCode().value_or(502),
-                                       self->proxiedResponseBytes_);
+                if (self->response_codec_) {
+                    self->record_access(self->response_codec_->status_code().value_or(502),
+                        self->proxied_response_bytes_);
                 }
                 self->close();
                 return;
             }
             if (error) {
-                self->logIo("origin response body read failed", error);
+                self->log_io("origin response body read failed", error);
                 self->close();
                 return;
             }
-            if (!self->responseCodec_->consumeBody(
-                    std::string_view(self->originReadBuffer_.data(), size))) {
+            if (!self->response_codec_->consume_body(
+                    std::string_view(self->origin_read_buffer_.data(), size))) {
                 self->log("origin response body parse failed");
                 self->close();
                 return;
             }
-            self->relayBytes_.assign(self->originReadBuffer_.data(), size);
-            self->relayOriginBytes(attempt);
+            self->relay_bytes_.assign(self->origin_read_buffer_.data(), size);
+            self->relay_origin_bytes(attempt);
         };
-        originTransport_->read(asio::buffer(originReadBuffer_), std::move(completion));
+        origin_transport_->read(asio::buffer(origin_read_buffer_), std::move(completion));
     }
 
     void consume() noexcept {
         try {
-            consumeChecked();
+            consume_checked();
         } catch (const std::exception& error) {
             log("request handling failed", error);
             close();
@@ -1064,42 +1081,36 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         }
     }
 
-    void consumeChecked() {
-        const auto result = parser_.parse(requestBytes_);
-        if (const auto* parsed = result.parsed()) {
-            handleRequest(*parsed);
-            return;
+    void consume_checked() {
+        switch (request_reader_.consume(request_bytes_)) {
+            case http1_request_read_status::complete:
+                handle_request(request_reader_);
+                return;
+            case http1_request_read_status::bad_request:
+                send(response("400 Bad Request"));
+                return;
+            case http1_request_read_status::too_large:
+                send(response("413 Content Too Large"));
+                return;
+            case http1_request_read_status::need_more:
+                read();
+                return;
         }
-        if (result.failure()) {
-            send(response("400 Bad Request"));
-            return;
-        }
-        const auto* more = result.needMore();
-        if (more == nullptr || requestBytes_.size() >= kMaxRequestBytes) {
-            send(response("413 Content Too Large"));
-            return;
-        }
-        const auto requiredTotalBytes = more->requiredTotalBytes();
-        if (requiredTotalBytes && *requiredTotalBytes > kMaxRequestBytes) {
-            send(response("413 Content Too Large"));
-            return;
-        }
-        read();
     }
 
     void read() {
-        if (closed_ || responsePending_) {
+        if (closed_ || response_pending_) {
             return;
         }
         const auto self = this->shared_from_this();
-        stream_.async_read_some(asio::buffer(readBuffer_),
-                                [self](const std::error_code& error, std::size_t size) {
-                                    self->readCompleted(error, size);
-                                });
+        stream_.async_read_some(asio::buffer(read_buffer_),
+            [self](const std::error_code& error, std::size_t size) {
+                self->read_completed(error, size);
+            });
     }
 
-    void readCompleted(const std::error_code& error, std::size_t size) noexcept {
-        if (closed_ || responsePending_) {
+    void read_completed(const std::error_code& error, std::size_t size) noexcept {
+        if (closed_ || response_pending_) {
             return;
         }
         if (error) {
@@ -1107,11 +1118,11 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
             return;
         }
         try {
-            if (!requestReservation_.tryGrow(size)) {
+            if (!request_reservation_.try_grow(size)) {
                 send(response("503 Service Unavailable"));
                 return;
             }
-            requestBytes_.append(readBuffer_.data(), size);
+            request_bytes_.append(read_buffer_.data(), size);
             consume();
         } catch (const std::exception& error) {
             log("client input handling failed", error);
@@ -1122,106 +1133,118 @@ class BasicHttpSession final : public std::enable_shared_from_this<BasicHttpSess
         }
     }
 
-    [[nodiscard]] decltype(auto) clientSocket() noexcept { return stream_.lowest_layer(); }
+    [[nodiscard]] decltype(auto) client_socket() noexcept {
+        return stream_.lowest_layer();
+    }
 
-    ClientStream stream_;
-    OriginConnectionPool& originConnections_;
+    client_stream_type stream_;
+    origin_connection_pool& origin_connections_;
     asio::steady_timer timer_;
-    RuntimeState& runtime_;
-    OriginHealthRegistry& health_;
-    RuntimeMetrics& metrics_;
-    NodeLogBuffer::Producer& logs_;
-    BufferedBytesBudget& responseBuffers_;
-    ruvia::Http1RequestParser parser_;
-    std::array<char, 8192> readBuffer_{};
-    std::string requestBytes_;
-    std::string responseBytes_;
-    BufferedBytesLease requestReservation_;
-    BufferedBytesLease responseReservation_;
-    std::string originHost_;
-    std::string websiteId_;
-    std::string requestHost_;
-    OriginHealthRegistry::Target currentHealth_;
-    std::string clientAddress_;
-    std::string requestMethod_;
-    std::string requestTarget_;
-    std::uint64_t requestBodyBytes_{};
-    std::string requestUserAgent_;
-    std::string requestReferer_;
-    std::string requestHeaders_;
-    std::string requestBody_;
-    std::string responseHeaders_;
-    std::string queryString_;
+    runtime_state& runtime_;
+    origin_health_registry& health_;
+    runtime_metrics& metrics_;
+    node_log_buffer::producer& logs_;
+    buffered_bytes_budget& response_buffers_;
+    http1_request_reader request_reader_{max_request_bytes};
+    std::array<char, 8192> read_buffer_{};
+    std::string request_bytes_;
+    std::string response_bytes_;
+    buffered_bytes_lease request_reservation_;
+    buffered_bytes_lease response_reservation_;
+    std::string origin_host_;
+    std::string website_id_;
+    std::string request_host_;
+    origin_health_registry::target current_health_;
+    std::string client_address_;
+    std::string request_method_;
+    std::string request_target_;
+    std::uint64_t request_body_bytes_{};
+    std::string request_user_agent_;
+    std::string request_referer_;
+    std::string request_headers_;
+    std::string request_body_;
+    std::string response_headers_;
+    std::string query_string_;
     std::string cookies_;
-    std::string tlsFingerprint_;
-    std::uint16_t originPort_{};
-    std::chrono::seconds connectTimeout_{10};
-    std::chrono::seconds readTimeout_{30};
-    std::string outboundRequest_;
-    std::unique_ptr<OriginTransport> originTransport_;
-    std::optional<OriginConnectionKey> originConnectionKey_;
-    std::unique_ptr<OriginResponseCodec> responseCodec_;
-    std::shared_ptr<BufferedOriginExchange> bufferedExchange_;
-    BufferedProxyRequest bufferedRequest_;
-    std::array<char, 8192> originReadBuffer_{};
-    std::array<char, 16384> clientTunnelBuffer_{};
-    std::array<char, 16384> originTunnelBuffer_{};
-    std::string relayBytes_;
-    std::string clientUpgradeRemainder_;
-    std::shared_ptr<const CompiledConfig> activeConfig_;
-    const v2::Website* activeWebsite_{};
-    std::optional<v2::RouteRule> effectiveRoute_;
-    const v2::RouteRule* activeRoute_{};
+    std::string tls_fingerprint_;
+    std::uint16_t origin_port_{};
+    std::chrono::seconds connect_timeout_{10};
+    std::chrono::seconds read_timeout_{30};
+    std::string outbound_request_;
+    std::unique_ptr<origin_transport> origin_transport_;
+    std::optional<origin_connection_key> origin_connection_key_;
+    std::unique_ptr<origin_response_codec> response_codec_;
+    std::shared_ptr<buffered_origin_exchange> buffered_exchange_;
+    buffered_proxy_request buffered_request_;
+    std::array<char, 8192> origin_read_buffer_{};
+    std::array<char, 16384> client_tunnel_buffer_{};
+    std::array<char, 16384> origin_tunnel_buffer_{};
+    std::string relay_bytes_;
+    std::string client_upgrade_remainder_;
+    std::shared_ptr<const compiled_config> active_config_;
+    const v2::Website* active_website_{};
+    std::optional<v2::RouteRule> effective_route_;
+    const v2::RouteRule* active_route_{};
     std::vector<const v2::Origin*> origins_;
-    std::size_t originIndex_{};
-    std::uint64_t originAttempt_{};
-    std::uint64_t proxiedResponseBytes_{};
-    std::uint32_t healthyThreshold_{1};
-    std::uint32_t unhealthyThreshold_{1};
+    std::size_t origin_index_{};
+    std::uint64_t origin_attempt_{};
+    std::uint64_t proxied_response_bytes_{};
+    std::uint32_t healthy_threshold_{1};
+    std::uint32_t unhealthy_threshold_{1};
     std::uint64_t sequence_{};
-    std::shared_ptr<const void> transportState_;
+    std::shared_ptr<const void> transport_state_;
     bool secure_{};
-    std::function<void()> onRetired_;
-    bool originSecure_{};
-    bool bufferedOriginEnabled_{};
-    bool reusedOriginTransport_{};
-    bool retriedReusedOriginTransport_{};
-    bool upgradeRequested_{};
+    std::function<void()> on_retired_;
+    bool origin_secure_{};
+    bool buffered_origin_enabled_{};
+    bool reused_origin_transport_{};
+    bool retried_reused_origin_transport_{};
+    bool upgrade_requested_{};
     bool tunnel_{};
-    bool hstsEnabled_{};
+    bool hsts_enabled_{};
     bool closed_{};
-    bool responsePending_{};
-    bool accessRecorded_{};
-    bool accessLogEnabled_{};
-    bool accessLogResponseHeadersEnabled_{};
-    bool accessLogClientAbortEnabled_{};
-    bool requestBodyTruncated_{};
-    std::array<bool, 5> accessLogStatusCodeRanges_{true, true, true, true, true};
-    std::chrono::steady_clock::time_point requestStartedAt_{std::chrono::steady_clock::now()};
+    bool response_pending_{};
+    bool access_recorded_{};
+    bool access_log_enabled_{};
+    bool access_log_response_headers_enabled_{};
+    bool access_log_client_abort_enabled_{};
+    bool request_body_truncated_{};
+    std::array<bool, 5> access_log_status_code_ranges_{true, true, true, true, true};
+    std::chrono::steady_clock::time_point request_started_at_{std::chrono::steady_clock::now()};
 };
 
-class HttpListener final : public std::enable_shared_from_this<HttpListener> {
-  public:
-    template <typename... Args>
-    [[nodiscard]] static std::shared_ptr<HttpListener> create(Args&&... args) {
-        auto listener = std::shared_ptr<HttpListener>(new HttpListener(std::forward<Args>(args)...));
-        listener->stopRegistration_ = listener->owner_.onStop(
-            [weak = std::weak_ptr<HttpListener>(listener)]() -> ruvia::Task<void> {
-                if (const auto self = weak.lock()) co_await self->stopAndWait();
+class http_listener final : public std::enable_shared_from_this<http_listener> {
+public:
+    template <typename... args_type>
+    [[nodiscard]] static std::shared_ptr<http_listener> create(args_type&&... args) {
+        auto listener = std::shared_ptr<http_listener>(new http_listener(std::forward<args_type>(args)...));
+        listener->stop_registration_ = listener->owner_.on_stop(
+            [weak = std::weak_ptr<http_listener>(listener)]() -> ruvia::task<void> {
+                if (const auto self = weak.lock()) {
+                    co_await self->stop_and_wait();
+                }
                 co_return;
             });
         return listener;
     }
 
-  private:
-    HttpListener(ruvia::EventLoop owner, RuntimeState& runtime, OriginHealthRegistry& health,
-                 RuntimeMetrics& metrics, NodeLogBuffer::Producer& logs,
-                 OriginConnectionPool& originConnections, BufferedBytesBudget& requestBuffers,
-                 BufferedBytesBudget& responseBuffers, const asio::ip::tcp::endpoint& endpoint)
-        : owner_(std::move(owner)), runtime_(runtime), health_(health), metrics_(metrics),
-          logs_(logs), originConnections_(originConnections), requestBuffers_(requestBuffers),
-          responseBuffers_(responseBuffers), acceptor_(owner_.ioContext()),
-          activationTimer_(owner_.ioContext()), stopNotification_(owner_) {
+private:
+    http_listener(ruvia::event_loop owner, runtime_state& runtime, origin_health_registry& health,
+        runtime_metrics& metrics, node_log_buffer::producer& logs,
+        origin_connection_pool& origin_connections, buffered_bytes_budget& request_buffers,
+        buffered_bytes_budget& response_buffers, const asio::ip::tcp::endpoint& endpoint)
+        : owner_(std::move(owner)),
+          owner_worker_(owner_.handle()),
+          runtime_(runtime),
+          health_(health),
+          metrics_(metrics),
+          logs_(logs),
+          origin_connections_(origin_connections),
+          request_buffers_(request_buffers),
+          response_buffers_(response_buffers),
+          acceptor_(owner_.io_context()),
+          activation_timer_(owner_.io_context()),
+          stop_signal_(owner_worker_) {
         std::error_code error;
         error = acceptor_.open(endpoint.protocol(), error);
         if (!error) {
@@ -1231,9 +1254,9 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
         if (!error) {
             int enabled = 1;
             if (::setsockopt(acceptor_.native_handle(), SOL_SOCKET, SO_REUSEPORT, &enabled,
-                             sizeof(enabled)) != 0) {
+                    sizeof(enabled)) != 0) {
                 throw std::system_error(errno, std::generic_category(),
-                                        "could not enable SO_REUSEPORT");
+                    "could not enable SO_REUSEPORT");
             }
         }
 #endif
@@ -1246,36 +1269,41 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
         if (error) {
             throw std::system_error(error, "could not start edge HTTP listener");
         }
-
     }
 
-  public:
-    ~HttpListener() {
-        std::lock_guard lock(lifecycleMutex_);
-        if (loopStopComplete_ || startRequested_) return;
+public:
+    ~http_listener() {
+        std::lock_guard lock(lifecycle_mutex_);
+        if (loop_stop_complete_ || start_requested_) {
+            return;
+        }
         stopping_ = true;
         std::error_code ignored;
         ignored = acceptor_.close(ignored);
     }
 
-  private:
+private:
     void start() {
         if (stopping_ || !acceptor_.is_open()) {
             return;
         }
-        if (activationGate_ && !activationGate_->active()) {
+        if (activation_gate_ && !activation_gate_->active()) {
             const auto self = shared_from_this();
-            bool operationStarted = false;
+            bool operation_started = false;
             try {
-                activationTimer_.expires_after(std::chrono::milliseconds(1));
-                ++pendingOperations_;
-                operationStarted = true;
-                activationTimer_.async_wait([self](const std::error_code& error) {
-                    self->operationCompleted();
-                    if (!error) self->start();
+                activation_timer_.expires_after(std::chrono::milliseconds(1));
+                ++pending_operations_;
+                operation_started = true;
+                activation_timer_.async_wait([self](const std::error_code& error) {
+                    self->operation_completed();
+                    if (!error) {
+                        self->start();
+                    }
                 });
             } catch (...) {
-                if (operationStarted) operationCompleted();
+                if (operation_started) {
+                    operation_completed();
+                }
                 stop();
             }
             return;
@@ -1283,85 +1311,97 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
         accept();
     }
 
-  public:
-    void requestStart(std::shared_ptr<const ListenerActivationGate> activationGate = nullptr) {
-        std::lock_guard lock(lifecycleMutex_);
-        if (loopStopComplete_) throw std::runtime_error("edge HTTP listener worker is stopping");
-        startRequested_ = true;
+public:
+    void request_start(std::shared_ptr<const listener_activation_gate> activation_gate = nullptr) {
+        std::lock_guard lock(lifecycle_mutex_);
+        if (loop_stop_complete_) {
+            throw std::runtime_error("edge HTTP listener worker is stopping");
+        }
+        start_requested_ = true;
         const auto self = shared_from_this();
         try {
-            if (!owner_.post([self, gate = std::move(activationGate)] {
-                    if (self->started_) return;
-                    self->started_ = true;
-                    self->activationGate_ = gate;
-                    self->start();
-                }).accepted()) {
+            if (!owner_.post([self, gate = std::move(activation_gate)] {
+                           if (self->started_) {
+                               return;
+                           }
+                           self->started_ = true;
+                           self->activation_gate_ = gate;
+                           self->start();
+                       })
+                    .accepted()) {
                 throw std::runtime_error("edge HTTP listener worker is stopping");
             }
         } catch (...) {
-            startRequested_ = false;
+            start_requested_ = false;
             throw;
         }
     }
 
-    [[nodiscard]] asio::ip::tcp::endpoint localEndpoint() const {
+    [[nodiscard]] asio::ip::tcp::endpoint local_endpoint() const {
         return acceptor_.local_endpoint();
     }
 
-  private:
+private:
     // Socket cancellation and accept initiation must stay on the owning loop.
-    ruvia::Task<void> stopAndWait() {
+    ruvia::task<void> stop_and_wait() {
         {
-            std::lock_guard lock(lifecycleMutex_);
+            std::lock_guard lock(lifecycle_mutex_);
             stop();
         }
-        while (pendingOperations_ != 0 || activeSessions_ != 0)
-            co_await stopNotification_.wait();
-        stopNotification_.close();
-        std::lock_guard lock(lifecycleMutex_);
-        loopStopComplete_ = true;
+        while (pending_operations_ != 0 || active_sessions_ != 0) {
+            co_await stop_signal_.wait();
+        }
+        std::lock_guard lock(lifecycle_mutex_);
+        loop_stop_complete_ = true;
     }
 
     void stop() noexcept {
         stopping_ = true;
         std::error_code ignored;
-        activationTimer_.cancel(ignored);
+        activation_timer_.cancel(ignored);
         ignored = acceptor_.cancel(ignored);
         ignored = acceptor_.close(ignored);
         for (const auto& weak : sessions_) {
-            if (const auto session = weak.lock()) session->close();
+            if (const auto session = weak.lock()) {
+                session->close();
+            }
         }
     }
 
-  public:
-    void requestStop() noexcept {
-        std::lock_guard lock(lifecycleMutex_);
-        if (loopStopComplete_) return;
-        if (!startRequested_) {
+public:
+    void request_stop() noexcept {
+        std::lock_guard lock(lifecycle_mutex_);
+        if (loop_stop_complete_) {
+            return;
+        }
+        if (!start_requested_) {
             stopping_ = true;
             std::error_code ignored;
             ignored = acceptor_.close(ignored);
-            loopStopComplete_ = true;
+            loop_stop_complete_ = true;
             return;
         }
-        if (owner_.isCurrent()) {
+        if (owner_.is_current()) {
             stop();
             return;
         }
         asio::post(owner_.executor(), [weak = weak_from_this()] {
-            if (const auto self = weak.lock()) self->stop();
+            if (const auto self = weak.lock()) {
+                self->stop();
+            }
         });
     }
 
-  private:
-    void operationCompleted() noexcept {
-        --pendingOperations_;
-        static_cast<void>(stopNotification_.notify());
+private:
+    // Accept completions and session retirement run on the owning loop.
+    void operation_completed() noexcept {
+        --pending_operations_;
+        stop_signal_.notify();
     }
 
-    void sessionRetired() noexcept {
-        --activeSessions_;
-        static_cast<void>(stopNotification_.notify());
+    void session_retired() noexcept {
+        --active_sessions_;
+        stop_signal_.notify();
     }
 
     void accept() {
@@ -1369,70 +1409,78 @@ class HttpListener final : public std::enable_shared_from_this<HttpListener> {
             return;
         }
         std::shared_ptr<asio::ip::tcp::socket> socket;
-        std::shared_ptr<HttpListener> self;
+        std::shared_ptr<http_listener> self;
         try {
-            socket = std::make_shared<asio::ip::tcp::socket>(owner_.ioContext());
+            socket = std::make_shared<asio::ip::tcp::socket>(owner_.io_context());
             self = shared_from_this();
         } catch (...) {
             stop();
             return;
         }
-        ++pendingOperations_;
+        ++pending_operations_;
         try {
             acceptor_.async_accept(
                 *socket,
                 asio::bind_executor(owner_.executor(), [self, socket](const std::error_code& error) {
-                self->operationCompleted();
-                if (!error && !self->stopping_) {
-                    try {
-                        auto session = std::make_shared<BasicHttpSession<asio::ip::tcp::socket>>(
-                            std::move(*socket), self->runtime_, self->health_, self->metrics_,
-                            self->logs_, self->originConnections_, self->requestBuffers_,
-                            self->responseBuffers_, ++self->sequence_, nullptr, false,
-                            std::string{}, [weak = self->weak_from_this()] {
-                                if (const auto listener = weak.lock()) listener->sessionRetired();
+                    self->operation_completed();
+                    if (!error && !self->stopping_) {
+                        try {
+                            auto session = std::make_shared<basic_http_session<asio::ip::tcp::socket>>(
+                                std::move(*socket), self->runtime_, self->health_, self->metrics_,
+                                self->logs_, self->origin_connections_, self->request_buffers_,
+                                self->response_buffers_, ++self->sequence_, nullptr, false,
+                                std::string{}, [weak = self->weak_from_this()] {
+                                    if (const auto listener = weak.lock()) {
+                                        listener->session_retired();
+                                    }
+                                });
+                            ++self->active_sessions_;
+                            std::erase_if(self->sessions_, [](const auto& active) {
+                                return active.expired();
                             });
-                        ++self->activeSessions_;
-                        std::erase_if(self->sessions_, [](const auto& active) {
-                            return active.expired();
-                        });
-                        self->sessions_.push_back(session);
-                        try { session->start(); } catch (...) { session->close(); }
-                    } catch (...) {
+                            self->sessions_.push_back(session);
+                            try {
+                                session->start();
+                            } catch (...) {
+                                session->close();
+                            }
+                        } catch (...) {
+                        }
                     }
-                }
-                if (self->acceptor_.is_open()) {
-                    self->accept();
-                }
+                    if (self->acceptor_.is_open()) {
+                        self->accept();
+                    }
                 }));
         } catch (...) {
-            operationCompleted();
+            operation_completed();
             stop();
         }
     }
 
-    ruvia::EventLoop owner_;
-    std::mutex lifecycleMutex_;
-    bool startRequested_{};
-    bool loopStopComplete_{};
-    RuntimeState& runtime_;
-    OriginHealthRegistry& health_;
-    RuntimeMetrics& metrics_;
-    NodeLogBuffer::Producer& logs_;
-    OriginConnectionPool& originConnections_;
-    BufferedBytesBudget& requestBuffers_;
-    BufferedBytesBudget& responseBuffers_;
+    ruvia::event_loop owner_;
+    // Borrowed by stop_signal_; declared first so it outlives every signal wait.
+    ruvia::worker_handle owner_worker_;
+    std::mutex lifecycle_mutex_;
+    bool start_requested_{};
+    bool loop_stop_complete_{};
+    runtime_state& runtime_;
+    origin_health_registry& health_;
+    runtime_metrics& metrics_;
+    node_log_buffer::producer& logs_;
+    origin_connection_pool& origin_connections_;
+    buffered_bytes_budget& request_buffers_;
+    buffered_bytes_budget& response_buffers_;
     asio::ip::tcp::acceptor acceptor_;
-    asio::steady_timer activationTimer_;
-    ruvia::EventLoopStopRegistration stopRegistration_;
-    ruvia::WorkerNotification stopNotification_;
-    std::size_t pendingOperations_{};
-    std::size_t activeSessions_{};
-    std::vector<std::weak_ptr<BasicHttpSession<asio::ip::tcp::socket>>> sessions_;
+    asio::steady_timer activation_timer_;
+    ruvia::event_loop_stop_registration stop_registration_;
+    ruvia::worker_signal stop_signal_;
+    std::size_t pending_operations_{};
+    std::size_t active_sessions_{};
+    std::vector<std::weak_ptr<basic_http_session<asio::ip::tcp::socket>>> sessions_;
     bool stopping_{};
-    std::shared_ptr<const ListenerActivationGate> activationGate_;
+    std::shared_ptr<const listener_activation_gate> activation_gate_;
     std::uint64_t sequence_{};
-    bool started_{}; // Accessed only by the owning event loop.
+    bool started_{};  // Accessed only by the owning event loop.
 };
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

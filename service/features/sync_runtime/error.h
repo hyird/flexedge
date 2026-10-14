@@ -6,10 +6,10 @@
 
 namespace service::sync_runtime {
 
-inline constexpr std::size_t kMaxErrorMessageLength{1000};
+inline constexpr std::size_t max_error_message_length{1000};
 
-[[nodiscard]] inline std::string boundedError(std::string_view value) {
-    return std::string(value.substr(0, kMaxErrorMessageLength));
+[[nodiscard]] inline std::string bounded_error(std::string_view value) {
+    return std::string(value.substr(0, max_error_message_length));
 }
 
-} // namespace service::sync_runtime
+}  // namespace service::sync_runtime

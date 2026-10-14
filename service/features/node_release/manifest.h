@@ -3,52 +3,53 @@
 #include <optional>
 #include <string>
 #include <string_view>
+
 #include "node/proto/release_metadata.h"
 
 namespace service::node_release {
 
-struct Manifest final {
-    std::string version;
-    std::string digest;
+struct manifest final {
+    std::string version_;
+    std::string digest_;
 };
 
-inline std::optional<Manifest> parseManifest(std::string_view value) {
-    constexpr std::string_view versionPrefix{"version="};
-    constexpr std::string_view digestPrefix{"sha256="};
-    const auto takeLine = [&value]() -> std::optional<std::string_view> {
-        const auto lineEnd = value.find('\n');
-        if (lineEnd == std::string_view::npos) {
+inline std::optional<manifest> parse_manifest(std::string_view value) {
+    constexpr std::string_view version_prefix{"version="};
+    constexpr std::string_view digest_prefix{"sha256="};
+    const auto take_line = [&value]() -> std::optional<std::string_view> {
+        const auto line_end = value.find('\n');
+        if (line_end == std::string_view::npos) {
             return std::nullopt;
         }
-        auto line = value.substr(0, lineEnd);
-        value.remove_prefix(lineEnd + 1);
+        auto line = value.substr(0, line_end);
+        value.remove_prefix(line_end + 1);
         if (line.ends_with('\r')) {
             line.remove_suffix(1);
         }
         return line;
     };
 
-    const auto headerLine = takeLine();
-    const auto versionLine = takeLine();
-    const auto digestLine = takeLine();
-    if (!headerLine || *headerLine != "flexedge-node-release-v1" || !versionLine || !digestLine ||
+    const auto header_line = take_line();
+    const auto version_line = take_line();
+    const auto digest_line = take_line();
+    if (!header_line || *header_line != "flexedge-node-release-v1" || !version_line || !digest_line ||
         !value.empty()) {
         return std::nullopt;
     }
-    if (!versionLine->starts_with(versionPrefix)) {
+    if (!version_line->starts_with(version_prefix)) {
         return std::nullopt;
     }
-    if (!digestLine->starts_with(digestPrefix)) {
+    if (!digest_line->starts_with(digest_prefix)) {
         return std::nullopt;
     }
 
-    Manifest result{.version = std::string(versionLine->substr(versionPrefix.size())),
-                    .digest = std::string(digestLine->substr(digestPrefix.size()))};
-    if (!flexedge::node::validNodeReleaseVersion(result.version) ||
-        !flexedge::crypto::isSha256Digest(result.digest)) {
+    manifest result{.version_ = std::string(version_line->substr(version_prefix.size())),
+        .digest_ = std::string(digest_line->substr(digest_prefix.size()))};
+    if (!flexedge::node::valid_node_release_version(result.version_) ||
+        !flexedge::crypto::is_sha256_digest(result.digest_)) {
         return std::nullopt;
     }
     return result;
 }
 
-} // namespace service::node_release
+}  // namespace service::node_release

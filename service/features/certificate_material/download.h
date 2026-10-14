@@ -6,12 +6,12 @@
 
 namespace service::certificate_material {
 
-struct CertificateDownload final {
-    std::string filename;
-    std::string archive;
+struct certificate_download final {
+    std::string filename_;
+    std::string archive_;
 };
 
-inline std::string archiveFilename(std::string_view domain) {
+inline std::string archive_filename(std::string_view domain) {
     if (domain.starts_with("*.")) {
         domain.remove_prefix(2);
     }
@@ -25,4 +25,4 @@ inline std::string archiveFilename(std::string_view domain) {
     return result.empty() ? "certificate" : result;
 }
 
-} // namespace service::certificate_material
+}  // namespace service::certificate_material

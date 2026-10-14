@@ -5,12 +5,12 @@
 
 namespace service::website_dispatch::detail {
 
-struct WebsiteMarker final {
-    std::string id;
-    std::string tenantId;
-    std::string resourceId;
-    std::int64_t version{};
-    std::int64_t failures{};
+struct website_marker final {
+    std::string id_;
+    std::string tenant_id_;
+    std::string resource_id_;
+    std::int64_t version_{};
+    std::int64_t failures_{};
 };
 
-} // namespace service::website_dispatch::detail
+}  // namespace service::website_dispatch::detail

@@ -1,71 +1,73 @@
 #pragma once
 
+#include <ruvia/core/task.h>
+#include <ruvia/web/model_json.h>
+
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
-#include <ruvia/core/Task.h>
-#include <ruvia/web/ModelJson.h>
-
 #include "service/features/background/worker_pool.h"
+#include "service/features/sync_runtime/state.h"
 #include "service/features/website_config/mapper.h"
 #include "service/features/website_dns/mapper.h"
 #include "service/features/website_dns/probe.h"
-#include "service/features/sync_runtime/state.h"
 
 namespace service::website_dns {
 
-inline ruvia::Task<void>
-completeStaleWebsiteTask(service::background::WorkerContext& context,
-                         const service::sync_runtime::RunningMarkerLease& marker,
-                         bool revisionChanged) {
-    auto completion = co_await context.db().beginTransaction();
-    if (revisionChanged) {
-        (void)co_await service::sync_runtime::releaseRunning(completion, marker);
+inline ruvia::task<void>
+complete_stale_website_task(service::background::worker_context& context,
+    const service::sync_runtime::running_marker_lease& marker,
+    bool revision_changed) {
+    auto completion = co_await context.db().begin_transaction();
+    if (revision_changed) {
+        (void)co_await service::sync_runtime::release_running(completion, marker);
     } else {
-        (void)co_await service::sync_runtime::completeRunning(completion, marker);
+        (void)co_await service::sync_runtime::complete_running(completion, marker);
     }
     co_await completion.commit();
     co_return;
 }
 
-inline ruvia::Task<WebsiteRuntimeData>
-probeWebsiteDomains(service::background::WorkerContext& context,
-                    const service::website_config::WebsiteConfigData& config,
-                    std::string_view expectedTarget, std::string_view checkedAt,
-                    const service::sync_runtime::RunningMarkerLease& marker) {
-    WebsiteRuntimeData output;
-    auto& domainStates = output.domainStates;
-    for (const auto& domain : config.domains) {
-        if (!co_await service::sync_runtime::renewRunningLease(context.db(), marker)) {
+inline ruvia::task<website_runtime_data>
+probe_website_domains(service::background::worker_context& context,
+    const service::website_config::website_config_data& config,
+    std::string_view expected_target, std::string_view checked_at,
+    const service::sync_runtime::running_marker_lease& marker) {
+    website_runtime_data output;
+    auto& domain_states = output.domain_states_;
+    auto db = context.db();
+    for (const auto& domain : config.domains_) {
+        if (!co_await service::sync_runtime::renew_running_lease(db, marker)) {
             throw std::runtime_error("网站同步标记 lease 已失效");
         }
-        auto& state = domainStates.emplace_back();
-        state.id = domain.id;
-        state.lastVerifiedAt = std::string(checkedAt);
+        auto& state = domain_states.emplace_back();
+        state.id_ = domain.id_;
+        state.last_verified_at_ = std::string(checked_at);
         try {
             const auto result =
-                co_await probeCname(context, domain.hostname, expectedTarget, domain.id);
-            state.resolutionStatus = result.matched ? "verified" : "invalid";
-            if (!result.matched) {
+                co_await probe_cname(context, domain.hostname_, expected_target, domain.id_);
+            state.resolution_status_ = result.matched_ ? "verified" : "invalid";
+            if (!result.matched_) {
                 const auto observed =
-                    result.observedTarget.empty() ? "未查询到 CNAME" : result.observedTarget;
-                state.lastError = "期望 " + std::string(expectedTarget) + "，实际 " + observed;
+                    result.observed_target_.empty() ? "未查询到 CNAME" : result.observed_target_;
+                state.last_error_ = "期望 " + std::string(expected_target) + "，实际 " + observed;
             }
         } catch (const std::exception& error) {
-            state.resolutionStatus = "unverified";
-            state.lastError = error.what();
+            state.resolution_status_ = "unverified";
+            state.last_error_ = error.what();
         }
     }
     co_return output;
 }
 
-inline ruvia::Task<void> probeWebsite(service::background::WorkerContext& context,
-                                      const std::string& websiteId,
-                                      const service::sync_runtime::RunningMarkerLease& marker,
-                                      std::int64_t expectedRevision) {
-    const auto rows = co_await context.db().query(
+inline ruvia::task<void> probe_website(service::background::worker_context& context,
+    const std::string& website_id,
+    const service::sync_runtime::running_marker_lease& marker,
+    std::int64_t expected_revision) {
+    auto db = context.db();
+    const auto rows = co_await db.query(
         "SELECT website.config::text, website.runtime::text, cluster.hostname_prefix || '.' || "
         "zone.domain, website.revision, website.deleted_at IS NOT NULL, TO_CHAR(NOW(), "
         "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') FROM sys_website website INNER JOIN sys_cluster "
@@ -73,56 +75,56 @@ inline ruvia::Task<void> probeWebsite(service::background::WorkerContext& contex
         "website.cluster_id INNER JOIN sys_dns_zone zone ON zone.tenant_id = "
         "cluster.tenant_id AND zone.id = cluster.dns_zone_id WHERE website.id = $1 AND "
         "website.tenant_id = $2 LIMIT 1",
-        websiteId, marker.marker.tenantId);
-    const bool revisionChanged =
-        !rows.empty() && rows.front()[3].as<std::int64_t>().value_or(0) != expectedRevision;
-    const bool resourceDeleted = rows.empty() || rows.front()[4].as<bool>().value_or(false);
-    if (resourceDeleted) {
-        auto completion = co_await context.db().beginTransaction();
-        (void)co_await service::sync_runtime::completeRunning(completion, marker);
+        website_id, marker.marker_.tenant_id_);
+    const bool revision_changed =
+        !rows.empty() && rows.front()[3].as<std::int64_t>().value_or(0) != expected_revision;
+    const bool resource_deleted = rows.empty() || rows.front()[4].as<bool>().value_or(false);
+    if (resource_deleted) {
+        auto completion = co_await db.begin_transaction();
+        (void)co_await service::sync_runtime::complete_running(completion, marker);
         co_await completion.commit();
         co_return;
     }
-    if (rows.empty() || revisionChanged) {
-        co_await completeStaleWebsiteTask(context, marker, revisionChanged);
+    if (rows.empty() || revision_changed) {
+        co_await complete_stale_website_task(context, marker, revision_changed);
         co_return;
     }
 
-    const auto config = service::website_config::parseStored(rows.front()[0].value().value_or("{}"),
-                                                             {.resource = context.pool()});
+    const auto config = service::website_config::parse_stored(rows.front()[0].value().value_or("{}"),
+        {.resource_ = context.pool()});
     const auto runtime =
-        parseStored(rows.front()[1].value().value_or("{}"), {.resource = context.pool()});
+        parse_stored(rows.front()[1].value().value_or("{}"), {.resource_ = context.pool()});
     if (!config || !runtime) {
         throw std::runtime_error("网站运行状态损坏");
     }
 
-    const auto expectedTarget = rows.front()[2].value().value_or("");
-    const auto checkedAt = rows.front()[5].value().value_or("");
-    auto output = co_await probeWebsiteDomains(context, *config, expectedTarget, checkedAt, marker);
+    const auto expected_target = rows.front()[2].value().value_or("");
+    const auto checked_at = rows.front()[5].value().value_or("");
+    auto output = co_await probe_website_domains(context, *config, expected_target, checked_at, marker);
 
-    const auto json = ruvia::toJson(toOutput(output, {.resource = context.pool()}),
-                                    {.resource = context.pool()});
-    auto completion = co_await context.db().beginTransaction();
+    const auto json = ruvia::to_json(to_output(output, {.resource_ = context.pool()}),
+        {.resource_ = context.pool()});
+    auto completion = co_await db.begin_transaction();
     const auto updated = co_await completion.execute(
         "UPDATE sys_website SET runtime = $2::jsonb WHERE id = $1 AND revision = $3 AND "
         "tenant_id = $4 AND deleted_at IS NULL",
-        websiteId, std::string_view(json), expectedRevision, marker.marker.tenantId);
-    service::sync_runtime::RunningResultTransition resultTransition;
-    if (updated.affectedRows() == 0) {
-        (void)co_await service::sync_runtime::releaseRunning(completion, marker);
+        website_id, std::string_view(json), expected_revision, marker.marker_.tenant_id_);
+    service::sync_runtime::running_result_transition result_transition;
+    if (updated.affected_rows() == 0) {
+        (void)co_await service::sync_runtime::release_running(completion, marker);
     } else {
-        if (!co_await service::sync_runtime::renewRunningLease(completion, marker)) {
+        if (!co_await service::sync_runtime::renew_running_lease(completion, marker)) {
             throw std::runtime_error("网站同步标记 lease 已失效");
         }
-        resultTransition =
-            co_await service::sync_runtime::completeRunningAndRecordEvent(completion, marker);
-        if (!resultTransition.markerTransitioned) {
+        result_transition =
+            co_await service::sync_runtime::complete_running_and_record_event(completion, marker);
+        if (!result_transition.marker_transitioned_) {
             throw std::runtime_error("网站同步标记 lease 已失效");
         }
     }
-    co_await service::sync_runtime::commitAndPublishResultEvent(completion, marker,
-                                                                resultTransition);
+    co_await service::sync_runtime::commit_and_publish_result_event(completion, marker,
+        result_transition);
     co_return;
 }
 
-} // namespace service::website_dns
+}  // namespace service::website_dns

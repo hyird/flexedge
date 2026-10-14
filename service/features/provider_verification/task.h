@@ -5,19 +5,19 @@
 
 namespace service::provider_verification::detail {
 
-struct VerificationTask final {
-    std::string id;
-    std::string tenantId;
-    std::string providerId;
-    std::string kind;
-    std::string provider;
-    std::string name;
-    std::string accountId;
-    std::int64_t providerRevision;
-    std::int64_t generation;
-    std::int64_t failures;
-    std::string configJson;
-    std::string runtimeJson;
+struct verification_task final {
+    std::string id_;
+    std::string tenant_id_;
+    std::string provider_id_;
+    std::string kind_;
+    std::string provider_;
+    std::string name_;
+    std::string account_id_;
+    std::int64_t provider_revision_;
+    std::int64_t generation_;
+    std::int64_t failures_;
+    std::string config_json_;
+    std::string runtime_json_;
 };
 
-} // namespace service::provider_verification::detail
+}  // namespace service::provider_verification::detail

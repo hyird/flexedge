@@ -1,5 +1,12 @@
 #pragma once
 
+#include <ruvia/core/task.h>
+#include <ruvia/core/timer.h>
+#include <ruvia/web/context.h>
+#include <ruvia/web/db/db.h>
+#include <ruvia/web/redis/redis.h>
+#include <ruvia/web/web_worker.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -11,13 +18,6 @@
 #include <utility>
 #include <vector>
 
-#include <ruvia/core/Task.h>
-#include <ruvia/core/Timer.h>
-#include <ruvia/web/Context.h>
-#include <ruvia/web/WebWorker.h>
-#include <ruvia/web/db/Db.h>
-#include <ruvia/web/redis/Redis.h>
-
 #include "service/features/log_ingest/envelope.h"
 #include "service/features/log_ingest/notifications.h"
 #include "service/features/log_ingest/queue.h"
@@ -25,14 +25,14 @@
 
 namespace service::log_ingest {
 
-inline std::int64_t nowMs() {
+inline std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
+        std::chrono::system_clock::now().time_since_epoch())
         .count();
 }
 
-inline std::int64_t boundedOccurredMs(std::uint64_t value) {
-    const auto now = nowMs();
+inline std::int64_t bounded_occurred_ms(std::uint64_t value) {
+    const auto now = now_ms();
     const auto maximum = static_cast<std::uint64_t>(now + 5 * 60 * 1000);
     if (value == 0 || value > maximum) {
         return now;
@@ -40,14 +40,14 @@ inline std::int64_t boundedOccurredMs(std::uint64_t value) {
     return static_cast<std::int64_t>(value);
 }
 
-inline ruvia::Task<bool> enqueue(ruvia::Context& c, std::string_view tenantId,
-                                 std::string_view nodeId, std::string_view agentId,
-                                 const flexedge::node::v2::LogDelivery& delivery) {
+inline ruvia::task<bool> enqueue(ruvia::context& c, std::string_view tenant_id,
+    std::string_view node_id, std::string_view agent_id,
+    const flexedge::node::v2::LogDelivery& delivery) {
     try {
-        if (!validDelivery(delivery, nodeId)) {
+        if (!valid_delivery(delivery, node_id)) {
             co_return false;
         }
-        const auto payload = serializeEnvelope(tenantId, agentId, delivery);
+        const auto payload = serialize_envelope(tenant_id, agent_id, delivery);
         co_return co_await queue::push(c.redis(), payload);
     } catch (const std::exception& error) {
         service::logging::error("Log enqueue failed: " + std::string(error.what()));
@@ -58,179 +58,180 @@ inline ruvia::Task<bool> enqueue(ruvia::Context& c, std::string_view tenantId,
     }
 }
 
-template <typename ContextT>
-inline ruvia::Task<void> insertEnvelope(ContextT& context,
-                                        const v2::QueuedLogDelivery& envelope) {
-    if (!validEnvelope(envelope)) {
+template <typename context_t_type>
+inline ruvia::task<void> insert_envelope(context_t_type& context,
+    const v2::QueuedLogDelivery& envelope) {
+    if (!valid_envelope(envelope)) {
         throw std::runtime_error("invalid queued log delivery");
     }
     const auto& delivery = envelope.delivery();
-    const std::string_view tenantId{envelope.tenant_id()};
-    const std::string_view nodeId{delivery.node_id()};
-    const std::string_view agentId{envelope.agent_id()};
-    auto transaction = co_await context.db().beginTransaction();
-    const auto nodeRows = co_await transaction.query(
+    const std::string_view tenant_id{envelope.tenant_id()};
+    const std::string_view node_id{delivery.node_id()};
+    const std::string_view agent_id{envelope.agent_id()};
+    auto db = context.db();
+    auto transaction = co_await db.begin_transaction();
+    const auto node_rows = co_await transaction.query(
         "SELECT cluster_id FROM sys_node WHERE tenant_id = $1 AND id = $2 AND agent_id = $3 AND "
         "registration_status = 'registered' AND deleted_at IS NULL LIMIT 1 FOR SHARE",
-        tenantId, nodeId, agentId);
-    if (nodeRows.empty()) {
+        tenant_id, node_id, agent_id);
+    if (node_rows.empty()) {
         co_await transaction.commit();
         co_return;
     }
-    const auto clusterId = std::string(nodeRows.front()[0].value().value_or(""));
-    std::vector<ruvia::DbValue> accessParams;
-    std::vector<ruvia::DbValue> nodeParams;
-    accessParams.reserve(static_cast<std::size_t>(delivery.events_size()) * 22);
-    nodeParams.reserve(static_cast<std::size_t>(delivery.events_size()) * 8);
-    std::vector<std::string> accessWebsiteIds;
-    accessWebsiteIds.reserve(static_cast<std::size_t>(delivery.events_size()));
-    std::string accessSql =
+    const auto cluster_id = std::string(node_rows.front()[0].value().value_or(""));
+    std::vector<ruvia::db_value> access_params;
+    std::vector<ruvia::db_value> node_params;
+    access_params.reserve(static_cast<std::size_t>(delivery.events_size()) * 22);
+    node_params.reserve(static_cast<std::size_t>(delivery.events_size()) * 8);
+    std::vector<std::string> access_website_ids;
+    access_website_ids.reserve(static_cast<std::size_t>(delivery.events_size()));
+    std::string access_sql =
         "INSERT INTO sys_website_access_log (tenant_id, occurred_at, id, node_id, website_id, "
         "client_ip, protocol, method, host, target, status_code, request_bytes, response_bytes, "
         "duration_ms, "
         "user_agent, referer, request_headers, request_body, request_body_truncated, "
         "tls_fingerprint, response_headers, query_string, cookies, created_at) VALUES ";
-    std::string nodeSql =
+    std::string node_sql =
         "INSERT INTO sys_node_log (tenant_id, occurred_at, id, node_id, level, category, message, "
         "created_at) VALUES ";
-    const auto appendParam = [](std::string& sql, std::vector<ruvia::DbValue>& params,
-                                ruvia::DbValue value) {
+    const auto append_param = [](std::string& sql, std::vector<ruvia::db_value>& params,
+                                  ruvia::db_value value) {
         sql += "$" + std::to_string(params.size() + 1);
         params.push_back(std::move(value));
     };
-    const auto appendText = [&](std::string& sql, std::vector<ruvia::DbValue>& params,
-                                std::string_view value) {
-        appendParam(sql, params, ruvia::DbValue{value});
+    const auto append_text = [&](std::string& sql, std::vector<ruvia::db_value>& params,
+                                 std::string_view value) {
+        append_param(sql, params, ruvia::db_value{value});
     };
-    std::size_t accessCount{};
-    std::size_t nodeCount{};
+    std::size_t access_count{};
+    std::size_t node_count{};
     for (const auto& event : delivery.events()) {
         if (event.has_access_log()) {
             const auto& access = event.access_log();
-            if (accessCount++ > 0) {
-                accessSql += ", ";
+            if (access_count++ > 0) {
+                access_sql += ", ";
             }
-            accessSql += "(";
-            appendText(accessSql, accessParams, tenantId);
-            accessSql += ", TO_TIMESTAMP(";
-            appendParam(accessSql, accessParams,
-                        ruvia::DbValue{boundedOccurredMs(access.occurred_unix_ms())});
-            accessSql += "::double precision / 1000.0), ";
-            appendText(accessSql, accessParams, access.id());
-            accessSql += ", ";
-            appendText(accessSql, accessParams, nodeId);
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.website_id());
-            accessWebsiteIds.emplace_back(access.website_id());
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.client_ip());
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.protocol());
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.method());
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.host());
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.target());
-            accessSql += ", ";
-            appendParam(accessSql, accessParams,
-                        ruvia::DbValue{static_cast<std::int64_t>(access.status_code())});
-            accessSql += ", ";
-            appendParam(accessSql, accessParams,
-                        ruvia::DbValue{static_cast<std::int64_t>(access.request_bytes())});
-            accessSql += ", ";
-            appendParam(accessSql, accessParams,
-                        ruvia::DbValue{static_cast<std::int64_t>(access.response_bytes())});
-            accessSql += ", ";
-            appendParam(accessSql, accessParams,
-                        ruvia::DbValue{static_cast<std::int64_t>(access.duration_ms())});
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.user_agent());
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.referer());
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.request_headers());
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.request_body());
-            accessSql += ", ";
-            appendParam(accessSql, accessParams, ruvia::DbValue{access.request_body_truncated()});
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.tls_fingerprint());
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.response_headers());
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.query_string());
-            accessSql += ", ";
-            appendText(accessSql, accessParams, access.cookies());
-            accessSql += ", NOW())";
+            access_sql += "(";
+            append_text(access_sql, access_params, tenant_id);
+            access_sql += ", TO_TIMESTAMP(";
+            append_param(access_sql, access_params,
+                ruvia::db_value{bounded_occurred_ms(access.occurred_unix_ms())});
+            access_sql += "::double precision / 1000.0), ";
+            append_text(access_sql, access_params, access.id());
+            access_sql += ", ";
+            append_text(access_sql, access_params, node_id);
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.website_id());
+            access_website_ids.emplace_back(access.website_id());
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.client_ip());
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.protocol());
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.method());
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.host());
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.target());
+            access_sql += ", ";
+            append_param(access_sql, access_params,
+                ruvia::db_value{static_cast<std::int64_t>(access.status_code())});
+            access_sql += ", ";
+            append_param(access_sql, access_params,
+                ruvia::db_value{static_cast<std::int64_t>(access.request_bytes())});
+            access_sql += ", ";
+            append_param(access_sql, access_params,
+                ruvia::db_value{static_cast<std::int64_t>(access.response_bytes())});
+            access_sql += ", ";
+            append_param(access_sql, access_params,
+                ruvia::db_value{static_cast<std::int64_t>(access.duration_ms())});
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.user_agent());
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.referer());
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.request_headers());
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.request_body());
+            access_sql += ", ";
+            append_param(access_sql, access_params, ruvia::db_value{access.request_body_truncated()});
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.tls_fingerprint());
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.response_headers());
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.query_string());
+            access_sql += ", ";
+            append_text(access_sql, access_params, access.cookies());
+            access_sql += ", NOW())";
             continue;
         }
 
         const auto& item = event.node_log();
-        if (nodeCount++ > 0) {
-            nodeSql += ", ";
+        if (node_count++ > 0) {
+            node_sql += ", ";
         }
-        nodeSql += "(";
-        appendText(nodeSql, nodeParams, tenantId);
-        nodeSql += ", TO_TIMESTAMP(";
-        appendParam(nodeSql, nodeParams,
-                    ruvia::DbValue{boundedOccurredMs(item.occurred_unix_ms())});
-        nodeSql += "::double precision / 1000.0), ";
-        appendText(nodeSql, nodeParams, item.id());
-        nodeSql += ", ";
-        appendText(nodeSql, nodeParams, nodeId);
-        nodeSql += ", ";
-        appendText(nodeSql, nodeParams, item.level());
-        nodeSql += ", ";
-        appendText(nodeSql, nodeParams, item.category());
-        nodeSql += ", ";
-        appendText(nodeSql, nodeParams, item.message());
-        nodeSql += ", NOW())";
+        node_sql += "(";
+        append_text(node_sql, node_params, tenant_id);
+        node_sql += ", TO_TIMESTAMP(";
+        append_param(node_sql, node_params,
+            ruvia::db_value{bounded_occurred_ms(item.occurred_unix_ms())});
+        node_sql += "::double precision / 1000.0), ";
+        append_text(node_sql, node_params, item.id());
+        node_sql += ", ";
+        append_text(node_sql, node_params, node_id);
+        node_sql += ", ";
+        append_text(node_sql, node_params, item.level());
+        node_sql += ", ";
+        append_text(node_sql, node_params, item.category());
+        node_sql += ", ";
+        append_text(node_sql, node_params, item.message());
+        node_sql += ", NOW())";
     }
-    std::sort(accessWebsiteIds.begin(), accessWebsiteIds.end());
-    accessWebsiteIds.erase(std::unique(accessWebsiteIds.begin(), accessWebsiteIds.end()),
-                           accessWebsiteIds.end());
-    if (!accessWebsiteIds.empty()) {
-        std::vector<ruvia::DbValue> websiteParams;
-        websiteParams.reserve(accessWebsiteIds.size() + 2);
-        websiteParams.emplace_back(tenantId);
-        websiteParams.emplace_back(clusterId);
+    std::sort(access_website_ids.begin(), access_website_ids.end());
+    access_website_ids.erase(std::unique(access_website_ids.begin(), access_website_ids.end()),
+        access_website_ids.end());
+    if (!access_website_ids.empty()) {
+        std::vector<ruvia::db_value> website_params;
+        website_params.reserve(access_website_ids.size() + 2);
+        website_params.emplace_back(tenant_id);
+        website_params.emplace_back(cluster_id);
         std::string placeholders;
-        for (const auto& websiteId : accessWebsiteIds) {
+        for (const auto& website_id : access_website_ids) {
             if (!placeholders.empty()) {
                 placeholders += ", ";
             }
-            placeholders += "$" + std::to_string(websiteParams.size() + 1);
-            websiteParams.emplace_back(websiteId);
+            placeholders += "$" + std::to_string(website_params.size() + 1);
+            website_params.emplace_back(website_id);
         }
-        const auto websiteRows = co_await transaction.query(
+        const auto website_rows = co_await transaction.query(
             "SELECT id FROM sys_website WHERE tenant_id = $1 AND cluster_id = $2 AND "
             "deleted_at IS NULL AND id IN (" +
                 placeholders + ") FOR SHARE",
-            websiteParams);
-        if (websiteRows.size() != accessWebsiteIds.size()) {
+            website_params);
+        if (website_rows.size() != access_website_ids.size()) {
             service::logging::error("Dropped log delivery with invalid website scope");
             co_await transaction.commit();
             co_return;
         }
     }
-    if (accessCount > 0) {
-        accessSql += " ON CONFLICT DO NOTHING";
-        (void)co_await transaction.execute(accessSql, accessParams);
+    if (access_count > 0) {
+        access_sql += " ON CONFLICT DO NOTHING";
+        (void)co_await transaction.execute(access_sql, access_params);
     }
-    if (nodeCount > 0) {
-        nodeSql += " ON CONFLICT DO NOTHING";
-        (void)co_await transaction.execute(nodeSql, nodeParams);
+    if (node_count > 0) {
+        node_sql += " ON CONFLICT DO NOTHING";
+        (void)co_await transaction.execute(node_sql, node_params);
     }
     co_await transaction.commit();
     try {
-        for (const auto& websiteId : accessWebsiteIds) {
-            co_await notifications::publish(context.redis(), notifications::LogResourceType::access,
-                                            tenantId, websiteId);
+        for (const auto& website_id : access_website_ids) {
+            co_await notifications::publish(context.redis(), notifications::log_resource_type::access,
+                tenant_id, website_id);
         }
-        if (nodeCount > 0) {
-            co_await notifications::publish(context.redis(), notifications::LogResourceType::node,
-                                            tenantId, nodeId);
+        if (node_count > 0) {
+            co_await notifications::publish(context.redis(), notifications::log_resource_type::node,
+                tenant_id, node_id);
         }
     } catch (const std::exception& error) {
         service::logging::error("Log notification failed: " + std::string(error.what()));
@@ -239,28 +240,28 @@ inline ruvia::Task<void> insertEnvelope(ContextT& context,
     }
 }
 
-template <typename ContextT>
-inline ruvia::Task<std::size_t> process(ContextT& context, std::string_view consumer,
-                                        std::vector<queue::Entry> entries) {
+template <typename context_t_type>
+inline ruvia::task<std::size_t> process(context_t_type& context, std::string_view consumer,
+    std::vector<queue::entry> entries) {
     std::size_t processed{};
     for (const auto& entry : entries) {
-        const auto envelope = entry.valid ? parseEnvelope(entry.payload) : std::nullopt;
+        const auto envelope = entry.valid_ ? parse_envelope(entry.payload_) : std::nullopt;
         if (!envelope) {
             service::logging::error("Dropped malformed queued log delivery");
             co_await queue::finish(context.redis(), consumer, entry);
             continue;
         }
-        bool insertFailed{};
+        bool insert_failed{};
         try {
-            co_await insertEnvelope(context, *envelope);
+            co_await insert_envelope(context, *envelope);
         } catch (...) {
-            insertFailed = true;
+            insert_failed = true;
         }
-        if (insertFailed) {
-            const auto deliveryCount =
-                co_await queue::deliveryCount(context.redis(), consumer, entry.id);
-            if (deliveryCount) {
-                if (*deliveryCount >= queue::kMaxDeliveryAttempts) {
+        if (insert_failed) {
+            const auto delivery_count =
+                co_await queue::delivery_count(context.redis(), consumer, entry.id_);
+            if (delivery_count) {
+                if (*delivery_count >= queue::max_delivery_attempts) {
                     service::logging::error("Dropped log delivery after maximum delivery attempts");
                     co_await queue::finish(context.redis(), consumer, entry);
                 } else {
@@ -275,26 +276,26 @@ inline ruvia::Task<std::size_t> process(ContextT& context, std::string_view cons
     co_return processed;
 }
 
-template <typename ContextT>
-inline ruvia::Task<void> recoverStale(ContextT& context, std::string_view consumer) {
+template <typename context_t_type>
+inline ruvia::task<void> recover_stale(context_t_type& context, std::string_view consumer) {
     std::string cursor{"0-0"};
     do {
-        auto claimed = co_await queue::autoClaim(context.redis(), consumer, cursor);
-        cursor = std::move(claimed.nextCursor);
-        if (!claimed.entries.empty()) {
-            (void)co_await process(context, consumer, std::move(claimed.entries));
+        auto claimed = co_await queue::auto_claim(context.redis(), consumer, cursor);
+        cursor = std::move(claimed.next_cursor_);
+        if (!claimed.entries_.empty()) {
+            (void)co_await process(context, consumer, std::move(claimed.entries_));
         }
     } while (cursor != "0-0");
 }
 
-template <typename ContextT>
-inline ruvia::Task<void> runWorker(ContextT& context, std::string consumer) {
+template <typename context_t_type>
+inline ruvia::task<void> run_worker(context_t_type& context, std::string consumer) {
     if (consumer.empty()) {
         throw std::invalid_argument("log ingest consumer name cannot be empty");
     }
     bool initialized{};
-    auto nextRecovery = std::chrono::steady_clock::now();
-    while (!context.stopToken().stopRequested()) {
+    auto next_recovery = std::chrono::steady_clock::now();
+    while (!context.get_stop_token().stop_requested()) {
         bool failed{};
         try {
             if (!initialized) {
@@ -302,35 +303,35 @@ inline ruvia::Task<void> runWorker(ContextT& context, std::string consumer) {
                 initialized = true;
             }
             const auto now = std::chrono::steady_clock::now();
-            if (now >= nextRecovery) {
-                co_await recoverStale(context, consumer);
-                nextRecovery = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            if (now >= next_recovery) {
+                co_await recover_stale(context, consumer);
+                next_recovery = std::chrono::steady_clock::now() + std::chrono::seconds(5);
             }
             auto entries = co_await queue::read(context.redis(), consumer);
             if (!entries.empty()) {
                 (void)co_await process(context, consumer, std::move(entries));
             }
         } catch (const std::exception& error) {
-            if (context.stopToken().stopRequested()) {
+            if (context.get_stop_token().stop_requested()) {
                 co_return;
             }
             initialized = false;
             failed = true;
             service::logging::error("Log ingest worker failure: " + std::string(error.what()));
         } catch (...) {
-            if (context.stopToken().stopRequested()) {
+            if (context.get_stop_token().stop_requested()) {
                 co_return;
             }
             initialized = false;
             failed = true;
             service::logging::error("Log ingest worker failure with unknown exception");
         }
-        if (failed && co_await ruvia::sleepFor(context.worker(), std::chrono::seconds(1),
-                                               context.stopToken()) ==
-                          ruvia::TimerSleepResult::kStopRequested) {
+        if (failed && co_await ruvia::sleep_for(context.worker(), std::chrono::seconds(1),
+                          context.get_stop_token()) ==
+                          ruvia::timer_sleep_result::stop_requested) {
             co_return;
         }
     }
 }
 
-} // namespace service::log_ingest
+}  // namespace service::log_ingest

@@ -1,22 +1,22 @@
 #pragma once
 
+#include <ruvia/core/task.h>
+
 #include <cstdint>
 #include <string>
-
-#include <ruvia/core/Task.h>
 
 #include "service/features/background/worker_pool.h"
 #include "service/features/dns_sync/queue.h"
 
 namespace service::dns_sync::detail {
 
-inline ruvia::Task<void> reconcileTasks(service::background::WorkerContext& context) {
+inline ruvia::task<void> reconcile_tasks(service::background::worker_context& context) {
     const auto zones = co_await context.db().query(
         "SELECT tenant_id, id FROM sys_dns_zone WHERE deleted_at IS NULL ORDER BY sort ASC LIMIT "
         "128");
     for (const auto& zone : zones) {
-        auto transaction = co_await context.db().beginTransaction();
-        (void)co_await service::dns_sync::pruneClusterManagedRecords(
+        auto transaction = co_await context.db().begin_transaction();
+        (void)co_await service::dns_sync::prune_cluster_managed_records(
             transaction, std::string(zone[0].value().value_or("")),
             std::string(zone[1].value().value_or("")));
         co_await transaction.commit();
@@ -29,14 +29,14 @@ inline ruvia::Task<void> reconcileTasks(service::background::WorkerContext& cont
         "task.version = zone.desired_revision AND NOT task.is_done) ORDER BY zone.sort ASC LIMIT "
         "32");
     for (const auto& row : missing) {
-        auto transaction = co_await context.db().beginTransaction();
+        auto transaction = co_await context.db().begin_transaction();
         const auto revision = row[2].as<std::int64_t>().value_or(1);
         const auto locked = co_await transaction.query(
             "SELECT 1 FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 AND "
             "desired_revision = $3 AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
             row[0].value().value_or(""), row[1].value().value_or(""), revision);
         if (!locked.empty()) {
-            co_await service::dns_sync::enqueueZoneRevision(
+            co_await service::dns_sync::enqueue_zone_revision(
                 transaction, std::string(row[0].value().value_or("")),
                 std::string(row[1].value().value_or("")), revision);
         }
@@ -45,4 +45,4 @@ inline ruvia::Task<void> reconcileTasks(service::background::WorkerContext& cont
     co_return;
 }
 
-} // namespace service::dns_sync::detail
+}  // namespace service::dns_sync::detail

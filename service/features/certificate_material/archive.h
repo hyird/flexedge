@@ -1,5 +1,7 @@
 #pragma once
 
+#include <zlib.h>
+
 #include <array>
 #include <cstdint>
 #include <limits>
@@ -9,30 +11,28 @@
 #include <type_traits>
 #include <utility>
 
-#include <zlib.h>
-
 namespace service::certificate_material {
 
 namespace detail {
 
-struct ZipEntry final {
-    std::string filename;
-    std::string compressed;
-    std::uint32_t checksum;
-    std::uint32_t uncompressedSize;
-    std::uint32_t localHeaderOffset;
+struct zip_entry final {
+    std::string filename_;
+    std::string compressed_;
+    std::uint32_t checksum_;
+    std::uint32_t uncompressed_size_;
+    std::uint32_t local_header_offset_;
 };
 
-template <typename Value>
-    requires std::is_unsigned_v<Value>
-inline void appendLittleEndian(std::string& output, Value value) {
-    for (std::size_t index = 0; index < sizeof(Value); ++index) {
-        output.push_back(static_cast<char>(value & static_cast<Value>(0xff)));
+template <typename value_type>
+    requires std::is_unsigned_v<value_type>
+inline void append_little_endian(std::string& output, value_type value) {
+    for (std::size_t index = 0; index < sizeof(value_type); ++index) {
+        output.push_back(static_cast<char>(value & static_cast<value_type>(0xff)));
         value >>= 8;
     }
 }
 
-inline std::uint32_t zipSize(std::size_t value, std::string_view field) {
+inline std::uint32_t zip_size(std::size_t value, std::string_view field) {
     if (value > std::numeric_limits<std::uint32_t>::max()) {
         throw std::runtime_error("certificate archive " + std::string(field) +
                                  " exceeds ZIP32 limits");
@@ -40,14 +40,14 @@ inline std::uint32_t zipSize(std::size_t value, std::string_view field) {
     return static_cast<std::uint32_t>(value);
 }
 
-inline std::uint16_t zipFilenameSize(std::size_t value) {
+inline std::uint16_t zip_filename_size(std::size_t value) {
     if (value > std::numeric_limits<std::uint16_t>::max()) {
         throw std::runtime_error("certificate archive filename exceeds ZIP limits");
     }
     return static_cast<std::uint16_t>(value);
 }
 
-inline std::string deflateForZip(std::string_view input) {
+inline std::string deflate_for_zip(std::string_view input) {
     if (input.size() > std::numeric_limits<uInt>::max()) {
         throw std::runtime_error("certificate file exceeds deflate limits");
     }
@@ -57,9 +57,11 @@ inline std::string deflateForZip(std::string_view input) {
         Z_OK) {
         throw std::runtime_error("failed to initialize certificate archive compression");
     }
-    struct StreamGuard final {
-        z_stream* stream;
-        ~StreamGuard() { deflateEnd(stream); }
+    struct stream_guard final {
+        z_stream* stream_;
+        ~stream_guard() {
+            deflateEnd(stream_);
+        }
     } guard{&stream};
 
     const auto bound = deflateBound(&stream, static_cast<uLong>(input.size()));
@@ -78,87 +80,87 @@ inline std::string deflateForZip(std::string_view input) {
     return output;
 }
 
-inline ZipEntry makeZipEntry(std::string filename, std::string_view content) {
+inline zip_entry make_zip_entry(std::string filename, std::string_view content) {
     if (content.empty()) {
         throw std::runtime_error("certificate archive entry is empty");
     }
     const auto checksum = crc32_z(crc32(0L, Z_NULL, 0),
-                                  reinterpret_cast<const Bytef*>(content.data()), content.size());
+        reinterpret_cast<const Bytef*>(content.data()), content.size());
     return {
-        .filename = std::move(filename),
-        .compressed = deflateForZip(content),
-        .checksum = static_cast<std::uint32_t>(checksum),
-        .uncompressedSize = zipSize(content.size(), "entry"),
-        .localHeaderOffset = 0,
+        .filename_ = std::move(filename),
+        .compressed_ = deflate_for_zip(content),
+        .checksum_ = static_cast<std::uint32_t>(checksum),
+        .uncompressed_size_ = zip_size(content.size(), "entry"),
+        .local_header_offset_ = 0,
     };
 }
 
-inline void appendLocalHeader(std::string& archive, ZipEntry& entry) {
-    entry.localHeaderOffset = zipSize(archive.size(), "offset");
-    appendLittleEndian<std::uint32_t>(archive, 0x04034b50);
-    appendLittleEndian<std::uint16_t>(archive, 20);
-    appendLittleEndian<std::uint16_t>(archive, 0x0800);
-    appendLittleEndian<std::uint16_t>(archive, 8);
-    appendLittleEndian<std::uint16_t>(archive, 0);
-    appendLittleEndian<std::uint16_t>(archive, 0x0021);
-    appendLittleEndian<std::uint32_t>(archive, entry.checksum);
-    appendLittleEndian<std::uint32_t>(archive, zipSize(entry.compressed.size(), "entry"));
-    appendLittleEndian<std::uint32_t>(archive, entry.uncompressedSize);
-    appendLittleEndian<std::uint16_t>(archive, zipFilenameSize(entry.filename.size()));
-    appendLittleEndian<std::uint16_t>(archive, 0);
-    archive.append(entry.filename);
-    archive.append(entry.compressed);
+inline void append_local_header(std::string& archive, zip_entry& entry) {
+    entry.local_header_offset_ = zip_size(archive.size(), "offset");
+    append_little_endian<std::uint32_t>(archive, 0x04034b50);
+    append_little_endian<std::uint16_t>(archive, 20);
+    append_little_endian<std::uint16_t>(archive, 0x0800);
+    append_little_endian<std::uint16_t>(archive, 8);
+    append_little_endian<std::uint16_t>(archive, 0);
+    append_little_endian<std::uint16_t>(archive, 0x0021);
+    append_little_endian<std::uint32_t>(archive, entry.checksum_);
+    append_little_endian<std::uint32_t>(archive, zip_size(entry.compressed_.size(), "entry"));
+    append_little_endian<std::uint32_t>(archive, entry.uncompressed_size_);
+    append_little_endian<std::uint16_t>(archive, zip_filename_size(entry.filename_.size()));
+    append_little_endian<std::uint16_t>(archive, 0);
+    archive.append(entry.filename_);
+    archive.append(entry.compressed_);
 }
 
-inline void appendCentralHeader(std::string& archive, const ZipEntry& entry) {
-    appendLittleEndian<std::uint32_t>(archive, 0x02014b50);
-    appendLittleEndian<std::uint16_t>(archive, 20);
-    appendLittleEndian<std::uint16_t>(archive, 20);
-    appendLittleEndian<std::uint16_t>(archive, 0x0800);
-    appendLittleEndian<std::uint16_t>(archive, 8);
-    appendLittleEndian<std::uint16_t>(archive, 0);
-    appendLittleEndian<std::uint16_t>(archive, 0x0021);
-    appendLittleEndian<std::uint32_t>(archive, entry.checksum);
-    appendLittleEndian<std::uint32_t>(archive, zipSize(entry.compressed.size(), "entry"));
-    appendLittleEndian<std::uint32_t>(archive, entry.uncompressedSize);
-    appendLittleEndian<std::uint16_t>(archive, zipFilenameSize(entry.filename.size()));
-    appendLittleEndian<std::uint16_t>(archive, 0);
-    appendLittleEndian<std::uint16_t>(archive, 0);
-    appendLittleEndian<std::uint16_t>(archive, 0);
-    appendLittleEndian<std::uint16_t>(archive, 0);
-    appendLittleEndian<std::uint32_t>(archive, 0);
-    appendLittleEndian<std::uint32_t>(archive, entry.localHeaderOffset);
-    archive.append(entry.filename);
+inline void append_central_header(std::string& archive, const zip_entry& entry) {
+    append_little_endian<std::uint32_t>(archive, 0x02014b50);
+    append_little_endian<std::uint16_t>(archive, 20);
+    append_little_endian<std::uint16_t>(archive, 20);
+    append_little_endian<std::uint16_t>(archive, 0x0800);
+    append_little_endian<std::uint16_t>(archive, 8);
+    append_little_endian<std::uint16_t>(archive, 0);
+    append_little_endian<std::uint16_t>(archive, 0x0021);
+    append_little_endian<std::uint32_t>(archive, entry.checksum_);
+    append_little_endian<std::uint32_t>(archive, zip_size(entry.compressed_.size(), "entry"));
+    append_little_endian<std::uint32_t>(archive, entry.uncompressed_size_);
+    append_little_endian<std::uint16_t>(archive, zip_filename_size(entry.filename_.size()));
+    append_little_endian<std::uint16_t>(archive, 0);
+    append_little_endian<std::uint16_t>(archive, 0);
+    append_little_endian<std::uint16_t>(archive, 0);
+    append_little_endian<std::uint16_t>(archive, 0);
+    append_little_endian<std::uint32_t>(archive, 0);
+    append_little_endian<std::uint32_t>(archive, entry.local_header_offset_);
+    archive.append(entry.filename_);
 }
 
-} // namespace detail
+}  // namespace detail
 
-inline std::string buildArchive(std::string_view filename, std::string_view certificateChain,
-                                std::string_view privateKey) {
+inline std::string build_archive(std::string_view filename, std::string_view certificate_chain,
+    std::string_view private_key) {
     std::array entries{
-        detail::makeZipEntry(std::string(filename) + ".crt", certificateChain),
-        detail::makeZipEntry(std::string(filename) + ".key", privateKey),
+        detail::make_zip_entry(std::string(filename) + ".crt", certificate_chain),
+        detail::make_zip_entry(std::string(filename) + ".key", private_key),
     };
     std::string archive;
-    archive.reserve(certificateChain.size() + privateKey.size() + 256);
+    archive.reserve(certificate_chain.size() + private_key.size() + 256);
     for (auto& entry : entries) {
-        detail::appendLocalHeader(archive, entry);
+        detail::append_local_header(archive, entry);
     }
 
-    const auto centralOffset = detail::zipSize(archive.size(), "central directory offset");
+    const auto central_offset = detail::zip_size(archive.size(), "central directory offset");
     for (const auto& entry : entries) {
-        detail::appendCentralHeader(archive, entry);
+        detail::append_central_header(archive, entry);
     }
-    const auto centralSize = detail::zipSize(archive.size() - centralOffset, "central directory");
-    detail::appendLittleEndian<std::uint32_t>(archive, 0x06054b50);
-    detail::appendLittleEndian<std::uint16_t>(archive, 0);
-    detail::appendLittleEndian<std::uint16_t>(archive, 0);
-    detail::appendLittleEndian<std::uint16_t>(archive, static_cast<std::uint16_t>(entries.size()));
-    detail::appendLittleEndian<std::uint16_t>(archive, static_cast<std::uint16_t>(entries.size()));
-    detail::appendLittleEndian<std::uint32_t>(archive, centralSize);
-    detail::appendLittleEndian<std::uint32_t>(archive, centralOffset);
-    detail::appendLittleEndian<std::uint16_t>(archive, 0);
+    const auto central_size = detail::zip_size(archive.size() - central_offset, "central directory");
+    detail::append_little_endian<std::uint32_t>(archive, 0x06054b50);
+    detail::append_little_endian<std::uint16_t>(archive, 0);
+    detail::append_little_endian<std::uint16_t>(archive, 0);
+    detail::append_little_endian<std::uint16_t>(archive, static_cast<std::uint16_t>(entries.size()));
+    detail::append_little_endian<std::uint16_t>(archive, static_cast<std::uint16_t>(entries.size()));
+    detail::append_little_endian<std::uint32_t>(archive, central_size);
+    detail::append_little_endian<std::uint32_t>(archive, central_offset);
+    detail::append_little_endian<std::uint16_t>(archive, 0);
     return archive;
 }
 
-} // namespace service::certificate_material
+}  // namespace service::certificate_material

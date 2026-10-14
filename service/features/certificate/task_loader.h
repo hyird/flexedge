@@ -1,20 +1,19 @@
 #pragma once
 
-#include "service/features/live_resource/fanout.h"
+#include <ruvia/core/task.h>
 
 #include <cstdint>
 #include <optional>
 #include <string>
 
-#include <ruvia/core/Task.h>
-
 #include "service/features/background/worker_pool.h"
 #include "service/features/certificate/task.h"
+#include "service/features/live_resource/fanout.h"
 
 namespace service::certificate_issuance::worker_detail {
 
-inline ruvia::Task<std::optional<CertificateTask>>
-claim(service::background::WorkerContext& context) {
+inline ruvia::task<std::optional<certificate_task>>
+claim(service::background::worker_context& context) {
     const auto rows = co_await context.db().query(
         "WITH candidate AS (SELECT marker.id FROM sys_sync_task marker INNER JOIN sys_certificate "
         "certificate ON certificate.tenant_id = marker.tenant_id AND certificate.id = "
@@ -28,24 +27,24 @@ claim(service::background::WorkerContext& context) {
         "seconds', "
         "updated_at = NOW() FROM candidate WHERE marker.id = candidate.id RETURNING marker.id, "
         "marker.tenant_id, marker.resource_id, marker.version, marker.count_fails",
-        context.leaseOwner());
+        context.lease_owner());
     if (rows.empty()) {
         co_return std::nullopt;
     }
     const auto& row = rows.front();
-    service::live_resource::hub().publish(row[1].value().value_or(""),
-                                         service::live_resource::Resource::tasks,
-                                         row[0].value().value_or(""));
-    service::live_resource::hub().publish(row[1].value().value_or(""),
-                                         service::live_resource::Resource::certificates,
-                                         row[2].value().value_or(""));
-    co_return CertificateTask{
-        .id = std::string(row[0].value().value_or("")),
-        .tenantId = std::string(row[1].value().value_or("")),
-        .certificateId = std::string(row[2].value().value_or("")),
-        .version = row[3].as<std::int64_t>().value_or(1),
-        .failures = row[4].as<std::int64_t>().value_or(0),
+    service::live_resource::get_hub().publish(row[1].value().value_or(""),
+        service::live_resource::resource::tasks,
+        row[0].value().value_or(""));
+    service::live_resource::get_hub().publish(row[1].value().value_or(""),
+        service::live_resource::resource::certificates,
+        row[2].value().value_or(""));
+    co_return certificate_task{
+        .id_ = std::string(row[0].value().value_or("")),
+        .tenant_id_ = std::string(row[1].value().value_or("")),
+        .certificate_id_ = std::string(row[2].value().value_or("")),
+        .version_ = row[3].as<std::int64_t>().value_or(1),
+        .failures_ = row[4].as<std::int64_t>().value_or(0),
     };
 }
 
-} // namespace service::certificate_issuance::worker_detail
+}  // namespace service::certificate_issuance::worker_detail

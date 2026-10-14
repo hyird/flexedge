@@ -7,54 +7,66 @@
 
 namespace service::live_resource {
 
-enum class Resource {
-    nodes, clusters, websites, dnsZones, providers, certificates, tasks, overview, accessHistory
+enum class resource {
+    nodes,
+    clusters,
+    websites,
+    dns_zones,
+    providers,
+    certificates,
+    tasks,
+    overview,
+    access_history,
+    overview_traffic
 };
 
 namespace detail {
-inline void appendQueryPart(std::string& key, std::string_view value) {
+inline void append_query_part(std::string& key, std::string_view value) {
     key += 's';
     key += std::to_string(value.size());
     key += ':';
     key += value;
 }
-template <std::integral T> void appendQueryPart(std::string& key, T value) {
+template <std::integral t_type>
+void append_query_part(std::string& key, t_type value) {
     key += 'i';
     key += std::to_string(value);
     key += ';';
 }
-template <typename T> void appendQueryPart(std::string& key, const std::optional<T>& value) {
+template <typename t_type>
+void append_query_part(std::string& key, const std::optional<t_type>& value) {
     key += value ? '+' : '-';
-    if (value)
-        appendQueryPart(key, *value);
+    if (value) {
+        append_query_part(key, *value);
+    }
 }
-} // namespace detail
+}  // namespace detail
 
 // Controllers supply validated, normalized values in a fixed order. Lengths
 // and type tags prevent delimiter collisions and distinguish absent filters.
-template <typename... Args>
-std::string queryKey(std::string_view projection, const Args&... args) {
+template <typename... args_type>
+std::string query_key(std::string_view projection, const args_type&... args) {
     std::string key;
-    detail::appendQueryPart(key, projection);
-    (detail::appendQueryPart(key, args), ...);
+    detail::append_query_part(key, projection);
+    (detail::append_query_part(key, args), ...);
     return key;
 }
 
-struct SnapshotKey final {
-    std::string tenant;
-    Resource resource;
-    std::string id;
-    std::string query;
-    friend bool operator==(const SnapshotKey&, const SnapshotKey&) = default;
+struct snapshot_key final {
+    std::string tenant_;
+    resource resource_;
+    std::string id_;
+    std::string query_;
+    friend bool operator==(const snapshot_key&, const snapshot_key&) = default;
 };
 
-struct SnapshotKeyHash final {
-    std::size_t operator()(const SnapshotKey& key) const noexcept {
-        return std::hash<std::string>{}(key.tenant) ^
-               (std::hash<std::string>{}(key.id) << 1U) ^
-               (std::hash<std::string>{}(key.query) << 2U) ^
-               (static_cast<std::size_t>(key.resource) << 3U);
+struct snapshot_key_hash final {
+    std::size_t operator()(const snapshot_key& key) const noexcept {
+        return std::hash<std::string>{}(key.tenant_) ^
+               (std::hash<std::string>{}(key.id_) << 1U) ^
+               (std::hash<std::string>{}(key.query_) << 2U) ^
+               (static_cast<std::size_t>(key.resource_) << 3U);
     }
 };
 
-} // namespace service::live_resource
+}  // namespace service::live_resource

@@ -1,5 +1,11 @@
 #pragma once
 
+#include <ruvia/core/event_loop.h>
+#include <ruvia/http/http1_client_request_writer.h>
+#include <ruvia/http/http1_client_response_parser.h>
+#include <ruvia/http/http1_close_policy.h>
+#include <ruvia/http/http_client.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -24,37 +30,38 @@
 #include <asio/steady_timer.hpp>
 #include <asio/write.hpp>
 
-#include <ruvia/core/EventLoop.h>
-#include <ruvia/http/Http1ClientRequestWriter.h>
-#include <ruvia/http/Http1ClientResponseParser.h>
-
 #include "node/data/origin_health.h"
 #include "node/data/origin_tls.h"
 
 namespace flexedge::node {
 
-struct OriginProbeConfig final {
-    std::string protocol;
-    std::string host;
-    std::uint16_t port{};
-    std::string path{"/"};
-    std::chrono::seconds timeout{3};
-    std::uint32_t expectedStatus{200};
-    std::uint32_t healthyThreshold{2};
-    std::uint32_t unhealthyThreshold{3};
+struct origin_probe_config final {
+    std::string protocol_;
+    std::string host_;
+    std::uint16_t port_{};
+    std::string path_{"/"};
+    std::chrono::seconds timeout_{3};
+    std::uint32_t expected_status_{200};
+    std::uint32_t healthy_threshold_{2};
+    std::uint32_t unhealthy_threshold_{3};
 };
 
-class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealthProbe> {
-  public:
-    OriginHealthProbe(ruvia::EventLoop loop, OriginHealthRegistry::Target target,
-                      OriginTlsContext& tlsContext, OriginProbeConfig config,
-                      std::function<void()> onRetired = {})
-        : loop_(std::move(loop)), target_(std::move(target)), tlsContext_(tlsContext),
-          config_(std::move(config)), onRetired_(std::move(onRetired)),
-          resolver_(loop_.ioContext()), socket_(loop_.ioContext()), timer_(loop_.ioContext()) {}
+class origin_health_probe final : public std::enable_shared_from_this<origin_health_probe> {
+public:
+    origin_health_probe(ruvia::event_loop loop, origin_health_registry::target target,
+        origin_tls_context& tls_context, origin_probe_config config,
+        std::function<void()> on_retired = {})
+        : loop_(std::move(loop)),
+          target_(std::move(target)),
+          tls_context_(tls_context),
+          config_(std::move(config)),
+          on_retired_(std::move(on_retired)),
+          resolver_(loop_.io_context()),
+          socket_(loop_.io_context()),
+          timer_(loop_.io_context()) {}
 
-    void setOnRetired(std::function<void()> callback) {
-        onRetired_ = std::move(callback);
+    void set_on_retired(std::function<void()> callback) {
+        on_retired_ = std::move(callback);
     }
 
     void cancel() noexcept {
@@ -62,14 +69,16 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
         std::error_code ignored;
         timer_.cancel(ignored);
         resolver_.cancel();
-        if (tlsStream_) ignored = tlsStream_->lowest_layer().close(ignored);
+        if (tls_stream_) {
+            ignored = tls_stream_->lowest_layer().close(ignored);
+        }
         ignored = socket_.close(ignored);
-        notifyRetiredIfReady();
+        notify_retired_if_ready();
     }
 
     void start() {
         try {
-            prepareRequest();
+            prepare_request();
         } catch (const std::exception& error) {
             log("request preparation failed", error);
             complete(false, "request preparation failed");
@@ -81,32 +90,36 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
         }
         const auto self = shared_from_this();
         try {
-            timer_.expires_after(config_.timeout);
-            operationStarted();
+            timer_.expires_after(config_.timeout_);
+            operation_started();
             try {
                 timer_.async_wait([self](const std::error_code& error) {
-                    Completion completion{self};
-                    if (!error) self->complete(false, "timeout");
+                    completion completion{self};
+                    if (!error) {
+                        self->complete(false, "timeout");
+                    }
                 });
             } catch (...) {
-                operationCompleted();
+                operation_completed();
                 throw;
             }
-            operationStarted();
+            operation_started();
             try {
-                resolver_.async_resolve(config_.host, std::to_string(config_.port),
-                                        [self](const std::error_code& error,
-                                               const asio::ip::tcp::resolver::results_type& endpoints) {
-                                            Completion completion{self};
-                                            if (self->completed_) return;
-                                            if (error) {
-                                                self->complete(false, "dns lookup failed");
-                                                return;
-                                            }
-                                            self->connect(endpoints);
-                                        });
+                resolver_.async_resolve(config_.host_, std::to_string(config_.port_),
+                    [self](const std::error_code& error,
+                        const asio::ip::tcp::resolver::results_type& endpoints) {
+                        completion completion{self};
+                        if (self->completed_) {
+                            return;
+                        }
+                        if (error) {
+                            self->complete(false, "dns lookup failed");
+                            return;
+                        }
+                        self->connect(endpoints);
+                    });
             } catch (...) {
-                operationCompleted();
+                operation_completed();
                 throw;
             }
         } catch (const std::exception& error) {
@@ -118,96 +131,105 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
         }
     }
 
-  private:
-    struct Completion final {
-        std::shared_ptr<OriginHealthProbe> probe;
-        ~Completion() {
+private:
+    struct completion final {
+        std::shared_ptr<origin_health_probe> probe_;
+        ~completion() {
             try {
-                asio::post(probe->loop_.executor(), [keepAlive = probe] {
-                    keepAlive->operationCompleted();
+                asio::post(probe_->loop_.executor(), [keep_alive = probe_] {
+                    keep_alive->operation_completed();
                 });
             } catch (...) {
-                probe->operationCompleted();
+                probe_->operation_completed();
             }
         }
     };
 
-    void operationStarted() noexcept { ++pendingOperations_; }
+    void operation_started() noexcept {
+        ++pending_operations_;
+    }
 
-    template <typename Initiation>
-    void initiateOperation(Initiation&& initiation, std::string_view failure) noexcept {
-        operationStarted();
+    template <typename initiation_type>
+    void initiate_operation(initiation_type&& initiation, std::string_view failure) noexcept {
+        operation_started();
         try {
-            std::forward<Initiation>(initiation)();
+            std::forward<initiation_type>(initiation)();
         } catch (const std::exception& error) {
-            operationCompleted();
+            operation_completed();
             log(failure, error);
             complete(false, failure);
         } catch (...) {
-            operationCompleted();
+            operation_completed();
             log(failure);
             complete(false, failure);
         }
     }
 
-    void operationCompleted() noexcept {
-        --pendingOperations_;
-        notifyRetiredIfReady();
+    void operation_completed() noexcept {
+        --pending_operations_;
+        notify_retired_if_ready();
     }
 
-    void notifyRetiredIfReady() noexcept {
-        if (!completed_ || pendingOperations_ != 0 || retiredNotified_) return;
-        retiredNotified_ = true;
-        if (onRetired_) {
-            try { onRetired_(); } catch (...) {}
+    void notify_retired_if_ready() noexcept {
+        if (!completed_ || pending_operations_ != 0 || retired_notified_) {
+            return;
+        }
+        retired_notified_ = true;
+        if (on_retired_) {
+            try {
+                on_retired_();
+            } catch (...) {
+            }
         }
     }
 
-    void prepareRequest() {
+    void prepare_request() {
         const auto origin =
-            config_.protocol == "https"
-                ? ruvia::HttpOriginView::https({.host = config_.host, .port = config_.port})
-                : ruvia::HttpOriginView::http({.host = config_.host, .port = config_.port});
-        ruvia::HttpClientRequestView request;
-        request.method = "HEAD";
-        request.target = config_.path;
+            config_.protocol_ == "https"
+                ? ruvia::http_origin_view::https({.host_ = config_.host_, .port_ = config_.port_})
+                : ruvia::http_origin_view::http({.host_ = config_.host_, .port_ = config_.port_});
+        ruvia::http_client_request_view request;
+        request.method_ = "HEAD";
+        request.target_ = config_.path_;
         std::array<char, 4096> head{};
-        auto prepared = ruvia::Http1ClientRequestWriter().prepare(
-            origin, request, head, {.closePolicy = ruvia::Http1ClosePolicy::kCloseAfterResponse});
+        auto prepared = ruvia::http1_client_request_writer().prepare(
+            origin, request, head, {.close_policy_ = ruvia::http1_close_policy::close_after_response});
         if (!prepared.prepared()) {
             throw std::runtime_error("could not prepare origin health request");
         }
-        requestBytes_.assign(prepared.prepared()->head());
-        responseParser_ = std::make_unique<ruvia::Http1ClientResponseParser>(
-            prepared.prepared()->exchangeState());
+        request_bytes_.assign(prepared.prepared()->head());
+        response_parser_ = std::make_unique<ruvia::http1_client_response_parser>(
+            prepared.prepared()->exchange_state());
     }
 
     void connect(const asio::ip::tcp::resolver::results_type& endpoints) {
         const auto self = shared_from_this();
-        initiateOperation(
+        initiate_operation(
             [&] {
                 asio::async_connect(socket_, endpoints,
-                                    [self](const std::error_code& error,
-                                           const asio::ip::tcp::endpoint&) {
-                                        Completion completion{self};
-                                        if (self->completed_) return;
-                                        if (error) {
-                                            self->complete(false, "connection failed");
-                                            return;
-                                        }
-                                        if (self->config_.protocol == "https") {
-                                            self->handshake();
-                                        } else {
-                                            self->write();
-                                        }
-                                    });
+                    [self](const std::error_code& error,
+                        const asio::ip::tcp::endpoint&) {
+                        completion completion{self};
+                        if (self->completed_) {
+                            return;
+                        }
+                        if (error) {
+                            self->complete(false, "connection failed");
+                            return;
+                        }
+                        if (self->config_.protocol_ == "https") {
+                            self->handshake();
+                        } else {
+                            self->write();
+                        }
+                    });
             },
             "connection initiation failed");
     }
 
     void handshake() {
         try {
-            tlsStream_.emplace(tlsContext_.stream(std::move(socket_), config_.host, false));
+            tls_stream_.emplace(tls_context_.get_stream(std::move(socket_), config_.host_));
         } catch (const std::exception& error) {
             log("TLS stream preparation failed", error);
             complete(false, "TLS setup failed");
@@ -218,41 +240,45 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
             return;
         }
         const auto self = shared_from_this();
-        initiateOperation(
+        initiate_operation(
             [&] {
-                tlsStream_->async_handshake(asio::ssl::stream_base::client,
-                                            [self](const std::error_code& error) {
-                                                Completion completion{self};
-                                                if (self->completed_) return;
-                                                if (error) {
-                                                    self->complete(false, "TLS handshake failed");
-                                                    return;
-                                                }
-                                                self->write();
-                                            });
+                tls_stream_->async_handshake(asio::ssl::stream_base::client,
+                    [self](const std::error_code& error) {
+                        completion completion{self};
+                        if (self->completed_) {
+                            return;
+                        }
+                        if (error) {
+                            self->complete(false, "TLS handshake failed");
+                            return;
+                        }
+                        self->write();
+                    });
             },
             "TLS handshake initiation failed");
     }
 
     void write() {
         const auto self = shared_from_this();
-        initiateOperation(
+        initiate_operation(
             [&] {
-                auto completion = [self](const std::error_code& error, std::size_t) {
-                    Completion operation{self};
-                    if (self->completed_) return;
+                auto completion_value = [self](const std::error_code& error, std::size_t) {
+                    completion operation{self};
+                    if (self->completed_) {
+                        return;
+                    }
                     if (error) {
                         self->complete(false, "request write failed");
                         return;
                     }
                     self->read();
                 };
-                if (tlsStream_) {
-                    asio::async_write(*tlsStream_, asio::buffer(requestBytes_),
-                                      std::move(completion));
+                if (tls_stream_) {
+                    asio::async_write(*tls_stream_, asio::buffer(request_bytes_),
+                        std::move(completion_value));
                 } else {
-                    asio::async_write(socket_, asio::buffer(requestBytes_),
-                                      std::move(completion));
+                    asio::async_write(socket_, asio::buffer(request_bytes_),
+                        std::move(completion_value));
                 }
             },
             "request write initiation failed");
@@ -260,22 +286,24 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
 
     void read() {
         const auto self = shared_from_this();
-        initiateOperation(
+        initiate_operation(
             [&] {
-                auto completion = [self](const std::error_code& error, std::size_t size) {
-                    Completion operation{self};
-                    if (self->completed_) return;
+                auto completion_value = [self](const std::error_code& error, std::size_t size) {
+                    completion operation{self};
+                    if (self->completed_) {
+                        return;
+                    }
                     if (error) {
                         self->complete(false, "response read failed");
                         return;
                     }
-                    self->responseBytes_.append(self->buffer_.data(), size);
+                    self->response_bytes_.append(self->buffer_.data(), size);
                     self->parse();
                 };
-                if (tlsStream_) {
-                    tlsStream_->async_read_some(asio::buffer(buffer_), std::move(completion));
+                if (tls_stream_) {
+                    tls_stream_->async_read_some(asio::buffer(buffer_), std::move(completion_value));
                 } else {
-                    socket_.async_read_some(asio::buffer(buffer_), std::move(completion));
+                    socket_.async_read_some(asio::buffer(buffer_), std::move(completion_value));
                 }
             },
             "response read initiation failed");
@@ -284,9 +312,9 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
     void parse() {
         for (;;) {
             auto result =
-                responseParser_->parse(std::string_view(responseBytes_).substr(responseOffset_));
-            if (result.needMore()) {
-                if (responseBytes_.size() >= 65536) {
+                response_parser_->parse(std::string_view(response_bytes_).substr(response_offset_));
+            if (result.need_more()) {
+                if (response_bytes_.size() >= 65536) {
                     complete(false, "response too large");
                 } else {
                     read();
@@ -298,15 +326,15 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
                 complete(false, "invalid response");
                 return;
             }
-            responseOffset_ += parsed->consumedBytes();
+            response_offset_ += parsed->consumed_bytes();
             if (parsed->plan().informational()) {
                 continue;
             }
             const auto status = static_cast<std::uint32_t>(parsed->head().status().value());
-            complete(status == config_.expectedStatus,
-                     status == config_.expectedStatus
-                         ? ""
-                         : "unexpected status " + std::to_string(status));
+            complete(status == config_.expected_status_,
+                status == config_.expected_status_
+                    ? ""
+                    : "unexpected status " + std::to_string(status));
             return;
         }
     }
@@ -319,22 +347,22 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
         std::error_code ignored;
         timer_.cancel(ignored);
         resolver_.cancel();
-        if (tlsStream_) {
-            ignored = tlsStream_->lowest_layer().close(ignored);
+        if (tls_stream_) {
+            ignored = tls_stream_->lowest_layer().close(ignored);
         }
         ignored = socket_.close(ignored);
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - startedAt_);
-        target_.recordProbe(
+            std::chrono::steady_clock::now() - started_at_);
+        target_.record_probe(
             healthy,
-            healthy ? config_.healthyThreshold : config_.unhealthyThreshold,
+            healthy ? config_.healthy_threshold_ : config_.unhealthy_threshold_,
             static_cast<std::uint32_t>((std::min)(elapsed.count(), std::int64_t{600000})), error);
-        notifyRetiredIfReady();
+        notify_retired_if_ready();
     }
 
     void log(std::string_view message) const noexcept {
         try {
-            std::cerr << "flexedge node health probe " << config_.host << ':' << config_.port
+            std::cerr << "flexedge node health probe " << config_.host_ << ':' << config_.port_
                       << ": " << message << '\n';
         } catch (...) {
         }
@@ -342,30 +370,30 @@ class OriginHealthProbe final : public std::enable_shared_from_this<OriginHealth
 
     void log(std::string_view message, const std::exception& error) const noexcept {
         try {
-            std::cerr << "flexedge node health probe " << config_.host << ':' << config_.port
+            std::cerr << "flexedge node health probe " << config_.host_ << ':' << config_.port_
                       << ": " << message << ": " << error.what() << '\n';
         } catch (...) {
         }
     }
 
-    ruvia::EventLoop loop_;
-    OriginHealthRegistry::Target target_;
-    OriginTlsContext& tlsContext_;
-    OriginProbeConfig config_;
-    std::function<void()> onRetired_;
+    ruvia::event_loop loop_;
+    origin_health_registry::target target_;
+    origin_tls_context& tls_context_;
+    origin_probe_config config_;
+    std::function<void()> on_retired_;
     asio::ip::tcp::resolver resolver_;
     asio::ip::tcp::socket socket_;
-    std::optional<OriginTlsContext::Stream> tlsStream_;
+    std::optional<origin_tls_context::stream> tls_stream_;
     asio::steady_timer timer_;
-    std::string requestBytes_;
-    std::unique_ptr<ruvia::Http1ClientResponseParser> responseParser_;
+    std::string request_bytes_;
+    std::unique_ptr<ruvia::http1_client_response_parser> response_parser_;
     std::array<char, 4096> buffer_{};
-    std::string responseBytes_;
-    std::size_t responseOffset_{};
-    std::chrono::steady_clock::time_point startedAt_{std::chrono::steady_clock::now()};
-    std::size_t pendingOperations_{};
+    std::string response_bytes_;
+    std::size_t response_offset_{};
+    std::chrono::steady_clock::time_point started_at_{std::chrono::steady_clock::now()};
+    std::size_t pending_operations_{};
     bool completed_{};
-    bool retiredNotified_{};
+    bool retired_notified_{};
 };
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

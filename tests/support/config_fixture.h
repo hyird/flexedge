@@ -1,8 +1,9 @@
 #pragma once
-#include <string>
-#include <vector>
 #include <stdexcept>
+#include <string>
 #include <utility>
+#include <vector>
+
 #include "node/proto/artifact.h"
 #include "node/proto/edge_control.pb.h"
 #include "node/proto/schema_version.h"
@@ -65,7 +66,7 @@ struct TestConfig final {
     void finalize() {
         for (auto& object : objects) {
             if (object.content().has_certificate()) {
-                object.set_digest_sha256(flexedge::node::artifactDigest(object.content()));
+                object.set_digest_sha256(flexedge::node::artifact_digest(object.content()));
             }
         }
         auto* website = mutableWebsite();
@@ -76,7 +77,7 @@ struct TestConfig final {
             bool resolved = false;
             for (const auto& object : objects) {
                 resolved = resolved || (object.content().has_certificate() &&
-                                        object.digest_sha256() == domain.certificate_digest());
+                                           object.digest_sha256() == domain.certificate_digest());
             }
             if (resolved) {
                 continue;
@@ -91,7 +92,7 @@ struct TestConfig final {
         auto* manifest = active.mutable_release()->mutable_content();
         manifest->clear_objects();
         for (auto& object : objects) {
-            object.set_digest_sha256(flexedge::node::artifactDigest(object.content()));
+            object.set_digest_sha256(flexedge::node::artifact_digest(object.content()));
             auto* reference = manifest->add_objects();
             reference->set_kind(object.content().has_website()
                                     ? flexedge::node::v2::OBJECT_KIND_WEBSITE
@@ -99,8 +100,8 @@ struct TestConfig final {
             reference->set_digest_sha256(object.digest_sha256());
         }
         active.mutable_node_spec()->set_digest_sha256(
-            flexedge::node::artifactDigest(active.node_spec().content()));
-        active.mutable_release()->set_digest_sha256(flexedge::node::artifactDigest(*manifest));
+            flexedge::node::artifact_digest(active.node_spec().content()));
+        active.mutable_release()->set_digest_sha256(flexedge::node::artifact_digest(*manifest));
     }
 };
 
@@ -108,7 +109,7 @@ inline TestConfig snapshot(bool forceHttps = true) {
     TestConfig value;
     auto* nodeSpec = value.active.mutable_node_spec()->mutable_content();
     nodeSpec->set_node_id("f3384ad8-afbe-4aa4-8fe5-b292809c4e04");
-    nodeSpec->set_schema_version(flexedge::node::kNodeSpecSchemaVersion);
+    nodeSpec->set_schema_version(flexedge::node::node_spec_schema_version);
     nodeSpec->set_revision(3);
     nodeSpec->set_enabled(true);
     auto* endpoint = nodeSpec->add_endpoints();
@@ -122,7 +123,7 @@ inline TestConfig snapshot(bool forceHttps = true) {
     release->set_generation(3);
     release->set_access_domain("edge.example.com");
     release->set_enabled(true);
-    release->set_schema_version(flexedge::node::kClusterReleaseSchemaVersion);
+    release->set_schema_version(flexedge::node::cluster_release_schema_version);
     flexedge::node::v2::DeliveryObject websiteObject;
     auto* website = websiteObject.mutable_content()->mutable_website();
     website->set_id("website-1");
@@ -180,5 +181,4 @@ inline TestConfig snapshot(bool forceHttps = true) {
     return value;
 }
 
-
-}
+}  // namespace flexedge::testing

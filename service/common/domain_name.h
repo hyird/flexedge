@@ -8,18 +8,18 @@
 
 namespace service::common {
 
-inline std::string normalizeDomainName(std::string_view value) {
+inline std::string normalize_domain_name(std::string_view value) {
     std::string result(value);
     while (!result.empty() && result.back() == '.') {
         result.pop_back();
     }
     std::ranges::transform(result, result.begin(),
-                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     return result;
 }
 
-inline bool isHostname(std::string_view value, bool allowWildcard = true) {
-    if (value.empty() || value.size() > 253 || (!allowWildcard && value.starts_with("*."))) {
+inline bool is_hostname(std::string_view value, bool allow_wildcard = true) {
+    if (value.empty() || value.size() > 253 || (!allow_wildcard && value.starts_with("*."))) {
         return false;
     }
     static const std::regex pattern(
@@ -27,10 +27,10 @@ inline bool isHostname(std::string_view value, bool allowWildcard = true) {
     return std::regex_match(value.begin(), value.end(), pattern);
 }
 
-inline bool certificateCoversHostname(std::string_view certificateDomain,
-                                      std::string_view hostname) {
-    const auto certificate = normalizeDomainName(certificateDomain);
-    const auto host = normalizeDomainName(hostname);
+inline bool certificate_covers_hostname(std::string_view certificate_domain,
+    std::string_view hostname) {
+    const auto certificate = normalize_domain_name(certificate_domain);
+    const auto host = normalize_domain_name(hostname);
     if (certificate.empty() || host.empty()) {
         return false;
     }
@@ -49,9 +49,9 @@ inline bool certificateCoversHostname(std::string_view certificateDomain,
     return host.substr(0, host.size() - suffix.size()).find('.') == std::string::npos;
 }
 
-inline bool domainBelongsToZone(std::string_view hostname, std::string_view zoneDomain) {
-    auto host = normalizeDomainName(hostname);
-    const auto zone = normalizeDomainName(zoneDomain);
+inline bool domain_belongs_to_zone(std::string_view hostname, std::string_view zone_domain) {
+    auto host = normalize_domain_name(hostname);
+    const auto zone = normalize_domain_name(zone_domain);
     if (host.starts_with("*.")) {
         host.erase(0, 2);
     }
@@ -59,4 +59,4 @@ inline bool domainBelongsToZone(std::string_view hostname, std::string_view zone
            (host == zone || (host.size() > zone.size() && host.ends_with("." + zone)));
 }
 
-} // namespace service::common
+}  // namespace service::common

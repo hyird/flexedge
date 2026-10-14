@@ -16,8 +16,8 @@ if not os.environ.get("PGDATABASE", "").endswith("_task_center_qa"):
     raise SystemExit("PGDATABASE must end in _task_center_qa")
 
 root = Path(__file__).resolve().parent.parent
-source = (root / "service/domains/task/task.service.h").read_text(encoding="utf-8")
-cte = re.search(r'kTaskRecordsSql = R"sql\((.*?)\)sql";', source, re.S).group(1)
+source = (root / "service/domains/task/task_service.h").read_text(encoding="utf-8")
+cte = re.search(r'task_records_sql = R"sql\((.*?)\)sql";', source, re.S).group(1)
 cte = cte.replace("$1", "(SELECT id FROM sys_tenant ORDER BY sort LIMIT 1)")
 for param in ("$2", "$3", "$4"):
     cte = cte.replace(param, "''")

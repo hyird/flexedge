@@ -1,5 +1,13 @@
 #pragma once
 
+#include <ruvia/core/asio_task.h>
+#include <ruvia/core/event_loop_pool.h>
+#include <ruvia/core/task.h>
+#include <ruvia/web/db/db_client.h>
+#include <ruvia/web/db/db_handle.h>
+#include <ruvia/web/db/db_transaction.h>
+#include <ruvia/web/dotenv.h>
+
 #include <future>
 #include <optional>
 #include <stdexcept>
@@ -10,38 +18,34 @@
 #include <asio/co_spawn.hpp>
 #include <asio/use_future.hpp>
 
-#include <ruvia/core/AsioTask.h>
-#include <ruvia/core/EventLoopPool.h>
-#include <ruvia/core/Task.h>
-#include <ruvia/web/Dotenv.h>
-#include <ruvia/web/db/DbClient.h>
-
 #include "service/utils/password.h"
 #include "service/utils/sensitive_string.h"
 
 namespace service::initial_admin {
 
-inline constexpr std::string_view kUsername{"admin"};
-inline constexpr std::string_view kNickname{"Administrator"};
-inline constexpr std::string_view kTenantName{"FlexEdge"};
+inline constexpr std::string_view username{"admin"};
+inline constexpr std::string_view nickname{"Administrator"};
+inline constexpr std::string_view tenant_name{"FlexEdge"};
 
-class InitialAdminConfig final {
-  public:
-    explicit InitialAdminConfig(service::utils::SensitiveString password)
+class initial_admin_config final {
+public:
+    explicit initial_admin_config(service::utils::sensitive_string password)
         : password_(std::move(password)) {}
 
-    InitialAdminConfig(const InitialAdminConfig&) = delete;
-    InitialAdminConfig& operator=(const InitialAdminConfig&) = delete;
-    InitialAdminConfig(InitialAdminConfig&&) noexcept = default;
-    InitialAdminConfig& operator=(InitialAdminConfig&&) noexcept = default;
+    initial_admin_config(const initial_admin_config&) = delete;
+    initial_admin_config& operator=(const initial_admin_config&) = delete;
+    initial_admin_config(initial_admin_config&&) noexcept = default;
+    initial_admin_config& operator=(initial_admin_config&&) noexcept = default;
 
-    [[nodiscard]] std::string_view password() const noexcept { return password_.view(); }
+    [[nodiscard]] std::string_view password() const noexcept {
+        return password_.view();
+    }
 
-  private:
-    service::utils::SensitiveString password_;
+private:
+    service::utils::sensitive_string password_;
 };
 
-inline std::optional<InitialAdminConfig> initialAdminConfig(const ruvia::Env& env) {
+inline std::optional<initial_admin_config> get_initial_admin_config(const ruvia::env& env) {
     const auto value = env.get("INITIAL_ADMIN_PASSWORD");
     if (!value || value->empty()) {
         return std::nullopt;
@@ -50,13 +54,14 @@ inline std::optional<InitialAdminConfig> initialAdminConfig(const ruvia::Env& en
         throw std::runtime_error(
             "INITIAL_ADMIN_PASSWORD must contain between 8 and 128 characters");
     }
-    return InitialAdminConfig(service::utils::SensitiveString(std::string(*value)));
+    return initial_admin_config(service::utils::sensitive_string(std::string(*value)));
 }
 
-inline ruvia::Task<void> initialize(ruvia::DbClient& database,
-                                    std::optional<InitialAdminConfig> config) {
+inline ruvia::task<void> initialize(ruvia::db_client& database,
+    std::optional<initial_admin_config> config) {
     co_await database.connect();
-    auto transaction = co_await database.beginTransaction();
+    auto db = database.handle();
+    auto transaction = co_await db.begin_transaction();
     const auto state = co_await transaction.query(
         "SELECT initialized_at IS NOT NULL FROM sys_instance_state WHERE singleton = true FOR "
         "UPDATE");
@@ -72,27 +77,27 @@ inline ruvia::Task<void> initialize(ruvia::DbClient& database,
             "INITIAL_ADMIN_PASSWORD is required before the first service startup");
     }
 
-    const auto passwordHash = service::utils::hashPassword(config->password());
+    const auto password_hash = service::utils::hash_password(config->password());
     (void)co_await transaction.execute(
         "INSERT INTO sys_tenant (name, slug, status) VALUES ($1, "
         "CONCAT('tenant-', LEFT(gen_random_uuid()::text, 12)), 'enabled')",
-        kTenantName);
+        tenant_name);
     (void)co_await transaction.execute(
         "INSERT INTO sys_admin (username, password_hash, nickname, status) VALUES "
         "($1, $2, $3, 'enabled')",
-        kUsername, passwordHash, kNickname);
+        username, password_hash, nickname);
     (void)co_await transaction.execute(
         "UPDATE sys_instance_state SET initialized_at = CURRENT_TIMESTAMP WHERE singleton = true");
     co_await transaction.commit();
 }
 
-inline void initialize(const ruvia::DbConfig& databaseConfig,
-                       std::optional<InitialAdminConfig> config) {
-    ruvia::EventLoopPool loops({.loopCount = 1, .mailboxCapacity = 64});
-    ruvia::DbClient database(loops.loop(0), databaseConfig);
+inline void initialize(const ruvia::db_config& database_config,
+    std::optional<initial_admin_config> config) {
+    ruvia::event_loop_pool loops({.loop_count_ = 1, .queue_capacity_ = 64});
+    ruvia::db_client database(loops.loop(0), database_config);
     auto completion = asio::co_spawn(loops.loop(0).executor(),
-                                     ruvia::asAwaitable(initialize(database, std::move(config))),
-                                     asio::use_future);
+        ruvia::as_awaitable(initialize(database, std::move(config))),
+        asio::use_future);
     try {
         loops.start();
         completion.get();
@@ -110,4 +115,4 @@ inline void initialize(const ruvia::DbConfig& databaseConfig,
     }
 }
 
-} // namespace service::initial_admin
+}  // namespace service::initial_admin

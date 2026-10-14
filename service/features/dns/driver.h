@@ -1,5 +1,8 @@
 #pragma once
 
+#include <ruvia/core/task.h>
+#include <ruvia/web/context.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -12,249 +15,248 @@
 
 #include <asio/ip/address.hpp>
 
-#include <ruvia/core/Task.h>
-#include <ruvia/web/Context.h>
-
 #include "service/features/dns/aliyun.h"
 #include "service/features/dns/cloudflare.h"
-#include "service/features/dns/record_reconciliation.h"
-#include "service/features/dns/registry.h"
 #include "service/features/dns/record_model.h"
 #include "service/features/dns/record_name_policy.h"
+#include "service/features/dns/record_reconciliation.h"
+#include "service/features/dns/registry.h"
 
 namespace service::dns {
 
-class DnsProviderDriver final {
-  public:
-    explicit DnsProviderDriver(std::string_view provider)
-        : kind_(requireDnsProvider(provider).kind) {}
+class dns_provider_driver final {
+public:
+    explicit dns_provider_driver(std::string_view provider)
+        : kind_(require_dns_provider(provider).kind_) {}
 
     [[nodiscard]] static bool supports(std::string_view provider) noexcept {
-        return findDnsProvider(provider) != nullptr;
+        return find_dns_provider(provider) != nullptr;
     }
 
-    [[nodiscard]] bool supportsRoutingLines() const noexcept {
-        return descriptor().supportsRoutingLines;
+    [[nodiscard]] bool supports_routing_lines() const noexcept {
+        return descriptor().supports_routing_lines_;
     }
 
-    [[nodiscard]] std::int64_t minimumRecordTtl() const noexcept {
-        return kind_ == DnsProviderKind::aliyun ? 600 : 1;
+    [[nodiscard]] std::int64_t minimum_record_ttl() const noexcept {
+        return kind_ == dns_provider_kind::aliyun ? 600 : 1;
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::vector<ProviderZone>> verify(Runtime& c, std::string_view accountId,
-                                                  std::string_view secret) const {
-        std::vector<ProviderZone> result;
-        if (kind_ == DnsProviderKind::cloudflare) {
-            const auto zones = co_await cloudflareClient().verifyToken(c, secret, accountId);
+    template <typename runtime_type>
+    ruvia::task<std::vector<provider_zone>> verify(runtime_type& c, std::string_view account_id,
+        std::string_view secret) const {
+        std::vector<provider_zone> result;
+        if (kind_ == dns_provider_kind::cloudflare) {
+            const auto zones = co_await get_cloudflare_client().verify_token(c, secret, account_id);
             result.reserve(zones.size());
             for (const auto& zone : zones) {
-                result.push_back({zone.id, zone.name, zone.status});
+                result.push_back({zone.id_, zone.name_, zone.status_});
             }
         } else {
-            const auto zones = co_await aliyunClient().verifyAccessKey(c, accountId, secret);
+            const auto zones = co_await get_aliyun_client().verify_access_key(c, account_id, secret);
             result.reserve(zones.size());
             for (const auto& zone : zones) {
-                result.push_back({zone.id, zone.name, zone.status});
+                result.push_back({zone.id_, zone.name_, zone.status_});
             }
         }
         co_return result;
     }
 
-    template <typename Runtime>
-    ruvia::Task<ProviderZone> findZone(Runtime& c, std::string_view accountId,
-                                       std::string_view secret, std::string_view domain) const {
-        if (kind_ == DnsProviderKind::cloudflare) {
-            const auto zone = co_await cloudflareClient().findZone(c, secret, accountId, domain);
-            co_return ProviderZone{zone.id, zone.name, zone.status};
+    template <typename runtime_type>
+    ruvia::task<provider_zone> find_zone(runtime_type& c, std::string_view account_id,
+        std::string_view secret, std::string_view domain) const {
+        if (kind_ == dns_provider_kind::cloudflare) {
+            const auto zone = co_await get_cloudflare_client().find_zone(c, secret, account_id, domain);
+            co_return provider_zone{zone.id_, zone.name_, zone.status_};
         }
-        const auto zones = co_await aliyunClient().listDomains(c, accountId, secret);
+        const auto zones = co_await get_aliyun_client().list_domains(c, account_id, secret);
         const auto found = std::find_if(zones.begin(), zones.end(), [domain](const auto& zone) {
-            return RecordNamePolicy::dnsNameEquals(zone.name, domain);
+            return record_name_policy::dns_name_equals(zone.name_, domain);
         });
         if (found == zones.end()) {
-            throw AliyunError(AliyunErrorCode::domainNotFound, "阿里云 DNS 中未找到该托管域名");
+            throw aliyun_error(aliyun_error_code::domain_not_found, "阿里云 DNS 中未找到该托管域名");
         }
-        co_return ProviderZone{found->id, found->name, found->status};
+        co_return provider_zone{found->id_, found->name_, found->status_};
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::vector<ProviderRecord>>
-    listRecords(Runtime& c, std::string_view accountId, std::string_view secret,
-                std::string_view zoneId, std::string_view domain) const {
-        std::vector<ProviderRecord> result;
-        if (kind_ == DnsProviderKind::cloudflare) {
-            const auto records = co_await cloudflareClient().listAllRecords(c, secret, zoneId);
+    template <typename runtime_type>
+    ruvia::task<std::vector<provider_record>>
+    list_records(runtime_type& c, std::string_view account_id, std::string_view secret,
+        std::string_view zone_id, std::string_view domain) const {
+        std::vector<provider_record> result;
+        if (kind_ == dns_provider_kind::cloudflare) {
+            const auto records = co_await get_cloudflare_client().list_all_records(c, secret, zone_id);
             result.reserve(records.size());
             for (const auto& record : records) {
-                result.push_back({record.id, record.type, record.name, record.content, record.ttl,
-                                  record.priority, record.proxied, "default"});
+                result.push_back({record.id_, record.type_, record.name_, record.content_, record.ttl_,
+                    record.priority_, record.proxied_, "default"});
             }
         } else {
             const auto records =
-                co_await aliyunClient().listAllRecords(c, accountId, secret, domain);
+                co_await get_aliyun_client().list_all_records(c, account_id, secret, domain);
             result.reserve(records.size());
             for (const auto& record : records) {
-                result.push_back({record.id, record.type, record.rr, record.value, record.ttl,
-                                  record.priority, false, record.line});
+                result.push_back({record.id_, record.type_, record.rr_, record.value_, record.ttl_,
+                    record.priority_, false, record.line_});
             }
         }
         co_return result;
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::vector<ProviderLine>> listLines(Runtime& c, std::string_view accountId,
-                                                     std::string_view secret,
-                                                     std::string_view domain) const {
-        if (kind_ == DnsProviderKind::cloudflare) {
-            co_return std::vector<ProviderLine>{{"default", "默认", "默认"}};
+    template <typename runtime_type>
+    ruvia::task<std::vector<provider_line>> list_lines(runtime_type& c, std::string_view account_id,
+        std::string_view secret,
+        std::string_view domain) const {
+        if (kind_ == dns_provider_kind::cloudflare) {
+            co_return std::vector<provider_line>{{"default", "默认", "默认"}};
         }
-        const auto lines = co_await aliyunClient().listSupportLines(c, accountId, secret, domain);
-        std::vector<ProviderLine> result;
+        const auto lines = co_await get_aliyun_client().list_support_lines(c, account_id, secret, domain);
+        std::vector<provider_line> result;
         result.reserve(lines.size());
         for (const auto& line : lines) {
-            result.push_back({line.code, line.name, line.displayName});
+            result.push_back({line.code_, line.name_, line.display_name_});
         }
         co_return result;
     }
 
-    template <typename Runtime>
-    ruvia::Task<std::string>
-    reconcileRecord(Runtime& c, std::string_view accountId, std::string_view secret,
-                    std::string_view zoneId, std::string_view domain,
-                    std::string_view remoteRecordId, std::string_view type,
-                    std::string_view localName, std::string_view content, std::int64_t ttl,
-                    std::optional<std::int64_t> priority, bool proxied, std::string_view lineCode,
-                    const std::vector<ProviderRecord>& remoteRecords) const {
-        const auto name = recordNames().remoteRecordName(localName, domain);
-        const auto plan = planRecordReconciliation(
-            remoteRecords, remoteRecordId,
-            [this, type, name, content, lineCode](const ProviderRecord& record) {
-                return recordHasSameIdentity(record, type, name, content, lineCode);
+    template <typename runtime_type>
+    ruvia::task<std::string>
+    reconcile_record(runtime_type& c, std::string_view account_id, std::string_view secret,
+        std::string_view zone_id, std::string_view domain,
+        std::string_view remote_record_id, std::string_view type,
+        std::string_view local_name, std::string_view content, std::int64_t ttl,
+        std::optional<std::int64_t> priority, bool proxied, std::string_view line_code,
+        const std::vector<provider_record>& remote_records) const {
+        const auto name = record_names().remote_record_name(local_name, domain);
+        const auto plan = plan_record_reconciliation(
+            remote_records, remote_record_id,
+            [this, type, name, content, line_code](const provider_record& record) {
+                return record_has_same_identity(record, type, name, content, line_code);
             },
             [this, type, name, content, ttl, priority, proxied,
-             lineCode](const ProviderRecord& record) {
-                return recordMatchesDesired(record, type, name, content, ttl, priority, proxied,
-                                            lineCode);
+                line_code](const provider_record& record) {
+                return record_matches_desired(record, type, name, content, ttl, priority, proxied,
+                    line_code);
             },
             [this] {
-                if (kind_ == DnsProviderKind::cloudflare) {
-                    throw CloudflareError(CloudflareErrorCode::recordConflict,
-                                          "Cloudflare 中存在多条相同 DNS 记录，无法安全接管");
+                if (kind_ == dns_provider_kind::cloudflare) {
+                    throw cloudflare_error(cloudflare_error_code::record_conflict,
+                        "Cloudflare 中存在多条相同 DNS 记录，无法安全接管");
                 }
-                throw AliyunError(AliyunErrorCode::recordConflict,
-                                  "阿里云 DNS 中存在多条相同线路解析记录，无法安全接管");
+                throw aliyun_error(aliyun_error_code::record_conflict,
+                    "阿里云 DNS 中存在多条相同线路解析记录，无法安全接管");
             });
-        if (plan.action == RecordReconciliationAction::reuse) {
-            co_return plan.record->id;
+        if (plan.action_ == record_reconciliation_action::reuse) {
+            co_return plan.record_->id_;
         }
-        if (kind_ == DnsProviderKind::cloudflare) {
-            if (plan.action == RecordReconciliationAction::update) {
-                co_return co_await cloudflareClient().updateRecord(c, secret, zoneId,
-                                                                   plan.record->id, type, name,
-                                                                   content, ttl, priority, proxied);
+        if (kind_ == dns_provider_kind::cloudflare) {
+            if (plan.action_ == record_reconciliation_action::update) {
+                co_return co_await get_cloudflare_client().update_record(c, secret, zone_id,
+                    plan.record_->id_, type, name,
+                    content, ttl, priority, proxied);
             }
-            co_return co_await cloudflareClient().createOrAdoptRecord(
-                c, secret, zoneId, type, name, content, ttl, priority, proxied);
+            co_return co_await get_cloudflare_client().create_or_adopt_record(
+                c, secret, zone_id, type, name, content, ttl, priority, proxied);
         }
-        if (plan.action == RecordReconciliationAction::update) {
-            co_return co_await aliyunClient().updateRecord(c, accountId, secret, plan.record->id,
-                                                           domain, type, name, content, ttl,
-                                                           priority, lineCode);
+        if (plan.action_ == record_reconciliation_action::update) {
+            co_return co_await get_aliyun_client().update_record(c, account_id, secret, plan.record_->id_,
+                domain, type, name, content, ttl,
+                priority, line_code);
         }
-        co_return co_await aliyunClient().createRecord(c, accountId, secret, domain, type, name,
-                                                       content, ttl, priority, lineCode);
+        co_return co_await get_aliyun_client().create_record(c, account_id, secret, domain, type, name,
+            content, ttl, priority, line_code);
     }
 
-    template <typename Runtime>
-    ruvia::Task<void> deleteRecord(Runtime& c, std::string_view accountId, std::string_view secret,
-                                   std::string_view zoneId, std::string_view recordId) const {
-        if (kind_ == DnsProviderKind::cloudflare) {
-            co_await cloudflareClient().deleteRecord(c, secret, zoneId, recordId);
+    template <typename runtime_type>
+    ruvia::task<void> delete_record(runtime_type& c, std::string_view account_id, std::string_view secret,
+        std::string_view zone_id, std::string_view record_id) const {
+        if (kind_ == dns_provider_kind::cloudflare) {
+            co_await get_cloudflare_client().delete_record(c, secret, zone_id, record_id);
         } else {
-            co_await aliyunClient().deleteRecord(c, accountId, secret, recordId);
+            co_await get_aliyun_client().delete_record(c, account_id, secret, record_id);
         }
         co_return;
     }
 
-    [[nodiscard]] RecordNamePolicy recordNames() const { return RecordNamePolicy(kind_); }
+    [[nodiscard]] record_name_policy record_names() const {
+        return record_name_policy(kind_);
+    }
 
-  private:
-    [[nodiscard]] const DnsProviderDescriptor& descriptor() const noexcept {
-        for (const auto& provider : kDnsProviders) {
-            if (provider.kind == kind_) {
+private:
+    [[nodiscard]] const dns_provider_descriptor& descriptor() const noexcept {
+        for (const auto& provider : dns_providers) {
+            if (provider.kind_ == kind_) {
                 return provider;
             }
         }
         std::terminate();
     }
 
-    [[nodiscard]] bool recordHasSameIdentity(const ProviderRecord& record, std::string_view type,
-                                             std::string_view name, std::string_view content,
-                                             std::string_view lineCode) const {
-        if (record.type != type || !recordNameEquals(record.name, name) ||
-            !recordContentEquals(type, record.content, content)) {
+    [[nodiscard]] bool record_has_same_identity(const provider_record& record, std::string_view type,
+        std::string_view name, std::string_view content,
+        std::string_view line_code) const {
+        if (record.type_ != type || !record_name_equals(record.name_, name) ||
+            !record_content_equals(type, record.content_, content)) {
             return false;
         }
-        return kind_ != DnsProviderKind::aliyun || record.lineCode == lineCode;
+        return kind_ != dns_provider_kind::aliyun || record.line_code_ == line_code;
     }
 
-    [[nodiscard]] bool recordMatchesDesired(const ProviderRecord& record, std::string_view type,
-                                            std::string_view name, std::string_view content,
-                                            std::int64_t ttl, std::optional<std::int64_t> priority,
-                                            bool proxied, std::string_view lineCode) const {
-        if (!recordHasSameIdentity(record, type, name, content, lineCode) || record.ttl != ttl) {
+    [[nodiscard]] bool record_matches_desired(const provider_record& record, std::string_view type,
+        std::string_view name, std::string_view content,
+        std::int64_t ttl, std::optional<std::int64_t> priority,
+        bool proxied, std::string_view line_code) const {
+        if (!record_has_same_identity(record, type, name, content, line_code) || record.ttl_ != ttl) {
             return false;
         }
-        if (type == "MX" && record.priority != priority) {
+        if (type == "MX" && record.priority_ != priority) {
             return false;
         }
-        if (kind_ == DnsProviderKind::cloudflare &&
+        if (kind_ == dns_provider_kind::cloudflare &&
             (type == "A" || type == "AAAA" || type == "CNAME")) {
-            return record.proxied == proxied;
+            return record.proxied_ == proxied;
         }
         return true;
     }
 
-    [[nodiscard]] bool recordContentEquals(std::string_view type, std::string_view left,
-                                           std::string_view right) const {
-        if (kind_ != DnsProviderKind::cloudflare) {
+    [[nodiscard]] bool record_content_equals(std::string_view type, std::string_view left,
+        std::string_view right) const {
+        if (kind_ != dns_provider_kind::cloudflare) {
             return left == right;
         }
         if (type == "A" || type == "AAAA") {
-            return ipAddressEquals(left, right);
+            return ip_address_equals(left, right);
         }
         if (type == "CNAME" || type == "MX") {
-            return recordNameEquals(left, right);
+            return record_name_equals(left, right);
         }
         return left == right;
     }
 
-    [[nodiscard]] static bool ipAddressEquals(std::string_view left, std::string_view right) {
-        std::error_code leftError;
-        std::error_code rightError;
-        const auto leftAddress = asio::ip::make_address(left, leftError);
-        const auto rightAddress = asio::ip::make_address(right, rightError);
-        return !leftError && !rightError && leftAddress == rightAddress;
+    [[nodiscard]] static bool ip_address_equals(std::string_view left, std::string_view right) {
+        std::error_code left_error;
+        std::error_code right_error;
+        const auto left_address = asio::ip::make_address(left, left_error);
+        const auto right_address = asio::ip::make_address(right, right_error);
+        return !left_error && !right_error && left_address == right_address;
     }
 
-    [[nodiscard]] bool recordNameEquals(std::string_view left, std::string_view right) const {
-        return normalizeRecordName(left, kind_ == DnsProviderKind::cloudflare) ==
-               normalizeRecordName(right, kind_ == DnsProviderKind::cloudflare);
+    [[nodiscard]] bool record_name_equals(std::string_view left, std::string_view right) const {
+        return normalize_record_name(left, kind_ == dns_provider_kind::cloudflare) ==
+               normalize_record_name(right, kind_ == dns_provider_kind::cloudflare);
     }
 
-    [[nodiscard]] static std::string normalizeRecordName(std::string_view input,
-                                                         bool trimTrailingDot) {
+    [[nodiscard]] static std::string normalize_record_name(std::string_view input,
+        bool trim_trailing_dot) {
         std::string result(input);
         std::transform(result.begin(), result.end(), result.begin(),
-                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        if (trimTrailingDot && result.ends_with('.')) {
+            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (trim_trailing_dot && result.ends_with('.')) {
             result.pop_back();
         }
         return result;
     }
 
-    DnsProviderKind kind_;
+    dns_provider_kind kind_;
 };
 
-} // namespace service::dns
+}  // namespace service::dns

@@ -4,8 +4,8 @@
 
 namespace service::dns_sync {
 
-[[nodiscard]] inline bool isEnabledLine(const ZoneLineRuntimeData& line) noexcept {
-    return line.code && line.status && *line.status == "enabled";
+[[nodiscard]] inline bool is_enabled_line(const zone_line_runtime_data& line) noexcept {
+    return line.code_ && line.status_ && *line.status_ == "enabled";
 }
 
-} // namespace service::dns_sync
+}  // namespace service::dns_sync

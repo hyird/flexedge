@@ -1,107 +1,108 @@
 #pragma once
 
+#include <ruvia/web/model_json.h>
+
 #include <memory_resource>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
-#include <ruvia/web/ModelJson.h>
 
 #include "service/features/certificate/provider_config_model.h"
 #include "service/features/certificate/provider_config_transport.h"
 
 namespace service::certificate_issuance {
 
-[[nodiscard]] inline CertificateProviderEabRuntimeData
-normalize(const CertificateProviderEabRuntimeInput& input) {
-    CertificateProviderEabRuntimeData result;
+[[nodiscard]] inline certificate_provider_eab_runtime_data
+normalize(const certificate_provider_eab_runtime_input& input) {
+    certificate_provider_eab_runtime_data result;
     if (const auto& value = input.get<"kid">()) {
-        result.kid = std::string(value->view());
+        result.kid_ = std::string(value->view());
     }
-    if (const auto& value = input.get<"hmacKeyEnvelope">()) {
-        result.hmacKeyEnvelope = std::string(value->view());
-    }
-    return result;
-}
-
-[[nodiscard]] inline CertificateProviderAccountRuntimeData
-normalize(const CertificateProviderAccountRuntimeInput& input) {
-    CertificateProviderAccountRuntimeData result;
-    if (const auto& value = input.get<"privateKeyEnvelope">()) {
-        result.privateKeyEnvelope = std::string(value->view());
-    }
-    if (const auto& value = input.get<"accountUrl">()) {
-        result.accountUrl = std::string(value->view());
+    if (const auto& value = input.get<"hmac_key_envelope">()) {
+        result.hmac_key_envelope_ = std::string(value->view());
     }
     return result;
 }
 
-[[nodiscard]] inline CertificateProviderRuntimeData
-normalize(const CertificateProviderRuntimeInput& input) {
-    CertificateProviderRuntimeData result;
+[[nodiscard]] inline certificate_provider_account_runtime_data
+normalize(const certificate_provider_account_runtime_input& input) {
+    certificate_provider_account_runtime_data result;
+    if (const auto& value = input.get<"private_key_envelope">()) {
+        result.private_key_envelope_ = std::string(value->view());
+    }
+    if (const auto& value = input.get<"account_url">()) {
+        result.account_url_ = std::string(value->view());
+    }
+    return result;
+}
+
+[[nodiscard]] inline certificate_provider_runtime_data
+normalize(const certificate_provider_runtime_input& input) {
+    certificate_provider_runtime_data result;
     if (const auto& eab = input.get<"eab">()) {
-        result.eab = normalize(*eab);
+        result.eab_ = normalize(*eab);
     }
-    if (const auto& account = input.get<"acmeAccount">()) {
-        result.acmeAccount = normalize(*account);
+    if (const auto& account = input.get<"acme_account">()) {
+        result.acme_account_ = normalize(*account);
     }
     return result;
 }
 
-[[nodiscard]] inline std::optional<CertificateProviderRuntimeData>
-parseCertificateProviderRuntime(std::string_view json, ruvia::ModelParseOptions options = {}) {
-    const std::optional<CertificateProviderRuntimeInput> input =
-        ruvia::fromJson<CertificateProviderRuntimeInput>(json, options);
-    return input ? std::optional<CertificateProviderRuntimeData>{normalize(*input)} : std::nullopt;
+[[nodiscard]] inline std::optional<certificate_provider_runtime_data>
+parse_certificate_provider_runtime(std::string_view json, ruvia::model_parse_options options = {}) {
+    const std::optional<certificate_provider_runtime_input> input =
+        ruvia::from_json<certificate_provider_runtime_input>(json, options);
+    return input ? std::optional<certificate_provider_runtime_data>{normalize(*input)} : std::nullopt;
 }
 
-[[nodiscard]] inline CertificateProviderRuntimeOutput
-toOutput(const CertificateProviderRuntimeData& input, ruvia::ModelOptions options = {}) {
-    CertificateProviderRuntimeOutput output(options);
-    if (input.eab && input.eab->kid && input.eab->hmacKeyEnvelope) {
+[[nodiscard]] inline certificate_provider_runtime_output
+to_output(const certificate_provider_runtime_data& input, ruvia::model_options options = {}) {
+    certificate_provider_runtime_output output(options);
+    if (input.eab_ && input.eab_->kid_ && input.eab_->hmac_key_envelope_) {
         auto& eab = output.ensure<"eab">();
-        eab.set<"kid">(*input.eab->kid);
-        eab.set<"hmacKeyEnvelope">(*input.eab->hmacKeyEnvelope);
+        eab.set<"kid">(*input.eab_->kid_);
+        eab.set<"hmac_key_envelope">(*input.eab_->hmac_key_envelope_);
     }
-    if (input.acmeAccount && input.acmeAccount->privateKeyEnvelope &&
-        input.acmeAccount->accountUrl) {
-        auto& acmeAccount = output.ensure<"acmeAccount">();
-        acmeAccount.set<"privateKeyEnvelope">(*input.acmeAccount->privateKeyEnvelope);
-        acmeAccount.set<"accountUrl">(*input.acmeAccount->accountUrl);
+    if (input.acme_account_ && input.acme_account_->private_key_envelope_ &&
+        input.acme_account_->account_url_) {
+        auto& acme_account = output.ensure<"acme_account">();
+        acme_account.set<"private_key_envelope">(*input.acme_account_->private_key_envelope_);
+        acme_account.set<"account_url">(*input.acme_account_->account_url_);
     }
     return output;
 }
 
-[[nodiscard]] inline std::optional<CertificateProviderConfigData>
-normalize(const CertificateProviderConfigInput& input) {
-    const auto& credentialMode = input.get<"credentialMode">();
-    if (!credentialMode) {
+[[nodiscard]] inline std::optional<certificate_provider_config_data>
+normalize(const certificate_provider_config_input& input) {
+    const auto& credential_mode = input.get<"credential_mode">();
+    if (!credential_mode) {
         return std::nullopt;
     }
 
-    CertificateProviderConfigData result{
-        .credentialMode = std::string(credentialMode->view()),
+    certificate_provider_config_data result{
+        .credential_mode_ = std::string(credential_mode->view()),
     };
-    if (const auto& accountEmail = input.get<"accountEmail">()) {
-        result.accountEmail = std::string(accountEmail->view());
+    if (const auto& account_email = input.get<"account_email">()) {
+        result.account_email_ = std::string(account_email->view());
     }
-    if (const auto& accessKey = input.get<"accessKey">()) {
-        const auto& envelope = accessKey->get<"envelope">();
-        const auto& hint = accessKey->get<"hint">();
+    if (const auto& access_key = input.get<"access_key">()) {
+        const auto& envelope = access_key->get<"envelope">();
+        const auto& hint = access_key->get<"hint">();
         if (!envelope || !hint) {
             return std::nullopt;
         }
-        result.envelope = std::string(envelope->view());
-        result.hint = std::string(hint->view());
+        result.envelope_ = std::string(envelope->view());
+        result.hint_ = std::string(hint->view());
     }
     return result;
 }
 
-inline CertificateProviderConfigData
-parseCertificateProviderConfig(std::string_view json, std::pmr::memory_resource* resource) {
-    const std::optional<CertificateProviderConfigInput> config =
-        ruvia::fromJson<CertificateProviderConfigInput>(json, {.resource = resource});
+inline certificate_provider_config_data
+parse_certificate_provider_config(std::string_view json, std::pmr::memory_resource* resource) {
+    const std::optional<certificate_provider_config_input> config =
+        ruvia::from_json<certificate_provider_config_input>(json, {.resource_ = resource});
     if (!config) {
         throw std::runtime_error("stored certificate provider config is incomplete");
     }
@@ -112,32 +113,32 @@ parseCertificateProviderConfig(std::string_view json, std::pmr::memory_resource*
     return *normalized;
 }
 
-[[nodiscard]] inline CertificateProviderConfigOutput
-toOutput(const CertificateProviderConfigData& input, ruvia::ModelOptions options = {}) {
-    CertificateProviderConfigOutput output(options);
-    output.set<"credentialMode">(input.credentialMode);
-    if (input.accountEmail) {
-        output.set<"accountEmail">(*input.accountEmail);
+[[nodiscard]] inline certificate_provider_config_output
+to_output(const certificate_provider_config_data& input, ruvia::model_options options = {}) {
+    certificate_provider_config_output output(options);
+    output.set<"credential_mode">(input.credential_mode_);
+    if (input.account_email_) {
+        output.set<"account_email">(*input.account_email_);
     }
-    if (input.envelope && input.hint) {
-        auto& accessKey = output.ensure<"accessKey">();
-        accessKey.set<"envelope">(*input.envelope);
-        accessKey.set<"hint">(*input.hint);
+    if (input.envelope_ && input.hint_) {
+        auto& access_key = output.ensure<"access_key">();
+        access_key.set<"envelope">(*input.envelope_);
+        access_key.set<"hint">(*input.hint_);
     }
     return output;
 }
 
-inline std::string serializeCertificateProviderConfig(
-    std::string_view credentialMode, const std::optional<std::string>& accountEmail,
+inline std::string serialize_certificate_provider_config(
+    std::string_view credential_mode, const std::optional<std::string>& account_email,
     const std::optional<std::string>& envelope, const std::optional<std::string>& hint,
     std::pmr::memory_resource* resource) {
     const auto output =
-        toOutput(CertificateProviderConfigData{.credentialMode = std::string(credentialMode),
-                                               .accountEmail = accountEmail,
-                                               .envelope = envelope,
-                                               .hint = hint},
-                 {.resource = resource});
-    const auto json = ruvia::toJson(output, {.resource = resource});
+        to_output(certificate_provider_config_data{.credential_mode_ = std::string(credential_mode),
+                      .account_email_ = account_email,
+                      .envelope_ = envelope,
+                      .hint_ = hint},
+            {.resource_ = resource});
+    const auto json = ruvia::to_json(output, {.resource_ = resource});
     return std::string(json.data(), json.size());
 }
-} // namespace service::certificate_issuance
+}  // namespace service::certificate_issuance

@@ -8,79 +8,91 @@
 
 namespace flexedge::node {
 
-class BufferedBytesBudget;
+class buffered_bytes_budget;
 
-class BufferedBytesLease final {
-  public:
-    BufferedBytesLease() = default;
-    BufferedBytesLease(const BufferedBytesLease&) = delete;
-    BufferedBytesLease& operator=(const BufferedBytesLease&) = delete;
+class buffered_bytes_lease final {
+public:
+    buffered_bytes_lease() = default;
+    buffered_bytes_lease(const buffered_bytes_lease&) = delete;
+    buffered_bytes_lease& operator=(const buffered_bytes_lease&) = delete;
 
-    BufferedBytesLease(BufferedBytesLease&& other) noexcept { moveFrom(std::move(other)); }
+    buffered_bytes_lease(buffered_bytes_lease&& other) noexcept {
+        move_from(std::move(other));
+    }
 
-    BufferedBytesLease& operator=(BufferedBytesLease&& other) noexcept {
+    buffered_bytes_lease& operator=(buffered_bytes_lease&& other) noexcept {
         if (this != &other) {
             reset();
-            moveFrom(std::move(other));
+            move_from(std::move(other));
         }
         return *this;
     }
 
-    ~BufferedBytesLease() { reset(); }
+    ~buffered_bytes_lease() {
+        reset();
+    }
 
-    [[nodiscard]] bool tryGrow(std::size_t bytes) noexcept;
+    [[nodiscard]] bool try_grow(std::size_t bytes) noexcept;
 
     void shrink(std::size_t bytes) noexcept;
 
-    [[nodiscard]] std::size_t bytes() const noexcept { return bytes_; }
+    [[nodiscard]] std::size_t bytes() const noexcept {
+        return bytes_;
+    }
 
-  private:
-    friend class BufferedBytesBudget;
+private:
+    friend class buffered_bytes_budget;
 
-    explicit BufferedBytesLease(BufferedBytesBudget& budget) noexcept : budget_(&budget) {}
+    explicit buffered_bytes_lease(buffered_bytes_budget& budget) noexcept
+        : budget_(&budget) {}
 
     void reset() noexcept;
 
-    void moveFrom(BufferedBytesLease&& other) noexcept {
+    void move_from(buffered_bytes_lease&& other) noexcept {
         budget_ = std::exchange(other.budget_, nullptr);
         bytes_ = std::exchange(other.bytes_, 0);
     }
 
-    BufferedBytesBudget* budget_{};
+    buffered_bytes_budget* budget_{};
     std::size_t bytes_{};
 };
 
-class BufferedBytesBudget final {
-  public:
-    explicit BufferedBytesBudget(std::size_t maximumBytes) noexcept : maximumBytes_(maximumBytes) {}
+class buffered_bytes_budget final {
+public:
+    explicit buffered_bytes_budget(std::size_t maximum_bytes) noexcept
+        : maximum_bytes_(maximum_bytes) {}
 
-    [[nodiscard]] BufferedBytesLease lease() noexcept { return BufferedBytesLease(*this); }
-
-    [[nodiscard]] std::size_t usedBytes() const noexcept {
-        return usedBytes_.load(std::memory_order_relaxed);
+    [[nodiscard]] buffered_bytes_lease lease() noexcept {
+        return buffered_bytes_lease(*this);
     }
 
-    [[nodiscard]] std::size_t rejectedReservations() const noexcept {
-        return rejectedReservations_.load(std::memory_order_relaxed);
+    [[nodiscard]] std::size_t used_bytes() const noexcept {
+        return used_bytes_.load(std::memory_order_relaxed);
     }
 
-    [[nodiscard]] std::size_t maximumBytes() const noexcept { return maximumBytes_; }
+    [[nodiscard]] std::size_t rejected_reservations() const noexcept {
+        return rejected_reservations_.load(std::memory_order_relaxed);
+    }
 
-  private:
-    friend class BufferedBytesLease;
+    [[nodiscard]] std::size_t maximum_bytes() const noexcept {
+        return maximum_bytes_;
+    }
+
+private:
+    friend class buffered_bytes_lease;
 
     [[nodiscard]] bool reserve(std::size_t bytes) noexcept {
         if (bytes == 0) {
             return true;
         }
-        auto used = usedBytes_.load(std::memory_order_relaxed);
+        auto used = used_bytes_.load(std::memory_order_relaxed);
         for (;;) {
-            if (bytes > maximumBytes_ || used > maximumBytes_ - bytes) {
-                rejectedReservations_.fetch_add(1, std::memory_order_relaxed);
+            if (bytes > maximum_bytes_ || used > maximum_bytes_ - bytes) {
+                rejected_reservations_.fetch_add(1, std::memory_order_relaxed);
                 return false;
             }
-            if (usedBytes_.compare_exchange_weak(used, used + bytes, std::memory_order_acq_rel,
-                                                 std::memory_order_relaxed)) {
+            if (used_bytes_.compare_exchange_weak(used, used + bytes, std::memory_order_acq_rel,
+                    std::memory_order_relaxed)) {
                 return true;
             }
         }
@@ -88,16 +100,16 @@ class BufferedBytesBudget final {
 
     void release(std::size_t bytes) noexcept {
         if (bytes != 0) {
-            usedBytes_.fetch_sub(bytes, std::memory_order_acq_rel);
+            used_bytes_.fetch_sub(bytes, std::memory_order_acq_rel);
         }
     }
 
-    std::size_t maximumBytes_{};
-    std::atomic<std::size_t> usedBytes_{};
-    std::atomic<std::size_t> rejectedReservations_{};
+    std::size_t maximum_bytes_{};
+    std::atomic<std::size_t> used_bytes_{};
+    std::atomic<std::size_t> rejected_reservations_{};
 };
 
-inline bool BufferedBytesLease::tryGrow(std::size_t bytes) noexcept {
+inline bool buffered_bytes_lease::try_grow(std::size_t bytes) noexcept {
     if (budget_ == nullptr) {
         return true;
     }
@@ -108,7 +120,7 @@ inline bool BufferedBytesLease::tryGrow(std::size_t bytes) noexcept {
     return true;
 }
 
-inline void BufferedBytesLease::shrink(std::size_t bytes) noexcept {
+inline void buffered_bytes_lease::shrink(std::size_t bytes) noexcept {
     if (budget_ == nullptr || bytes == 0) {
         return;
     }
@@ -117,18 +129,18 @@ inline void BufferedBytesLease::shrink(std::size_t bytes) noexcept {
     budget_->release(released);
 }
 
-inline void BufferedBytesLease::reset() noexcept {
+inline void buffered_bytes_lease::reset() noexcept {
     if (budget_ != nullptr) {
         budget_->release(std::exchange(bytes_, 0));
     }
     budget_ = nullptr;
 }
 
-inline bool bufferedBytesExhausted(const std::error_code& error) noexcept {
+inline bool buffered_bytes_exhausted(const std::error_code& error) noexcept {
     return error == std::make_error_code(std::errc::not_enough_memory);
 }
 
-inline constexpr std::size_t kMaximumRequestBufferBytes{128 * 1024 * 1024};
-inline constexpr std::size_t kMaximumResponseBufferBytes{256 * 1024 * 1024};
+inline constexpr std::size_t maximum_request_buffer_bytes{128 * 1024 * 1024};
+inline constexpr std::size_t maximum_response_buffer_bytes{256 * 1024 * 1024};
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

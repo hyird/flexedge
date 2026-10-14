@@ -1,5 +1,11 @@
 #pragma once
 
+#include <ruvia/http/http1_client_exchange_state.h>
+#include <ruvia/http/http1_client_response_parser.h>
+#include <ruvia/http/http1_close_policy.h>
+#include <ruvia/http/http_client_response_head.h>
+#include <ruvia/http/http_status.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -10,62 +16,63 @@
 #include <string_view>
 #include <vector>
 
-#include <ruvia/http/Http1ClientResponseParser.h>
-
 #include "node/data/chunked_wire_tracker.h"
 #include "node/data/origin_request_codec.h"
 
 namespace flexedge::node {
 
-enum class OriginResponseHeadStatus { kNeedMore, kReady, kFailure };
+enum class origin_response_head_status { need_more,
+    ready,
+    failure };
 
-class OriginResponseCodec final {
-  public:
-    explicit OriginResponseCodec(ruvia::Http1ClientExchangeState responseExchange, bool hstsEnabled,
-                                 const v2::RouteRule* route = nullptr)
-        : parser_(std::make_unique<ruvia::Http1ClientResponseParser>(std::move(responseExchange))),
-          hstsEnabled_(hstsEnabled), route_(route ? std::optional<v2::RouteRule>{*route} : std::nullopt) {}
+class origin_response_codec final {
+public:
+    explicit origin_response_codec(ruvia::http1_client_exchange_state response_exchange, bool hsts_enabled,
+        const v2::RouteRule* route = nullptr)
+        : parser_(std::make_unique<ruvia::http1_client_response_parser>(std::move(response_exchange))),
+          hsts_enabled_(hsts_enabled),
+          route_(route ? std::optional<v2::RouteRule>{*route} : std::nullopt) {}
 
-    [[nodiscard]] OriginResponseHeadStatus consumeHead(std::string_view bytes) {
-        headBytes_.append(bytes);
+    [[nodiscard]] origin_response_head_status consume_head(std::string_view bytes) {
+        head_bytes_.append(bytes);
         for (;;) {
-            auto result = parser_->parse(std::string_view(headBytes_).substr(headOffset_));
-            if (result.needMore()) {
-                return headBytes_.size() >= kMaxHeadBytes ? OriginResponseHeadStatus::kFailure
-                                                          : OriginResponseHeadStatus::kNeedMore;
+            auto result = parser_->parse(std::string_view(head_bytes_).substr(head_offset_));
+            if (result.need_more()) {
+                return head_bytes_.size() >= max_head_bytes ? origin_response_head_status::failure
+                                                            : origin_response_head_status::need_more;
             }
             const auto* parsed = result.parsed();
             if (parsed == nullptr) {
-                return OriginResponseHeadStatus::kFailure;
+                return origin_response_head_status::failure;
             }
-            const auto headStart = headOffset_;
-            headOffset_ += parsed->consumedBytes();
+            const auto head_start = head_offset_;
+            head_offset_ += parsed->consumed_bytes();
             if (parsed->plan().informational()) {
-                if (headOffset_ == headBytes_.size()) {
-                    return OriginResponseHeadStatus::kNeedMore;
+                if (head_offset_ == head_bytes_.size()) {
+                    return origin_response_head_status::need_more;
                 }
                 continue;
             }
-            tunnel_ = parsed->plan().protocolUpgrade() != nullptr;
-            const auto body = std::string_view(headBytes_).substr(headOffset_);
-            if (!configureBody(parsed->plan(), body)) {
-                return OriginResponseHeadStatus::kFailure;
+            tunnel_ = parsed->plan().protocol_upgrade() != nullptr;
+            const auto body = std::string_view(head_bytes_).substr(head_offset_);
+            if (!configure_body(parsed->plan(), body)) {
+                return origin_response_head_status::failure;
             }
-            statusCode_ = static_cast<std::uint16_t>(parsed->head().status().value());
-            output_.assign(headBytes_, 0, headStart);
-            appendHead(parsed->head());
-            if (tunnel_ || bodyKind_ != BodyKind::kNone) {
+            status_code_ = static_cast<std::uint16_t>(parsed->head().status().value());
+            output_.assign(head_bytes_, 0, head_start);
+            append_head(parsed->head());
+            if (tunnel_ || body_kind_ != body_kind::none) {
                 output_.append(body);
             }
-            return OriginResponseHeadStatus::kReady;
+            return origin_response_head_status::ready;
         }
     }
 
-    [[nodiscard]] bool consumeBody(std::string_view bytes) {
+    [[nodiscard]] bool consume_body(std::string_view bytes) {
         if (complete_) {
             return bytes.empty();
         }
-        if (bodyKind_ == BodyKind::kKnownLength) {
+        if (body_kind_ == body_kind::known_length) {
             if (bytes.size() > remaining_) {
                 return false;
             }
@@ -73,39 +80,53 @@ class OriginResponseCodec final {
             complete_ = remaining_ == 0;
             return true;
         }
-        if (bodyKind_ == BodyKind::kChunked) {
+        if (body_kind_ == body_kind::chunked) {
             const auto status = chunked_.consume(bytes);
-            complete_ = status == ChunkedWireStatus::kComplete;
-            return status != ChunkedWireStatus::kInvalid;
+            complete_ = status == chunked_wire_status::complete;
+            return status != chunked_wire_status::invalid;
         }
-        return bodyKind_ == BodyKind::kCloseDelimited;
+        return body_kind_ == body_kind::close_delimited;
     }
 
-    [[nodiscard]] std::string takeOutput() { return std::move(output_); }
-    [[nodiscard]] bool complete() const noexcept { return complete_; }
-    [[nodiscard]] bool chunked() const noexcept { return bodyKind_ == BodyKind::kChunked; }
-    [[nodiscard]] bool tunnel() const noexcept { return tunnel_; }
-    [[nodiscard]] bool originReusable() const noexcept {
-        return complete_ && !tunnel_ && originReusable_;
+    [[nodiscard]] std::string take_output() {
+        return std::move(output_);
     }
-    [[nodiscard]] bool eofCompletesResponse() const noexcept {
-        return bodyKind_ == BodyKind::kCloseDelimited;
+    [[nodiscard]] bool complete() const noexcept {
+        return complete_;
     }
-    [[nodiscard]] std::optional<std::uint16_t> statusCode() const noexcept { return statusCode_; }
-
-  private:
-    static constexpr std::size_t kMaxHeadBytes = 1024 * 1024;
-    enum class BodyKind { kNone, kKnownLength, kChunked, kCloseDelimited, kTunnel };
-
-    static bool responseHopByHop(std::string_view name) noexcept {
-        return httpHeaderName(name, "Connection") || httpHeaderName(name, "Keep-Alive") ||
-               httpHeaderName(name, "Proxy-Connection") || httpHeaderName(name, "Upgrade");
+    [[nodiscard]] bool chunked() const noexcept {
+        return body_kind_ == body_kind::chunked;
+    }
+    [[nodiscard]] bool tunnel() const noexcept {
+        return tunnel_;
+    }
+    [[nodiscard]] bool origin_reusable() const noexcept {
+        return complete_ && !tunnel_ && origin_reusable_;
+    }
+    [[nodiscard]] bool eof_completes_response() const noexcept {
+        return body_kind_ == body_kind::close_delimited;
+    }
+    [[nodiscard]] std::optional<std::uint16_t> status_code() const noexcept {
+        return status_code_;
     }
 
-    static std::vector<std::string> connectionTokens(const ruvia::HttpClientResponseHead& head) {
-        std::vector<std::string> connectionTokens;
+private:
+    static constexpr std::size_t max_head_bytes = 1024 * 1024;
+    enum class body_kind { none,
+        known_length,
+        chunked,
+        close_delimited,
+        tunnel };
+
+    static bool response_hop_by_hop(std::string_view name) noexcept {
+        return http_header_name(name, "Connection") || http_header_name(name, "Keep-Alive") ||
+               http_header_name(name, "Proxy-Connection") || http_header_name(name, "Upgrade");
+    }
+
+    static std::vector<std::string> connection_tokens(const ruvia::http_client_response_head& head) {
+        std::vector<std::string> connection_tokens;
         for (const auto& header : head.headers()) {
-            if (!httpHeaderName(header.name(), "Connection")) {
+            if (!http_header_name(header.name(), "Connection")) {
                 continue;
             }
             auto value = header.value();
@@ -119,7 +140,7 @@ class OriginResponseCodec final {
                     token.remove_suffix(1);
                 }
                 if (!token.empty()) {
-                    connectionTokens.emplace_back(token);
+                    connection_tokens.emplace_back(token);
                 }
                 if (comma == std::string_view::npos) {
                     break;
@@ -127,13 +148,13 @@ class OriginResponseCodec final {
                 value.remove_prefix(comma + 1);
             }
         }
-        return connectionTokens;
+        return connection_tokens;
     }
 
-    void appendStatusLine(const ruvia::HttpClientResponseHead& head) {
+    void append_status_line(const ruvia::http_client_response_head& head) {
         output_.append("HTTP/1.1 ");
         output_.append(std::to_string(head.status().value()));
-        const auto reason = ruvia::httpReasonPhrase(head.status());
+        const auto reason = ruvia::http_reason_phrase(head.status());
         if (!reason.empty()) {
             output_.push_back(' ');
             output_.append(reason);
@@ -141,21 +162,21 @@ class OriginResponseCodec final {
         output_.append("\r\n");
     }
 
-    void appendResponseHeaders(const ruvia::HttpClientResponseHead& head,
-                               const std::vector<std::string>& connectionTokens) {
+    void append_response_headers(const ruvia::http_client_response_head& head,
+        const std::vector<std::string>& connection_tokens) {
         for (const auto& header : head.headers()) {
-            const auto preserveUpgrade = tunnel_ && (httpHeaderName(header.name(), "Connection") ||
-                                                     httpHeaderName(header.name(), "Upgrade"));
-            const auto namedByConnection =
-                std::ranges::any_of(connectionTokens, [&](const auto& token) {
-                    return httpHeaderName(header.name(), token);
+            const auto preserve_upgrade = tunnel_ && (http_header_name(header.name(), "Connection") ||
+                                                         http_header_name(header.name(), "Upgrade"));
+            const auto named_by_connection =
+                std::ranges::any_of(connection_tokens, [&](const auto& token) {
+                    return http_header_name(header.name(), token);
                 });
-            if ((!preserveUpgrade && (responseHopByHop(header.name()) || namedByConnection)) ||
-                (hstsEnabled_ && httpHeaderName(header.name(), "Strict-Transport-Security")) ||
+            if ((!preserve_upgrade && (response_hop_by_hop(header.name()) || named_by_connection)) ||
+                (hsts_enabled_ && http_header_name(header.name(), "Strict-Transport-Security")) ||
                 (route_.has_value() &&
-                 std::ranges::any_of(route_->response_headers(), [&](const auto& mutation) {
-                     return httpHeaderName(header.name(), mutation.name());
-                 }))) {
+                    std::ranges::any_of(route_->response_headers(), [&](const auto& mutation) {
+                        return http_header_name(header.name(), mutation.name());
+                    }))) {
                 continue;
             }
             output_.append(header.name());
@@ -173,99 +194,99 @@ class OriginResponseCodec final {
         }
     }
 
-    void appendProxyHeaders() {
+    void append_proxy_headers() {
         if (!tunnel_) {
             output_.append("Connection: close\r\n");
         }
-        if (hstsEnabled_ && !tunnel_) {
+        if (hsts_enabled_ && !tunnel_) {
             output_.append("Strict-Transport-Security: max-age=31536000\r\n");
         }
         output_.append("\r\n");
     }
 
-    void appendHead(const ruvia::HttpClientResponseHead& head) {
-        const auto connectionTokenValues = connectionTokens(head);
-        appendStatusLine(head);
-        appendResponseHeaders(head, connectionTokenValues);
-        appendProxyHeaders();
+    void append_head(const ruvia::http_client_response_head& head) {
+        const auto connection_token_values = connection_tokens(head);
+        append_status_line(head);
+        append_response_headers(head, connection_token_values);
+        append_proxy_headers();
     }
 
-    bool configureBody(const ruvia::Http1ClientResponsePlan& plan, std::string_view initialBody) {
-        originReusable_ = planAllowsReuse(plan);
+    bool configure_body(const ruvia::http1_client_response_plan& plan, std::string_view initial_body) {
+        origin_reusable_ = plan_allows_reuse(plan);
         if (tunnel_) {
-            bodyKind_ = BodyKind::kTunnel;
+            body_kind_ = body_kind::tunnel;
             return true;
         }
-        if (const auto* known = plan.knownLength()) {
-            bodyKind_ = BodyKind::kKnownLength;
-            remaining_ = known->contentLength();
-            return consumeBody(initialBody);
+        if (const auto* known = plan.known_length()) {
+            body_kind_ = body_kind::known_length;
+            remaining_ = known->content_length();
+            return consume_body(initial_body);
         }
         if (plan.chunked()) {
-            bodyKind_ = BodyKind::kChunked;
-            return consumeBody(initialBody);
+            body_kind_ = body_kind::chunked;
+            return consume_body(initial_body);
         }
-        if (plan.closeDelimited()) {
-            bodyKind_ = BodyKind::kCloseDelimited;
+        if (plan.close_delimited()) {
+            body_kind_ = body_kind::close_delimited;
             return true;
         }
-        if (const auto* zero = plan.zeroContent()) {
-            if (const auto* known = zero->knownLength()) {
-                bodyKind_ = BodyKind::kKnownLength;
-                remaining_ = known->contentLength();
-                return consumeBody(initialBody);
+        if (const auto* zero = plan.zero_content()) {
+            if (const auto* known = zero->known_length()) {
+                body_kind_ = body_kind::known_length;
+                remaining_ = known->content_length();
+                return consume_body(initial_body);
             }
             if (zero->chunked()) {
-                bodyKind_ = BodyKind::kChunked;
-                return consumeBody(initialBody);
+                body_kind_ = body_kind::chunked;
+                return consume_body(initial_body);
             }
-            bodyKind_ = BodyKind::kCloseDelimited;
+            body_kind_ = body_kind::close_delimited;
             return true;
         }
-        bodyKind_ = BodyKind::kNone;
+        body_kind_ = body_kind::none;
         complete_ = true;
-        return initialBody.empty();
+        return initial_body.empty();
     }
 
-    static bool planAllowsReuse(const ruvia::Http1ClientResponsePlan& plan) noexcept {
-        const auto allowsReuse = [](const auto* response) {
-            return response->persistence() == ruvia::Http1ClosePolicy::kAllowReuse;
+    static bool plan_allows_reuse(const ruvia::http1_client_response_plan& plan) noexcept {
+        const auto allows_reuse = [](const auto* response) {
+            return response->persistence() == ruvia::http1_close_policy::allow_reuse;
         };
-        if (const auto* response = plan.withoutContent()) {
-            return allowsReuse(response);
+        if (const auto* response = plan.without_content()) {
+            return allows_reuse(response);
         }
-        if (const auto* response = plan.knownLength()) {
-            return allowsReuse(response);
+        if (const auto* response = plan.known_length()) {
+            return allows_reuse(response);
         }
         if (const auto* response = plan.chunked()) {
-            return allowsReuse(response);
+            return allows_reuse(response);
         }
-        if (const auto* response = plan.zeroContent()) {
-            if (const auto* known = response->knownLength()) {
-                return allowsReuse(known);
+        if (const auto* response = plan.zero_content()) {
+            if (const auto* known = response->known_length()) {
+                return allows_reuse(known);
             }
             if (const auto* chunked = response->chunked()) {
-                return allowsReuse(chunked);
+                return allows_reuse(chunked);
             }
         }
         return false;
     }
 
-    std::unique_ptr<ruvia::Http1ClientResponseParser> parser_;
-    std::string headBytes_;
-    std::size_t headOffset_{};
+    std::unique_ptr<ruvia::http1_client_response_parser> parser_;
+    std::string head_bytes_;
+    std::size_t head_offset_{};
     std::string output_;
-    BodyKind bodyKind_{BodyKind::kNone};
+    body_kind body_kind_{body_kind::none};
     std::size_t remaining_{};
-    ChunkedWireTracker chunked_;
-    std::optional<std::uint16_t> statusCode_;
-    bool hstsEnabled_{};
+    chunked_wire_tracker chunked_;
+    std::optional<std::uint16_t> status_code_;
+    bool hsts_enabled_{};
     // A resolved phase policy belongs to a request, not the configuration snapshot.
     // Retain it while asynchronous origin response parsing is still in progress.
     std::optional<v2::RouteRule> route_;
     bool tunnel_{};
     bool complete_{};
-    bool originReusable_{};
+    bool origin_reusable_{};
 };
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

@@ -1,17 +1,17 @@
 #pragma once
 
-#include "ruvia/web/Model.h"
-#include "ruvia/web/Validation.h"
+#include "ruvia/web/model.h"
+#include "ruvia/web/validation.h"
 
 namespace service::certificate_issuance {
 
-RUVIA_MODEL(CertificateConfigInput,
-                    RUVIA_OPTIONAL_FIELD_NAME("auto_renew", autoRenew, ruvia::Bool));
+RUVIA_MODEL(certificate_config_input,
+    RUVIA_OPTIONAL_FIELD_NAME("auto_renew", auto_renew, ruvia::bool_value));
 
-inline void validateCertificateConfig(const CertificateConfigInput& config,
-                                      ruvia::Validator& validator) {
-    validator.required(config.get<"autoRenew">(), "auto_renew", "自动续签设置不能为空");
+inline void validate_certificate_config(const certificate_config_input& config,
+    ruvia::validator& validator) {
+    validator.required(config.get<"auto_renew">(), "auto_renew", "自动续签设置不能为空");
 }
-RUVIA_MODEL(CertificateConfigOutput,
-                     RUVIA_REQUIRED_FIELD_NAME("auto_renew", autoRenew, ruvia::Bool));
-} // namespace service::certificate_issuance
+RUVIA_MODEL(certificate_config_output,
+    RUVIA_REQUIRED_FIELD_NAME("auto_renew", auto_renew, ruvia::bool_value));
+}  // namespace service::certificate_issuance

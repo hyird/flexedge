@@ -8,40 +8,48 @@
 
 namespace service::utils {
 
-template <typename Buffer> class SensitiveBufferGuard final {
-  public:
-    explicit SensitiveBufferGuard(Buffer& value) noexcept : value_(value) {}
+template <typename buffer_type>
+class sensitive_buffer_guard final {
+public:
+    explicit sensitive_buffer_guard(buffer_type& value) noexcept
+        : value_(value) {}
 
-    ~SensitiveBufferGuard() {
+    ~sensitive_buffer_guard() {
         if (!value_.empty()) {
-            OPENSSL_cleanse(value_.data(), value_.size() * sizeof(typename Buffer::value_type));
+            OPENSSL_cleanse(value_.data(), value_.size() * sizeof(typename buffer_type::value_type));
         }
     }
 
-    SensitiveBufferGuard(const SensitiveBufferGuard&) = delete;
-    SensitiveBufferGuard& operator=(const SensitiveBufferGuard&) = delete;
-    SensitiveBufferGuard(SensitiveBufferGuard&&) = delete;
-    SensitiveBufferGuard& operator=(SensitiveBufferGuard&&) = delete;
+    sensitive_buffer_guard(const sensitive_buffer_guard&) = delete;
+    sensitive_buffer_guard& operator=(const sensitive_buffer_guard&) = delete;
+    sensitive_buffer_guard(sensitive_buffer_guard&&) = delete;
+    sensitive_buffer_guard& operator=(sensitive_buffer_guard&&) = delete;
 
-  private:
-    Buffer& value_;
+private:
+    buffer_type& value_;
 };
 
-class SensitiveString final {
-  public:
-    SensitiveString() = default;
+class sensitive_string final {
+public:
+    sensitive_string() = default;
 
-    explicit SensitiveString(std::string&& value) : value_(std::move(value)) { cleanse(value); }
+    explicit sensitive_string(std::string&& value)
+        : value_(std::move(value)) {
+        cleanse(value);
+    }
 
-    ~SensitiveString() { cleanse(value_); }
+    ~sensitive_string() {
+        cleanse(value_);
+    }
 
-    SensitiveString(const SensitiveString&) = delete;
-    SensitiveString& operator=(const SensitiveString&) = delete;
-    SensitiveString(SensitiveString&& other) noexcept : value_(std::move(other.value_)) {
+    sensitive_string(const sensitive_string&) = delete;
+    sensitive_string& operator=(const sensitive_string&) = delete;
+    sensitive_string(sensitive_string&& other) noexcept
+        : value_(std::move(other.value_)) {
         cleanse(other.value_);
     }
 
-    SensitiveString& operator=(SensitiveString&& other) noexcept {
+    sensitive_string& operator=(sensitive_string&& other) noexcept {
         if (this == &other) {
             return *this;
         }
@@ -51,9 +59,11 @@ class SensitiveString final {
         return *this;
     }
 
-    [[nodiscard]] std::string_view view() const noexcept { return value_; }
+    [[nodiscard]] std::string_view view() const noexcept {
+        return value_;
+    }
 
-  private:
+private:
     static void cleanse(std::string& value) noexcept {
         if (!value.empty()) {
             OPENSSL_cleanse(value.data(), value.size());
@@ -64,4 +74,4 @@ class SensitiveString final {
     std::string value_;
 };
 
-} // namespace service::utils
+}  // namespace service::utils

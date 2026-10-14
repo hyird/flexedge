@@ -14,75 +14,76 @@
 
 namespace flexedge::node {
 
-struct OriginConnectionKey final {
-    std::string host;
-    std::uint16_t port{};
-    bool secure{};
+struct origin_connection_key final {
+    std::string host_;
+    std::uint16_t port_{};
+    bool secure_{};
 
-    [[nodiscard]] bool operator==(const OriginConnectionKey&) const noexcept = default;
+    [[nodiscard]] bool operator==(const origin_connection_key&) const noexcept = default;
 };
 
 // Each data-plane worker owns its pool, so an acquired transport always remains
 // on the event loop that created its resolver, socket, and TLS stream.
-class OriginConnectionPool final {
-  public:
-    OriginConnectionPool(asio::any_io_executor executor, OriginTlsContext& tlsContext)
-        : executor_(std::move(executor)), tlsContext_(tlsContext) {}
+class origin_connection_pool final {
+public:
+    origin_connection_pool(asio::any_io_executor executor, origin_tls_context& tls_context)
+        : executor_(std::move(executor)),
+          tls_context_(tls_context) {}
 
-    OriginConnectionPool(const OriginConnectionPool&) = delete;
-    OriginConnectionPool& operator=(const OriginConnectionPool&) = delete;
+    origin_connection_pool(const origin_connection_pool&) = delete;
+    origin_connection_pool& operator=(const origin_connection_pool&) = delete;
 
-    [[nodiscard]] std::unique_ptr<OriginTransport> acquire(const OriginConnectionKey& key) {
+    [[nodiscard]] std::unique_ptr<origin_transport> acquire(const origin_connection_key& key) {
         const auto now = std::chrono::steady_clock::now();
         for (auto iterator = idle_.begin(); iterator != idle_.end();) {
-            if (now - iterator->releasedAt > kMaxIdleAge) {
-                iterator->transport->close();
+            if (now - iterator->released_at_ > max_idle_age) {
+                iterator->transport_->close();
                 iterator = idle_.erase(iterator);
                 continue;
             }
-            if (iterator->key == key) {
-                auto transport = std::move(iterator->transport);
+            if (iterator->key_ == key) {
+                auto transport = std::move(iterator->transport_);
                 idle_.erase(iterator);
                 return transport;
             }
             ++iterator;
         }
-        return std::make_unique<OriginTransport>(executor_, tlsContext_);
+        return std::make_unique<origin_transport>(executor_, tls_context_);
     }
 
-    void release(OriginConnectionKey key, std::unique_ptr<OriginTransport> transport) {
+    void release(origin_connection_key key, std::unique_ptr<origin_transport> transport) {
         if (!transport || !transport->connected()) {
             return;
         }
-        if (idle_.size() == kMaxIdleConnections) {
-            idle_.front().transport->close();
+        if (idle_.size() == max_idle_connections) {
+            idle_.front().transport_->close();
             idle_.erase(idle_.begin());
         }
-        idle_.push_back({.key = std::move(key),
-                         .transport = std::move(transport),
-                         .releasedAt = std::chrono::steady_clock::now()});
+        idle_.push_back({.key_ = std::move(key),
+            .transport_ = std::move(transport),
+            .released_at_ = std::chrono::steady_clock::now()});
     }
 
     void close() noexcept {
         for (auto& idle : idle_) {
-            idle.transport->close();
+            idle.transport_->close();
         }
         idle_.clear();
     }
 
-  private:
-    struct IdleConnection final {
-        OriginConnectionKey key;
-        std::unique_ptr<OriginTransport> transport;
-        std::chrono::steady_clock::time_point releasedAt;
+private:
+    struct idle_connection final {
+        origin_connection_key key_;
+        std::unique_ptr<origin_transport> transport_;
+        std::chrono::steady_clock::time_point released_at_;
     };
 
-    static constexpr std::size_t kMaxIdleConnections{64};
-    static constexpr auto kMaxIdleAge = std::chrono::seconds(30);
+    static constexpr std::size_t max_idle_connections{64};
+    static constexpr auto max_idle_age = std::chrono::seconds(30);
 
     asio::any_io_executor executor_;
-    OriginTlsContext& tlsContext_;
-    std::vector<IdleConnection> idle_;
+    origin_tls_context& tls_context_;
+    std::vector<idle_connection> idle_;
 };
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

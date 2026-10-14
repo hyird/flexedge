@@ -5,24 +5,25 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+
 #include "node/proto/edge_control.pb.h"
 
 namespace flexedge::node {
 namespace compression_validation {
-inline void validateCompressionLimits(const v2::Website& website) {
+inline void validate_compression_limits(const v2::Website& website) {
     if (website.response_compression_enabled() &&
         (website.response_compression_min_bytes() < 256 ||
-         website.response_compression_min_bytes() > 1024 * 1024 ||
-         (website.response_compression_max_bytes() != 0 &&
-          website.response_compression_max_bytes() <
-              website.response_compression_min_bytes()) ||
-         website.response_compression_max_bytes() > 64 * 1024 * 1024 ||
-         website.response_compression_algorithms().empty())) {
+            website.response_compression_min_bytes() > 1024 * 1024 ||
+            (website.response_compression_max_bytes() != 0 &&
+                website.response_compression_max_bytes() <
+                    website.response_compression_min_bytes()) ||
+            website.response_compression_max_bytes() > 64 * 1024 * 1024 ||
+            website.response_compression_algorithms().empty())) {
         throw std::runtime_error("invalid response compression policy");
     }
 }
 
-inline void validateCompressionAlgorithms(const v2::Website& website) {
+inline void validate_compression_algorithms(const v2::Website& website) {
     std::unordered_set<std::string> algorithms;
     for (const auto& algorithm : website.response_compression_algorithms()) {
         if ((algorithm != "br" && algorithm != "zstd" && algorithm != "gzip") ||
@@ -32,8 +33,8 @@ inline void validateCompressionAlgorithms(const v2::Website& website) {
     }
 }
 
-inline bool validCompressionMimeType(std::string_view value) noexcept {
-    const auto validToken = [](std::string_view segment) {
+inline bool valid_compression_mime_type(std::string_view value) noexcept {
+    const auto valid_token = [](std::string_view segment) {
         return !segment.empty() && std::ranges::all_of(segment, [](unsigned char ch) {
             return std::isalnum(ch) || ch == '!' || ch == '#' || ch == '$' || ch == '&' ||
                    ch == '^' || ch == '_' || ch == '.' || ch == '+' || ch == '-';
@@ -46,13 +47,14 @@ inline bool validCompressionMimeType(std::string_view value) noexcept {
     }
     const auto type = value.substr(0, slash);
     const auto subtype = value.substr(slash + 1);
-    return validToken(type) && (subtype == "*" || validToken(subtype));
+    return valid_token(type) && (subtype == "*" || valid_token(subtype));
 }
 
-enum class MatchValueKind { MimeType, Extension };
+enum class match_value_kind { mime_type,
+    extension };
 
-template <typename Values>
-inline void validateCompressionMatchValues(const Values& values, MatchValueKind kind) {
+template <typename values_type>
+inline void validate_compression_match_values(const values_type& values, match_value_kind kind) {
     if (values.size() > 32) {
         throw std::runtime_error("too many response compression match values");
     }
@@ -60,26 +62,26 @@ inline void validateCompressionMatchValues(const Values& values, MatchValueKind 
     for (const auto& value : values) {
         if (value.empty() || value.size() > 127 ||
             std::ranges::any_of(value,
-                                [](unsigned char ch) { return std::isspace(ch) != 0; }) ||
-            (kind == MatchValueKind::Extension && value.front() != '.') ||
-            (kind == MatchValueKind::MimeType && !validCompressionMimeType(value)) ||
+                [](unsigned char ch) { return std::isspace(ch) != 0; }) ||
+            (kind == match_value_kind::extension && value.front() != '.') ||
+            (kind == match_value_kind::mime_type && !valid_compression_mime_type(value)) ||
             !seen.emplace(value).second) {
             throw std::runtime_error("invalid response compression match value");
         }
     }
 }
 
-} // namespace compression_validation
+}  // namespace compression_validation
 
-inline void validateResponseCompression(const v2::Website& website) {
-    compression_validation::validateCompressionLimits(website);
-    compression_validation::validateCompressionAlgorithms(website);
-    compression_validation::validateCompressionMatchValues(
-        website.response_compression_mime_types(), compression_validation::MatchValueKind::MimeType);
-    compression_validation::validateCompressionMatchValues(
-        website.response_compression_extensions(), compression_validation::MatchValueKind::Extension);
-    compression_validation::validateCompressionMatchValues(
-        website.response_compression_excluded_extensions(), compression_validation::MatchValueKind::Extension);
+inline void validate_response_compression(const v2::Website& website) {
+    compression_validation::validate_compression_limits(website);
+    compression_validation::validate_compression_algorithms(website);
+    compression_validation::validate_compression_match_values(
+        website.response_compression_mime_types(), compression_validation::match_value_kind::mime_type);
+    compression_validation::validate_compression_match_values(
+        website.response_compression_extensions(), compression_validation::match_value_kind::extension);
+    compression_validation::validate_compression_match_values(
+        website.response_compression_excluded_extensions(), compression_validation::match_value_kind::extension);
 }
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

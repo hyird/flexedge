@@ -15,18 +15,18 @@ def main():
     tables = []
     for name in ("sys_tenant", "sys_admin", "sys_auth_session", "sys_auth_login_throttle"):
         tables.append(re.search(r"CREATE TABLE public\." + name + r" \(.*?\n\);", schema, re.S).group())
-    statements = store_statements(root / "service/domains/auth/auth_session.store.h")
+    statements = store_statements(root / "service/domains/auth/auth_session_store.h")
     if len(statements) != 7:
         raise AssertionError(f"expected seven store SQL statements, got {len(statements)}")
     select, revoke_expired, revoke_disabled, rotate, insert_next, create, logout = statements
     sql = "BEGIN;\n" + "\n".join(tables) + "\n"
-    login_user, current_user = store_statements(root / "service/domains/auth/auth_user.store.h")
+    login_user, current_user = store_statements(root / "service/domains/auth/auth_user_store.h")
     sql += "CREATE TEMP VIEW qa_login AS " + login_user.replace("$1", "'qa'") + ";\n"
     sql += "CREATE TEMP VIEW qa_current AS " + current_user.replace(
         "$1", "(SELECT id FROM sys_admin WHERE username='qa')"
     ) + ";\n"
     remaining_lock, record_failure, clear_failures = store_statements(
-        root / "service/domains/auth/login_throttle.store.h"
+        root / "service/domains/auth/login_throttle_store.h"
     )
     sql += "CREATE TEMP VIEW qa_lock(seconds) AS " + remaining_lock.replace("$1", "'qa'") + ";\n"
     sql += "PREPARE record_failure AS " + record_failure + ";\n"

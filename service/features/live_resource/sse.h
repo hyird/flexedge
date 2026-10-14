@@ -1,12 +1,24 @@
 #pragma once
 
+#include <ruvia/core/move_only_function.h>
+#include <ruvia/core/task.h>
+#include <ruvia/core/worker_wait_result.h>
+#include <ruvia/web/context.h>
+#include <ruvia/web/model_json.h>
+#include <ruvia/web/streaming.h>
+
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <exception>
-#include <optional>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
-#include <ruvia/web/ModelJson.h>
-#include <ruvia/web/Streaming.h>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include "service/common/connection_error.h"
 #include "service/common/http.h"
 #include "service/features/live_resource/fanout.h"
@@ -16,87 +28,155 @@
 
 namespace service::live_resource {
 
-template <typename Fetch>
-ruvia::Task<void> streamSnapshot(ruvia::Context& c, Hub::Subscription subscription, Fetch fetch,
-                                std::string_view snapshotEvent = "snapshot") {
+// One projection carried by a snapshot stream. Parts are paired by index with
+// the parts of the stream's hub subscription: each has its own event source,
+// cache key and single-flight read, and is re-read only when it changes.
+struct snapshot_part final {
+    std::string_view event_;
+    ruvia::move_only_function<ruvia::task<std::string>(snapshot_read_scope&)> fetch_;
+};
+
+// Streams one or more projections over one SSE connection. Each part writes
+// its initial snapshot once, then only snapshots whose bytes changed. Read
+// failures are `resource-error` frames; runtime patches follow the part's
+// baseline. Coalesced parts are re-read when their deferral elapses.
+inline ruvia::task<void> stream_snapshots(ruvia::context& c, hub::subscription subscription,
+    std::vector<snapshot_part> parts) {
+    using clock = std::chrono::steady_clock;
+    if (parts.empty() || parts.size() != subscription.parts()) {
+        throw std::logic_error("snapshot parts must pair with subscription parts");
+    }
     // Business errors are SSE frames as well, including errors in the initial
     // snapshot. EventSource cannot inspect HTTP error bodies.
-    auto events = c.streamSse();
-    const auto credential = std::make_shared<std::optional<service::auth::SessionCredential>>(
-        service::auth::readSessionCookie(c));
-    auto checkedAt = std::chrono::steady_clock::now();
-    // Duplicate suppression must not pin snapshots evicted by the byte budget.
-    std::weak_ptr<const Snapshot> lastSnapshot;
-    bool initial = true;
-    PendingChanges pending{.snapshot = true, .runtime = {}, .origins = {}};
+    auto events = c.stream_sse();
+    const auto credential = std::make_shared<std::optional<service::auth::session_credential>>(
+        service::auth::read_session_cookie(c));
+    auto checked_at = clock::now();
+    struct part_state final {
+        // Duplicate suppression must not pin snapshots evicted by the byte budget.
+        std::weak_ptr<const snapshot> last_snapshot_;
+        bool initial_ = true;
+        pending_changes pending_{.snapshot_ = true, .runtime_ = {}, .origins_ = {}, .refresh_at_ = {}};
+        std::optional<clock::time_point> refresh_at_;
+    };
+    std::vector<part_state> states(parts.size());
     try {
         co_await events.write(
-            {.data = "{}", .event = "ready", .retry = std::chrono::milliseconds(3000)});
+            {.data_ = "{}", .event_ = "ready", .retry_ = std::chrono::milliseconds(3000)});
+        auto heartbeat_at = clock::now() + heartbeat_interval;
         while (!events.aborted()) {
-            const auto now = std::chrono::steady_clock::now();
-            if (now - checkedAt >= kHeartbeatInterval) {
+            const auto now = clock::now();
+            if (now - checked_at >= heartbeat_interval) {
                 // This bounded session check is security validation, never a
                 // resource reload. Revoked sessions cannot retain live access.
                 const auto principal =
-                    co_await readOnce<std::optional<service::auth::AuthenticatedPrincipal>>(
+                    co_await read_once<std::optional<service::auth::authenticated_principal>>(
                         c,
                         [credential](auto& read)
-                            -> ruvia::Task<std::optional<service::auth::AuthenticatedPrincipal>> {
-                            if (!*credential)
+                            -> ruvia::task<std::optional<service::auth::authenticated_principal>> {
+                            if (!*credential) {
                                 co_return std::nullopt;
-                            co_return co_await service::auth::resolveSessionPrincipal(read.db(),
-                                                                                      **credential);
+                            }
+                            co_return co_await service::auth::resolve_session_principal(read.db(),
+                                **credential);
                         });
                 if (!principal ||
-                    principal->system_tenant_id != service::middleware::currentTenantId(c)) {
-                    co_await events.write({.data = "{}", .event = "session-expired"});
+                    principal->system_tenant_id_ != service::middleware::current_tenant_id(c)) {
+                    co_await events.write({.data_ = "{}", .event_ = "session-expired"});
                     co_return;
                 }
-                checkedAt = now;
+                checked_at = now;
             }
-            if (pending.snapshot) {
-                std::shared_ptr<const Snapshot> snapshot;
-                try {
-                    snapshot = co_await readSnapshot(c, subscription.snapshots(), fetch);
-                } catch (const SnapshotCapacityError&) {
-                    snapshot = std::make_shared<const Snapshot>(snapshotUnavailable());
+            for (std::size_t index = 0; index < parts.size(); ++index) {
+                auto& part = parts[index];
+                auto& state = states[index];
+                if (state.pending_.snapshot_) {
+                    std::shared_ptr<const snapshot> snapshot_value;
+                    try {
+                        snapshot_value = co_await read_snapshot(
+                            c, subscription.snapshots(index),
+                            [&part](snapshot_read_scope& read) { return part.fetch_(read); });
+                    } catch (const snapshot_capacity_error&) {
+                        snapshot_value = std::make_shared<const snapshot>(snapshot_unavailable());
+                    }
+                    if (snapshot_value->failure_) {
+                        co_await events.write({.data_ = snapshot_value->data_, .event_ = "resource-error"});
+                    } else {
+                        const auto previous = state.last_snapshot_.lock();
+                        if (state.initial_ || !previous || snapshot_value->data_ != previous->data_) {
+                            co_await events.write({.data_ = snapshot_value->data_, .event_ = part.event_});
+                        }
+                        state.last_snapshot_ = snapshot_value;
+                    }
+                    // A shared read may predate patches in this mailbox. Replay
+                    // them after the baseline; revision/time guards in the client
+                    // ignore patches older than the fetched lifecycle state.
+                    state.initial_ = snapshot_value->failure_;
                 }
-                if (snapshot->failure) {
-                    co_await events.write({.data = snapshot->data, .event = "resource-error"});
-                } else {
-                    const auto previous = lastSnapshot.lock();
-                    if (initial || !previous || snapshot->data != previous->data)
-                        co_await events.write({.data = snapshot->data, .event = snapshotEvent});
-                    lastSnapshot = snapshot;
+                for (const auto& [id, runtime] : state.pending_.runtime_) {
+                    (void)id;
+                    co_await events.write({.data_ = runtime, .event_ = "node-runtime"});
                 }
-                // A shared read may predate patches in this mailbox. Replay
-                // them after the baseline; revision/time guards in the client
-                // ignore patches older than the fetched lifecycle state.
-                initial = snapshot->failure;
+                for (const auto& [id, origins] : state.pending_.origins_) {
+                    (void)id;
+                    co_await events.write({.data_ = origins, .event_ = "origin-runtime"});
+                }
             }
-            for (const auto& [id, runtime] : pending.runtime) {
-                (void)id;
-                co_await events.write({.data = runtime, .event = "node-runtime"});
+            // Wait for a change, a coalescing deadline, or the heartbeat.
+            auto wake_at = heartbeat_at;
+            for (const auto& state : states) {
+                if (state.refresh_at_) {
+                    wake_at = std::min(wake_at, *state.refresh_at_);
+                }
             }
-            for (const auto& [id, origins] : pending.origins) {
-                (void)id;
-                co_await events.write({.data = origins, .event = "origin-runtime"});
-            }
-            const auto signal = co_await subscription.receiveFor(kHeartbeatInterval, c.stopToken());
-            if (events.aborted())
+            const auto signal = co_await subscription.receive_for(
+                std::max(wake_at - clock::now(), clock::duration::zero()), c.get_stop_token());
+            if (events.aborted()) {
                 co_return;
-            if (!signal.hasValue()) {
-                if (signal.status() != ruvia::WorkerWaitStatus::kTimedOut)
-                    co_return;
-                co_await events.write({.data = "{}", .event = "heartbeat"});
             }
-            pending = subscription.drain();
+            const auto woken_at = clock::now();
+            if (signal.has_value()) {
+                heartbeat_at = woken_at + heartbeat_interval;
+            } else {
+                if (signal.status() != ruvia::worker_wait_status::timed_out) {
+                    co_return;
+                }
+                for (std::size_t index = 0; index < states.size(); ++index) {
+                    auto& state = states[index];
+                    if (state.refresh_at_ && woken_at >= *state.refresh_at_) {
+                        state.refresh_at_.reset();
+                        // Delivery marks this mailbox pending as well.
+                        (void)subscription.release_coalesced(index, woken_at);
+                    }
+                }
+                if (woken_at >= heartbeat_at) {
+                    co_await events.write({.data_ = "{}", .event_ = "heartbeat"});
+                    heartbeat_at = woken_at + heartbeat_interval;
+                }
+            }
+            for (std::size_t index = 0; index < states.size(); ++index) {
+                auto& state = states[index];
+                state.pending_ = subscription.drain(index);
+                if (state.pending_.refresh_at_ &&
+                    (!state.refresh_at_ || *state.pending_.refresh_at_ < *state.refresh_at_)) {
+                    state.refresh_at_ = state.pending_.refresh_at_;
+                }
+            }
         }
     } catch (const std::exception& error) {
-        if (service::common::sseClientDisconnected(error))
+        if (service::common::sse_client_disconnected(error)) {
             co_return;
+        }
         throw;
     }
 }
 
-} // namespace service::live_resource
+template <typename fetch_type>
+ruvia::task<void> stream_snapshot(ruvia::context& c, hub::subscription subscription, fetch_type fetch,
+    std::string_view snapshot_event = "snapshot") {
+    std::vector<snapshot_part> parts;
+    parts.push_back({snapshot_event, std::move(fetch)});
+    co_await stream_snapshots(c, std::move(subscription), std::move(parts));
+}
+
+}  // namespace service::live_resource

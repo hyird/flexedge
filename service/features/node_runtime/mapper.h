@@ -1,79 +1,79 @@
 #pragma once
 
+#include <ruvia/web/model_json.h>
+
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
-
-#include <ruvia/web/ModelJson.h>
 
 #include "service/features/node_runtime/model.h"
 #include "service/features/node_runtime/transport.h"
 
 namespace service::node_runtime {
 
-[[nodiscard]] inline NodeRuntimeData normalize(const NodeRuntimeInput& input) {
-    NodeRuntimeData result;
-    if (const auto& value = input.get<"agentVersion">()) {
-        result.agentVersion = std::string(value->view());
+[[nodiscard]] inline node_runtime_data normalize(const node_runtime_input& input) {
+    node_runtime_data result;
+    if (const auto& value = input.get<"agent_version">()) {
+        result.agent_version_ = std::string(value->view());
     }
-    if (const auto& value = input.get<"cpuUsage">()) {
-        result.cpuUsage = value->value;
+    if (const auto& value = input.get<"cpu_usage">()) {
+        result.cpu_usage_ = value->value_;
     }
-    if (const auto& value = input.get<"memoryUsage">()) {
-        result.memoryUsage = value->value;
+    if (const auto& value = input.get<"memory_usage">()) {
+        result.memory_usage_ = value->value_;
     }
-    if (const auto& value = input.get<"trafficOutBps">()) {
-        result.trafficOutBps = value->value;
+    if (const auto& value = input.get<"traffic_out_bps">()) {
+        result.traffic_out_bps_ = value->value_;
     }
-    if (const auto& value = input.get<"connectionCount">()) {
-        result.connectionCount = value->value;
+    if (const auto& value = input.get<"connection_count">()) {
+        result.connection_count_ = value->value_;
     }
     if (const auto& value = input.get<"load1m">()) {
-        result.load1m = value->value;
+        result.load1m_ = value->value_;
     }
-    if (const auto& value = input.get<"queuedLogEvents">()) {
-        result.queuedLogEvents = value->value;
+    if (const auto& value = input.get<"queued_log_events">()) {
+        result.queued_log_events_ = value->value_;
     }
-    if (const auto& value = input.get<"droppedLogEvents">()) {
-        result.droppedLogEvents = value->value;
+    if (const auto& value = input.get<"dropped_log_events">()) {
+        result.dropped_log_events_ = value->value_;
     }
-    if (const auto& values = input.get<"originHealth">()) {
-        result.originHealth.reserve(values->size());
+    if (const auto& values = input.get<"origin_health">()) {
+        result.origin_health_.reserve(values->size());
         for (const auto& value : *values) {
-            const auto& websiteId = value.get<"websiteId">();
-            const auto& originId = value.get<"originId">();
+            const auto& website_id = value.get<"website_id">();
+            const auto& origin_id = value.get<"origin_id">();
             const auto& status = value.get<"status">();
-            const auto& checkedAtUnixMillis = value.get<"checkedAtUnixMillis">();
-            const auto& latencyMillis = value.get<"latencyMillis">();
-            if (!websiteId || !originId || !status || !checkedAtUnixMillis || !latencyMillis) {
+            const auto& checked_at_unix_millis = value.get<"checked_at_unix_millis">();
+            const auto& latency_millis = value.get<"latency_millis">();
+            if (!website_id || !origin_id || !status || !checked_at_unix_millis || !latency_millis) {
                 continue;
             }
-            NodeRuntimeData::OriginHealth item{.websiteId = std::string(websiteId->view()),
-                                               .originId = std::string(originId->view()),
-                                               .status = std::string(status->view()),
-                                               .checkedAtUnixMillis = checkedAtUnixMillis->value,
-                                               .latencyMillis = latencyMillis->value,
-                                               .lastError = std::nullopt};
-            if (const auto& lastError = value.get<"lastError">()) {
-                item.lastError = std::string(lastError->view());
+            node_runtime_data::origin_health item{.website_id_ = std::string(website_id->view()),
+                .origin_id_ = std::string(origin_id->view()),
+                .status_ = std::string(status->view()),
+                .checked_at_unix_millis_ = checked_at_unix_millis->value_,
+                .latency_millis_ = latency_millis->value_,
+                .last_error_ = std::nullopt};
+            if (const auto& last_error = value.get<"last_error">()) {
+                item.last_error_ = std::string(last_error->view());
             }
-            result.originHealth.push_back(std::move(item));
+            result.origin_health_.push_back(std::move(item));
         }
     }
     if (const auto& value = input.get<"health">()) {
-        result.health = std::string(value->view());
+        result.health_ = std::string(value->view());
     }
-    if (const auto& value = input.get<"lastError">()) {
-        result.lastError = std::string(value->view());
+    if (const auto& value = input.get<"last_error">()) {
+        result.last_error_ = std::string(value->view());
     }
     return result;
 }
 
-[[nodiscard]] inline std::optional<NodeRuntimeData>
-parseStored(std::string_view json, ruvia::ModelParseOptions options = {}) {
-    const std::optional<NodeRuntimeInput> input = ruvia::fromJson<NodeRuntimeInput>(json, options);
-    return input ? std::optional<NodeRuntimeData>{normalize(*input)} : std::nullopt;
+[[nodiscard]] inline std::optional<node_runtime_data>
+parse_stored(std::string_view json, ruvia::model_parse_options options = {}) {
+    const std::optional<node_runtime_input> input = ruvia::from_json<node_runtime_input>(json, options);
+    return input ? std::optional<node_runtime_data>{normalize(*input)} : std::nullopt;
 }
 
-} // namespace service::node_runtime
+}  // namespace service::node_runtime

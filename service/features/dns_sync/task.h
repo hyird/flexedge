@@ -7,13 +7,13 @@
 
 namespace service::dns_sync::detail {
 
-struct DnsTask final {
-    std::string id;
-    std::string tenantId;
-    std::string resourceId;
-    service::sync_runtime::MarkerOperation operation;
-    std::int64_t version;
-    std::int64_t failures;
+struct dns_task final {
+    std::string id_;
+    std::string tenant_id_;
+    std::string resource_id_;
+    service::sync_runtime::marker_operation operation_;
+    std::int64_t version_;
+    std::int64_t failures_;
 };
 
-} // namespace service::dns_sync::detail
+}  // namespace service::dns_sync::detail

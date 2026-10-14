@@ -5,25 +5,25 @@
 
 namespace service::certificate_issuance {
 
-struct CertificateProviderEabRuntimeData final {
-    std::optional<std::string> kid;
-    std::optional<std::string> hmacKeyEnvelope;
+struct certificate_provider_eab_runtime_data final {
+    std::optional<std::string> kid_;
+    std::optional<std::string> hmac_key_envelope_;
 };
 
-struct CertificateProviderAccountRuntimeData final {
-    std::optional<std::string> privateKeyEnvelope;
-    std::optional<std::string> accountUrl;
+struct certificate_provider_account_runtime_data final {
+    std::optional<std::string> private_key_envelope_;
+    std::optional<std::string> account_url_;
 };
 
-struct CertificateProviderRuntimeData final {
-    std::optional<CertificateProviderEabRuntimeData> eab;
-    std::optional<CertificateProviderAccountRuntimeData> acmeAccount;
+struct certificate_provider_runtime_data final {
+    std::optional<certificate_provider_eab_runtime_data> eab_;
+    std::optional<certificate_provider_account_runtime_data> acme_account_;
 };
 
-struct CertificateProviderConfigData final {
-    std::string credentialMode;
-    std::optional<std::string> accountEmail{};
-    std::optional<std::string> envelope{};
-    std::optional<std::string> hint{};
+struct certificate_provider_config_data final {
+    std::string credential_mode_;
+    std::optional<std::string> account_email_{};
+    std::optional<std::string> envelope_{};
+    std::optional<std::string> hint_{};
 };
-} // namespace service::certificate_issuance
+}  // namespace service::certificate_issuance

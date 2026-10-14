@@ -21,180 +21,191 @@
 
 namespace flexedge::node {
 
-class NodeLogBuffer final {
-  private:
-    struct BufferedEvent final {
-        v2::LogEvent value;
-        std::uint64_t serializedBytes{};
+class node_log_buffer final {
+private:
+    struct buffered_event final {
+        v2::LogEvent value_;
+        std::uint64_t serialized_bytes_{};
     };
 
-  public:
-    struct AccessRecord final {
-        std::string websiteId;
-        std::string clientIp;
-        std::string protocol;
-        std::string method;
-        std::string host;
-        std::string target;
-        std::uint32_t statusCode{};
-        std::uint64_t requestBytes{};
-        std::uint64_t responseBytes{};
-        std::uint64_t durationMs{};
-        std::string userAgent;
-        std::string referer;
-        std::string requestHeaders;
-        std::string requestBody;
-        bool requestBodyTruncated{};
-        std::string tlsFingerprint;
-        std::string responseHeaders;
-        std::string queryString;
-        std::string cookies;
+public:
+    struct access_record final {
+        std::string website_id_;
+        std::string client_ip_;
+        std::string protocol_;
+        std::string method_;
+        std::string host_;
+        std::string target_;
+        std::uint32_t status_code_{};
+        std::uint64_t request_bytes_{};
+        std::uint64_t response_bytes_{};
+        std::uint64_t duration_ms_{};
+        std::string user_agent_;
+        std::string referer_;
+        std::string request_headers_;
+        std::string request_body_;
+        bool request_body_truncated_{};
+        std::string tls_fingerprint_;
+        std::string response_headers_;
+        std::string query_string_;
+        std::string cookies_;
     };
 
-    class Producer final {
-      public:
-        bool access(AccessRecord record) const {
-            return owner_->push(shardIndex_, accessEvent(std::move(record)));
+    class producer final {
+    public:
+        bool access(access_record record) const {
+            return owner_->push(shard_index_, access_event(std::move(record)));
         }
 
         bool node(std::string_view level, std::string_view category,
-                  std::string_view message) const {
-            return owner_->push(shardIndex_, nodeEvent(level, category, message));
+            std::string_view message) const {
+            return owner_->push(shard_index_, node_event(level, category, message));
         }
 
-      private:
-        friend class NodeLogBuffer;
+    private:
+        friend class node_log_buffer;
 
-        Producer(NodeLogBuffer& owner, std::size_t shardIndex)
-            : owner_(&owner), shardIndex_(shardIndex) {}
+        producer(node_log_buffer& owner, std::size_t shard_index)
+            : owner_(&owner),
+              shard_index_(shard_index) {}
 
-        NodeLogBuffer* owner_;
-        std::size_t shardIndex_;
+        node_log_buffer* owner_;
+        std::size_t shard_index_;
     };
 
-    class InFlightDelivery final {
-      public:
-        InFlightDelivery(InFlightDelivery&&) noexcept = default;
-        InFlightDelivery& operator=(InFlightDelivery&&) noexcept = default;
-        InFlightDelivery(const InFlightDelivery&) = delete;
-        InFlightDelivery& operator=(const InFlightDelivery&) = delete;
+    class in_flight_delivery final {
+    public:
+        in_flight_delivery(in_flight_delivery&&) noexcept = default;
+        in_flight_delivery& operator=(in_flight_delivery&&) noexcept = default;
+        in_flight_delivery(const in_flight_delivery&) = delete;
+        in_flight_delivery& operator=(const in_flight_delivery&) = delete;
 
-        [[nodiscard]] const v2::LogDelivery& value() const noexcept { return value_; }
+        [[nodiscard]] const v2::LogDelivery& value() const noexcept {
+            return value_;
+        }
 
-      private:
-        friend class NodeLogBuffer;
+    private:
+        friend class node_log_buffer;
 
-        struct Contribution final {
-            std::size_t shardIndex{};
-            std::uint64_t eventCount{};
-            std::uint64_t retainedBytes{};
+        struct contribution final {
+            std::size_t shard_index_{};
+            std::uint64_t event_count_{};
+            std::uint64_t retained_bytes_{};
         };
 
-        InFlightDelivery() = default;
+        in_flight_delivery() = default;
 
         v2::LogDelivery value_;
-        std::vector<Contribution> contributions_;
-        std::vector<std::uint64_t> serializedBytes_;
+        std::vector<contribution> contributions_;
+        std::vector<std::uint64_t> serialized_bytes_;
     };
 
-    static constexpr std::size_t kMaxRequestHeadersBytes{log_contract::kMaxRequestHeadersBytes};
-    static constexpr std::size_t kMaxResponseHeadersBytes{log_contract::kMaxResponseHeadersBytes};
-    static constexpr std::size_t kMaxRequestBodyBytes{log_contract::kMaxRequestBodyBytes};
-    static constexpr std::size_t kMaxQueryStringBytes{log_contract::kMaxQueryStringBytes};
-    static constexpr std::size_t kMaxCookiesBytes{log_contract::kMaxCookiesBytes};
+    static constexpr std::size_t max_request_headers_bytes{log_contract::max_request_headers_bytes};
+    static constexpr std::size_t max_response_headers_bytes{log_contract::max_response_headers_bytes};
+    static constexpr std::size_t max_request_body_bytes{log_contract::max_request_body_bytes};
+    static constexpr std::size_t max_query_string_bytes{log_contract::max_query_string_bytes};
+    static constexpr std::size_t max_cookies_bytes{log_contract::max_cookies_bytes};
 
-    explicit NodeLogBuffer(std::size_t workerShardCount = 0,
-                           std::function<void()> onQueued = {})
-        : onQueued_(std::move(onQueued)) {
-        shards_.reserve(workerShardCount == 0 ? 1 : workerShardCount + 2);
-        if (workerShardCount == 0) {
-            shards_.push_back(std::make_unique<Shard>(kMaxPendingEvents, kMaxPendingBytes));
+    explicit node_log_buffer(std::size_t worker_shard_count = 0,
+        std::function<void()> on_queued = {})
+        : on_queued_(std::move(on_queued)) {
+        shards_.reserve(worker_shard_count == 0 ? 1 : worker_shard_count + 2);
+        if (worker_shard_count == 0) {
+            shards_.push_back(std::make_unique<shard>(max_pending_events, max_pending_bytes));
             return;
         }
-        shards_.push_back(std::make_unique<Shard>(kControlPendingEvents, kControlPendingBytes));
-        shards_.push_back(std::make_unique<Shard>(kControlPendingEvents, kControlPendingBytes));
-        workerShardOffset_ = 2;
-        for (std::size_t index = 0; index < workerShardCount; ++index) {
-            const auto events = kMaxPendingEvents / workerShardCount +
-                                (index < kMaxPendingEvents % workerShardCount ? 1 : 0);
-            const auto bytes = kMaxPendingBytes / workerShardCount +
-                               (index < kMaxPendingBytes % workerShardCount ? 1 : 0);
-            shards_.push_back(std::make_unique<Shard>(events, bytes));
+        shards_.push_back(std::make_unique<shard>(control_pending_events, control_pending_bytes));
+        shards_.push_back(std::make_unique<shard>(control_pending_events, control_pending_bytes));
+        worker_shard_offset_ = 2;
+        for (std::size_t index = 0; index < worker_shard_count; ++index) {
+            const auto events = max_pending_events / worker_shard_count +
+                                (index < max_pending_events % worker_shard_count ? 1 : 0);
+            const auto bytes = max_pending_bytes / worker_shard_count +
+                               (index < max_pending_bytes % worker_shard_count ? 1 : 0);
+            shards_.push_back(std::make_unique<shard>(events, bytes));
         }
     }
 
-    NodeLogBuffer(const NodeLogBuffer&) = delete;
-    NodeLogBuffer& operator=(const NodeLogBuffer&) = delete;
+    node_log_buffer(const node_log_buffer&) = delete;
+    node_log_buffer& operator=(const node_log_buffer&) = delete;
 
-    [[nodiscard]] Producer workerProducer(std::size_t workerIndex) {
-        if (workerShardOffset_ == 0 || workerShardOffset_ + workerIndex >= shards_.size()) {
+    [[nodiscard]] producer worker_producer(std::size_t worker_index) {
+        if (worker_shard_offset_ == 0 || worker_shard_offset_ + worker_index >= shards_.size()) {
             throw std::out_of_range("log producer worker index is out of range");
         }
-        return Producer(*this, workerShardOffset_ + workerIndex);
+        return producer(*this, worker_shard_offset_ + worker_index);
     }
 
-    [[nodiscard]] Producer backgroundProducer() {
-        return Producer(*this, workerShardOffset_ == 0 ? 0 : 1);
+    [[nodiscard]] producer background_producer() {
+        return producer(*this, worker_shard_offset_ == 0 ? 0 : 1);
     }
 
-    static std::string requestHeaderValue(std::string_view name, std::string_view value) {
+    static std::string request_header_value(std::string_view name, std::string_view value) {
         (void)name;
         return std::string(value);
     }
 
-    static std::string requestBodyValue(std::string_view value) { return std::string(value); }
-
-    static std::string responseHeaderValue(std::string_view name, std::string_view value) {
-        return requestHeaderValue(name, value);
+    static std::string request_body_value(std::string_view value) {
+        return std::string(value);
     }
 
-    static std::string cookieValue(std::string_view value) { return std::string(value); }
+    static std::string response_header_value(std::string_view name, std::string_view value) {
+        return request_header_value(name, value);
+    }
 
-    bool access(AccessRecord record) { return push(0, accessEvent(std::move(record))); }
+    static std::string cookie_value(std::string_view value) {
+        return std::string(value);
+    }
+
+    bool access(access_record record) {
+        return push(0, access_event(std::move(record)));
+    }
 
     bool node(std::string_view level, std::string_view category, std::string_view message) {
-        return push(0, nodeEvent(level, category, message));
+        return push(0, node_event(level, category, message));
     }
 
-    [[nodiscard]] bool pending() const noexcept { return queuedEvents() != 0; }
+    [[nodiscard]] bool pending() const noexcept {
+        return queued_events() != 0;
+    }
 
-    [[nodiscard]] std::uint64_t queuedEvents() const noexcept {
+    [[nodiscard]] std::uint64_t queued_events() const noexcept {
         std::uint64_t result{};
         for (const auto& shard : shards_) {
-            result += shard->queuedEvents.load(std::memory_order_relaxed);
+            result += shard->queued_events_.load(std::memory_order_relaxed);
         }
         return result;
     }
 
-    [[nodiscard]] std::uint64_t retainedEvents() const noexcept {
+    [[nodiscard]] std::uint64_t retained_events() const noexcept {
         std::uint64_t result{};
         for (const auto& shard : shards_) {
-            result += shard->retainedEvents.load(std::memory_order_acquire);
+            result += shard->retained_events_.load(std::memory_order_acquire);
         }
         return result;
     }
 
-    [[nodiscard]] std::uint64_t droppedEvents() const noexcept {
+    [[nodiscard]] std::uint64_t dropped_events() const noexcept {
         std::uint64_t result{};
         for (const auto& shard : shards_) {
-            result += shard->droppedEvents.load(std::memory_order_relaxed);
+            result += shard->dropped_events_.load(std::memory_order_relaxed);
         }
         return result;
     }
 
-    [[nodiscard]] bool waitForControlDrain(std::chrono::milliseconds timeout) const noexcept {
+    [[nodiscard]] bool wait_for_control_drain(std::chrono::milliseconds timeout) const noexcept {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
-        const auto controlShardCount =
-            workerShardOffset_ == 0 ? std::size_t{1} : workerShardOffset_;
-        const auto controlPending = [this, controlShardCount] {
-            for (std::size_t index = 0; index < controlShardCount; ++index) {
-                if (shards_[index]->retainedEvents.load(std::memory_order_acquire) != 0) {
+        const auto control_shard_count =
+            worker_shard_offset_ == 0 ? std::size_t{1} : worker_shard_offset_;
+        const auto control_pending = [this, control_shard_count] {
+            for (std::size_t index = 0; index < control_shard_count; ++index) {
+                if (shards_[index]->retained_events_.load(std::memory_order_acquire) != 0) {
                     return true;
                 }
             }
             return false;
         };
-        while (controlPending()) {
+        while (control_pending()) {
             if (std::chrono::steady_clock::now() >= deadline) {
                 return false;
             }
@@ -203,9 +214,9 @@ class NodeLogBuffer final {
         return true;
     }
 
-    [[nodiscard]] bool waitForDrain(std::chrono::milliseconds timeout) const noexcept {
+    [[nodiscard]] bool wait_for_drain(std::chrono::milliseconds timeout) const noexcept {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
-        while (retainedEvents() != 0) {
+        while (retained_events() != 0) {
             if (std::chrono::steady_clock::now() >= deadline) {
                 return false;
             }
@@ -214,143 +225,144 @@ class NodeLogBuffer final {
         return true;
     }
 
-    [[nodiscard]] std::optional<InFlightDelivery> take(std::string_view nodeId) {
-        if (deliveryInFlight_ || !pending()) {
+    [[nodiscard]] std::optional<in_flight_delivery> take(std::string_view node_id) {
+        if (delivery_in_flight_ || !pending()) {
             return std::nullopt;
         }
-        InFlightDelivery delivery;
-        delivery.value_.set_node_id(std::string(nodeId));
+        in_flight_delivery delivery;
+        delivery.value_.set_node_id(std::string(node_id));
         delivery.contributions_.reserve(shards_.size());
-        delivery.value_.mutable_events()->Reserve(kMaxDeliveryEvents);
-        delivery.serializedBytes_.reserve(kMaxDeliveryEvents);
-        std::size_t wireBytes = fieldWireBytes(nodeId.size());
+        delivery.value_.mutable_events()->Reserve(max_delivery_events);
+        delivery.serialized_bytes_.reserve(max_delivery_events);
+        std::size_t wire_bytes = field_wire_bytes(node_id.size());
 
-        bool deliveryFull{};
-        if (workerShardOffset_ != 0) {
+        bool delivery_full{};
+        if (worker_shard_offset_ != 0) {
             // Keep control and self-upgrade logs observable even while access logs are saturated.
-            for (std::size_t index = 0; index < workerShardOffset_; ++index) {
-                if (appendShard(delivery, wireBytes, index)) {
-                    deliveryFull = true;
+            for (std::size_t index = 0; index < worker_shard_offset_; ++index) {
+                if (append_shard(delivery, wire_bytes, index)) {
+                    delivery_full = true;
                     break;
                 }
             }
         }
-        if (!deliveryFull) {
-            const auto firstDataShard =
-                workerShardOffset_ == 0 ? std::size_t{0} : workerShardOffset_;
-            const auto dataShardCount = shards_.size() - firstDataShard;
-            const auto start = nextShard_ % dataShardCount;
+        if (!delivery_full) {
+            const auto first_data_shard =
+                worker_shard_offset_ == 0 ? std::size_t{0} : worker_shard_offset_;
+            const auto data_shard_count = shards_.size() - first_data_shard;
+            const auto start = next_shard_ % data_shard_count;
             std::size_t visited{};
             for (;
-                 visited < dataShardCount && delivery.serializedBytes_.size() < kMaxDeliveryEvents;
-                 ++visited) {
-                const auto shardIndex = firstDataShard + (start + visited) % dataShardCount;
-                if (appendShard(delivery, wireBytes, shardIndex)) {
+                visited < data_shard_count && delivery.serialized_bytes_.size() < max_delivery_events;
+                ++visited) {
+                const auto shard_index = first_data_shard + (start + visited) % data_shard_count;
+                if (append_shard(delivery, wire_bytes, shard_index)) {
                     ++visited;
                     break;
                 }
             }
-            nextShard_ = (start + visited) % dataShardCount;
+            next_shard_ = (start + visited) % data_shard_count;
         }
-        if (delivery.serializedBytes_.empty()) {
+        if (delivery.serialized_bytes_.empty()) {
             return std::nullopt;
         }
-        deliveryInFlight_ = true;
+        delivery_in_flight_ = true;
         return delivery;
     }
 
-    void acknowledge(InFlightDelivery delivery) noexcept {
+    void acknowledge(in_flight_delivery delivery) noexcept {
         for (const auto& contribution : delivery.contributions_) {
-            auto& shard = *shards_[contribution.shardIndex];
-            shard.discard(static_cast<std::size_t>(contribution.eventCount));
-            shard.queuedEvents.fetch_sub(contribution.eventCount, std::memory_order_relaxed);
-            shard.retainedEvents.fetch_sub(contribution.eventCount, std::memory_order_relaxed);
-            shard.retainedBytes.fetch_sub(contribution.retainedBytes, std::memory_order_relaxed);
+            auto& shard = *shards_[contribution.shard_index_];
+            shard.discard(static_cast<std::size_t>(contribution.event_count_));
+            shard.queued_events_.fetch_sub(contribution.event_count_, std::memory_order_relaxed);
+            shard.retained_events_.fetch_sub(contribution.event_count_, std::memory_order_relaxed);
+            shard.retained_bytes_.fetch_sub(contribution.retained_bytes_, std::memory_order_relaxed);
         }
-        deliveryInFlight_ = false;
+        delivery_in_flight_ = false;
     }
 
-    void restore(InFlightDelivery delivery) noexcept {
+    void restore(in_flight_delivery delivery) noexcept {
         if (!delivery.contributions_.empty()) {
-            nextShard_ = delivery.contributions_.front().shardIndex;
+            next_shard_ = delivery.contributions_.front().shard_index_;
         }
-        deliveryInFlight_ = false;
+        delivery_in_flight_ = false;
     }
 
-  private:
+private:
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4324)
 #endif
-    struct alignas(64) Shard final {
-        Shard(std::uint64_t maximumEvents, std::uint64_t maximumBytes)
-            : events(static_cast<std::size_t>(maximumEvents) + 1), maximumEvents(maximumEvents),
-              maximumBytes(maximumBytes) {}
+    struct alignas(64) shard final {
+        shard(std::uint64_t maximum_events, std::uint64_t maximum_bytes)
+            : events_(static_cast<std::size_t>(maximum_events) + 1),
+              maximum_events_(maximum_events),
+              maximum_bytes_(maximum_bytes) {}
 
-        [[nodiscard]] bool push(BufferedEvent event) {
-            const auto next = advance(writeIndex_);
-            if (next == readIndex_.load(std::memory_order_acquire)) {
+        [[nodiscard]] bool push(buffered_event event) {
+            const auto next = advance(write_index_);
+            if (next == read_index_.load(std::memory_order_acquire)) {
                 return false;
             }
-            events[writeIndex_].emplace(std::move(event));
-            writeIndex_ = next;
-            publishedWriteIndex_.store(writeIndex_, std::memory_order_release);
+            events_[write_index_].emplace(std::move(event));
+            write_index_ = next;
+            published_write_index_.store(write_index_, std::memory_order_release);
             return true;
         }
 
-        [[nodiscard]] const BufferedEvent* peek(std::size_t offset) const noexcept {
-            const auto read = readIndex_.load(std::memory_order_relaxed);
-            const auto published = publishedWriteIndex_.load(std::memory_order_acquire);
+        [[nodiscard]] const buffered_event* peek(std::size_t offset) const noexcept {
+            const auto read = read_index_.load(std::memory_order_relaxed);
+            const auto published = published_write_index_.load(std::memory_order_acquire);
             if (offset >= distance(read, published)) {
                 return nullptr;
             }
-            const auto& event = events[advance(read, offset)];
+            const auto& event = events_[advance(read, offset)];
             return event ? std::addressof(*event) : nullptr;
         }
 
         void discard(std::size_t count) noexcept {
-            auto read = readIndex_.load(std::memory_order_relaxed);
+            auto read = read_index_.load(std::memory_order_relaxed);
             for (std::size_t index = 0; index < count; ++index) {
-                events[read].reset();
+                events_[read].reset();
                 read = advance(read);
             }
-            readIndex_.store(read, std::memory_order_release);
+            read_index_.store(read, std::memory_order_release);
         }
 
         [[nodiscard]] std::size_t advance(std::size_t index,
-                                          std::size_t amount = 1) const noexcept {
-            return (index + amount) % events.size();
+            std::size_t amount = 1) const noexcept {
+            return (index + amount) % events_.size();
         }
 
         [[nodiscard]] std::size_t distance(std::size_t first, std::size_t last) const noexcept {
-            return last >= first ? last - first : events.size() - first + last;
+            return last >= first ? last - first : events_.size() - first + last;
         }
 
-        std::vector<std::optional<BufferedEvent>> events;
+        std::vector<std::optional<buffered_event>> events_;
         // The worker that owns this shard is the sole writer; the control loop is the sole reader.
-        std::size_t writeIndex_{};
-        std::atomic<std::size_t> publishedWriteIndex_{};
-        std::atomic<std::size_t> readIndex_{};
-        std::atomic<std::uint64_t> queuedEvents{};
-        std::atomic<std::uint64_t> retainedEvents{};
-        std::atomic<std::uint64_t> retainedBytes{};
-        std::atomic<std::uint64_t> droppedEvents{};
-        std::uint64_t maximumEvents;
-        std::uint64_t maximumBytes;
+        std::size_t write_index_{};
+        std::atomic<std::size_t> published_write_index_{};
+        std::atomic<std::size_t> read_index_{};
+        std::atomic<std::uint64_t> queued_events_{};
+        std::atomic<std::uint64_t> retained_events_{};
+        std::atomic<std::uint64_t> retained_bytes_{};
+        std::atomic<std::uint64_t> dropped_events_{};
+        std::uint64_t maximum_events_;
+        std::uint64_t maximum_bytes_;
     };
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
 
-    static constexpr std::size_t kMaxPendingEvents{8192};
-    static constexpr std::size_t kMaxPendingBytes{64 * 1024 * 1024};
-    static constexpr std::size_t kControlPendingEvents{512};
-    static constexpr std::size_t kControlPendingBytes{4 * 1024 * 1024};
-    static constexpr int kMaxDeliveryEvents{static_cast<int>(log_contract::kMaxDeliveryEvents)};
-    static constexpr std::size_t kMaxDeliveryBytes{log_contract::kMaxDeliveryBytes};
-    static constexpr std::size_t kMaxEventBytes{kMaxDeliveryBytes - 128};
+    static constexpr std::size_t max_pending_events{8192};
+    static constexpr std::size_t max_pending_bytes{64 * 1024 * 1024};
+    static constexpr std::size_t control_pending_events{512};
+    static constexpr std::size_t control_pending_bytes{4 * 1024 * 1024};
+    static constexpr int max_delivery_events{static_cast<int>(log_contract::max_delivery_events)};
+    static constexpr std::size_t max_delivery_bytes{log_contract::max_delivery_bytes};
+    static constexpr std::size_t max_event_bytes{max_delivery_bytes - 128};
 
-    static std::size_t varintBytes(std::size_t value) noexcept {
+    static std::size_t varint_bytes(std::size_t value) noexcept {
         std::size_t result{1};
         while (value >= 0x80) {
             value >>= 7;
@@ -359,109 +371,111 @@ class NodeLogBuffer final {
         return result;
     }
 
-    static std::size_t fieldWireBytes(std::size_t valueBytes) noexcept {
-        return 1 + varintBytes(valueBytes) + valueBytes;
+    static std::size_t field_wire_bytes(std::size_t value_bytes) noexcept {
+        return 1 + varint_bytes(value_bytes) + value_bytes;
     }
 
-    [[nodiscard]] bool appendShard(InFlightDelivery& delivery, std::size_t& wireBytes,
-                                   std::size_t shardIndex) {
-        auto& shard = *shards_[shardIndex];
+    [[nodiscard]] bool append_shard(in_flight_delivery& delivery, std::size_t& wire_bytes,
+        std::size_t shard_index) {
+        auto& shard = *shards_[shard_index];
         std::size_t offset{};
-        std::uint64_t retainedBytes{};
-        while (delivery.serializedBytes_.size() < kMaxDeliveryEvents) {
+        std::uint64_t retained_bytes{};
+        while (delivery.serialized_bytes_.size() < max_delivery_events) {
             const auto* event = shard.peek(offset);
             if (event == nullptr) {
                 break;
             }
-            const auto eventBytes = event->serializedBytes;
-            const auto eventWireBytes = fieldWireBytes(eventBytes);
-            if (wireBytes + eventWireBytes > kMaxDeliveryBytes) {
+            const auto event_bytes = event->serialized_bytes_;
+            const auto event_wire_bytes = field_wire_bytes(event_bytes);
+            if (wire_bytes + event_wire_bytes > max_delivery_bytes) {
                 break;
             }
-            wireBytes += eventWireBytes;
-            retainedBytes += eventBytes;
-            *delivery.value_.add_events() = event->value;
-            delivery.serializedBytes_.push_back(eventBytes);
+            wire_bytes += event_wire_bytes;
+            retained_bytes += event_bytes;
+            *delivery.value_.add_events() = event->value_;
+            delivery.serialized_bytes_.push_back(event_bytes);
             ++offset;
         }
         if (offset != 0) {
             delivery.contributions_.push_back(
-                {.shardIndex = shardIndex, .eventCount = offset, .retainedBytes = retainedBytes});
+                {.shard_index_ = shard_index, .event_count_ = offset, .retained_bytes_ = retained_bytes});
         }
-        return wireBytes >= kMaxDeliveryBytes || (shard.peek(offset) != nullptr && offset != 0);
+        return wire_bytes >= max_delivery_bytes || (shard.peek(offset) != nullptr && offset != 0);
     }
 
     static bool reserve(std::atomic<std::uint64_t>& counter, std::uint64_t amount,
-                        std::uint64_t maximum) noexcept {
+        std::uint64_t maximum) noexcept {
         auto current = counter.load(std::memory_order_relaxed);
         for (;;) {
             if (amount > maximum || current > maximum - amount) {
                 return false;
             }
             if (counter.compare_exchange_weak(current, current + amount,
-                                              std::memory_order_relaxed)) {
+                    std::memory_order_relaxed)) {
                 return true;
             }
         }
     }
 
-    [[nodiscard]] bool push(std::size_t shardIndex, v2::LogEvent event) {
-        auto& shard = *shards_[shardIndex];
-        const auto eventBytes = static_cast<std::uint64_t>(event.ByteSizeLong());
-        if (eventBytes > kMaxEventBytes || !reserve(shard.retainedEvents, 1, shard.maximumEvents)) {
-            shard.droppedEvents.fetch_add(1, std::memory_order_relaxed);
+    [[nodiscard]] bool push(std::size_t shard_index, v2::LogEvent event) {
+        auto& shard = *shards_[shard_index];
+        const auto event_bytes = static_cast<std::uint64_t>(event.ByteSizeLong());
+        if (event_bytes > max_event_bytes || !reserve(shard.retained_events_, 1, shard.maximum_events_)) {
+            shard.dropped_events_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
-        if (!reserve(shard.retainedBytes, eventBytes, shard.maximumBytes)) {
-            shard.retainedEvents.fetch_sub(1, std::memory_order_relaxed);
-            shard.droppedEvents.fetch_add(1, std::memory_order_relaxed);
+        if (!reserve(shard.retained_bytes_, event_bytes, shard.maximum_bytes_)) {
+            shard.retained_events_.fetch_sub(1, std::memory_order_relaxed);
+            shard.dropped_events_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
         try {
-            if (!shard.push({.value = std::move(event), .serializedBytes = eventBytes})) {
-                shard.retainedBytes.fetch_sub(eventBytes, std::memory_order_relaxed);
-                shard.retainedEvents.fetch_sub(1, std::memory_order_relaxed);
-                shard.droppedEvents.fetch_add(1, std::memory_order_relaxed);
+            if (!shard.push({.value_ = std::move(event), .serialized_bytes_ = event_bytes})) {
+                shard.retained_bytes_.fetch_sub(event_bytes, std::memory_order_relaxed);
+                shard.retained_events_.fetch_sub(1, std::memory_order_relaxed);
+                shard.dropped_events_.fetch_add(1, std::memory_order_relaxed);
                 return false;
             }
-            shard.queuedEvents.fetch_add(1, std::memory_order_relaxed);
+            shard.queued_events_.fetch_add(1, std::memory_order_relaxed);
         } catch (...) {
-            shard.retainedBytes.fetch_sub(eventBytes, std::memory_order_relaxed);
-            shard.retainedEvents.fetch_sub(1, std::memory_order_relaxed);
+            shard.retained_bytes_.fetch_sub(event_bytes, std::memory_order_relaxed);
+            shard.retained_events_.fetch_sub(1, std::memory_order_relaxed);
             throw;
         }
-        if (onQueued_) onQueued_();
+        if (on_queued_) {
+            on_queued_();
+        }
         return true;
     }
 
     // Immutable after construction; producers may notify concurrently.
-    std::function<void()> onQueued_;
+    std::function<void()> on_queued_;
 
-    static std::uint64_t nowMs() {
+    static std::uint64_t now_ms() {
         return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                              std::chrono::system_clock::now().time_since_epoch())
-                                              .count());
+            std::chrono::system_clock::now().time_since_epoch())
+                .count());
     }
 
     static std::string uuid() {
         unsigned char bytes[16]{};
         if (RAND_bytes(bytes, sizeof(bytes)) != 1) {
-            const auto value = nowMs();
+            const auto value = now_ms();
             for (std::size_t index = 0; index < sizeof(bytes); ++index) {
                 bytes[index] = static_cast<unsigned char>((value >> ((index % 8) * 8)) & 0xff);
             }
         }
         bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0f) | 0x40);
         bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3f) | 0x80);
-        constexpr char kHex[] = "0123456789abcdef";
+        constexpr char hex[] = "0123456789abcdef";
         std::string result;
         result.reserve(36);
         for (std::size_t index = 0; index < sizeof(bytes); ++index) {
             if (index == 4 || index == 6 || index == 8 || index == 10) {
                 result.push_back('-');
             }
-            result.push_back(kHex[bytes[index] >> 4]);
-            result.push_back(kHex[bytes[index] & 0x0f]);
+            result.push_back(hex[bytes[index] >> 4]);
+            result.push_back(hex[bytes[index] & 0x0f]);
         }
         return result;
     }
@@ -486,75 +500,75 @@ class NodeLogBuffer final {
         return result;
     }
 
-    static AccessRecord clamp(AccessRecord record) {
-        record.websiteId = bounded(record.websiteId, log_contract::kMaxWebsiteIdBytes);
-        record.clientIp = bounded(record.clientIp, log_contract::kMaxClientIpBytes);
-        record.protocol = bounded(record.protocol, log_contract::kMaxProtocolBytes);
-        record.method = bounded(record.method, log_contract::kMaxMethodBytes);
-        record.host = bounded(record.host, log_contract::kMaxHostBytes);
-        record.target = bounded(record.target, log_contract::kMaxTargetBytes);
-        record.statusCode = std::clamp(record.statusCode, 100u, 999u);
-        record.requestBytes = (std::min)(record.requestBytes, log_contract::kMaxRequestBytes);
-        record.responseBytes = (std::min)(record.responseBytes, log_contract::kMaxResponseBytes);
-        record.durationMs = (std::min)(record.durationMs, log_contract::kMaxDurationMs);
-        record.userAgent = bounded(record.userAgent, log_contract::kMaxUserAgentBytes);
-        record.referer = bounded(record.referer, log_contract::kMaxRefererBytes);
-        record.requestBodyTruncated =
-            record.requestBodyTruncated || record.requestBody.size() > kMaxRequestBodyBytes;
-        record.requestHeaders = printable(record.requestHeaders, kMaxRequestHeadersBytes);
-        record.responseHeaders = printable(record.responseHeaders, kMaxResponseHeadersBytes);
-        record.requestBody = printable(record.requestBody, kMaxRequestBodyBytes);
-        record.tlsFingerprint =
-            bounded(record.tlsFingerprint, log_contract::kMaxTlsFingerprintBytes);
-        record.queryString = printable(record.queryString, kMaxQueryStringBytes);
-        record.cookies = printable(record.cookies, kMaxCookiesBytes);
+    static access_record clamp(access_record record) {
+        record.website_id_ = bounded(record.website_id_, log_contract::max_website_id_bytes);
+        record.client_ip_ = bounded(record.client_ip_, log_contract::max_client_ip_bytes);
+        record.protocol_ = bounded(record.protocol_, log_contract::max_protocol_bytes);
+        record.method_ = bounded(record.method_, log_contract::max_method_bytes);
+        record.host_ = bounded(record.host_, log_contract::max_host_bytes);
+        record.target_ = bounded(record.target_, log_contract::max_target_bytes);
+        record.status_code_ = std::clamp(record.status_code_, 100u, 999u);
+        record.request_bytes_ = (std::min)(record.request_bytes_, log_contract::max_request_bytes);
+        record.response_bytes_ = (std::min)(record.response_bytes_, log_contract::max_response_bytes);
+        record.duration_ms_ = (std::min)(record.duration_ms_, log_contract::max_duration_ms);
+        record.user_agent_ = bounded(record.user_agent_, log_contract::max_user_agent_bytes);
+        record.referer_ = bounded(record.referer_, log_contract::max_referer_bytes);
+        record.request_body_truncated_ =
+            record.request_body_truncated_ || record.request_body_.size() > max_request_body_bytes;
+        record.request_headers_ = printable(record.request_headers_, max_request_headers_bytes);
+        record.response_headers_ = printable(record.response_headers_, max_response_headers_bytes);
+        record.request_body_ = printable(record.request_body_, max_request_body_bytes);
+        record.tls_fingerprint_ =
+            bounded(record.tls_fingerprint_, log_contract::max_tls_fingerprint_bytes);
+        record.query_string_ = printable(record.query_string_, max_query_string_bytes);
+        record.cookies_ = printable(record.cookies_, max_cookies_bytes);
         return record;
     }
 
-    static v2::LogEvent accessEvent(AccessRecord record) {
+    static v2::LogEvent access_event(access_record record) {
         record = clamp(std::move(record));
         v2::LogEvent event;
         auto* value = event.mutable_access_log();
         value->set_id(uuid());
-        value->set_occurred_unix_ms(nowMs());
-        value->set_website_id(record.websiteId);
-        value->set_client_ip(record.clientIp);
-        value->set_protocol(record.protocol);
-        value->set_method(record.method);
-        value->set_host(record.host);
-        value->set_target(record.target);
-        value->set_status_code(record.statusCode);
-        value->set_request_bytes(record.requestBytes);
-        value->set_response_bytes(record.responseBytes);
-        value->set_duration_ms(record.durationMs);
-        value->set_user_agent(record.userAgent);
-        value->set_referer(record.referer);
-        value->set_request_headers(record.requestHeaders);
-        value->set_request_body(record.requestBody);
-        value->set_request_body_truncated(record.requestBodyTruncated);
-        value->set_tls_fingerprint(record.tlsFingerprint);
-        value->set_response_headers(record.responseHeaders);
-        value->set_query_string(record.queryString);
-        value->set_cookies(record.cookies);
+        value->set_occurred_unix_ms(now_ms());
+        value->set_website_id(record.website_id_);
+        value->set_client_ip(record.client_ip_);
+        value->set_protocol(record.protocol_);
+        value->set_method(record.method_);
+        value->set_host(record.host_);
+        value->set_target(record.target_);
+        value->set_status_code(record.status_code_);
+        value->set_request_bytes(record.request_bytes_);
+        value->set_response_bytes(record.response_bytes_);
+        value->set_duration_ms(record.duration_ms_);
+        value->set_user_agent(record.user_agent_);
+        value->set_referer(record.referer_);
+        value->set_request_headers(record.request_headers_);
+        value->set_request_body(record.request_body_);
+        value->set_request_body_truncated(record.request_body_truncated_);
+        value->set_tls_fingerprint(record.tls_fingerprint_);
+        value->set_response_headers(record.response_headers_);
+        value->set_query_string(record.query_string_);
+        value->set_cookies(record.cookies_);
         return event;
     }
 
-    static v2::LogEvent nodeEvent(std::string_view level, std::string_view category,
-                                  std::string_view message) {
+    static v2::LogEvent node_event(std::string_view level, std::string_view category,
+        std::string_view message) {
         v2::LogEvent event;
         auto* value = event.mutable_node_log();
         value->set_id(uuid());
-        value->set_occurred_unix_ms(nowMs());
-        value->set_level(bounded(level, log_contract::kMaxNodeLevelBytes));
-        value->set_category(bounded(category, log_contract::kMaxNodeCategoryBytes));
-        value->set_message(bounded(message, log_contract::kMaxNodeMessageBytes));
+        value->set_occurred_unix_ms(now_ms());
+        value->set_level(bounded(level, log_contract::max_node_level_bytes));
+        value->set_category(bounded(category, log_contract::max_node_category_bytes));
+        value->set_message(bounded(message, log_contract::max_node_message_bytes));
         return event;
     }
 
-    std::vector<std::unique_ptr<Shard>> shards_;
-    std::size_t workerShardOffset_{};
-    std::size_t nextShard_{};
-    bool deliveryInFlight_{};
+    std::vector<std::unique_ptr<shard>> shards_;
+    std::size_t worker_shard_offset_{};
+    std::size_t next_shard_{};
+    bool delivery_in_flight_{};
 };
 
-} // namespace flexedge::node
+}  // namespace flexedge::node

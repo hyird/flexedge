@@ -1,92 +1,97 @@
 #pragma once
 
+#include <ruvia/core/channel.h>
+#include <ruvia/core/worker_handle.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
-#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include <ruvia/core/Channel.h>
+
 #include "service/features/live_resource/query_key.h"
 
 namespace service::live_resource {
 
 // Only owned, allocator-independent bytes cross worker boundaries. In
 // particular, request DTOs and HttpError objects must never enter this cache.
-struct Snapshot final {
-    std::string data;
-    bool failure{};
+struct snapshot final {
+    std::string data_;
+    bool failure_{};
 };
 
-class SnapshotCapacityError final : public std::runtime_error {
-  public:
-    SnapshotCapacityError() : std::runtime_error("live resource cache capacity exceeded") {}
+class snapshot_capacity_error final : public std::runtime_error {
+public:
+    snapshot_capacity_error()
+        : std::runtime_error("live resource cache capacity exceeded") {}
 };
 
-class SnapshotCache final {
-  public:
-    using Clock = std::chrono::steady_clock;
-    struct Limits final {
-        std::size_t groups{1024};
-        std::size_t subscribers{8192};
-        std::size_t flights{128};
-        std::size_t bytes{32 * 1024 * 1024};
-        std::size_t snapshotBytes{4 * 1024 * 1024};
-        std::size_t keyBytes{4096};
+class snapshot_cache final {
+public:
+    using clock = std::chrono::steady_clock;
+    struct limits final {
+        std::size_t groups_{1024};
+        std::size_t subscribers_{8192};
+        std::size_t flights_{128};
+        std::size_t bytes_{32 * 1024 * 1024};
+        std::size_t snapshot_bytes_{4 * 1024 * 1024};
+        std::size_t key_bytes_{4096};
         // Lazy expiry bounds reuse of time-dependent projections. Heartbeats
         // never load resources; expiry is checked only when a read is requested.
-        Clock::duration maxAge{std::chrono::seconds(15)};
+        clock::duration max_age_{std::chrono::seconds(15)};
     };
-    struct Stats final {
-        std::size_t groups{}, subscribers{}, flights{}, bytes{};
+    struct stats final {
+        std::size_t groups_{}, subscribers_{}, flights_{}, bytes_{};
     };
-    struct Result final {
-        std::shared_ptr<const Snapshot> snapshot;
-        std::uint64_t version{};
-        std::uint64_t patchEpoch{};
+    struct result final {
+        std::shared_ptr<const snapshot> snapshot_;
+        std::uint64_t version_{};
+        std::uint64_t patch_epoch_{};
     };
 
-  private:
-    struct Waiter final {
-        ruvia::ChannelSender<Result> sender;
+private:
+    struct waiter final {
+        ruvia::channel_sender<result> sender_;
     };
-    struct Entry final {
-        SnapshotKey key;
-        std::size_t subscribers{};
-        std::uint64_t version{1};
-        std::uint64_t patchEpoch{};
-        bool loading{};
-        std::uint64_t nextFlightGeneration{};
-        std::uint64_t flightGeneration{};
-        std::shared_ptr<const Snapshot> snapshot;
-        Clock::time_point expires{}, used{};
-        std::vector<std::weak_ptr<Waiter>> waiters;
+    struct entry final {
+        snapshot_key key_;
+        std::size_t subscribers_{};
+        std::uint64_t version_{1};
+        std::uint64_t patch_epoch_{};
+        bool loading_{};
+        std::uint64_t next_flight_generation_{};
+        std::uint64_t flight_generation_{};
+        std::shared_ptr<const snapshot> snapshot_;
+        clock::time_point expires_{}, used_{};
+        std::vector<std::weak_ptr<waiter>> waiters_;
     };
-    struct State final {
-        explicit State(Limits value) : limits(value) {}
-        std::mutex mutex;
-        Limits limits;
-        std::unordered_map<SnapshotKey, std::shared_ptr<Entry>, SnapshotKeyHash> entries;
-        std::size_t subscribers{}, flights{}, bytes{};
+    struct state final {
+        explicit state(limits value)
+            : limits_(value) {}
+        std::mutex mutex_;
+        limits limits_;
+        std::unordered_map<snapshot_key, std::shared_ptr<entry>, snapshot_key_hash> entries_;
+        std::size_t subscribers_{}, flights_{}, bytes_{};
 
-        void clear(Entry& entry) {
-            if (entry.snapshot) {
-                bytes -= entry.snapshot->data.size();
-                entry.snapshot.reset();
+        void clear(entry& entry) {
+            if (entry.snapshot_) {
+                bytes_ -= entry.snapshot_->data_.size();
+                entry.snapshot_.reset();
             }
         }
     };
 
-  public:
-    class Ticket final {
-      public:
-        void complete(std::shared_ptr<const Snapshot> snapshot) const {
+public:
+    class ticket final {
+    public:
+        void complete(std::shared_ptr<const snapshot> snapshot) const {
             finish(std::move(snapshot));
         }
 
@@ -95,191 +100,212 @@ class SnapshotCache final {
             finish({});
         }
 
-      private:
-        friend class SnapshotCache;
-        Ticket(std::shared_ptr<State> state, std::shared_ptr<Entry> entry, std::uint64_t version,
-               std::uint64_t patchEpoch, std::uint64_t flightGeneration)
-            : state_(std::move(state)), entry_(std::move(entry)), version_(version),
-              patchEpoch_(patchEpoch), flightGeneration_(flightGeneration) {}
+    private:
+        friend class snapshot_cache;
+        ticket(std::shared_ptr<state> state, std::shared_ptr<entry> entry, std::uint64_t version,
+            std::uint64_t patch_epoch, std::uint64_t flight_generation)
+            : state_(std::move(state)),
+              entry_(std::move(entry)),
+              version_(version),
+              patch_epoch_(patch_epoch),
+              flight_generation_(flight_generation) {}
 
-        void finish(std::shared_ptr<const Snapshot> snapshot) const {
-            std::vector<std::weak_ptr<Waiter>> waiters;
-            Result result;
+        void finish(std::shared_ptr<const snapshot> snapshot) const {
+            std::vector<std::weak_ptr<waiter>> waiters;
+            result result;
             {
-                const std::lock_guard lock(state_->mutex);
-                if (!entry_->loading || entry_->flightGeneration != flightGeneration_)
+                const std::lock_guard lock(state_->mutex_);
+                if (!entry_->loading_ || entry_->flight_generation_ != flight_generation_) {
                     return;
-                entry_->loading = false;
-                --state_->flights;
-                waiters.swap(entry_->waiters);
+                }
+                entry_->loading_ = false;
+                --state_->flights_;
+                waiters.swap(entry_->waiters_);
                 // A business commit invalidated this read, or everyone
                 // disconnected. Never install or distribute its old result.
-                if (snapshot && entry_->version == version_ && entry_->subscribers != 0) {
-                    result = {std::move(snapshot), version_, patchEpoch_};
-                    const auto bytes = result.snapshot->data.size();
-                    if (entry_->patchEpoch == patchEpoch_ && !result.snapshot->failure &&
-                        bytes <= state_->limits.snapshotBytes && bytes <= state_->limits.bytes) {
-                        while (state_->bytes > state_->limits.bytes - bytes) {
-                            std::shared_ptr<Entry> oldest;
-                            for (const auto& [key, value] : state_->entries) {
+                if (snapshot && entry_->version_ == version_ && entry_->subscribers_ != 0) {
+                    result = {std::move(snapshot), version_, patch_epoch_};
+                    const auto bytes = result.snapshot_->data_.size();
+                    if (entry_->patch_epoch_ == patch_epoch_ && !result.snapshot_->failure_ &&
+                        bytes <= state_->limits_.snapshot_bytes_ && bytes <= state_->limits_.bytes_) {
+                        while (state_->bytes_ > state_->limits_.bytes_ - bytes) {
+                            std::shared_ptr<entry> oldest;
+                            for (const auto& [key, value] : state_->entries_) {
                                 (void)key;
-                                if (value->snapshot && (!oldest || value->used < oldest->used))
+                                if (value->snapshot_ && (!oldest || value->used_ < oldest->used_)) {
                                     oldest = value;
+                                }
                             }
-                            if (!oldest) break;
+                            if (!oldest) {
+                                break;
+                            }
                             state_->clear(*oldest);
-                            ++oldest->version;
+                            ++oldest->version_;
                         }
                         state_->clear(*entry_);
-                        entry_->snapshot = result.snapshot;
-                        entry_->used = Clock::now();
-                        entry_->expires = entry_->used + state_->limits.maxAge;
-                        state_->bytes += bytes;
+                        entry_->snapshot_ = result.snapshot_;
+                        entry_->used_ = clock::now();
+                        entry_->expires_ = entry_->used_ + state_->limits_.max_age_;
+                        state_->bytes_ += bytes;
                     }
                 }
             }
             // Do not allocate while releasing a generation: an old ticket must
             // never strand or accidentally release the next flight.
-            for (const auto& weak : waiters)
-                if (auto waiter = weak.lock())
-                    (void)waiter->sender.send(result);
+            for (const auto& weak : waiters) {
+                if (auto waiter = weak.lock()) {
+                    (void)waiter->sender_.send(result);
+                }
+            }
         }
 
-        std::shared_ptr<State> state_;
-        std::shared_ptr<Entry> entry_;
+        std::shared_ptr<state> state_;
+        std::shared_ptr<entry> entry_;
         std::uint64_t version_;
-        std::uint64_t patchEpoch_;
-        std::uint64_t flightGeneration_;
+        std::uint64_t patch_epoch_;
+        std::uint64_t flight_generation_;
     };
 
-    struct Read final {
-        Result ready;
-        std::optional<Ticket> ticket;
+    struct read final {
+        result ready_;
+        std::optional<ticket> ticket_;
         // Weak waiter storage means an aborted request cannot accumulate
         // channels while a slow DB query finishes for the other subscribers.
-        std::shared_ptr<Waiter> waiter;
-        ruvia::ChannelReceiver<Result> receiver;
+        std::shared_ptr<waiter> waiter_;
+        ruvia::channel_receiver<result> receiver_;
     };
 
-    class Lease final {
-      public:
-        Lease(const Lease&) = delete;
-        Lease& operator=(const Lease&) = delete;
-        Lease(Lease&&) noexcept = default;
-        ~Lease() {
-            if (!entry_)
+    class lease final {
+    public:
+        lease(const lease&) = delete;
+        lease& operator=(const lease&) = delete;
+        lease(lease&&) noexcept = default;
+        ~lease() {
+            if (!entry_) {
                 return;
-            const std::lock_guard lock(state_->mutex);
-            --state_->subscribers;
-            if (--entry_->subscribers == 0) {
+            }
+            const std::lock_guard lock(state_->mutex_);
+            --state_->subscribers_;
+            if (--entry_->subscribers_ == 0) {
                 state_->clear(*entry_);
-                state_->entries.erase(entry_->key);
-                entry_->waiters.clear();
+                state_->entries_.erase(entry_->key_);
+                entry_->waiters_.clear();
             }
         }
 
-        Read read(const ruvia::WorkerHandle& worker, Clock::time_point now = Clock::now()) const {
-            auto [sender, receiver] = ruvia::makeChannel<Result>(
-                worker, {.capacity = 1, .resource = std::pmr::new_delete_resource()});
-            Read result{{}, {}, {}, std::move(receiver)};
-            const std::lock_guard lock(state_->mutex);
-            if (entry_->snapshot && now < entry_->expires) {
-                entry_->used = now;
-                result.ready = {entry_->snapshot, entry_->version, entry_->patchEpoch};
+        service::live_resource::snapshot_cache::read read(const ruvia::worker_handle& worker, clock::time_point now = clock::now()) const {
+            auto [sender, receiver] = ruvia::make_channel<result>(
+                worker, {.capacity_ = 1, .resource_ = std::pmr::new_delete_resource()});
+            service::live_resource::snapshot_cache::read result{{}, {}, {}, std::move(receiver)};
+            const std::lock_guard lock(state_->mutex_);
+            if (entry_->snapshot_ && now < entry_->expires_) {
+                entry_->used_ = now;
+                result.ready_ = {entry_->snapshot_, entry_->version_, entry_->patch_epoch_};
                 return result;
             }
-            if (entry_->snapshot) {
+            if (entry_->snapshot_) {
                 state_->clear(*entry_);
-                ++entry_->version;
+                ++entry_->version_;
             }
-            if (!entry_->loading && state_->flights >= state_->limits.flights)
-                throw SnapshotCapacityError();
-            if (!entry_->loading && entry_->nextFlightGeneration ==
-                                        (std::numeric_limits<std::uint64_t>::max)())
+            if (!entry_->loading_ && state_->flights_ >= state_->limits_.flights_) {
+                throw snapshot_capacity_error();
+            }
+            if (!entry_->loading_ && entry_->next_flight_generation_ ==
+                                         (std::numeric_limits<std::uint64_t>::max)()) {
                 throw std::overflow_error("snapshot flight generation exhausted");
-            result.waiter = std::make_shared<Waiter>(std::move(sender));
-            std::erase_if(entry_->waiters, [](const auto& weak) { return weak.expired(); });
-            entry_->waiters.push_back(result.waiter);
-            if (!entry_->loading) {
-                const auto generation = ++entry_->nextFlightGeneration;
-                result.ticket = Ticket(state_, entry_, entry_->version, entry_->patchEpoch, generation);
-                entry_->flightGeneration = generation;
-                entry_->loading = true;
-                ++state_->flights;
+            }
+            result.waiter_ = std::make_shared<waiter>(std::move(sender));
+            std::erase_if(entry_->waiters_, [](const auto& weak) { return weak.expired(); });
+            entry_->waiters_.push_back(result.waiter_);
+            if (!entry_->loading_) {
+                const auto generation = ++entry_->next_flight_generation_;
+                result.ticket_ = ticket(state_, entry_, entry_->version_, entry_->patch_epoch_, generation);
+                entry_->flight_generation_ = generation;
+                entry_->loading_ = true;
+                ++state_->flights_;
             }
             return result;
         }
         bool current(std::uint64_t version) const {
-            const std::lock_guard lock(state_->mutex);
-            return entry_->version == version;
+            const std::lock_guard lock(state_->mutex_);
+            return entry_->version_ == version;
         }
-        std::uint64_t patchEpoch() const {
-            const std::lock_guard lock(state_->mutex);
-            return entry_->patchEpoch;
+        std::uint64_t patch_epoch() const {
+            const std::lock_guard lock(state_->mutex_);
+            return entry_->patch_epoch_;
         }
-        bool current(const Result& result, std::uint64_t minimumPatchEpoch = 0) const {
-            const std::lock_guard lock(state_->mutex);
+        bool current(const result& result, std::uint64_t minimum_patch_epoch = 0) const {
+            const std::lock_guard lock(state_->mutex_);
             // A subscriber can replay all patches delivered since it joined.
             // A late join cannot use a query begun before that boundary: some
             // intervening patches were never in its mailbox. It joins the next
             // read once, without starving on subsequent high-rate heartbeats.
-            return entry_->version == result.version &&
-                   result.patchEpoch >= std::max(joinedEpoch_, minimumPatchEpoch);
+            return entry_->version_ == result.version_ &&
+                   result.patch_epoch_ >= std::max(joined_epoch_, minimum_patch_epoch);
         }
 
-      private:
-        friend class SnapshotCache;
-        Lease(std::shared_ptr<State> state, std::shared_ptr<Entry> entry)
-            : state_(std::move(state)), entry_(std::move(entry)), joinedEpoch_(entry_->patchEpoch) {}
-        std::shared_ptr<State> state_;
-        std::shared_ptr<Entry> entry_;
-        std::uint64_t joinedEpoch_;
+    private:
+        friend class snapshot_cache;
+        lease(std::shared_ptr<state> state, std::shared_ptr<entry> entry)
+            : state_(std::move(state)),
+              entry_(std::move(entry)),
+              joined_epoch_(entry_->patch_epoch_) {}
+        std::shared_ptr<state> state_;
+        std::shared_ptr<entry> entry_;
+        std::uint64_t joined_epoch_;
     };
 
-    SnapshotCache() : SnapshotCache(Limits{}) {}
-    explicit SnapshotCache(Limits limits) : state_(std::make_shared<State>(limits)) {}
-    Lease subscribe(SnapshotKey key) {
-        if (key.tenant.empty() || key.query.empty())
+    snapshot_cache()
+        : snapshot_cache(limits{}) {}
+    explicit snapshot_cache(limits limits)
+        : state_(std::make_shared<state>(limits)) {}
+    lease subscribe(snapshot_key key) {
+        if (key.tenant_.empty() || key.query_.empty()) {
             throw std::invalid_argument("snapshot subscription requires tenant and query key");
-        const std::lock_guard lock(state_->mutex);
-        if (key.tenant.size() + key.id.size() + key.query.size() > state_->limits.keyBytes ||
-            state_->subscribers >= state_->limits.subscribers)
-            throw SnapshotCapacityError();
-        auto found = state_->entries.find(key);
-        if (found == state_->entries.end()) {
-            if (state_->entries.size() >= state_->limits.groups)
-                throw SnapshotCapacityError();
-            auto entry = std::make_shared<Entry>();
-            entry->key = key;
-            found = state_->entries.emplace(std::move(key), std::move(entry)).first;
         }
-        ++state_->subscribers;
-        ++found->second->subscribers;
-        return Lease(state_, found->second);
+        const std::lock_guard lock(state_->mutex_);
+        if (key.tenant_.size() + key.id_.size() + key.query_.size() > state_->limits_.key_bytes_ ||
+            state_->subscribers_ >= state_->limits_.subscribers_) {
+            throw snapshot_capacity_error();
+        }
+        auto found = state_->entries_.find(key);
+        if (found == state_->entries_.end()) {
+            if (state_->entries_.size() >= state_->limits_.groups_) {
+                throw snapshot_capacity_error();
+            }
+            auto entry_value = std::make_shared<entry>();
+            entry_value->key_ = key;
+            found = state_->entries_.emplace(std::move(key), std::move(entry_value)).first;
+        }
+        ++state_->subscribers_;
+        ++found->second->subscribers_;
+        return lease(state_, found->second);
     }
 
-    void invalidate(std::string_view tenant, Resource resource, std::string_view id = {},
-                    bool detailOnly = false, bool patch = false) {
-        const std::lock_guard lock(state_->mutex);
-        for (const auto& [key, entry] : state_->entries) {
-            if (key.tenant != tenant || key.resource != resource ||
-                (!key.id.empty() && !id.empty() && key.id != id) ||
-                (detailOnly && key.id.empty()))
+    void invalidate(std::string_view tenant, resource resource, std::string_view id = {},
+        bool detail_only = false, bool patch = false) {
+        const std::lock_guard lock(state_->mutex_);
+        for (const auto& [key, entry] : state_->entries_) {
+            if (key.tenant_ != tenant || key.resource_ != resource ||
+                (!key.id_.empty() && !id.empty() && key.id_ != id) ||
+                (detail_only && key.id_.empty())) {
                 continue;
-            if (patch)
-                ++entry->patchEpoch;
-            else
-                ++entry->version;
+            }
+            if (patch) {
+                ++entry->patch_epoch_;
+            } else {
+                ++entry->version_;
+            }
             state_->clear(*entry);
         }
     }
-    Stats stats() const {
-        const std::lock_guard lock(state_->mutex);
-        return {state_->entries.size(), state_->subscribers, state_->flights, state_->bytes};
+    stats get_stats() const {
+        const std::lock_guard lock(state_->mutex_);
+        return {state_->entries_.size(), state_->subscribers_, state_->flights_, state_->bytes_};
     }
 
-  private:
-    std::shared_ptr<State> state_;
+private:
+    std::shared_ptr<state> state_;
 };
 
-} // namespace service::live_resource
+}  // namespace service::live_resource

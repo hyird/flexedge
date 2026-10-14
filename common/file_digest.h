@@ -9,18 +9,19 @@
 #include <string>
 
 #include <openssl/evp.h>
+
 #include "common/hex.h"
 
 namespace flexedge::crypto {
 
-inline std::string fileSha256(const std::filesystem::path& path) {
+inline std::string file_sha256(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         throw std::runtime_error("file is unavailable");
     }
 
-    using DigestContext = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
-    DigestContext context(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
+    using digest_context = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+    digest_context context(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
     if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1) {
         throw std::runtime_error("failed to initialize file digest");
     }
@@ -39,11 +40,11 @@ inline std::string fileSha256(const std::filesystem::path& path) {
     }
 
     std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
-    unsigned int digestSize = 0;
-    if (EVP_DigestFinal_ex(context.get(), digest.data(), &digestSize) != 1) {
+    unsigned int digest_size = 0;
+    if (EVP_DigestFinal_ex(context.get(), digest.data(), &digest_size) != 1) {
         throw std::runtime_error("failed to finalize file digest");
     }
-    return hexEncode({digest.data(), digestSize});
+    return hex_encode({digest.data(), digest_size});
 }
 
-} // namespace flexedge::crypto
+}  // namespace flexedge::crypto

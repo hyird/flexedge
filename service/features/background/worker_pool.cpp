@@ -1,170 +1,185 @@
 #include "service/features/background/worker_pool.h"
 
+#include <ruvia/core/event_loop_pool.h>
+#include <ruvia/core/memory/memory_pool.h>
+#include <ruvia/core/root_task.h>
+#include <ruvia/web/app.h>
+#include <ruvia/web/db/db_client.h>
+
 #include <atomic>
 #include <exception>
 #include <stdexcept>
 #include <string_view>
-
-#include <ruvia/core/EventLoopPool.h>
-#include <ruvia/core/RootTask.h>
-#include <ruvia/core/memory/MemoryPool.h>
-#include <ruvia/web/App.h>
 
 #include "service/features/logging/logger.h"
 #include "service/utils/token.h"
 
 namespace service::background {
 
-struct WorkerContext::Impl final {
-    struct OutboundClient final {
-        std::string_view alias;
-        std::unique_ptr<ruvia::HttpClient> client;
+struct worker_context::impl final {
+    struct outbound_client final {
+        std::string_view alias_;
+        std::unique_ptr<ruvia::http_client> client_;
     };
 
-    Impl(ruvia::EventLoop eventLoop, ruvia::DbConfig database,
-         const service::config::OutboundOrigins& origins, std::string workerName,
-         std::span<const std::string_view> outboundAliases)
-        : loop(std::move(eventLoop)), worker(loop.handle()), database(loop, std::move(database)) {
-        clients.reserve(outboundAliases.size());
-        for (const auto alias : outboundAliases) {
-            for (const auto& client : clients) {
-                if (client.alias == alias) {
+    impl(ruvia::event_loop event_loop, ruvia::db_config database,
+        const service::config::outbound_origins& origins, std::string worker_name,
+        std::span<const std::string_view> outbound_aliases)
+        : loop_(std::move(event_loop)),
+          worker_(loop_.handle()),
+          database_(loop_, std::move(database)) {
+        clients_.reserve(outbound_aliases.size());
+        for (const auto alias : outbound_aliases) {
+            for (const auto& client : clients_) {
+                if (client.alias_ == alias) {
                     throw std::invalid_argument("background worker origin is declared twice");
                 }
             }
-            clients.push_back({
-                .alias = alias,
-                .client = std::make_unique<ruvia::HttpClient>(
-                    loop, service::config::outboundOriginConfig(origins, alias)),
+            clients_.push_back({
+                .alias_ = alias,
+                .client_ = std::make_unique<ruvia::http_client>(
+                    loop_, service::config::outbound_origin_config(origins, alias)),
             });
         }
-        leaseOwner = std::move(workerName) + ":" + service::utils::randomToken().substr(0, 32);
-        stopRegistration = loop.onStop([this]() -> ruvia::Task<void> {
-            stopSource.requestStop();
-            for (const auto& client : clients) {
-                client.client->close();
+        lease_owner_ = std::move(worker_name) + ":" + service::utils::random_token().substr(0, 32);
+        stop_registration_ = loop_.on_stop([this]() -> ruvia::task<void> {
+            stop_source_.request_stop();
+            for (const auto& client : clients_) {
+                client.client_->close();
             }
-            this->database.close();
-            for (const auto& client : clients)
-                co_await client.client->shutdown();
-            co_await this->database.shutdown();
+            this->database_.close();
+            for (const auto& client : clients_) {
+                co_await client.client_->shutdown();
+            }
+            co_await this->database_.shutdown();
         });
     }
 
-    ruvia::EventLoop loop;
-    ruvia::WorkerHandle worker;
-    ruvia::WorkerMemory memory;
-    ruvia::StopSource stopSource;
-    ruvia::DbClient database;
-    std::vector<OutboundClient> clients;
-    std::string leaseOwner;
-    ruvia::EventLoopStopRegistration stopRegistration;
+    ruvia::event_loop loop_;
+    ruvia::worker_handle worker_;
+    ruvia::worker_memory memory_;
+    ruvia::stop_source stop_source_;
+    ruvia::db_client database_;
+    std::vector<outbound_client> clients_;
+    std::string lease_owner_;
+    ruvia::event_loop_stop_registration stop_registration_;
 };
 
-WorkerContext::WorkerContext(ruvia::EventLoop loop, ruvia::DbConfig database,
-                             const service::config::OutboundOrigins& origins,
-                             std::string workerName,
-                             std::span<const std::string_view> outboundAliases)
-    : impl_(std::make_unique<Impl>(std::move(loop), std::move(database), origins,
-                                   std::move(workerName), outboundAliases)) {}
+worker_context::worker_context(ruvia::event_loop loop, ruvia::db_config database,
+    const service::config::outbound_origins& origins,
+    std::string worker_name,
+    std::span<const std::string_view> outbound_aliases)
+    : impl_(std::make_unique<impl>(std::move(loop), std::move(database), origins,
+          std::move(worker_name), outbound_aliases)) {}
 
-WorkerContext::~WorkerContext() = default;
+worker_context::~worker_context() = default;
 
-ruvia::DbClient& WorkerContext::db() const noexcept { return impl_->database; }
+ruvia::db_handle worker_context::db() const {
+    return impl_->database_.handle();
+}
 
-ruvia::HttpClient& WorkerContext::httpClient(std::string_view alias) const {
-    for (const auto& client : impl_->clients) {
-        if (client.alias == alias) {
-            return *client.client;
+ruvia::http_client& worker_context::get_http_client(std::string_view alias) const {
+    for (const auto& client : impl_->clients_) {
+        if (client.alias_ == alias) {
+            return *client.client_;
         }
     }
     throw std::invalid_argument("background HTTP origin is not configured");
 }
 
-const ruvia::WorkerHandle& WorkerContext::worker() const noexcept { return impl_->worker; }
-
-std::pmr::memory_resource* WorkerContext::pool() const noexcept {
-    return impl_->memory.resource();
+const ruvia::worker_handle& worker_context::worker() const noexcept {
+    return impl_->worker_;
 }
 
-ruvia::StopToken WorkerContext::stopToken() const noexcept { return impl_->stopSource.token(); }
+std::pmr::memory_resource* worker_context::pool() const noexcept {
+    return impl_->memory_.resource();
+}
 
-std::string_view WorkerContext::leaseOwner() const noexcept { return impl_->leaseOwner; }
+ruvia::stop_token worker_context::get_stop_token() const noexcept {
+    return impl_->stop_source_.token();
+}
 
-void WorkerContext::close() noexcept {
-    impl_->stopSource.requestStop();
-    for (const auto& client : impl_->clients) {
-        client.client->close();
+std::string_view worker_context::lease_owner() const noexcept {
+    return impl_->lease_owner_;
+}
+
+void worker_context::close() noexcept {
+    impl_->stop_source_.request_stop();
+    for (const auto& client : impl_->clients_) {
+        client.client_->close();
     }
-    impl_->database.close();
+    impl_->database_.close();
 }
 
-struct WorkerPool::Impl final {
-    Impl(const ruvia::DbConfig& database, const service::config::OutboundOrigins& origins,
-         std::vector<WorkerDefinition> definitions)
-        : loops({.loopCount = definitions.size(), .mailboxCapacity = 256}),
-          workers(std::move(definitions)) {
-        if (workers.empty()) {
+struct worker_pool::impl final {
+    impl(const ruvia::db_config& database, const service::config::outbound_origins& origins,
+        std::vector<worker_definition> definitions)
+        : loops_({.loop_count_ = definitions.size(), .queue_capacity_ = 256}),
+          workers_(std::move(definitions)) {
+        if (workers_.empty()) {
             throw std::invalid_argument("background worker pool requires at least one worker");
         }
-        contexts.reserve(workers.size());
-        for (std::size_t index = 0; index < workers.size(); ++index) {
-            contexts.push_back(std::unique_ptr<WorkerContext>(
-                new WorkerContext(loops.loop(index), database, origins, workers[index].name,
-                                  workers[index].outboundAliases)));
+        contexts_.reserve(workers_.size());
+        for (std::size_t index = 0; index < workers_.size(); ++index) {
+            contexts_.push_back(std::unique_ptr<worker_context>(
+                new worker_context(loops_.loop(index), database, origins, workers_[index].name_,
+                    workers_[index].outbound_aliases_)));
         }
     }
 
-    ruvia::Task<void> runTask(std::size_t index) {
+    ruvia::task<void> run_task(std::size_t index) {
         try {
-            co_await workers[index].run(*contexts[index]);
-            if (!contexts[index]->stopToken().stopRequested()) {
-                service::logging::error("Background worker " + workers[index].name +
+            co_await workers_[index].run_(*contexts_[index]);
+            if (!contexts_[index]->get_stop_token().stop_requested()) {
+                service::logging::error("Background worker " + workers_[index].name_ +
                                         " stopped unexpectedly");
                 ruvia::app().stop();
             }
         } catch (const std::exception& error) {
-            if (contexts[index]->stopToken().stopRequested())
+            if (contexts_[index]->get_stop_token().stop_requested()) {
                 co_return;
-            service::logging::error("Background worker " + workers[index].name +
+            }
+            service::logging::error("Background worker " + workers_[index].name_ +
                                     " failed: " + error.what());
             ruvia::app().stop();
             throw;
         } catch (...) {
-            if (contexts[index]->stopToken().stopRequested())
+            if (contexts_[index]->get_stop_token().stop_requested()) {
                 co_return;
-            service::logging::error("Background worker " + workers[index].name +
+            }
+            service::logging::error("Background worker " + workers_[index].name_ +
                                     " failed with an unknown exception");
             ruvia::app().stop();
             throw;
         }
     }
 
-    void startTask(std::size_t index) {
-        tasks.push_back(loops.loop(index).start(runTask(index)));
+    void start_task(std::size_t index) {
+        tasks_.push_back(loops_.loop(index).start(run_task(index)));
     }
 
-    void waitTasks() noexcept {
-        for (std::size_t index = 0; index < tasks.size(); ++index) {
+    void wait_tasks() noexcept {
+        for (std::size_t index = 0; index < tasks_.size(); ++index) {
             try {
-                tasks[index].get();
-                if (!contexts[index]->stopToken().stopRequested()) {
-                    service::logging::error("Background worker " + workers[index].name +
+                tasks_[index].get();
+                if (!contexts_[index]->get_stop_token().stop_requested()) {
+                    service::logging::error("Background worker " + workers_[index].name_ +
                                             " stopped unexpectedly");
                     ruvia::app().stop();
                 }
             } catch (...) {
-                // runTask() has already reported the failure and requested shutdown.
+                // run_task() has already reported the failure and requested shutdown.
                 ruvia::app().stop();
             }
         }
-        tasks.clear();
+        tasks_.clear();
     }
 
-    void waitConnections() noexcept {
-        for (auto& connection : connectionTasks) {
-            if (!connection.valid())
+    void wait_connections() noexcept {
+        for (auto& connection : connection_tasks_) {
+            if (!connection.valid()) {
                 continue;
+            }
             try {
                 connection.get();
             } catch (const std::exception& error) {
@@ -174,27 +189,30 @@ struct WorkerPool::Impl final {
                 service::logging::error("Background database connection shutdown failed");
             }
         }
-        connectionTasks.clear();
+        connection_tasks_.clear();
     }
 
     void start() {
-        if (started.exchange(true)) {
+        if (started_.exchange(true)) {
             throw std::logic_error("background worker pool already started");
         }
 
         try {
-            loops.start();
-            connectionTasks.reserve(contexts.size());
-            for (std::size_t index = 0; index < contexts.size(); ++index)
-                connectionTasks.push_back(loops.loop(index).start(contexts[index]->db().connect()));
-            for (auto& connection : connectionTasks)
+            loops_.start();
+            connection_tasks_.reserve(contexts_.size());
+            for (std::size_t index = 0; index < contexts_.size(); ++index) {
+                connection_tasks_.push_back(
+                    loops_.loop(index).start(contexts_[index]->impl_->database_.connect()));
+            }
+            for (auto& connection : connection_tasks_) {
                 connection.get();
-            tasks.reserve(workers.size());
-            for (std::size_t index = 0; index < workers.size(); ++index) {
-                startTask(index);
+            }
+            tasks_.reserve(workers_.size());
+            for (std::size_t index = 0; index < workers_.size(); ++index) {
+                start_task(index);
             }
             service::logging::info("Background worker pool started with " +
-                                   std::to_string(workers.size()) + " workers");
+                                   std::to_string(workers_.size()) + " workers");
         } catch (...) {
             stop();
             throw;
@@ -202,48 +220,56 @@ struct WorkerPool::Impl final {
     }
 
     void stop() noexcept {
-        if (stopped.exchange(true)) {
+        if (stopped_.exchange(true)) {
             return;
         }
-        for (auto& context : contexts) {
+        for (auto& context : contexts_) {
             context->close();
         }
-        loops.stop();
-        waitTasks();
-        waitConnections();
+        loops_.stop();
+        wait_tasks();
+        wait_connections();
         try {
-            loops.join();
+            loops_.join();
         } catch (const std::exception& error) {
             service::logging::error("Background worker pool shutdown failed: " +
                                     std::string(error.what()));
         } catch (...) {
             service::logging::error("Background worker pool shutdown failed");
         }
-        if (started.load()) {
+        if (started_.load()) {
             service::logging::info("Background worker pool stopped");
         }
     }
 
-    ruvia::EventLoopPool loops;
-    std::vector<WorkerDefinition> workers;
-    std::vector<std::unique_ptr<WorkerContext>> contexts;
-    std::vector<ruvia::RootTask<void>> connectionTasks;
-    std::vector<ruvia::RootTask<void>> tasks;
-    std::atomic_bool started{false};
-    std::atomic_bool stopped{false};
+    ruvia::event_loop_pool loops_;
+    std::vector<worker_definition> workers_;
+    std::vector<std::unique_ptr<worker_context>> contexts_;
+    std::vector<ruvia::root_task<void>> connection_tasks_;
+    std::vector<ruvia::root_task<void>> tasks_;
+    std::atomic_bool started_{false};
+    std::atomic_bool stopped_{false};
 };
 
-WorkerPool::WorkerPool(const ruvia::DbConfig& database,
-                       const service::config::OutboundOrigins& origins,
-                       std::vector<WorkerDefinition> workers)
-    : impl_(std::make_unique<Impl>(database, origins, std::move(workers))) {}
+worker_pool::worker_pool(const ruvia::db_config& database,
+    const service::config::outbound_origins& origins,
+    std::vector<worker_definition> workers)
+    : impl_(std::make_unique<impl>(database, origins, std::move(workers))) {}
 
-WorkerPool::~WorkerPool() { stop(); }
+worker_pool::~worker_pool() {
+    stop();
+}
 
-void WorkerPool::start() { impl_->start(); }
+void worker_pool::start() {
+    impl_->start();
+}
 
-void WorkerPool::stop() noexcept { impl_->stop(); }
+void worker_pool::stop() noexcept {
+    impl_->stop();
+}
 
-std::size_t WorkerPool::workerCount() const noexcept { return impl_->workers.size(); }
+std::size_t worker_pool::worker_count() const noexcept {
+    return impl_->workers_.size();
+}
 
-} // namespace service::background
+}  // namespace service::background

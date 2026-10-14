@@ -1,66 +1,66 @@
 #pragma once
 
+#include <ruvia/core/task.h>
+#include <ruvia/web/db/db.h>
+#include <ruvia/web/db/db_transaction.h>
+
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
-#include <ruvia/core/Task.h>
-#include <ruvia/web/db/Db.h>
-#include <ruvia/web/db/DbTransaction.h>
-
 #include "node/proto/artifact.h"
-#include "service/features/node_dispatch/deployment_source.store.h"
-#include "service/features/node_dispatch/object.store.h"
-#include "service/features/node_dispatch/release.store.h"
+#include "service/features/node_dispatch/deployment_source_store.h"
+#include "service/features/node_dispatch/object_store.h"
 #include "service/features/node_dispatch/protocol.h"
+#include "service/features/node_dispatch/release_store.h"
 #include "service/utils/secret.h"
 
 namespace service::node_dispatch {
 
-inline ruvia::Task<void> publishClusterRelease(ruvia::DbTransaction& transaction,
-                                               std::string_view tenantId,
-                                               std::string_view clusterId) {
-    const auto allocation = co_await allocateClusterRelease(transaction, tenantId, clusterId,
-        static_cast<std::int64_t>(flexedge::node::kClusterReleaseSchemaVersion));
-    const auto& releaseId = allocation.id;
-    const auto generation = allocation.generation;
-    const auto deployment = co_await loadClusterDeploymentSource(
-        transaction, std::string(tenantId), std::string(clusterId),
-        allocation.accessDomain, allocation.enabled);
-    const auto artifact = buildClusterRelease(releaseId, generation, deployment);
+inline ruvia::task<void> publish_cluster_release(ruvia::db_transaction& transaction,
+    std::string_view tenant_id,
+    std::string_view cluster_id) {
+    const auto allocation = co_await allocate_cluster_release(transaction, tenant_id, cluster_id,
+        static_cast<std::int64_t>(flexedge::node::cluster_release_schema_version));
+    const auto& release_id = allocation.id_;
+    const auto generation = allocation.generation_;
+    const auto deployment = co_await load_cluster_deployment_source(
+        transaction, std::string(tenant_id), std::string(cluster_id),
+        allocation.access_domain_, allocation.enabled_);
+    const auto artifact = build_cluster_release(release_id, generation, deployment);
 
     std::int64_t position{};
-    for (const auto& object : artifact.objects) {
-        co_await persistObject(transaction, tenantId, object);
-        co_await linkReleaseObject(transaction, tenantId, releaseId, position++, object.digest_sha256());
+    for (const auto& object : artifact.objects_) {
+        co_await persist_object(transaction, tenant_id, object);
+        co_await link_release_object(transaction, tenant_id, release_id, position++, object.digest_sha256());
     }
-    const auto manifestBytes = flexedge::node::serializeArtifact(artifact.manifest);
-    const auto manifestEnvelope = service::utils::sealSecret(manifestBytes);
-    co_await activateClusterRelease(transaction, tenantId, clusterId, releaseId,
-        artifact.manifest.digest_sha256(), manifestEnvelope);
+    const auto manifest_bytes = flexedge::node::serialize_artifact(artifact.manifest_);
+    const auto manifest_envelope = service::utils::seal_secret(manifest_bytes);
+    co_await activate_cluster_release(transaction, tenant_id, cluster_id, release_id,
+        artifact.manifest_.digest_sha256(), manifest_envelope);
 
     co_return;
 }
 
-inline ruvia::Task<void> ensureClusterRelease(ruvia::DbTransaction& transaction,
-                                              std::string_view tenantId,
-                                              std::string_view clusterId) {
-    const auto schema = co_await lockCurrentReleaseSchemaVersion(transaction, tenantId, clusterId);
-    if (schema != static_cast<std::int64_t>(flexedge::node::kClusterReleaseSchemaVersion)) {
-        co_await publishClusterRelease(transaction, tenantId, clusterId);
+inline ruvia::task<void> ensure_cluster_release(ruvia::db_transaction& transaction,
+    std::string_view tenant_id,
+    std::string_view cluster_id) {
+    const auto schema = co_await lock_current_release_schema_version(transaction, tenant_id, cluster_id);
+    if (schema != static_cast<std::int64_t>(flexedge::node::cluster_release_schema_version)) {
+        co_await publish_cluster_release(transaction, tenant_id, cluster_id);
     }
     co_return;
 }
 
-inline ruvia::Task<void> enqueueCertificateConsumers(ruvia::DbTransaction& transaction,
-                                                     std::string_view tenantId,
-                                                     std::string_view certificateId) {
-    const auto clusters = co_await findCertificateConsumerClusters(transaction, tenantId, certificateId);
+inline ruvia::task<void> enqueue_certificate_consumers(ruvia::db_transaction& transaction,
+    std::string_view tenant_id,
+    std::string_view certificate_id) {
+    const auto clusters = co_await find_certificate_consumer_clusters(transaction, tenant_id, certificate_id);
     for (const auto& cluster : clusters) {
-        co_await publishClusterRelease(transaction, tenantId, cluster);
+        co_await publish_cluster_release(transaction, tenant_id, cluster);
     }
     co_return;
 }
 
-} // namespace service::node_dispatch
+}  // namespace service::node_dispatch
