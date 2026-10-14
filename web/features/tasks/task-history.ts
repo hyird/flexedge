@@ -8,13 +8,9 @@ export type AttemptGroup = {
   attempts: TaskAttempt[]
 }
 
-/** Collapses consecutive failures with the same error into one entry. Runs
- * are found on the full list before filtering, so a success between two
- * failures always breaks the run even when only failures are shown. */
-export function groupAttempts(
-  list: readonly TaskAttempt[],
-  { failuresOnly = false }: { failuresOnly?: boolean } = {}
-): AttemptGroup[] {
+/** Collapses consecutive failures with the same error into one entry; a
+ * success between two failures always breaks the run. */
+export function groupAttempts(list: readonly TaskAttempt[]): AttemptGroup[] {
   const groups: AttemptGroup[] = []
   for (const attempt of list) {
     const run = groups.at(-1)?.attempts[0]
@@ -30,9 +26,7 @@ export function groupAttempts(
         attempts: [attempt],
       })
   }
-  return failuresOnly
-    ? groups.filter((group) => group.attempts[0].outcome === 'failed')
-    : groups
+  return groups
 }
 
 /** Attempt duration: `878 毫秒`, `12.4 秒`, `2 分 5 秒`, `1 小时 3 分`.

@@ -45,10 +45,8 @@ function attempt(
   }
 }
 
-const runs = (list: TaskAttempt[], failuresOnly = false) =>
-  groupAttempts(list, { failuresOnly }).map((group) =>
-    group.attempts.map((item) => item.attempt)
-  )
+const runs = (list: TaskAttempt[]) =>
+  groupAttempts(list).map((group) => group.attempts.map((item) => item.attempt))
 
 test('consecutive identical failures collapse into one run, newest first', () => {
   const list = [
@@ -61,8 +59,6 @@ test('consecutive identical failures collapse into one run, newest first', () =>
     attempt(1, 'completed'),
   ]
   expect(runs(list)).toEqual([[7, 6, 5], [4], [3], [2], [1]])
-  // A success between two failures still breaks the run when filtered.
-  expect(runs(list, true)).toEqual([[7, 6, 5], [4], [2]])
 })
 
 test('failures without an error text and successes never collapse', () => {
@@ -75,7 +71,6 @@ test('failures without an error text and successes never collapse', () => {
     ])
   ).toEqual([[4], [3], [2], [1]])
   expect(runs([])).toEqual([])
-  expect(runs([attempt(1, 'completed')], true)).toEqual([])
 })
 
 test('durations are compact and unknown for records without a start time', () => {

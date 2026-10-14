@@ -1,7 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRotateLeft, CircleCheck } from '@gravity-ui/icons'
-import { Segment } from '@heroui-pro/react'
+import { ArrowRotateLeft } from '@gravity-ui/icons'
 import { Alert, Button, Disclosure, Skeleton } from '@heroui/react'
 import { formatDate, formatPercent, parseDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -27,8 +26,6 @@ const outcomeLabels = [outcomes.completed.label, outcomes.failed.label]
 // One attempt (or folded run) per row, separated by a hairline.
 const attemptRow = 'flex min-w-0 flex-col gap-2 py-3 first:pt-0 last:pb-0'
 
-type HistoryFilter = 'all' | 'failed'
-
 /** "执行记录" tab: a one-shot snapshot of the task's attempts, read when the
  * tab opens and again only on the manual refresh button. Relative times tick
  * on the shared local display clock and never read data. */
@@ -37,7 +34,6 @@ export function TaskHistoryPanel({ task }: { task: Task }) {
     ...taskHistoryQuery(task),
     meta: { inlineError: true },
   })
-  const [filter, setFilter] = useState<HistoryFilter>('all')
   const data = history.data
   return (
     <>
@@ -57,17 +53,7 @@ export function TaskHistoryPanel({ task }: { task: Task }) {
         )
       )}
       {(data || history.isPending) && (
-        <div className='flex flex-wrap items-center justify-between gap-2'>
-          <Segment
-            size='sm'
-            aria-label='筛选执行记录'
-            selectedKey={filter}
-            onSelectionChange={(key) => setFilter(key as HistoryFilter)}
-            isDisabled={!data?.list.length}
-          >
-            <Segment.Item id='all'>全部</Segment.Item>
-            <Segment.Item id='failed'>只看失败</Segment.Item>
-          </Segment>
+        <div className='flex justify-end'>
           <Button
             size='sm'
             variant='tertiary'
@@ -80,12 +66,7 @@ export function TaskHistoryPanel({ task }: { task: Task }) {
         </div>
       )}
       {data ? (
-        <AttemptList
-          taskId={task.id}
-          history={data}
-          filter={filter}
-          onShowAll={() => setFilter('all')}
-        />
+        <AttemptList taskId={task.id} history={data} />
       ) : (
         history.isPending && (
           <div
@@ -227,13 +208,9 @@ function TimePair({ value, empty }: { value: string; empty: string }) {
 function AttemptList({
   taskId,
   history,
-  filter,
-  onShowAll,
 }: {
   taskId: string
   history: TaskHistory
-  filter: HistoryFilter
-  onShowAll: () => void
 }) {
   if (!history.list.length)
     return (
@@ -243,9 +220,7 @@ function AttemptList({
         description='任务开始执行后，每次尝试的结果会记录在这里，保留 7 天。'
       />
     )
-  const groups = groupAttempts(history.list, {
-    failuresOnly: filter === 'failed',
-  })
+  const groups = groupAttempts(history.list)
   const omitted = history.summary.attempt_count - history.list.length
   return (
     <>
@@ -262,38 +237,24 @@ function AttemptList({
           </Alert.Content>
         </Alert>
       )}
-      {groups.length ? (
-        <ol
-          aria-label='执行记录'
-          className='m-0 flex list-none flex-col divide-y divide-border p-0'
-        >
-          {groups.map((group) =>
-            group.attempts.length > 1 ? (
-              <AttemptRun
-                key={group.key}
-                taskId={taskId}
-                attempts={group.attempts}
-              />
-            ) : (
-              <li key={group.key} className={attemptRow}>
-                <AttemptBody taskId={taskId} attempt={group.attempts[0]} />
-              </li>
-            )
-          )}
-        </ol>
-      ) : (
-        <EmptyState
-          size='sm'
-          icon={<CircleCheck />}
-          title='没有失败的尝试'
-          description='列出的执行记录中没有失败的尝试。'
-          action={
-            <Button size='sm' variant='tertiary' onPress={onShowAll}>
-              查看全部记录
-            </Button>
-          }
-        />
-      )}
+      <ol
+        aria-label='执行记录'
+        className='m-0 flex list-none flex-col divide-y divide-border p-0'
+      >
+        {groups.map((group) =>
+          group.attempts.length > 1 ? (
+            <AttemptRun
+              key={group.key}
+              taskId={taskId}
+              attempts={group.attempts}
+            />
+          ) : (
+            <li key={group.key} className={attemptRow}>
+              <AttemptBody taskId={taskId} attempt={group.attempts[0]} />
+            </li>
+          )
+        )}
+      </ol>
     </>
   )
 }
