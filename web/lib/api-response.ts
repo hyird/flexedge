@@ -5,8 +5,6 @@ export type ApiResponse<T = unknown> = {
   message: string
   data?: T
 }
-export type ApiEnvelope<T> = ApiResponse<T> & { data: T }
-
 export class ApiProtocolError extends Error {
   constructor() {
     super('FlexEdge 服务响应格式不正确')

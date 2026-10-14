@@ -22,6 +22,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       root.classList.toggle('light', !dark)
       root.dataset.theme = dark ? 'dark' : 'light'
       root.style.colorScheme = dark ? 'dark' : 'light'
+      // Match the browser chrome to the app background token.
+      document
+        .querySelector('meta[name="theme-color"]')
+        ?.setAttribute(
+          'content',
+          getComputedStyle(root).getPropertyValue('--background').trim()
+        )
     }
     apply()
     media.addEventListener('change', apply)

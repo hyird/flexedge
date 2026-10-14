@@ -1,0 +1,112 @@
+import { useState } from 'react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from '@heroui/react'
+import { queryKeys } from '@/lib/query-keys'
+import { ConfirmDialog } from '@/components/confirm-dialog'
+import { Mono } from '@/components/mono'
+import { removeDnsZone, syncDnsZone } from './data'
+import type { DnsZone } from './types'
+
+type ConflictPolicy = 'local' | 'remote'
+
+const policyCopy: Record<
+  ConflictPolicy,
+  { label: string; consequence: string }
+> = {
+  local: {
+    label: '使用本地记录',
+    consequence: '本地记录将覆盖服务商中的冲突记录。',
+  },
+  remote: {
+    label: '使用远端记录',
+    consequence: '服务商中的记录将替换本地冲突记录，本地修改会丢失。',
+  },
+}
+
+/** Sync, conflict resolution and removal shared by the zone list rows and the
+ * zone detail header. Render `dialogs` once in the page. Live streams push the
+ * resulting state; option snapshots are only marked stale. */
+export function useZoneCommands({
+  onRemoved,
+}: { onRemoved?: () => void } = {}) {
+  const client = useQueryClient()
+  const [resolving, setResolving] = useState<{
+    zone: DnsZone
+    policy: ConflictPolicy
+  }>()
+  const [removing, setRemoving] = useState<DnsZone>()
+  const markStale = () =>
+    client.invalidateQueries({
+      queryKey: queryKeys.dnsZones,
+      refetchType: 'none',
+    })
+  const onSynced = (response: { message: string }) => {
+    toast.success(response.message || '同步任务已提交')
+    void markStale()
+  }
+  // Header/row "立即同步" reports failures by toast; conflict resolution and
+  // removal run inside ConfirmDialog, which shows the error inline.
+  const sync = useMutation({ mutationFn: syncDnsZone, onSuccess: onSynced })
+  const resolveConflict = useMutation({
+    meta: { inlineError: true },
+    mutationFn: syncDnsZone,
+    onSuccess: onSynced,
+  })
+  const remove = useMutation({
+    meta: { inlineError: true },
+    mutationFn: removeDnsZone,
+    onSuccess: (response) => {
+      toast.success(response.message || 'DNS 区域已移除')
+      void markStale()
+      onRemoved?.()
+    },
+  })
+  return {
+    sync: (zone: DnsZone) => sync.mutate({ item: zone }),
+    /** Zone id while its sync request is in flight. */
+    syncingId: sync.isPending ? sync.variables?.item.id : undefined,
+    resolve: (zone: DnsZone, policy: ConflictPolicy) =>
+      setResolving({ zone, policy }),
+    remove: (zone: DnsZone) => setRemoving(zone),
+    dialogs: (
+      <>
+        <ConfirmDialog
+          isOpen={!!resolving}
+          onClose={() => setResolving(undefined)}
+          tone={resolving?.policy === 'remote' ? 'danger' : 'accent'}
+          title={`${resolving ? policyCopy[resolving.policy].label : ''}解决 ${resolving?.zone.domain ?? ''} 的冲突？`}
+          description={
+            resolving && (
+              <>
+                {resolving.zone.runtime.conflicts.length} 条记录与服务商不一致。
+                {policyCopy[resolving.policy].consequence}
+                确认后立即提交同步任务。
+              </>
+            )
+          }
+          confirmLabel={resolving ? policyCopy[resolving.policy].label : '确认'}
+          onConfirm={() =>
+            resolving &&
+            resolveConflict.mutateAsync({
+              item: resolving.zone,
+              policy: resolving.policy,
+            })
+          }
+        />
+        <ConfirmDialog
+          isOpen={!!removing}
+          onClose={() => setRemoving(undefined)}
+          title={`移除 DNS 区域 ${removing?.domain ?? ''}？`}
+          description={
+            <>
+              移除后不再管理 <Mono>{removing?.domain}</Mono>{' '}
+              的记录，服务商中的区域保留不变。仍被集群、证书或网站使用的区域无法移除。
+            </>
+          }
+          confirmLabel='移除区域'
+          onConfirm={() => removing && remove.mutateAsync(removing)}
+        />
+      </>
+    ),
+  }
+}

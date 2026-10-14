@@ -2,6 +2,7 @@ import { queryOptions } from '@tanstack/react-query'
 import { sendData, streamPath, type PageData } from '@/lib/api'
 import { readLiveQuery } from '@/lib/live-query'
 import { queryKeys } from '@/lib/query-keys'
+import type { ZoneSyncFilter } from './dns-zone-display'
 import type { DnsZoneOption, DnsZone, DnsRecord } from './types'
 
 export const dnsZoneOptionsQuery = queryOptions({
@@ -20,6 +21,8 @@ export function dnsZonesQuery(params: {
   page_size: number
   keyword?: string
   dns_provider_id?: string
+  /** `issue` = failed or conflict (overview `dns_zone_issue_count`). */
+  sync_status?: ZoneSyncFilter
 }) {
   return queryOptions({
     retry: false,
@@ -27,6 +30,23 @@ export function dnsZonesQuery(params: {
     queryFn: ({ queryKey, signal }) =>
       readLiveQuery<PageData<DnsZone>>(
         streamPath('/dns-zones', params),
+        queryKey,
+        signal
+      ),
+  })
+}
+
+/** Live zone detail (`/dns-zones/:id/stream`): one stream shared by the
+ * detail layout and its tabs. */
+export function dnsZoneDetailQuery(zoneId: string) {
+  return queryOptions({
+    retry: false,
+    // The detail layout renders not-found and stream errors itself.
+    meta: { inlineError: true },
+    queryKey: [...queryKeys.dnsZones, 'detail', zoneId],
+    queryFn: ({ queryKey, signal }) =>
+      readLiveQuery<DnsZone>(
+        streamPath('/dns-zones/' + zoneId),
         queryKey,
         signal
       ),

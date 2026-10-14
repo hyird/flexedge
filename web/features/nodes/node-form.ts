@@ -1,10 +1,9 @@
 import { z } from 'zod'
+import type { NodeInput } from './data'
+import type { Node } from './types'
 
 const ipv4 = z.ipv4(),
   ipv6 = z.ipv6()
-const maxMemoryBytes = 1099511627776
-const maxDiskBytes = 1125899906842624
-const maxObjectBytes = 1099511627776
 function isNodeIpAddress(value: string) {
   // Linux Asio parses the IPv6 address before '%' and keeps the scope separately.
   return (
@@ -52,46 +51,31 @@ export const nodeFormSchema = z.object({
         addresses.add(endpoint.ip_address)
       })
     }),
-  cache: z
-    .object({
-      memory_bytes: z.number().int().min(0).max(maxMemoryBytes),
-      disk_bytes: z.number().int().min(0).max(maxDiskBytes),
-      max_object_bytes: z.number().int().min(1).max(maxObjectBytes),
-      directory: z
-        .string()
-        .min(1)
-        .max(255)
-        .refine((value) => {
-          if (
-            value.includes('\\') ||
-            value.includes(':') ||
-            value.endsWith('/')
-          )
-            return false
-          if (value.startsWith('/')) return false
-          if (
-            [...value].some(
-              (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127
-            )
-          )
-            return false
-          return value
-            .split('/')
-            .every(
-              (part) =>
-                part !== '' &&
-                part !== '.' &&
-                part !== '..' &&
-                part === part.trim()
-            )
-        }, '目录必须是节点 state 下的相对路径，且不能包含空、点或父级组件'),
-    })
-    .default({
-      memory_bytes: 67108864,
-      disk_bytes: 1073741824,
-      max_object_bytes: 268435456,
-      directory: 'cache',
-    }),
 })
 
 export type NodeFormValues = z.infer<typeof nodeFormSchema>
+
+/** Form values for a new node (optionally in a preset cluster) or an
+ * existing node's saved configuration. */
+export function nodeFormValues(
+  node?: Pick<Node, 'cluster_id' | 'name' | 'status' | 'config'>,
+  clusterId = ''
+): NodeFormValues {
+  return {
+    cluster_id: node?.cluster_id ?? clusterId,
+    name: node?.name ?? '',
+    status: node?.status === 'disabled' ? 'disabled' : 'enabled',
+    endpoints: node
+      ? node.config.endpoints.map((endpoint) => ({ ...endpoint }))
+      : [{ id: crypto.randomUUID(), ip_address: '', line_code: 'default' }],
+  }
+}
+
+export function nodeInputFromForm(values: NodeFormValues): NodeInput {
+  return {
+    cluster_id: values.cluster_id,
+    name: values.name,
+    status: values.status,
+    config: { endpoints: values.endpoints },
+  }
+}

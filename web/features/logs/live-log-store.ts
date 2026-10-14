@@ -1,4 +1,5 @@
 import { reconnectingEventSource } from '@/lib/event-stream'
+import { releaseDepartedLiveQueries } from '@/lib/live-query'
 
 export type LogEntry = { id: string; occurred_at: string }
 export const liveLogCapacity = 1000
@@ -41,6 +42,9 @@ export function createLiveLogStore<T extends LogEntry>(
     for (const listener of listeners) listener()
   }
   const connect = () => {
+    // A tab switch from a live detail to its log tail: close the departed
+    // detail stream first so the page never holds two streams at once.
+    releaseDepartedLiveQueries()
     const connection = createSource(url)
     source = connection
     connection.addEventListener('ready', () => {

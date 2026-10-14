@@ -1,17 +1,11 @@
 // Local-only browser QA. Never imported by the production app.
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('.', import.meta.url))
-const policyFixture = JSON.parse(
-  await readFile(resolve(root, 'fixtures/cache-policies.json'), 'utf8')
-)
-const jobsFixture = JSON.parse(
-  await readFile(resolve(root, 'fixtures/cache-jobs.json'), 'utf8')
-)
 const uuid = (number) =>
   `00000000-0000-4000-8000-${String(number).padStart(12, '0')}`
 const initialTime = '2026-10-01T01:30:00.000Z'
@@ -19,7 +13,7 @@ const timestamps = { created_at: initialTime, updated_at: initialTime }
 let tick = 0
 const nextTime = () =>
   new Date(Date.parse(initialTime) + ++tick * 1000).toISOString()
-const websiteId = jobsFixture.data.list[0].website_id
+const websiteId = uuid(921)
 const zoneId = uuid(981),
   clusterId = uuid(951),
   nodeId = uuid(971),
@@ -47,34 +41,8 @@ const lines = [
   },
   { code: 'oversea', name: '境外', display_name: '境外', status: 'enabled' },
 ]
-const cacheConfig = {
-  memory_bytes: 67108864,
-  disk_bytes: 1073741824,
-  max_object_bytes: 268435456,
-  directory: 'cache',
-}
-const cacheStatistics = {
-  memory_hits: 1284,
-  disk_hits: 462,
-  misses: 93,
-  bypasses: 17,
-  stale_hits: 8,
-  revalidations: 12,
-  origin_bytes: 18350080,
-  cache_bytes: 150994944,
-  coalesced: 28,
-  active_waiters: 2,
-  memory_bytes: 9437184,
-  disk_bytes: 71303168,
-  entries: 384,
-  writes: 402,
-  write_errors: 0,
-  evictions: 19,
-}
 const websiteConfig = {
   name: 'QA 网站',
-  cache_enabled: true,
-  cache_policy_id: policyFixture.data.list[0].id,
   domains: [
     { id: uuid(961), hostname: 'qa.example.test', dns_mode: 'managed' },
   ],
@@ -116,7 +84,6 @@ const websiteConfig = {
   certificate_ids: [certificateId],
   minimum_tls_version: '1.2',
   force_https: false,
-  http2_enabled: true,
   hsts_enabled: false,
   response_compression_enabled: true,
   response_compression_min_bytes: 1024,
@@ -134,8 +101,8 @@ let db = {
       revision: 3,
       name: 'Cloudflare 生产账号',
       provider: 'cloudflare',
-      account_id: 'qa-account-01',
-      token_hint: 'qa…0001',
+      account_id: '0a1b2c3d4e5f60718293a4b5c6d7e8f9',
+      token_hint: '****0001',
       status: 'verified',
       zone_count: 1,
       last_verified_at: initialTime,
@@ -146,8 +113,8 @@ let db = {
       revision: 1,
       name: '阿里云备用账号',
       provider: 'aliyun',
-      account_id: 'qa-account-02',
-      token_hint: 'qa…0002',
+      account_id: 'LTAI5tQaAccount02',
+      token_hint: '****0002',
       status: 'unverified',
       zone_count: 1,
       ...timestamps,
@@ -169,7 +136,7 @@ let db = {
       revision: 1,
       provider: 'zerossl',
       credential_mode: 'access_key',
-      access_key_hint: 'qa…0003',
+      access_key_hint: '****0003',
       status: 'unverified',
       ...timestamps,
     },
@@ -197,15 +164,50 @@ let db = {
             proxied: false,
             line_code: 'default',
           },
+          {
+            id: uuid(984),
+            type: 'MX',
+            name: '@',
+            content: 'mx.example.test',
+            ttl: 600,
+            priority: 10,
+            proxied: false,
+            line_code: 'default',
+          },
         ],
       },
       runtime: {
         records_imported: true,
         lines_synced_at: initialTime,
         lines: structuredClone(lines),
-        projected_records: [],
+        projected_records: [
+          {
+            id: uuid(985),
+            type: 'CNAME',
+            name: 'qa',
+            content: 'edge.example.test',
+            ttl: 300,
+            proxied: false,
+            line_code: 'default',
+          },
+          {
+            id: uuid(986),
+            type: 'TXT',
+            name: '_acme-challenge.qa',
+            content: 'qa-acme-token',
+            ttl: 120,
+            proxied: false,
+            line_code: 'default',
+          },
+        ],
         record_states: [
           { id: uuid(982), sync_status: 'synced', synced_revision: 4 },
+          {
+            id: uuid(984),
+            sync_status: 'failed',
+            synced_revision: 3,
+            last_error: 'QA 场景：供应商拒绝 MX 记录（优先级冲突）',
+          },
         ],
         conflicts: [],
       },
@@ -234,6 +236,52 @@ let db = {
       last_error: 'QA 场景：供应商令牌等待验证',
       ...timestamps,
     },
+    {
+      id: uuid(987),
+      revision: 3,
+      dns_provider_id: dnsProviderId,
+      dns_provider: 'cloudflare',
+      dns_provider_name: 'Cloudflare 生产账号',
+      domain: 'conflict.test',
+      sync_status: 'conflict',
+      desired_revision: 3,
+      synced_revision: 2,
+      website_count: 0,
+      config: {
+        records: [
+          {
+            id: uuid(988),
+            type: 'A',
+            name: 'www',
+            content: '192.0.2.10',
+            ttl: 300,
+            proxied: false,
+            line_code: 'default',
+          },
+        ],
+      },
+      runtime: {
+        records_imported: true,
+        lines: structuredClone(lines),
+        projected_records: [],
+        record_states: [
+          { id: uuid(988), sync_status: 'conflict', synced_revision: 2 },
+        ],
+        conflicts: [
+          {
+            id: uuid(988),
+            type: 'A',
+            name: 'www',
+            line_code: 'default',
+            local_content: '192.0.2.10',
+            remote_content: '198.51.100.7',
+          },
+        ],
+      },
+      last_synced_at: initialTime,
+      last_error: 'QA 场景：远端记录已被手动修改',
+      ...timestamps,
+    },
   ],
   clusters: [
     {
@@ -242,7 +290,7 @@ let db = {
       name: 'QA Cluster',
       dns_zone_id: zoneId,
       dns_zone_domain: 'example.test',
-      dns_provider_name: 'Cloudflare 生产账号',
+      dns_provider_name: 'cloudflare',
       hostname_prefix: 'edge',
       access_domain: 'edge.example.test',
       node_count: 3,
@@ -256,7 +304,7 @@ let db = {
       name: '备用集群',
       dns_zone_id: zoneId,
       dns_zone_domain: 'example.test',
-      dns_provider_name: 'Cloudflare 生产账号',
+      dns_provider_name: 'cloudflare',
       hostname_prefix: 'backup',
       access_domain: 'backup.example.test',
       node_count: 0,
@@ -278,7 +326,6 @@ let db = {
         endpoints: [
           { id: uuid(972), ip_address: '192.0.2.10', line_code: 'default' },
         ],
-        cache: structuredClone(cacheConfig),
       },
       runtime: {
         registration_status: 'registered',
@@ -288,15 +335,15 @@ let db = {
         active_release_id: uuid(701),
         active_manifest_digest: 'a'.repeat(64),
         agent_version: '1.8.0',
-        cpu_usage: 12.4,
-        memory_usage: 28.6,
+        // Ratios in [0, 1], as validated by service/domains/agent/agent_protocol.h.
+        cpu_usage: 0.124,
+        memory_usage: 0.286,
         traffic_out_bps: 3145728,
         connection_count: 426,
         load_1m: 0.24,
         queued_log_events: 2,
         dropped_log_events: 0,
         health: 'healthy',
-        cache_statistics: structuredClone(cacheStatistics),
       },
       ...timestamps,
     },
@@ -312,7 +359,6 @@ let db = {
         endpoints: [
           { id: uuid(974), ip_address: '2001:db8::20', line_code: 'telecom' },
         ],
-        cache: structuredClone(cacheConfig),
       },
       runtime: {
         registration_status: 'registered',
@@ -320,12 +366,11 @@ let db = {
         last_heartbeat_at: initialTime,
         applied_node_spec_revision: 3,
         agent_version: '1.8.0',
-        cpu_usage: 8.2,
-        memory_usage: 19.5,
+        cpu_usage: 0.082,
+        memory_usage: 0.195,
         traffic_out_bps: 1048576,
         connection_count: 187,
         load_1m: 0.12,
-        cache_statistics: structuredClone(cacheStatistics),
       },
       ...timestamps,
     },
@@ -341,7 +386,6 @@ let db = {
         endpoints: [
           { id: uuid(976), ip_address: '192.0.2.30', line_code: 'oversea' },
         ],
-        cache: structuredClone(cacheConfig),
       },
       runtime: {
         registration_status: 'pending',
@@ -355,7 +399,7 @@ let db = {
     {
       id: certificateId,
       revision: 2,
-      domains: ['qa.example.test'],
+      domains: ['qa.example.test', 'www.qa.example.test'],
       issuer: "Let's Encrypt",
       certificate_provider_id: certificateProviderId,
       certificate_provider: 'letsencrypt',
@@ -392,6 +436,70 @@ let db = {
       website_count: 0,
       ...timestamps,
     },
+    {
+      id: uuid(993),
+      revision: 3,
+      domains: ['shop.example.test'],
+      issuer: "Let's Encrypt",
+      certificate_provider_id: certificateProviderId,
+      certificate_provider: 'letsencrypt',
+      status: 'valid',
+      usable: true,
+      config: { auto_renew: false },
+      dns_zone_id: zoneId,
+      dns_zone_domain: 'example.test',
+      not_before: '2026-07-28T00:00:00Z',
+      expires_at: '2026-10-26T00:00:00Z',
+      remaining_days: 12,
+      serial_number: 'QA000003',
+      fingerprint_sha256: 'cd'.repeat(32),
+      last_issued_at: '2026-07-28T00:05:00Z',
+      sync_status: 'completed',
+      sync_count_fails: 0,
+      website_count: 0,
+      ...timestamps,
+    },
+    {
+      id: uuid(994),
+      revision: 2,
+      domains: ['legacy.example.test'],
+      issuer: 'zerossl',
+      certificate_provider_id: uuid(812),
+      certificate_provider: 'zerossl',
+      status: 'failed',
+      usable: false,
+      config: { auto_renew: true },
+      dns_zone_id: zoneId,
+      dns_zone_domain: 'example.test',
+      last_error: 'QA 场景：ACME 订单验证失败（DNS-01 记录未生效）',
+      sync_status: 'failed',
+      sync_count_fails: 3,
+      website_count: 0,
+      ...timestamps,
+    },
+    {
+      id: uuid(995),
+      revision: 4,
+      domains: ['old.example.test'],
+      issuer: "Let's Encrypt",
+      certificate_provider_id: certificateProviderId,
+      certificate_provider: 'letsencrypt',
+      status: 'expired',
+      usable: false,
+      config: { auto_renew: false },
+      dns_zone_id: zoneId,
+      dns_zone_domain: 'example.test',
+      not_before: '2026-06-01T00:00:00Z',
+      expires_at: '2026-08-30T00:00:00Z',
+      remaining_days: 0,
+      serial_number: 'QA000005',
+      fingerprint_sha256: 'ef'.repeat(32),
+      last_issued_at: '2026-06-01T00:05:00Z',
+      sync_status: 'completed',
+      sync_count_fails: 0,
+      website_count: 0,
+      ...timestamps,
+    },
   ],
   websites: [
     {
@@ -403,7 +511,11 @@ let db = {
       status: 'enabled',
       config: structuredClone(websiteConfig),
       certificates: [
-        { id: certificateId, domains: ['qa.example.test'], usable: true },
+        {
+          id: certificateId,
+          domains: ['qa.example.test', 'www.qa.example.test'],
+          usable: true,
+        },
       ],
       runtime: {
         domain_states: [
@@ -427,7 +539,7 @@ let db = {
             latency_millis: 23,
           },
         ],
-        deploy_status: 'synced',
+        deploy_status: 'applied',
         target_node_count: 2,
         synced_node_count: 2,
       },
@@ -450,8 +562,6 @@ let db = {
             dns_mode: 'external',
           },
         ],
-        cache_enabled: false,
-        cache_policy_id: '',
         certificate_ids: [],
         https_enabled: false,
       },
@@ -473,39 +583,6 @@ let db = {
       ...timestamps,
     },
   ],
-  policies: [
-    structuredClone(policyFixture.data.list[0]),
-    {
-      ...structuredClone(policyFixture.data.list[0]),
-      id: uuid(902),
-      name: 'QA API 绕过策略',
-      description: '仅供本地视觉回归，适合动态接口',
-      status: 'disabled',
-      revision: 1,
-      website_count: 0,
-      websites: [],
-      rules: [
-        {
-          id: uuid(912),
-          name: '全部绕过',
-          status: 'enabled',
-          match_type: 'all',
-          patterns: [],
-          action: 'bypass',
-          ttl_seconds: 0,
-          query_mode: 'include',
-          status_codes: [200],
-          min_object_bytes: 0,
-          max_object_bytes: 0,
-          stale_if_error_seconds: 0,
-          ignore_origin_cache_control: false,
-          range_enabled: false,
-        },
-      ],
-      ...timestamps,
-    },
-  ],
-  jobs: structuredClone(jobsFixture.data.list),
   tasks: [
     {
       id: 'certificate:issue:qa',
@@ -585,10 +662,6 @@ let db = {
         user_agent: 'QA Browser',
         referer: 'https://qa.example.test/',
         request_body_truncated: false,
-        cache_status: 'hit',
-        cache_layer: 'memory',
-        origin_bytes: 0,
-        cache_bytes: 16384,
       },
       {
         id: uuid(612),
@@ -605,26 +678,217 @@ let db = {
         response_bytes: 512,
         duration_ms: 29,
         request_body_truncated: false,
-        cache_status: 'miss',
-        cache_layer: 'none',
-        origin_bytes: 512,
-        cache_bytes: 0,
       },
     ],
   },
 }
-for (const job of db.jobs) {
-  job.error ??= ''
-  for (const node of job.nodes) {
-    node.node_id = nodeId
-    node.command_id ??= uuid(631)
-    node.error ??= ''
-    for (const result of node.results) result.error ??= ''
+// Enough nodes and websites to exercise list paging, filters and dashboards.
+const generatedNodes = [
+  ['QA Edge 04', clusterId, 'online', 0.41, 0.52, 7340032, 'telecom'],
+  ['QA Edge 05', clusterId, 'online', 0.67, 0.71, 12582912, 'unicom'],
+  ['QA Edge 06', clusterId, 'online', 0.93, 0.88, 20971520, 'default'],
+  ['QA Edge 07', clusterId, 'offline', undefined, undefined, 0, 'oversea'],
+  ['QA Edge 08', clusterId, 'online', 0.22, 0.34, 2097152, 'telecom'],
+  ['QA Edge 09', clusterId, 'online', 0.05, 0.17, 524288, 'default'],
+  ['备用 Edge 01', uuid(952), 'offline', undefined, undefined, 0, 'default'],
+  [
+    '备用 Edge 02',
+    uuid(952),
+    'unregistered',
+    undefined,
+    undefined,
+    0,
+    'unicom',
+  ],
+  ['QA Edge 10', clusterId, 'online', 0.78, 0.63, 9437184, 'unicom'],
+]
+generatedNodes.forEach(
+  ([name, cluster, connection, cpu, memory, traffic, line], index) => {
+    const online = connection === 'online'
+    const registered = connection !== 'unregistered'
+    db.nodes.push({
+      id: uuid(1001 + index),
+      revision: 1,
+      cluster_id: cluster,
+      cluster_name: '',
+      name,
+      status: registered ? 'enabled' : 'disabled',
+      node_spec_revision: 1,
+      config: {
+        endpoints: [
+          {
+            id: uuid(1101 + index),
+            ip_address: `198.51.100.${40 + index}`,
+            line_code: line,
+          },
+        ],
+      },
+      runtime: registered
+        ? {
+            registration_status: 'registered',
+            connection_status: connection,
+            last_heartbeat_at: new Date(
+              Date.parse(initialTime) - (online ? index * 5000 : 3600000)
+            ).toISOString(),
+            applied_node_spec_revision: 1,
+            agent_version: index % 3 === 0 ? '1.7.4' : '1.8.0',
+            ...(online
+              ? {
+                  cpu_usage: cpu,
+                  memory_usage: memory,
+                  traffic_out_bps: traffic,
+                  connection_count: Math.round(traffic / 8192),
+                  load_1m: Math.round(cpu * 400) / 100,
+                  health: cpu > 0.9 ? 'degraded' : 'healthy',
+                }
+              : {}),
+          }
+        : {
+            registration_status: 'pending',
+            connection_status: 'unregistered',
+            applied_node_spec_revision: 0,
+          },
+      ...timestamps,
+    })
   }
-}
+)
+const generatedWebsites = [
+  ['官网', 'www', 'enabled', true, 'applied'],
+  ['API 网关', 'api', 'enabled', true, 'applied'],
+  ['开发者文档', 'docs', 'enabled', true, 'partial'],
+  ['博客', 'blog', 'enabled', true, 'applied'],
+  ['下载中心', 'download', 'enabled', false, 'applied'],
+  ['控制台前端', 'app', 'enabled', true, 'applied'],
+  ['图片服务', 'img', 'enabled', true, 'applied'],
+  ['活动页', 'event', 'disabled', false, 'pending'],
+  ['帮助中心', 'help', 'enabled', true, 'applied'],
+  ['状态页', 'status', 'enabled', false, 'applied'],
+  ['视频点播', 'vod', 'enabled', true, 'partial'],
+  ['移动端 H5', 'm', 'enabled', true, 'applied'],
+  ['合作伙伴门户', 'partner', 'enabled', false, 'pending'],
+  ['灰度环境', 'canary', 'disabled', false, 'pending'],
+]
+generatedWebsites.forEach(([name, host, status, logging, deploy], index) => {
+  const domains = [
+    {
+      id: uuid(1301 + index * 2),
+      hostname: `${host}.example.test`,
+      dns_mode: 'managed',
+    },
+    ...(index % 3 === 0
+      ? [
+          {
+            id: uuid(1302 + index * 2),
+            hostname: `${host}-cn.example.test`,
+            dns_mode: 'external',
+          },
+        ]
+      : []),
+  ]
+  db.websites.push({
+    id: uuid(1201 + index),
+    revision: 1,
+    cluster_id: clusterId,
+    cluster_name: '',
+    access_domain: '',
+    status,
+    config: {
+      ...structuredClone(websiteConfig),
+      name,
+      domains,
+      origins: [
+        {
+          ...structuredClone(websiteConfig.origins[0]),
+          id: uuid(1401 + index),
+          host: `${host}.origin.qa.test`,
+        },
+      ],
+      access_log_enabled: logging,
+      https_enabled: index % 4 !== 3,
+      // The first generated website (官网) also binds the QA certificate.
+      certificate_ids: index === 0 ? [certificateId] : [],
+    },
+    certificates: [],
+    runtime: {
+      domain_states: domains.map((domain) => ({
+        id: domain.id,
+        access_protocol: index % 4 !== 3 ? 'https' : 'http',
+        resolution_status: deploy === 'pending' ? 'pending' : 'verified',
+        ...(deploy === 'pending' ? {} : { last_verified_at: initialTime }),
+      })),
+      origin_sources: [],
+      origin_states: [],
+      deploy_status: deploy,
+      target_node_count: 7,
+      synced_node_count:
+        deploy === 'applied' ? 7 : deploy === 'partial' ? 4 : 0,
+    },
+    ...timestamps,
+  })
+})
+db.tasks.push(
+  {
+    id: 'node:deploy:qa-06',
+    resource_type: 'node',
+    resource_id: uuid(1003),
+    name: 'QA Edge 06',
+    operation: 'deploy',
+    version: 1,
+    status: 'queued',
+    error: '',
+    failures: 0,
+    updated_at: '2026-10-01T01:29:30Z',
+    next_attempt_at: '',
+  },
+  {
+    id: 'certificate:renew:qa',
+    resource_type: 'certificate',
+    resource_id: certificateId,
+    name: 'qa.example.test',
+    operation: 'renew',
+    version: 2,
+    status: 'failed',
+    error: 'QA 场景：DNS-01 验证超时',
+    failures: 3,
+    updated_at: '2026-10-01T01:10:00Z',
+    next_attempt_at: '',
+  },
+  {
+    id: 'dns-zone:sync:example',
+    resource_type: 'dns_zone',
+    resource_id: zoneId,
+    name: 'example.test',
+    operation: 'sync',
+    version: 4,
+    status: 'recovered',
+    error: '',
+    failures: 1,
+    updated_at: '2026-10-01T00:55:00Z',
+    next_attempt_at: '',
+  },
+  {
+    id: 'provider:verify:cloudflare',
+    resource_type: 'provider',
+    resource_id: dnsProviderId,
+    name: 'Cloudflare 生产账号',
+    operation: 'verify',
+    version: 3,
+    status: 'completed',
+    error: '',
+    failures: 0,
+    updated_at: '2026-10-01T00:40:00Z',
+    next_attempt_at: '',
+  }
+)
 const seed = structuredClone(db)
+// Like the backend: `node_id` is the agent id (32 lowercase hex, not the node
+// UUID) and `secret` is 64 lowercase hex; both are regenerated on reset.
+const issueCredentials = () => ({
+  node_id: randomBytes(16).toString('hex'),
+  secret: randomBytes(32).toString('hex'),
+})
 const credentials = new Map(
-  db.nodes.map((node) => [node.id, `qa-only-secret-${node.id}`])
+  db.nodes.map((node) => [node.id, issueCredentials()])
 )
 const user = {
   id: uuid(101),
@@ -666,13 +930,10 @@ function requireRevision(req, item) {
       '/api/providers/dns': 16107,
       '/api/providers/certificate': 16016,
       '/api/certificates': 16016,
-      '/api/cache-policies': 17104,
     }
-    const code = path.includes('/cache-jobs')
-      ? 17202
-      : (Object.entries(codes).find(([prefix]) =>
-          path.startsWith(prefix)
-        )?.[1] ?? 40001)
+    const code =
+      Object.entries(codes).find(([prefix]) => path.startsWith(prefix))?.[1] ??
+      40001
     fail('配置已被其他请求修改，请刷新后重试', 412, code)
   }
 }
@@ -686,7 +947,8 @@ function refreshRelations() {
     const nodes = db.nodes.filter((value) => value.cluster_id === cluster.id)
     Object.assign(cluster, {
       dns_zone_domain: zone?.domain ?? '',
-      dns_provider_name: zone?.dns_provider_name ?? '',
+      // Backend sends the platform code (provider.provider) under this name.
+      dns_provider_name: zone?.dns_provider ?? '',
       access_domain: `${cluster.hostname_prefix}.${zone?.domain ?? ''}`,
       node_count: nodes.length,
       online_node_count: nodes.filter(
@@ -726,17 +988,6 @@ function refreshRelations() {
     certificate.website_count = db.websites.filter((value) =>
       value.config.certificate_ids.includes(certificate.id)
     ).length
-  for (const policy of db.policies) {
-    const websites = db.websites.filter(
-      (value) => value.config.cache_policy_id === policy.id
-    )
-    policy.website_count = websites.length
-    policy.websites = websites.map((value) => ({
-      id: value.id,
-      name: value.config.name,
-      status: value.status,
-    }))
-  }
 }
 function filtered(list, query) {
   const keyword = query.get('keyword')?.toLowerCase()
@@ -783,6 +1034,43 @@ function zoneOption(zone) {
     available: zone.sync_status === 'synced',
   }
 }
+// Shared definitions for overview counts and list filters (same 口径).
+const zoneSyncStatuses = ['pending', 'syncing', 'synced', 'failed', 'conflict']
+const zoneIssueStatuses = ['failed', 'conflict']
+const isCertificateExpiring = (certificate) =>
+  certificate.status === 'valid' &&
+  certificate.remaining_days !== undefined &&
+  certificate.remaining_days <= 30
+const isCertificateAbnormal = (certificate) =>
+  ['failed', 'expired'].includes(certificate.status) ||
+  (certificate.status === 'valid' && Boolean(certificate.last_error))
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+// Invalid filter values are rejected before the stream opens (HTTP 400).
+function validateStreamQuery(url) {
+  const query = url.searchParams
+  const invalid = (name) => fail(`参数 ${name} 不合法`, 400, 40001)
+  if (url.pathname === '/api/dns-zones/stream') {
+    const value = query.get('sync_status')
+    if (
+      value !== null &&
+      value !== 'issue' &&
+      !zoneSyncStatuses.includes(value)
+    )
+      invalid('sync_status')
+  }
+  if (url.pathname === '/api/certificates/stream')
+    for (const name of ['expiring', 'abnormal'])
+      if (query.has(name) && query.get(name) !== '1') invalid(name)
+  if (url.pathname === '/api/websites/stream') {
+    const value = query.get('certificate_id')
+    if (value !== null && !uuidPattern.test(value)) invalid('certificate_id')
+  }
+}
+// Overview `nodes` event: same page shape as /api/nodes/stream?page=1&page_size=100.
+function overviewNodes() {
+  return page(db.nodes, new URLSearchParams({ page: '1', page_size: '100' }))
+}
 function overview() {
   return {
     resources: {
@@ -790,17 +1078,24 @@ function overview() {
       domain_count: db.zones.length,
       certificate_count: db.certificates.length,
       cluster_count: db.clusters.length,
+      node_count: db.nodes.length,
+      // Backend: registered + enabled + heartbeat within 90 s; the mock keeps
+      // fixed heartbeat times, so its connection_status stands in for liveness.
+      online_node_count: db.nodes.filter(
+        (node) =>
+          node.status === 'enabled' &&
+          node.runtime.registration_status === 'registered' &&
+          node.runtime.connection_status === 'online'
+      ).length,
     },
     issues: {
-      dns_zone_issue_count: db.zones.filter(
-        (zone) => zone.sync_status === 'failed'
+      dns_zone_issue_count: db.zones.filter((zone) =>
+        zoneIssueStatuses.includes(zone.sync_status)
       ).length,
-      certificate_expiring_count: db.certificates.filter(
-        (certificate) => certificate.remaining_days < 30
-      ).length,
-      certificate_failed_count: db.certificates.filter(
-        (certificate) => certificate.status === 'failed'
-      ).length,
+      certificate_expiring_count: db.certificates.filter(isCertificateExpiring)
+        .length,
+      certificate_failed_count: db.certificates.filter(isCertificateAbnormal)
+        .length,
       active_marker_count: db.tasks.filter((task) =>
         ['queued', 'running', 'retrying'].includes(task.status)
       ).length,
@@ -866,11 +1161,122 @@ function dashboard() {
     ],
   }
 }
+// Access-log events ingested through /__qa/control?event=logs&resource=website.
+const ingestedTraffic = new Map()
+const utcHourTimestamp = (time) =>
+  new Date(time).toISOString().replace(/\.\d{3}Z$/, '+00:00')
+// Overview `traffic` event: 24 ascending hourly points ending at the
+// current UTC hour, fixed 1xx–5xx classes, top 8 websites by response bytes,
+// computed only from websites with access logging enabled.
+function overviewTraffic() {
+  const hourMs = 3600000
+  const currentHour = Math.floor(Date.now() / hourMs) * hourMs
+  const logging = db.websites.filter(
+    (website) => website.config.access_log_enabled
+  )
+  const weights = logging.map((website) => ({
+    website,
+    weight: 1 + (Number.parseInt(website.id.slice(-4), 10) % 7),
+  }))
+  const totalWeight = weights.reduce((sum, item) => sum + item.weight, 0)
+  const extra = [...ingestedTraffic.values()].reduce(
+    (sum, item) => ({
+      requests: sum.requests + item.requests,
+      bytes: sum.bytes + item.bytes,
+      errors: sum.errors + item.errors,
+    }),
+    { requests: 0, bytes: 0, errors: 0 }
+  )
+  const hourly = Array.from({ length: 24 }, (_, index) => {
+    const timestamp = currentHour - (23 - index) * hourMs
+    const hour = new Date(timestamp).getUTCHours()
+    const curve = 0.55 + 0.45 * Math.sin(((hour - 8) / 24) * 2 * Math.PI)
+    let requestCount = Math.round(totalWeight * 900 * curve)
+    let responseBytes = requestCount * 36864
+    if (index === 23) {
+      requestCount += extra.requests
+      responseBytes += extra.bytes
+    }
+    return {
+      timestamp: utcHourTimestamp(timestamp),
+      request_count: requestCount,
+      response_bytes: responseBytes,
+      bandwidth_bps: Math.round((responseBytes * 8) / 3600),
+    }
+  })
+  const requestCount = hourly.reduce(
+    (sum, point) => sum + point.request_count,
+    0
+  )
+  const responseBytes = hourly.reduce(
+    (sum, point) => sum + point.response_bytes,
+    0
+  )
+  const status5xx = Math.round(requestCount * 0.004) + extra.errors
+  const shares = { '1xx': 0.001, '3xx': 0.07, '4xx': 0.065 }
+  const classCounts = Object.fromEntries(
+    Object.entries(shares).map(([label, share]) => [
+      label,
+      Math.round(requestCount * share),
+    ])
+  )
+  classCounts['5xx'] = status5xx
+  classCounts['2xx'] =
+    requestCount -
+    Object.values(classCounts).reduce((sum, count) => sum + count, 0)
+  const dailyRequests = (weight) =>
+    totalWeight
+      ? Math.round((requestCount - extra.requests) * (weight / totalWeight))
+      : 0
+  return {
+    window_hours: 24,
+    summary: {
+      request_count: requestCount,
+      response_bytes: responseBytes,
+      peak_bandwidth_bps: Math.round(
+        Math.max(0, ...hourly.map((point) => point.bandwidth_bps)) * 1.35
+      ),
+      status_5xx_count: status5xx,
+      unique_client_ips: Math.round(requestCount / 37),
+    },
+    hourly,
+    status_classes: ['1xx', '2xx', '3xx', '4xx', '5xx'].map((label) => ({
+      label,
+      request_count: classCounts[label],
+    })),
+    top_websites: weights
+      .map(({ website, weight }) => {
+        const ingested = ingestedTraffic.get(website.id)
+        const requests = dailyRequests(weight) + (ingested?.requests ?? 0)
+        return {
+          website_id: website.id,
+          name:
+            website.config.name ?? website.config.domains[0]?.hostname ?? '',
+          request_count: requests,
+          response_bytes:
+            Math.round(requests * 36864 * (1 + (weight % 3) * 0.4)) +
+            (ingested?.bytes ?? 0),
+        }
+      })
+      .sort((left, right) => right.response_bytes - left.response_bytes)
+      .slice(0, 8),
+    coverage: {
+      logging_website_count: logging.length,
+      website_count: db.websites.length,
+    },
+  }
+}
+function detail(list, id, code, message) {
+  const item = list.find((value) => value.id === id)
+  if (!item) fail(message, 404, code)
+  return item
+}
 function readStream(url) {
   refreshRelations()
   const path = url.pathname,
     query = url.searchParams,
     part = path.split('/').filter(Boolean)
+  // The combined overview stream is emitted per event in emitSnapshot.
   if (path === '/api/overview/stream') return overview()
   if (path === '/api/providers/dns/stream') return page(db.dnsProviders, query)
   if (path === '/api/providers/dns/options/stream')
@@ -882,7 +1288,19 @@ function readStream(url) {
     return filtered(db.certificateProviders, query)
   if (part[1] === 'providers' && part[2] === 'dns' && part.length === 5)
     return find(db.dnsProviders, part[3])
-  if (path === '/api/dns-zones/stream') return page(db.zones, query)
+  if (path === '/api/dns-zones/stream') {
+    const syncStatus = query.get('sync_status')
+    return page(
+      db.zones.filter(
+        (zone) =>
+          !syncStatus ||
+          (syncStatus === 'issue'
+            ? zoneIssueStatuses.includes(zone.sync_status)
+            : zone.sync_status === syncStatus)
+      ),
+      query
+    )
+  }
   if (path === '/api/dns-zones/collection/stream')
     return filtered(db.zones, query).map(zoneOption)
   if (path === '/api/dns-zones/options/stream')
@@ -895,43 +1313,53 @@ function readStream(url) {
       ],
     }
   if (part[1] === 'dns-zones' && part.length === 4)
-    return find(db.zones, part[2])
+    return detail(db.zones, part[2], 16201, '托管域名不存在')
   if (path === '/api/clusters/stream') return page(db.clusters, query)
+  if (part[1] === 'clusters' && part.length === 4 && part[2] !== 'options')
+    return detail(db.clusters, part[2], 16401, '集群不存在')
   if (path === '/api/clusters/options/stream')
     return filtered(db.clusters, query)
   if (path === '/api/nodes/stream') return page(db.nodes, query)
+  if (part[1] === 'nodes' && part.length === 4)
+    return detail(db.nodes, part[2], 16501, '节点不存在')
   if (part[1] === 'nodes' && part[3] === 'logs') {
     find(db.nodes, part[2])
     return { list: db.nodeLogs[part[2]] ?? [] }
   }
-  if (path === '/api/certificates/stream') return page(db.certificates, query)
+  if (path === '/api/certificates/stream')
+    return page(
+      db.certificates.filter(
+        (certificate) =>
+          (query.get('expiring') !== '1' ||
+            isCertificateExpiring(certificate)) &&
+          (query.get('abnormal') !== '1' || isCertificateAbnormal(certificate))
+      ),
+      query
+    )
   if (path === '/api/certificates/options/stream')
     return filtered(db.certificates, query).filter(
       (value) => query.get('usable') !== 'true' || value.usable
     )
   if (part[1] === 'certificates' && part.length === 4)
-    return find(db.certificates, part[2])
-  if (path === '/api/cache-policies/stream') return page(db.policies, query)
-  if (path === '/api/cache-policies/options/stream')
-    return db.policies
-      .filter((policy) => policy.status === 'enabled')
-      .map(({ id, name, status, revision }) => ({ id, name, status, revision }))
-  if (part[1] === 'cache-policies' && part.length === 4)
-    return find(db.policies, part[2])
-  if (path === '/api/websites/stream') return page(db.websites, query)
+    return detail(db.certificates, part[2], 16001, '证书任务不存在')
+  if (path === '/api/websites/stream') {
+    const certificate = query.get('certificate_id')
+    return page(
+      db.websites.filter(
+        (website) =>
+          !certificate || website.config.certificate_ids.includes(certificate)
+      ),
+      query
+    )
+  }
   if (part[1] === 'websites') {
-    find(db.websites, part[2])
+    const website = detail(db.websites, part[2], 16601, '网站不存在')
     if (part[3] === 'access-logs')
       return part[4] === 'history'
         ? page(db.accessLogs[part[2]] ?? [], query)
         : { list: db.accessLogs[part[2]] ?? [] }
     if (part[3] === 'dashboard') return dashboard()
-    if (part[3] === 'cache-jobs')
-      return page(
-        db.jobs.filter((job) => job.website_id === part[2]),
-        query
-      )
-    if (part.length === 4) return find(db.websites, part[2])
+    if (part.length === 4) return website
   }
   if (path === '/api/tasks/stream')
     return {
@@ -961,21 +1389,37 @@ function readStream(url) {
 function emit(stream, event, data, { force = false, cursor } = {}) {
   const payload = typeof data === 'string' ? data : JSON.stringify(data)
   const frame = `${cursor ? `id: ${cursor}\n` : ''}event: ${event}\ndata: ${payload}\n\n`
-  if (!force && stream.lastFrame === frame) return
+  // Deduplicate per event: combined streams only push the parts that changed.
+  stream.framesByEvent ??= new Map()
+  if (!force && stream.framesByEvent.get(event) === frame) return
   stream.res.write(frame)
   stream.lastFrame = frame
+  stream.framesByEvent.set(event, frame)
   stream.eventCount += 1
   emittedEvents += 1
   stream.lastEvent = event
 }
 function emitSnapshot(stream, force = false) {
   try {
+    if (stream.url.pathname === '/api/overview/stream') {
+      // Combined overview stream: counts, traffic aggregate and node health.
+      refreshRelations()
+      emit(stream, 'snapshot', envelope(overview()), { force })
+      emit(stream, 'traffic', envelope(overviewTraffic()), { force })
+      emit(stream, 'nodes', envelope(overviewNodes()), { force })
+      return
+    }
     const event = stream.url.pathname.endsWith('/dashboard/stream')
       ? 'dashboard'
       : 'snapshot'
     emit(stream, event, envelope(readStream(stream.url)), { force })
   } catch (error) {
-    emit(stream, 'resource-error', errorEnvelope(error.message), { force })
+    emit(
+      stream,
+      'resource-error',
+      errorEnvelope(error.message, error.code ?? 40001),
+      { force }
+    )
   }
 }
 function openStream(req, res, url) {
@@ -1023,7 +1467,11 @@ function openStream(req, res, url) {
         { cursor }
       )
     } catch (error) {
-      emit(stream, 'resource-error', errorEnvelope(error.message))
+      emit(
+        stream,
+        'resource-error',
+        errorEnvelope(error.message, error.code ?? 40001)
+      )
     }
   } else emitSnapshot(stream)
   // Transport keepalive only, without business reads or repeated snapshots.
@@ -1096,7 +1544,6 @@ function qaState() {
       websites: db.websites.length,
       dns_zones: db.zones.length,
       certificates: db.certificates.length,
-      cache_policies: db.policies.length,
       tasks: db.tasks.length,
     },
   }
@@ -1130,6 +1577,7 @@ function control(query) {
   if (event === 'reset') {
     db = structuredClone(seed)
     tick = 0
+    ingestedTraffic.clear()
     for (const stream of targets)
       if (!/\/(?:logs|access-logs)\/stream$/.test(stream.url.pathname))
         emitSnapshot(stream, true)
@@ -1138,14 +1586,19 @@ function control(query) {
   if (event === 'node-runtime') {
     const node = find(db.nodes, query.get('id') ?? nodeId)
     node.runtime.last_heartbeat_at = nextTime()
-    node.runtime.cpu_usage = Number(
-      query.get('cpu') ?? (node.runtime.cpu_usage ?? 0) + 1
+    node.runtime.cpu_usage = Math.min(
+      1,
+      Number(query.get('cpu') ?? (node.runtime.cpu_usage ?? 0) + 0.01)
     )
     for (const stream of targets)
       if (
-        stream.url.pathname === '/api/nodes/stream' &&
-        (!stream.url.searchParams.get('cluster_id') ||
-          stream.url.searchParams.get('cluster_id') === node.cluster_id)
+        stream.url.pathname === `/api/nodes/${node.id}/stream` ||
+        // Overview `nodes` event holds the first 100 nodes.
+        (stream.url.pathname === '/api/overview/stream' &&
+          overviewNodes().list.some((item) => item.id === node.id)) ||
+        (stream.url.pathname === '/api/nodes/stream' &&
+          (!stream.url.searchParams.get('cluster_id') ||
+            stream.url.searchParams.get('cluster_id') === node.cluster_id))
       )
         emit(
           stream,
@@ -1154,6 +1607,16 @@ function control(query) {
           { force: true }
         )
     return { node_id: node.id, cpu_usage: node.runtime.cpu_usage }
+  }
+  if (event === 'node-connection') {
+    // Node goes online/offline: list, detail, cluster and overview snapshots change.
+    const node = find(db.nodes, query.get('id') ?? nodeId)
+    const status = query.get('status') === 'online' ? 'online' : 'offline'
+    node.runtime.connection_status = status
+    if (status === 'online') node.runtime.last_heartbeat_at = nextTime()
+    refreshRelations()
+    broadcast(['nodes', 'clusters'])
+    return { node_id: node.id, connection_status: status }
   }
   if (event === 'logs') {
     const resource = query.get('resource') ?? 'node',
@@ -1183,6 +1646,21 @@ function control(query) {
         `/api/${resource === 'node' ? 'nodes' : 'websites'}/${id}/${resource === 'node' ? 'logs' : 'access-logs'}/stream`
       )
         emit(stream, 'logs', envelope({ list: [entry], cursor }), { cursor })
+    if (resource !== 'node') {
+      // Access-log ingestion notifies the tenant-wide traffic aggregate.
+      const totals = ingestedTraffic.get(id) ?? {
+        requests: 0,
+        bytes: 0,
+        errors: 0,
+      }
+      totals.requests += 1
+      totals.bytes += entry.response_bytes
+      if (entry.status_code >= 500) totals.errors += 1
+      ingestedTraffic.set(id, totals)
+      for (const stream of targets)
+        if (stream.url.pathname === '/api/overview/stream')
+          emit(stream, 'traffic', envelope(overviewTraffic()))
+    }
     return { log_id: entry.id }
   }
   if (event === 'update') {
@@ -1193,7 +1671,6 @@ function control(query) {
       websites: db.websites,
       'dns-zones': db.zones,
       certificates: db.certificates,
-      'cache-policies': db.policies,
     }
     const collection = collections[resource]
     if (!collection) fail('QA resource 不支持更新')
@@ -1245,11 +1722,6 @@ function rejectDelete(resource, id) {
     db.websites.some((website) => website.config.certificate_ids.includes(id))
   )
     fail('证书正在被网站使用', 409)
-  if (
-    resource === 'cache-policies' &&
-    db.websites.some((website) => website.config.cache_policy_id === id)
-  )
-    fail('缓存策略正在被网站使用', 409)
 }
 function createResource(resource, input, url) {
   const base = {
@@ -1268,10 +1740,7 @@ function createResource(resource, input, url) {
       ...base,
       ...input,
       node_spec_revision: 1,
-      config: {
-        ...input.config,
-        cache: input.config?.cache ?? structuredClone(cacheConfig),
-      },
+      config: input.config,
       runtime: {
         registration_status: 'pending',
         connection_status: 'unregistered',
@@ -1329,8 +1798,11 @@ function createResource(resource, input, url) {
       ...base,
       name: input.name,
       provider: input.provider,
-      account_id: input.account_id,
-      token_hint: `qa…${(input.api_token ?? '').slice(-4)}`,
+      account_id:
+        input.provider === 'cloudflare'
+          ? input.account_id.toLowerCase()
+          : input.account_id,
+      token_hint: `****${(input.api_token ?? '').slice(-4)}`,
       status: 'unverified',
       zone_count: 0,
     }
@@ -1341,7 +1813,7 @@ function createResource(resource, input, url) {
       credential_mode: input.credential_mode,
       ...(input.credential_mode === 'email'
         ? { account_email: input.account_email }
-        : { access_key_hint: `qa…${(input.access_key ?? '').slice(-4)}` }),
+        : { access_key_hint: `****${(input.access_key ?? '').slice(-4)}` }),
       status: 'unverified',
     }
   if (resource === 'certificates') {
@@ -1365,8 +1837,6 @@ function createResource(resource, input, url) {
       website_count: 0,
     }
   }
-  if (resource === 'cache-policies')
-    return { ...base, ...input, website_count: 0, websites: [] }
   fail('QA create 不支持')
 }
 async function mutate(req, res, url) {
@@ -1382,7 +1852,6 @@ async function mutate(req, res, url) {
       'providers/dns': db.dnsProviders,
       'providers/certificate': db.certificateProviders,
       certificates: db.certificates,
-      'cache-policies': db.policies,
     },
     list = collections[resource]
   if (!list) fail(`QA mock 未实现写入：${url.pathname}`, 404)
@@ -1392,81 +1861,43 @@ async function mutate(req, res, url) {
     if (part[4] !== 'reveal') {
       requireRevision(req, node)
       touch(node)
-      credentials.set(id, `qa-only-secret-${randomUUID()}`)
+      credentials.set(id, issueCredentials())
       broadcast(['nodes'])
     }
     return json(
       res,
       {
-        node_id: id,
-        secret: credentials.get(id) ?? `qa-only-secret-${id}`,
+        ...(credentials.get(id) ??
+          credentials.set(id, issueCredentials()).get(id)),
         revision: node.revision,
       },
       '凭据已获取',
       node.revision
     )
   }
-  if (resource === 'websites' && action === 'cache-jobs') {
-    const website = find(db.websites, id)
-    if (!part[4]) {
-      requireRevision(req, website)
-      const job = {
-        id: randomUUID(),
-        website_id: id,
-        website_revision: website.revision,
-        policy_revision:
-          db.policies.find(
-            (policy) => policy.id === website.config.cache_policy_id
-          )?.revision ?? 0,
-        ...input,
-        status: 'queued',
-        revision: 1,
-        error: '',
-        created_at: nextTime(),
-        updated_at: nextTime(),
-        nodes: db.nodes
-          .filter(
-            (node) =>
-              node.cluster_id === website.cluster_id &&
-              node.status === 'enabled'
-          )
-          .map((node) => ({
-            node_id: node.id,
-            node_name: node.name,
-            command_id: randomUUID(),
-            status: 'queued',
-            error: '',
-            results: [],
-          })),
-      }
-      db.jobs.unshift(job)
-      broadcast(['websites'])
-      return json(res, job, '缓存任务已创建', 1)
-    }
-    const job = find(db.jobs, part[4])
-    requireRevision(req, job)
-    if (part[5] === 'cancel') job.status = 'cancelled'
-    else if (part[5] === 'retry') job.status = 'queued'
-    else fail('缓存任务操作不正确')
-    touch(job)
-    broadcast(['websites'])
-    return json(res, undefined, '缓存任务已更新', job.revision)
-  }
   if (req.method === 'POST' && !id) {
     const item = createResource(resource, input, url)
     list.push(item)
     refreshRelations()
-    broadcast([resource, 'clusters', 'cache-policies'])
+    broadcast([resource, 'clusters'])
     if (resource === 'nodes') {
-      const secret = `qa-only-secret-${item.id}`
-      credentials.set(item.id, secret)
+      const issued = issueCredentials()
+      credentials.set(item.id, issued)
       return json(
         res,
-        { node_id: item.id, secret, revision: item.revision },
+        { ...issued, id: item.id, revision: item.revision },
         '节点已创建',
         item.revision
       )
     }
+    // Contract: creation responses carry the new resource id.
+    if (resource === 'websites')
+      return json(
+        res,
+        { id: item.id, revision: item.revision },
+        '资源已创建',
+        item.revision
+      )
     return json(res, undefined, '资源已创建', item.revision)
   }
   const item = find(list, id)
@@ -1485,7 +1916,7 @@ async function mutate(req, res, url) {
     rejectDelete(resource, id)
     list.splice(list.indexOf(item), 1)
     refreshRelations()
-    broadcast([resource, 'clusters', 'cache-policies'])
+    broadcast([resource, 'clusters'])
     return json(res, undefined, '资源已删除', item.revision + 1)
   }
   if (req.method === 'PUT') {
@@ -1510,14 +1941,14 @@ async function mutate(req, res, url) {
     else if (resource === 'providers/dns') {
       if (input.name) item.name = input.name
       if (input.api_token) {
-        item.token_hint = `qa…${input.api_token.slice(-4)}`
+        item.token_hint = `****${input.api_token.slice(-4)}`
         item.status = 'unverified'
       }
     } else if (resource === 'providers/certificate') {
       item.credential_mode = input.credential_mode
       if (input.account_email) item.account_email = input.account_email
       if (input.access_key)
-        item.access_key_hint = `qa…${input.access_key.slice(-4)}`
+        item.access_key_hint = `****${input.access_key.slice(-4)}`
       item.status = 'unverified'
     } else {
       if (resource === 'clusters') find(db.zones, input.dns_zone_id)
@@ -1557,8 +1988,10 @@ createServer(async (req, res) => {
     totalRequests += 1
     const key = `${req.method} ${url.pathname}${url.search}`
     requestCounts.set(key, (requestCounts.get(key) ?? 0) + 1)
-    if (req.method === 'GET' && url.pathname.endsWith('/stream'))
+    if (req.method === 'GET' && url.pathname.endsWith('/stream')) {
+      validateStreamQuery(url)
       return openStream(req, res, url)
+    }
     if (url.pathname === '/api/auth/me' || url.pathname === '/api/auth/refresh')
       return json(res, user)
     if (url.pathname === '/api/auth/login') return json(res, { user })

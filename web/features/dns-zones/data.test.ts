@@ -143,3 +143,23 @@ test('line queries share a zone read and change cache identity when a cluster ch
   expect(await readLines('zone-b')).toEqual([{ code: 'zone-b' }])
   expect(dnsZoneLinesQuery(undefined).enabled).toBe(false)
 })
+
+test('the sync filter is a server parameter: it reaches the stream URL and the cache key', async () => {
+  const urls: string[] = []
+  setLiveQueryQueryClient(client, undefined, (url) => {
+    urls.push(url)
+    return new Source() as never
+  })
+  const issues = dnsZonesQuery({ page: 2, page_size: 50, sync_status: 'issue' })
+  const all = dnsZonesQuery({ page: 2, page_size: 50 })
+  expect(issues.queryKey).not.toEqual(all.queryKey)
+  const observer = new QueryObserver(client, issues)
+  const stop = observer.subscribe(() => undefined)
+  void observer.refetch().catch(() => undefined)
+  await new Promise<void>((resolve) => queueMicrotask(resolve))
+  expect(urls).toEqual([
+    '/api/dns-zones/stream?page=2&page_size=50&sync_status=issue',
+  ])
+  stop()
+  observer.destroy()
+})

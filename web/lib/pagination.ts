@@ -23,3 +23,26 @@ export function validateCollectionPage(value: unknown, requestedPage: number) {
     throw new ApiProtocolError()
   }
 }
+
+type PageWindowItem = number | 'start-ellipsis' | 'end-ellipsis'
+
+/** Page links for a pager: first, last, `siblings` around the current page,
+ * and an ellipsis wherever more than one page is skipped. */
+export function pageWindow(
+  page: number,
+  totalPages: number,
+  siblings = 1
+): PageWindowItem[] {
+  const last = Math.max(1, totalPages)
+  const current = Math.min(Math.max(1, page), last)
+  const start = Math.max(2, current - siblings)
+  const end = Math.min(last - 1, current + siblings)
+  const items: PageWindowItem[] = [1]
+  if (start > 3) items.push('start-ellipsis')
+  else for (let value = 2; value < start; value++) items.push(value)
+  for (let value = start; value <= end; value++) items.push(value)
+  if (end < last - 2) items.push('end-ellipsis')
+  else for (let value = end + 1; value < last; value++) items.push(value)
+  if (last > 1) items.push(last)
+  return items
+}

@@ -1,6 +1,12 @@
 type Options = {
   createSource?: (url: string) => EventSource
+  /** First reconnect delay; doubles per consecutive failed attempt. */
   retryDelayMs?: number
+  /** Upper bound of the reconnect backoff. */
+  maxRetryDelayMs?: number
+  /** Consecutive refused handshakes (HTTP error, readyState CLOSED) before
+   * the stream gives up and emits `exhausted`; a successful open resets it. */
+  maxRejectedAttempts?: number
   // null for endpoints whose heartbeat frames are not dispatched as DOM events.
   idleTimeoutMs?: number | null
   // Cursor streams replace connections themselves so a fixed query cursor never
@@ -8,10 +14,17 @@ type Options = {
   resumeQueryParam?: string
 }
 
+/** Event dispatched once when refused handshakes exhausted the retries. */
+export const streamExhaustedEvent = 'exhausted'
+
 /** Native EventSource retries interrupted streams, but terminal HTTP errors
- * (for example a proxy's 500 during deployment) can leave it CLOSED forever.
- * A proxy can also leave a dead connection open. Heartbeats bound that silence;
- * reconnecting ready reconciles current data without HTTP polling.
+ * (for example a proxy's 500 during deployment, or an endpoint this server
+ * does not provide) leave it CLOSED. Those handshakes are retried with a
+ * bounded exponential backoff and abandoned after a few consecutive refusals,
+ * so a missing endpoint never turns into a reconnect loop; the caller shows
+ * the failure and offers a manual retry. A proxy can also leave a dead
+ * connection open. Heartbeats bound that silence; reconnecting ready
+ * reconciles current data without HTTP polling.
  */
 export function reconnectingEventSource(url: string, options: Options = {}) {
   const createSource =
@@ -24,6 +37,9 @@ export function reconnectingEventSource(url: string, options: Options = {}) {
   let timer: ReturnType<typeof setTimeout> | undefined
   let idleTimer: ReturnType<typeof setTimeout> | undefined
   let lastEventId = ''
+  // Consecutive replacement attempts without an opened connection.
+  let failures = 0
+  let rejected = 0
   const connectionUrl = () => {
     if (!options.resumeQueryParam || !lastEventId) return url
     const hashIndex = url.indexOf('#')
@@ -50,6 +66,14 @@ export function reconnectingEventSource(url: string, options: Options = {}) {
     timer = undefined
     retireSource()
     connect()
+  }
+  const exhaust = () => {
+    stopped = true
+    clearTimeout(idleTimer)
+    retireSource()
+    const handlers = [...(listeners.get(streamExhaustedEvent) ?? [])]
+    listeners.clear()
+    for (const handler of handlers) handler(new Event(streamExhaustedEvent))
   }
   const activity = () => {
     if (idleTimer !== undefined) clearTimeout(idleTimer)
@@ -88,7 +112,10 @@ export function reconnectingEventSource(url: string, options: Options = {}) {
     const connection = createSource(connectionUrl())
     source = connection
     activity()
-    attach(connection, 'open', () => undefined)
+    attach(connection, 'open', () => {
+      failures = 0
+      rejected = 0
+    })
     attach(connection, 'heartbeat', () => undefined)
     for (const [type, handlers] of listeners) {
       for (const handler of handlers) attach(connection, type, handler)
@@ -96,15 +123,25 @@ export function reconnectingEventSource(url: string, options: Options = {}) {
     const onError = () => {
       // Snapshot streams retain native retries; cursor streams use their latest
       // delivered id for every replacement, including transport interruption.
+      const refused = connection.readyState === 2
       if (
         stopped ||
         source !== connection ||
-        (!options.resumeQueryParam && connection.readyState !== 2) ||
+        (!options.resumeQueryParam && !refused) ||
         timer !== undefined
       )
         return
       if (options.resumeQueryParam) connection.close()
-      timer = setTimeout(reconnect, options.retryDelayMs ?? 3000)
+      if (refused && ++rejected >= (options.maxRejectedAttempts ?? 4)) {
+        exhaust()
+        return
+      }
+      const delay = Math.min(
+        (options.retryDelayMs ?? 3000) * 2 ** failures,
+        options.maxRetryDelayMs ?? 30000
+      )
+      failures++
+      timer = setTimeout(reconnect, delay)
     }
     connection.addEventListener('error', onError)
     detachListeners.push(() => connection.removeEventListener('error', onError))

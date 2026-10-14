@@ -1,16 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import { apiErrorMessage } from './api'
 import {
+  formatBitsPerSecond,
   formatBytes,
-  formatBytesPerSecond,
   formatDate,
+  formatNumber,
+  formatPercent,
+  formatRelative,
+  formatUtcDate,
+  ratioOf,
 } from './format'
 
 describe('format helpers', () => {
-  it('formats transfer rates with binary units', () => {
-    expect(formatBytesPerSecond(0)).toBe('0 B/s')
-    expect(formatBytesPerSecond(1536)).toBe('1.5 KB/s')
-    expect(formatBytesPerSecond(undefined)).toBe('—')
+  it('formats *_bps bandwidth as decimal bits per second', () => {
+    expect(formatBitsPerSecond(999)).toBe('999 bps')
+    expect(formatBitsPerSecond(3_145_728)).toBe('3.1 Mbps')
+    expect(formatBitsPerSecond(Number.NaN)).toBe('—')
   })
 
   it('formats byte sizes with adaptive units', () => {
@@ -23,6 +28,7 @@ describe('format helpers', () => {
   it('keeps invalid timestamps visible for diagnosis', () => {
     expect(formatDate()).toBe('—')
     expect(formatDate('invalid-timestamp')).toBe('invalid-timestamp')
+    expect(formatRelative('invalid-timestamp')).toBe('invalid-timestamp')
   })
 
   it('formats timestamps consistently through seconds', () => {
@@ -30,6 +36,24 @@ describe('format helpers', () => {
     expect(formatDate('2026-09-05T00:25:10.869203+08')).toBe(
       '2026-09-05 00:25:10'
     )
+    expect(formatUtcDate('2026-09-05T00:25:10+08:00')).toBe(
+      '2026-09-04 16:25:10 UTC'
+    )
+  })
+
+  it('formats relative time in both directions with a near-now threshold', () => {
+    const now = Date.parse('2026-10-14T12:00:00Z')
+    expect(formatRelative('2026-10-14T11:59:30Z', now)).toBe('刚刚')
+    expect(formatRelative('2026-10-14T11:57:00Z', now)).toBe('3分钟前')
+    expect(formatRelative('2026-10-16T12:00:00Z', now)).toBe('2天后')
+  })
+
+  it('formats counts and ratios', () => {
+    expect(formatNumber(12345)).toBe('12,345')
+    expect(formatNumber(123456, { compact: true })).toBe('12.3万')
+    expect(formatPercent(0.124)).toBe('12.4%')
+    expect(formatPercent(undefined)).toBe('—')
+    expect(ratioOf(3, 0)).toBe(0)
   })
 })
 

@@ -1,6 +1,8 @@
+import { z } from 'zod'
 import { queryOptions } from '@tanstack/react-query'
 import { sendData, streamPath, type PageData } from '@/lib/api'
-import { readLiveQuery } from '@/lib/live-query'
+import { ApiBusinessError, ApiProtocolError } from '@/lib/api-response'
+import { readLiveQuery, snapshotQueryOptions } from '@/lib/live-query'
 import { queryKeys } from '@/lib/query-keys'
 import { accessLogPageSchema } from './access-log-schema'
 import type { Website, WebsiteConfig } from './types'
@@ -65,31 +67,55 @@ export function patchWebsiteOriginRuntime(
   }
 }
 
-export function saveWebsite(
-  values: { cluster_id: string; status: string; config: WebsiteConfig },
-  website?: Pick<Website, 'id' | 'revision'>
-) {
-  const body = { status: values.status, config: values.config }
-  const params = new URLSearchParams({ cluster_id: values.cluster_id })
-  return website
-    ? sendData(
-        'put',
-        `/websites/${website.id}?${params}`,
-        body,
-        website.revision
-      )
-    : sendData('post', `/websites?${params}`, body)
+type WebsiteInput = {
+  cluster_id: string
+  status: string
+  config: WebsiteConfig
 }
 
-export function websitesQuery(params: {
+const createdWebsiteSchema = z.object({
+  id: z.string().uuid(),
+  revision: z.number().int().positive(),
+})
+
+/** `POST /websites?cluster_id=` answers `{ id, revision }` of the new website. */
+export async function createWebsite(values: WebsiteInput) {
+  const params = new URLSearchParams({ cluster_id: values.cluster_id })
+  const response = await sendData<unknown>('post', `/websites?${params}`, {
+    status: values.status,
+    config: values.config,
+  })
+  const result = createdWebsiteSchema.safeParse(response.data)
+  if (!result.success) throw new ApiProtocolError()
+  return result.data
+}
+
+export function updateWebsite(
+  values: WebsiteInput,
+  website: Pick<Website, 'id' | 'revision'>
+) {
+  const params = new URLSearchParams({ cluster_id: values.cluster_id })
+  return sendData(
+    'put',
+    `/websites/${website.id}?${params}`,
+    { status: values.status, config: values.config },
+    website.revision
+  )
+}
+
+export type WebsitesListParams = {
   page: number
   page_size: number
   keyword?: string
   cluster_id?: string
+  certificate_id?: string
   status?: string
-}) {
+}
+
+export function websitesQuery(params: WebsitesListParams) {
   return queryOptions({
     retry: false,
+    meta: { inlineError: true },
     queryKey: [...queryKeys.websites, 'list', params],
     queryFn: ({ queryKey, signal }) =>
       readLiveQuery<PageData<Website>>(
@@ -97,6 +123,20 @@ export function websitesQuery(params: {
         queryKey,
         signal
       ),
+  })
+}
+
+/** One-shot page of `/websites/stream` for pages whose live stream belongs to
+ * another resource (e.g. websites referencing a certificate). Re-read with
+ * `refetch()` or by invalidating `websitesSnapshotKey`. */
+export const websitesSnapshotKey = [...queryKeys.websites, 'list-snapshot']
+export function websitesSnapshotQuery(params: WebsitesListParams) {
+  return queryOptions({
+    ...snapshotQueryOptions<PageData<Website>>(
+      streamPath('/websites', params),
+      [...websitesSnapshotKey, params]
+    ),
+    meta: { inlineError: true },
   })
 }
 export function removeWebsite(target: Pick<Website, 'id' | 'revision'>) {
@@ -110,6 +150,8 @@ export function removeWebsite(target: Pick<Website, 'id' | 'revision'>) {
 export function websiteDetailQuery(id: string | undefined) {
   return queryOptions({
     retry: false,
+    // The detail layout renders "网站不存在" and stream errors itself.
+    meta: { inlineError: true },
     queryKey: [...queryKeys.websites, id, 'detail'],
     enabled: !!id,
     queryFn: ({ queryKey, signal }) => {
@@ -123,6 +165,24 @@ export function websiteDetailQuery(id: string | undefined) {
       )
     },
   })
+}
+/** One-shot read of the website detail stream for the detail header on tabs
+ * whose own live stream is something else (traffic, logs). */
+export function websiteSnapshotQuery(id: string) {
+  return queryOptions({
+    ...snapshotQueryOptions<Website>(streamPath('/websites/' + id), [
+      ...queryKeys.websites,
+      id,
+      'header',
+    ]),
+    meta: { inlineError: true },
+  })
+}
+/** `WebsiteError::NOT_FOUND` (service/domains/website/website_error.h), sent as
+ * the detail stream's `resource-error` for unknown or deleted websites. */
+const websiteNotFoundCode = 16601
+export function isWebsiteNotFound(error: unknown) {
+  return error instanceof ApiBusinessError && error.code === websiteNotFoundCode
 }
 export function probeWebsiteDns(id: string | undefined) {
   if (!id) throw new Error('网站不存在')
@@ -140,6 +200,7 @@ export function websiteAccessLogHistoryQuery(
 ) {
   return queryOptions({
     retry: false,
+    meta: { inlineError: true },
     queryKey: [...queryKeys.websites, id, 'access-logs', params],
     queryFn: ({ queryKey, signal }) =>
       readLiveQuery(

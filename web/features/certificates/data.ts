@@ -20,6 +20,10 @@ export function certificatesQuery(params: {
   page_size: number
   keyword?: string
   status?: string
+  /** Valid and expiring within 30 days (overview `certificate_expiring_count`). */
+  expiring?: 1
+  /** Failed/expired, or valid with an error (overview `certificate_failed_count`). */
+  abnormal?: 1
 }) {
   return queryOptions({
     retry: false,
@@ -27,6 +31,22 @@ export function certificatesQuery(params: {
     queryFn: ({ queryKey, signal }) =>
       readLiveQuery<PageData<Certificate>>(
         streamPath('/certificates', params),
+        queryKey,
+        signal
+      ),
+  })
+}
+
+/** Live certificate detail (`/certificates/:id/stream`). */
+export function certificateDetailQuery(certificateId: string) {
+  return queryOptions({
+    retry: false,
+    // The detail page renders not-found and stream errors itself.
+    meta: { inlineError: true },
+    queryKey: [...queryKeys.certificates, 'detail', certificateId],
+    queryFn: ({ queryKey, signal }) =>
+      readLiveQuery<Certificate>(
+        streamPath('/certificates/' + certificateId),
         queryKey,
         signal
       ),

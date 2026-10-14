@@ -7,5 +7,4 @@ export const queryKeys = {
   nodes: ['nodes'],
   websites: ['websites'],
   tasks: ['tasks'],
-  cachePolicies: ['cache-policies'],
 } as const

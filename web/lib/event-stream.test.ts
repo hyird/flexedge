@@ -205,3 +205,55 @@ test('native reconnect is not duplicated and unmount cancels terminal retry', as
   expect(sources).toHaveLength(1)
   expect(sources[0].closed).toBe(true)
 })
+
+test('refused handshakes back off and give up instead of reconnecting forever', async () => {
+  const sources: Source[] = []
+  const stream = reconnectingEventSource('/missing', {
+    retryDelayMs: 1,
+    maxRejectedAttempts: 3,
+    createSource: () => {
+      const source = new Source()
+      sources.push(source)
+      return source as unknown as EventSource
+    },
+  })
+  let exhausted = 0
+  stream.addEventListener('exhausted', () => {
+    exhausted++
+  })
+  for (let attempt = 0; attempt < 3; attempt++) {
+    sources[attempt].fail(2)
+    await settle()
+  }
+  expect(sources).toHaveLength(3)
+  expect(exhausted).toBe(1)
+  expect(sources[2].closed).toBe(true)
+  await settle()
+  expect(sources).toHaveLength(3)
+  stream.close()
+})
+
+test('an opened connection resets the refused-handshake budget', async () => {
+  const sources: Source[] = []
+  const stream = reconnectingEventSource('/events', {
+    retryDelayMs: 1,
+    maxRejectedAttempts: 2,
+    createSource: () => {
+      const source = new Source()
+      sources.push(source)
+      return source as unknown as EventSource
+    },
+  })
+  let exhausted = 0
+  stream.addEventListener('exhausted', () => {
+    exhausted++
+  })
+  sources[0].fail(2)
+  await settle()
+  sources[1].dispatchEvent(new Event('open'))
+  sources[1].fail(2)
+  await settle()
+  expect(sources).toHaveLength(3)
+  expect(exhausted).toBe(0)
+  stream.close()
+})

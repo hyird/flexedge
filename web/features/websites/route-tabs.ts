@@ -17,3 +17,17 @@ export const routeTabs = {
     empty: '暂无路由规则，将使用默认源站组。',
   },
 } as const
+
+/** Route editor view state. It lives with the settings draft so switching
+ * groups and returning keeps the selected phase, rule and preview request. */
+export type RouteEditorView = {
+  phase: keyof typeof routeTabs
+  selectedId: string | null
+  preview: { method: string; host: string; target: string; headers: string }
+}
+
+export const initialRouteEditorView: RouteEditorView = {
+  phase: 'proxy',
+  selectedId: null,
+  preview: { method: 'GET', host: '', target: '/', headers: '' },
+}

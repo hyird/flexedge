@@ -2,7 +2,12 @@ import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { afterEach, expect, test } from 'vitest'
 import { ApiProtocolError } from '@/lib/api-response'
 import { setLiveQueryQueryClient } from '@/lib/live-query'
-import { taskDetailQuery, taskHistoryQuery, tasksQuery } from './data'
+import {
+  latestTaskVersionQuery,
+  taskDetailQuery,
+  taskHistoryQuery,
+  tasksQuery,
+} from './data'
 import type { Task } from './types'
 
 const clients: QueryClient[] = []
@@ -115,4 +120,28 @@ test('missing selections and node history do not start requests', () => {
     observers.map((observer) => observer.getCurrentResult().fetchStatus)
   ).toEqual(['idle', 'idle', 'idle'])
   stops.forEach((stop) => stop())
+})
+
+test('latest version resolves the newest record of the task for that resource', async () => {
+  const client = setup()
+  respond({
+    ...page,
+    page_size: 100,
+    list: [
+      { ...task, version: 2 },
+      { ...task, version: 5 },
+      { ...task, id: 'other', version: 9 },
+    ],
+  })
+  expect(
+    await client.fetchQuery(
+      latestTaskVersionQuery({ id: task.id, resource_id: task.resource_id })
+    )
+  ).toBe(5)
+  respond({ ...page, page_size: 100, list: [] })
+  expect(
+    await client.fetchQuery(
+      latestTaskVersionQuery({ id: 'missing', resource_id: 'none' })
+    )
+  ).toBeNull()
 })

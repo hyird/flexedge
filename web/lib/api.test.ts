@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   api,
   apiErrorMessage,
+  isRevisionConflict,
   getData,
   sendData,
   normalizeApiPath,
@@ -76,5 +77,26 @@ describe('normalizeApiPath', () => {
     expect(normalizeApiPath('/tasks/?page=2')).toBe('/tasks?page=2')
     expect(normalizeApiPath('/nodes/#online')).toBe('/nodes#online')
     expect(normalizeApiPath('/')).toBe('/')
+  })
+})
+
+describe('revision conflicts', () => {
+  it('treats 409 and stale If-Match 412 as conflicts with a shared message', async () => {
+    for (const status of [409, 412]) {
+      api.defaults.adapter = async (config) =>
+        Promise.reject(
+          Object.assign(new Error('conflict'), {
+            isAxiosError: true,
+            config,
+            response: { status, data: {}, headers: {}, config, statusText: '' },
+          })
+        )
+      const error = await getData('/websites').catch((reason) => reason)
+      expect(isRevisionConflict(error)).toBe(true)
+      expect(apiErrorMessage(error)).toBe(
+        '数据已被其他人更新，请重新加载后重试'
+      )
+    }
+    expect(isRevisionConflict(new Error('网络错误'))).toBe(false)
   })
 })

@@ -18,8 +18,6 @@ export type WebsiteOrigin = {
 }
 
 export type WebsiteConfig = {
-  cache_enabled: boolean
-  cache_policy_id: string
   name?: string
   domains: WebsiteDomain[]
   origins: WebsiteOrigin[]
@@ -49,7 +47,6 @@ export type WebsiteConfig = {
   certificate_ids: string[]
   minimum_tls_version: '1.2' | '1.3'
   force_https: boolean
-  http2_enabled: boolean
   hsts_enabled: boolean
   response_compression_enabled: boolean
   response_compression_min_bytes: number

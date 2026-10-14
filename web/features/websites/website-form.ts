@@ -78,10 +78,6 @@ export function parseRouteHeaders(value: string) {
     })
 }
 
-export function valuesToLines(values: string[]) {
-  return values.join('\n')
-}
-
 export function linesToValues(value: string) {
   return value
     .split(/[\r\n,]+/)
@@ -332,8 +328,6 @@ const routeRuleSchema = z
 
 export const websiteFormSchema = z
   .object({
-    cache_enabled: z.boolean(),
-    cache_policy_id: z.string().uuid().or(z.literal('')),
     cluster_id: z.string().uuid('请选择所属集群'),
     status: z.enum(['enabled', 'disabled']),
     name: z.string().trim().min(1, '请输入网站名称').max(100),
@@ -367,7 +361,6 @@ export const websiteFormSchema = z
     certificate_ids: z.array(z.string().uuid()).max(20),
     minimum_tls_version: z.enum(['1.2', '1.3']),
     force_https: z.boolean(),
-    http2_enabled: z.boolean(),
     hsts_enabled: z.boolean(),
     response_compression_enabled: z.boolean(),
     response_compression_min_bytes: z.number().int().min(256).max(1048576),
@@ -423,6 +416,14 @@ export const websiteFormSchema = z
 
 export type WebsiteFormValues = z.infer<typeof websiteFormSchema>
 export type WebsiteRouteRuleForm = z.infer<typeof routeRuleSchema>
+
+const zhCNErrors = z.locales.zhCN().localeError
+
+/** Validates a settings draft; built-in range and type messages are Chinese,
+ * schema-specific messages take precedence. */
+export function validateWebsiteForm(values: unknown) {
+  return websiteFormSchema.safeParse(values, { error: zhCNErrors })
+}
 
 export function setWebsiteHttpsEnabled(
   values: WebsiteFormValues,
@@ -538,8 +539,6 @@ export function routeRuleToForm(
 }
 export function defaultWebsiteConfig(): WebsiteConfig {
   return {
-    cache_enabled: false,
-    cache_policy_id: '',
     name: '',
     domains: [],
     origins: [],
@@ -569,7 +568,6 @@ export function defaultWebsiteConfig(): WebsiteConfig {
     certificate_ids: [],
     minimum_tls_version: '1.2',
     force_https: false,
-    http2_enabled: true,
     hsts_enabled: false,
     response_compression_enabled: true,
     response_compression_min_bytes: 1024,

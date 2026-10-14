@@ -6,10 +6,13 @@ import { setLiveQueryQueryClient } from '@/lib/live-query'
 import {
   createNode,
   getNodeCredentials,
-  updateNode,
+  nodeQuery,
   nodesQuery,
+  resetNodeCredentials,
+  updateNode,
   type NodeInput,
 } from './data'
+import { nodeInstallCommand } from './install-command'
 
 const originalAdapter = api.defaults.adapter
 afterEach(() => {
@@ -18,6 +21,8 @@ afterEach(() => {
 })
 
 const id = '22bc1a68-6db8-4c77-bd29-c11e563fa187'
+const agentId = '0123456789abcdef0123456789abcdef'
+const secret = 'a'.repeat(64)
 const input: NodeInput = {
   cluster_id: id,
   name: 'edge',
@@ -116,10 +121,13 @@ describe('node API contracts', () => {
       undefined,
       null,
       {},
-      { node_id: id, secret: '', revision: 1 },
-      { node_id: 'invalid', secret: 'token', revision: 1 },
-      { node_id: id, secret: 'token', revision: 0 },
-      { node_id: id, secret: 'token', revision: 1.5 },
+      { node_id: agentId, secret: '', revision: 1 },
+      { node_id: agentId, secret: 'short', revision: 1 },
+      { node_id: agentId, secret: `${secret} space`, revision: 1 },
+      { node_id: id, secret, revision: 1 },
+      { node_id: agentId.toUpperCase(), secret, revision: 1 },
+      { node_id: agentId, secret, revision: 0 },
+      { node_id: agentId, secret, revision: 1.5 },
     ]) {
       respond({ code: 0, message: 'created', data })
       await expect(createNode(input)).rejects.toBeInstanceOf(ApiProtocolError)
@@ -129,17 +137,25 @@ describe('node API contracts', () => {
     }
   })
 
-  it('returns validated credentials on creation', async () => {
-    const credentials = { node_id: id, secret: 'token', revision: 1 }
-    respond({ code: 0, message: 'created', data: credentials })
-    expect((await createNode(input)).data).toEqual(credentials)
+  it('returns the created node id with validated credentials', async () => {
+    const created = { id, node_id: agentId, secret, revision: 1 }
+    respond({ code: 0, message: 'created', data: created })
+    expect((await createNode(input)).data).toEqual(created)
+    for (const data of [
+      { node_id: agentId, secret, revision: 1 },
+      { id: agentId, node_id: agentId, secret, revision: 1 },
+    ]) {
+      respond({ code: 0, message: 'created', data })
+      await expect(createNode(input)).rejects.toBeInstanceOf(ApiProtocolError)
+    }
   })
 
   it('retrieves validated credentials from the selected node', async () => {
-    const credentials = { node_id: id, secret: 'token', revision: 3 }
+    const credentials = { node_id: agentId, secret, revision: 3 }
     api.defaults.adapter = async (config) => {
       expect(config.method).toBe('post')
       expect(config.url).toBe(`/nodes/${id}/credentials/reveal`)
+      expect(config.headers.get('If-Match')).toBeUndefined()
       return {
         config,
         status: 200,
@@ -149,6 +165,44 @@ describe('node API contracts', () => {
       }
     }
     expect(await getNodeCredentials(id)).toEqual(credentials)
+  })
+
+  it('resets credentials with the node revision', async () => {
+    const credentials = { node_id: agentId, secret, revision: 8 }
+    api.defaults.adapter = async (config) => {
+      expect(config.method).toBe('post')
+      expect(config.url).toBe(`/nodes/${id}/credentials`)
+      expect(config.headers.get('If-Match')).toBe('"7"')
+      return {
+        config,
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        data: { code: 0, message: 'reset', data: credentials },
+      }
+    }
+    expect(await resetNodeCredentials({ id, revision: 7 })).toEqual({
+      message: 'reset',
+      data: credentials,
+    })
+  })
+
+  it('builds the install command expected by install-node.sh', () => {
+    expect(
+      nodeInstallCommand('https://console.example.test/', {
+        node_id: agentId,
+        secret,
+      })
+    ).toBe(
+      `curl -fsSL 'https://console.example.test/api/agent/install-node.sh' -o install-node.sh && \\\n` +
+        `  sudo FLEXEDGE_SERVER_ORIGIN='https://console.example.test' bash install-node.sh '${agentId}' '${secret}'`
+    )
+    expect(
+      nodeInstallCommand('http://127.0.0.1:8080', {
+        node_id: agentId,
+        secret: "a'b",
+      })
+    ).toContain(`'a'\\''b'`)
   })
 
   it('accepts update acknowledgements and sends the original revision', async () => {
@@ -175,5 +229,64 @@ describe('node API contracts', () => {
   it('does not expose unsolicited update data as credentials', async () => {
     respond({ code: 0, message: 'updated', data: { secret: 'unvalidated' } })
     expect((await updateNode({ id, revision: 7 }, input)).data).toBeUndefined()
+  })
+
+  it('patches the node detail stream in place without a new snapshot', async () => {
+    class Source extends EventTarget {
+      close() {}
+    }
+    const sources: Source[] = []
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    setLiveQueryQueryClient(client, undefined, (url) => {
+      expect(url).toBe(`/api/nodes/${id}/stream`)
+      const source = new Source()
+      sources.push(source)
+      return source as never
+    })
+    const node = {
+      id,
+      revision: 4,
+      name: 'edge',
+      runtime: {
+        registration_status: 'registered',
+        connection_status: 'online',
+        last_heartbeat_at: '2026-09-09T00:00:00Z',
+        cpu_usage: 0.1,
+      },
+    }
+    const observer = new QueryObserver(client, nodeQuery(id))
+    const stop = observer.subscribe(() => undefined)
+    const pending = observer.refetch()
+    sources[0].dispatchEvent(
+      new MessageEvent('snapshot', {
+        data: JSON.stringify({ code: 0, message: 'ok', data: node }),
+      })
+    )
+    await pending
+    const patch = (revision: number, cpu: number) =>
+      sources[0].dispatchEvent(
+        new MessageEvent('node-runtime', {
+          data: JSON.stringify({
+            id,
+            node_revision: revision,
+            runtime: {
+              connection_status: 'offline',
+              last_heartbeat_at: '2026-09-09T00:01:00Z',
+              cpu_usage: cpu,
+            },
+          }),
+        })
+      )
+    patch(3, 0.9)
+    patch(4, 0.42)
+    const cached = client.getQueryData<typeof node>(nodeQuery(id).queryKey)!
+    expect(cached.runtime.cpu_usage).toBe(0.42)
+    expect(cached.runtime.last_heartbeat_at).toBe('2026-09-09T00:01:00Z')
+    expect(cached.runtime.connection_status).toBe('online')
+    expect(sources).toHaveLength(1)
+    stop()
+    observer.destroy()
   })
 })

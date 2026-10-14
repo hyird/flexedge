@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { nodeFormSchema } from './node-form'
+import { nodeFormSchema, nodeFormValues, nodeInputFromForm } from './node-form'
 
 const id = '29b9df01-e8bb-4f33-87e5-dfef34c77f8f'
 const endpoint = { id, ip_address: '192.0.2.1', line_code: 'default' }
@@ -60,59 +60,22 @@ test('node endpoints reject duplicate ids or addresses at the offending row', ()
   ).toBe(false)
 })
 
-test('node cache resources enforce byte bounds and relative directory components', () => {
-  const cache = {
-    memory_bytes: 0,
-    disk_bytes: 0,
-    max_object_bytes: 1,
-    directory: 'cache/v1',
+test('form values round-trip a saved node and default new nodes', () => {
+  const node = {
+    cluster_id: id,
+    name: 'node',
+    status: 'disabled',
+    config: { endpoints: [endpoint] },
   }
-  expect(nodeFormSchema.safeParse({ ...values, cache }).success).toBe(true)
-  expect(
-    nodeFormSchema.safeParse({
-      ...values,
-      cache: {
-        ...cache,
-        memory_bytes: 1099511627776,
-        disk_bytes: 1125899906842624,
-        max_object_bytes: 1099511627776,
-      },
-    }).success
-  ).toBe(true)
-  for (const directory of [
-    '',
-    '/',
-    '/cache',
-    'cache/',
-    'cache//v1',
-    'cache/./v1',
-    'cache/../v1',
-    'cache\\v1',
-    'C:cache',
-    'cache ',
-    'cache/.',
-    'cache/\u0001v1',
-  ])
-    expect(
-      nodeFormSchema.safeParse({ ...values, cache: { ...cache, directory } })
-        .success
-    ).toBe(false)
-  expect(
-    nodeFormSchema.safeParse({
-      ...values,
-      cache: { ...cache, max_object_bytes: 0 },
-    }).success
-  ).toBe(false)
-  expect(
-    nodeFormSchema.safeParse({
-      ...values,
-      cache: { ...cache, memory_bytes: 1099511627777 },
-    }).success
-  ).toBe(false)
-  expect(
-    nodeFormSchema.safeParse({
-      ...values,
-      cache: { ...cache, disk_bytes: 1125899906842625 },
-    }).success
-  ).toBe(false)
+  const form = nodeFormValues(node)
+  expect(form.endpoints[0]).not.toBe(endpoint)
+  expect(nodeInputFromForm(form)).toEqual({ ...node, status: 'disabled' })
+  const created = nodeFormValues(undefined, id)
+  expect(created).toMatchObject({
+    cluster_id: id,
+    name: '',
+    status: 'enabled',
+  })
+  expect(created.endpoints).toHaveLength(1)
+  expect(nodeFormSchema.safeParse(created).success).toBe(false)
 })

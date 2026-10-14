@@ -4,6 +4,7 @@ export type Cluster = Revisioned & {
   name: string
   dns_zone_id: string
   dns_zone_domain: string
+  /** DNS platform code (`cloudflare` / `aliyun`), despite the wire name. */
   dns_provider_name: string
   hostname_prefix: string
   access_domain: string

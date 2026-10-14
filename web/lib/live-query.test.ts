@@ -3,7 +3,7 @@ import {
   QueryObserver,
   type QueryKey,
 } from '@tanstack/react-query'
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { ApiBusinessError, ApiProtocolError } from './api-response'
 import { LiveQueryManager } from './live-query'
 
@@ -69,6 +69,230 @@ test('historical access logs release their stream after a snapshot even without 
   })
   sources[0].snapshot({ items: [], total: 0 })
   expect(client.getQueryData(key)).toEqual(records)
+})
+
+test('explicit one-shot reads release a list stream after the first snapshot while still observed', async () => {
+  const { sources, client, manager } = setup()
+  const key = ['websites', 'command-search', 'qa']
+  const observer = new QueryObserver(client, {
+    queryKey: key,
+    queryFn: ({ queryKey, signal }) =>
+      manager.readSnapshot(
+        '/api/websites/stream?keyword=qa&page=1&page_size=5',
+        queryKey,
+        signal
+      ),
+  })
+  const unsubscribe = observer.subscribe(() => undefined)
+  cleanups.push(() => {
+    unsubscribe()
+    observer.destroy()
+  })
+  sources[0].snapshot({ list: [{ id: 'website-a' }], total: 1 })
+  await settled(() => {
+    expect(sources[0].closed).toBe(true)
+    expect(observer.getCurrentResult().data).toEqual({
+      list: [{ id: 'website-a' }],
+      total: 1,
+    })
+  })
+  sources[0].snapshot({ list: [], total: 0 })
+  expect(client.getQueryData(key)).toEqual({
+    list: [{ id: 'website-a' }],
+    total: 1,
+  })
+  expect(sources).toHaveLength(1)
+})
+
+test('a combined stream feeds several query keys over one connection until the last observer leaves', async () => {
+  const { sources, client, manager } = setup()
+  const observe = (
+    event: string,
+    patch?: (current: unknown, value: unknown) => unknown
+  ) => {
+    const observer = new QueryObserver(client, {
+      queryKey: ['overview', event],
+      queryFn: ({ queryKey, signal }) =>
+        manager.readEvent(
+          '/api/overview/stream',
+          event,
+          queryKey,
+          signal,
+          undefined,
+          patch
+        ),
+    })
+    const unsubscribe = observer.subscribe(() => undefined)
+    cleanups.push(() => observer.destroy())
+    return { observer, unsubscribe }
+  }
+  const summary = observe('snapshot')
+  const traffic = observe('traffic')
+  const nodes = observe('nodes', (current, value) => ({
+    ...(current as object),
+    cpu: (value as { cpu: number }).cpu,
+  }))
+  await settled(() => expect(sources).toHaveLength(1))
+  sources[0].snapshot({ websites: 3 })
+  sources[0].frame('traffic', { code: 0, message: 'ok', data: { requests: 9 } })
+  sources[0].frame('nodes', { code: 0, message: 'ok', data: { cpu: 0.1 } })
+  await settled(() => {
+    expect(summary.observer.getCurrentResult().data).toEqual({ websites: 3 })
+    expect(traffic.observer.getCurrentResult().data).toEqual({ requests: 9 })
+    expect(nodes.observer.getCurrentResult().data).toEqual({ cpu: 0.1 })
+  })
+  sources[0].frame('node-runtime', { cpu: 0.5 })
+  sources[0].frame('traffic', {
+    code: 0,
+    message: 'ok',
+    data: { requests: 10 },
+  })
+  await settled(() => {
+    expect(nodes.observer.getCurrentResult().data).toEqual({ cpu: 0.5 })
+    expect(traffic.observer.getCurrentResult().data).toEqual({ requests: 10 })
+    expect(summary.observer.getCurrentResult().data).toEqual({ websites: 3 })
+  })
+  summary.unsubscribe()
+  traffic.unsubscribe()
+  await settled(() => expect(sources[0].closed).toBe(false))
+  nodes.unsubscribe()
+  await settled(() => {
+    expect(sources[0].closed).toBe(true)
+    expect(sources).toHaveLength(1)
+  })
+})
+
+test('a resource error on a combined stream fails every bound query', async () => {
+  const { sources, client, manager } = setup()
+  const observers = ['snapshot', 'traffic'].map((event) => {
+    const observer = new QueryObserver(client, {
+      queryKey: ['overview', event],
+      queryFn: ({ queryKey, signal }) =>
+        manager.readEvent('/api/overview/stream', event, queryKey, signal),
+    })
+    const unsubscribe = observer.subscribe(() => undefined)
+    cleanups.push(() => {
+      unsubscribe()
+      observer.destroy()
+    })
+    return observer
+  })
+  sources[0].frame('resource-error', { code: 16601, message: '网站不存在' })
+  await settled(() => {
+    for (const observer of observers)
+      expect(observer.getCurrentResult().error).toBeInstanceOf(ApiBusinessError)
+  })
+})
+
+test('switching views in one commit closes the old stream before the new one opens', async () => {
+  const { watch, sources, urls } = setup()
+  const open = () => sources.filter((source) => !source.closed).length
+  const peak: number[] = []
+  const nodes = watch(['nodes', 'n1', 'detail'], '/api/nodes/n1/stream')
+  sources[0].snapshot({ id: 'n1' })
+  await settled(() => expect(open()).toBe(1))
+  // Same commit: the old observer unmounts, then the new one mounts.
+  nodes.unsubscribe()
+  watch(['nodes', 'n1', 'logs'], '/api/nodes/n1/logs-view/stream')
+  peak.push(open())
+  await settled(() => {
+    peak.push(open())
+    expect(urls).toEqual([
+      '/api/nodes/n1/stream',
+      '/api/nodes/n1/logs-view/stream',
+    ])
+    expect(sources[0].closed).toBe(true)
+    expect(Math.max(...peak)).toBe(1)
+  })
+})
+
+describe('combined stream release races', () => {
+  const events = ['snapshot', 'traffic', 'nodes']
+  function observeOverview(
+    client: QueryClient,
+    manager: LiveQueryManager,
+    event: string
+  ) {
+    const observer = new QueryObserver(client, {
+      queryKey: ['overview', event],
+      queryFn: ({ queryKey, signal }) =>
+        manager.readEvent('/api/overview/stream', event, queryKey, signal),
+    })
+    const unsubscribe = observer.subscribe(() => undefined)
+    cleanups.push(() => observer.destroy())
+    return unsubscribe
+  }
+  const frame = (source: Source, event: string) =>
+    source.frame(event, { code: 0, message: 'ok', data: { event } })
+  const openCount = (sources: Source[]) =>
+    sources.filter((source) => !source.closed).length
+
+  test('every unmount order before the first frame releases the connection', async () => {
+    for (const order of [
+      [0, 1, 2],
+      [2, 1, 0],
+      [1, 2, 0],
+    ]) {
+      const { sources, client, manager } = setup()
+      const leave = events.map((event) =>
+        observeOverview(client, manager, event)
+      )
+      for (const index of order) leave[index]()
+      await settled(() => {
+        expect(sources).toHaveLength(1)
+        expect(openCount(sources)).toBe(0)
+      })
+    }
+  })
+
+  test('frames interleaved with unmounts still release after the last observer', async () => {
+    const { sources, client, manager } = setup()
+    const leave = events.map((event) => observeOverview(client, manager, event))
+    frame(sources[0], 'traffic')
+    leave[1]()
+    sources[0].snapshot({ event: 'snapshot' })
+    leave[0]()
+    await settled(() => expect(openCount(sources)).toBe(1))
+    frame(sources[0], 'nodes')
+    leave[2]()
+    frame(sources[0], 'traffic')
+    await settled(() => {
+      expect(openCount(sources)).toBe(0)
+      expect(sources).toHaveLength(1)
+    })
+  })
+
+  test('a StrictMode remount keeps one connection and the final unmount releases it', async () => {
+    const { sources, client, manager } = setup()
+    const first = events.map((event) => observeOverview(client, manager, event))
+    // StrictMode: effects clean up and run again in the same turn.
+    first.forEach((leave) => leave())
+    const second = events.map((event) =>
+      observeOverview(client, manager, event)
+    )
+    await settled(() => {
+      expect(sources).toHaveLength(1)
+      expect(openCount(sources)).toBe(1)
+    })
+    second.forEach((leave) => leave())
+    await settled(() => expect(openCount(sources)).toBe(0))
+  })
+
+  test('a flush from another view or a session reconnect never revives a departed stream', async () => {
+    const recover = vi.fn(async () => ({}))
+    const { sources, client, manager } = setup(recover)
+    const leave = events.map((event) => observeOverview(client, manager, event))
+    sources[0].snapshot({ event: 'snapshot' })
+    // Session recovery is pending while the page unmounts.
+    sources[0].frame('session-expired', {})
+    leave.forEach((unsubscribe) => unsubscribe())
+    // The recovery reconnect runs before the queued release microtasks; its
+    // flush retires the departed entry, which must not open a new source.
+    await settled(() => {
+      expect(recover).toHaveBeenCalledTimes(1)
+      expect(openCount(sources)).toBe(0)
+    })
+  })
 })
 
 test('the default resource transport does not reconnect idle snapshots on a timer', async () => {

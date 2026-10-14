@@ -68,10 +68,20 @@ export function apiErrorMessage(error: unknown) {
     if (!error.response) return '无法连接 FlexEdge 服务'
     if (error.response.status === 401) return '登录状态已失效，请重新登录'
     if (error.response.status === 403) return '当前账户没有操作权限'
-    if (error.response.status === 409) return '数据已更新，请刷新后重试'
+    if (isRevisionConflict(error)) return '数据已被其他人更新，请重新加载后重试'
     if (error.response.status >= 500) return 'FlexEdge 服务暂时不可用'
     if (error.response.status >= 400) return '请求未能完成，请检查输入后重试'
   }
   if (error instanceof Error && error.message) return error.message
   return '操作失败，请稍后重试'
+}
+
+/** True when a write lost a revision race: the backend answers a stale
+ * `If-Match` with 412 (e.g. 16205/16016) and some conflicts with 409. UI shows
+ * “数据已被其他人更新” and offers to reload the resource. */
+export function isRevisionConflict(error: unknown) {
+  return (
+    axios.isAxiosError(error) &&
+    (error.response?.status === 409 || error.response?.status === 412)
+  )
 }

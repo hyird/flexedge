@@ -2,58 +2,139 @@
 @import '@heroui/styles';
 @import '@heroui-pro/react/css';
 
+/* System font stacks only: the console ships as one file without web fonts. */
+@theme {
+  --font-sans: Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-mono:
+    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Theme tokens. Only HeroUI's documented semantic variables are overridden;
+   component code uses the matching utilities (bg-surface, border-border…). */
+:root,
+.light,
+[data-theme='light'] {
+  --background: oklch(0.975 0.0015 286.37);
+  --surface-secondary: oklch(0.965 0.0015 286.37);
+  --border: oklch(0.915 0.004 286.32);
+  --separator: oklch(0.93 0.004 286.32);
+  /* Flat surfaces: a 1px semantic edge instead of elevation. */
+  --surface-shadow: 0 0 0 1px var(--border);
+  --sidebar-edge-outline: var(--border);
+}
+.dark,
+[data-theme='dark'] {
+  --background: oklch(0.15 0.004 285.82);
+  --surface: oklch(0.19 0.005 285.89);
+  --surface-secondary: oklch(0.225 0.004 286.14);
+  --border: oklch(0.29 0.006 286.03);
+  --surface-shadow: 0 0 0 1px var(--border);
+  --sidebar-edge-outline: var(--border);
+}
 :root {
-  font-family: Inter, 'Segoe UI', 'Microsoft YaHei', sans-serif;
   --workspace-navbar-height: 3.5rem;
+  /* Sticky save bars and table viewports subtract the shell chrome. */
+  --workspace-content-offset: calc(var(--workspace-navbar-height) + 1px);
 }
-[data-theme='light'],
-.light {
-  --background: oklch(98.5% 0 0);
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    min-width: 320px;
+    background: var(--background);
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(--font-mono);
+  }
+  /* Numbers line up in tables, KPIs and meters. */
+  table,
+  output,
+  time,
+  [data-numeric] {
+    font-variant-numeric: tabular-nums;
+  }
 }
-body {
-  margin: 0;
-  min-width: 320px;
-  background: var(--background);
+
+/* Density adjustments on HeroUI's documented BEM classes (36px controls). */
+@layer components {
+  .input,
+  .select__trigger,
+  .search-field__group,
+  .input-group {
+    min-height: 2.25rem;
+    font-size: 0.875rem;
+  }
+  .button--sm {
+    font-size: 0.8125rem;
+  }
+  .sidebar__menu-item-content {
+    min-height: 2.25rem;
+  }
+  .sidebar__group-label {
+    letter-spacing: 0.02em;
+  }
+  .navbar {
+    border-bottom: 1px solid var(--border);
+  }
+  .card {
+    gap: 0.75rem;
+  }
+
+  /* Tables keep one scroll viewport so the sticky header and body columns
+     stay aligned; narrow screens scroll horizontally inside it. */
+  .data-grid {
+    min-width: 0;
+    min-height: 0;
+  }
+  .data-grid .table__scroll-container {
+    max-height: clamp(16rem, calc(100dvh - 22rem), 48rem);
+    overflow: auto;
+    overscroll-behavior: contain;
+    scroll-padding-block-start: 2.5rem;
+  }
+  .data-grid .table__column {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: var(--color-surface-secondary);
+  }
+  .data-grid .table__column[data-pinned] {
+    z-index: 4;
+  }
+  .data-grid .table__cell {
+    height: 2.75rem;
+    padding-block: 0.5rem;
+  }
+
+  .command__item {
+    min-height: 2.5rem;
+  }
+
+  /* Text links (HeroUI `.link`) read as links in tables and meta lines:
+     accent color, underline on hover. Button-styled links keep button colors. */
+  .link:not(.button) {
+    color: var(--accent);
+  }
+  .link:not(.button):hover,
+  .link:not(.button)[data-hovered='true'] {
+    text-decoration-line: underline;
+  }
 }
-button,
-input,
-select,
-textarea {
-  font: inherit;
-}
-/* Match UltraTerminal's compact control density using HeroUI's documented BEM classes. */
-.input,
-.select__trigger,
-.search-field__group {
-  min-height: 2.25rem;
-  font-size: 0.875rem;
-}
-.sidebar__menu-item-content {
-  min-height: 2.25rem;
-}
-.button--sm {
-  font-size: 0.875rem;
-}
-/* Keep table rows in one scroll area so headers and cells retain the same column widths. */
-.data-grid {
-  min-width: 0;
-  min-height: 0;
-}
-.data-grid .table__scroll-container {
-  max-height: clamp(12rem, calc(100dvh - 24rem), 42rem);
-  overflow: auto;
-  overscroll-behavior: contain;
-  scroll-padding-block-start: 2.5rem;
-}
-.data-grid .table__column {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  background: var(--color-surface-secondary);
-}
-.data-grid .table__column[data-pinned] {
-  z-index: 4;
-}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;

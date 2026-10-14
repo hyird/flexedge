@@ -1,6 +1,6 @@
 import type { WebsiteOrigin } from './types'
 
-export type OriginGroup = {
+type OriginGroup = {
   name: string
   indexes: number[]
   enabledCount: number
@@ -93,7 +93,7 @@ export function originRemovalError<T extends RouteReference>(
   )
   if (!removesGroup) return
   if (state.default_origin_group.trim() === groupName)
-    return '请先在“基础”页切换默认源站组，再删除该组'
+    return '请先把默认源站组切换到其他组，再删除该组'
   if (
     state.route_rules.some(
       (rule) => rule.action === 'proxy' && rule.origin_group === groupName

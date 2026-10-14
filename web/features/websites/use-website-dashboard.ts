@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { reconnectingEventSource } from '@/lib/event-stream'
+import { releaseDepartedLiveQueries } from '@/lib/live-query'
 import { queryKeys } from '@/lib/query-keys'
 import { recoverStreamSession } from '@/features/auth/session-expiry'
 import { registerSessionCleanup } from '@/features/auth/session-lifecycle'
@@ -25,6 +26,9 @@ export function useWebsiteDashboard(websiteId: string) {
     let stream: ReturnType<typeof reconnectingEventSource> | undefined
     const connect = () => {
       stream?.close()
+      // The dashboard owns its EventSource; close the previous tab's live
+      // query first so the page never holds two streams.
+      releaseDepartedLiveQueries()
       stream = reconnectingEventSource(
         `/api/websites/${websiteId}/dashboard/stream`,
         { idleTimeoutMs: null }

@@ -172,3 +172,26 @@ test('certificate archive download preserves binary data and server filename', a
     filename: 'example.com.zip',
   })
 })
+
+test('attention filters are server parameters: they reach the stream URL and the cache key', async () => {
+  const urls: string[] = []
+  setLiveQueryQueryClient(client, undefined, (url) => {
+    urls.push(url)
+    return new Source() as never
+  })
+  const expiring = certificatesQuery({ page: 1, page_size: 20, expiring: 1 })
+  const abnormal = certificatesQuery({ page: 1, page_size: 20, abnormal: 1 })
+  expect(expiring.queryKey).not.toEqual(abnormal.queryKey)
+  for (const options of [expiring, abnormal]) {
+    const observer = new QueryObserver(client, options)
+    const stop = observer.subscribe(() => undefined)
+    void observer.refetch().catch(() => undefined)
+    await new Promise<void>((resolve) => queueMicrotask(resolve))
+    stop()
+    observer.destroy()
+  }
+  expect(urls).toEqual([
+    '/api/certificates/stream?expiring=1&page=1&page_size=20',
+    '/api/certificates/stream?abnormal=1&page=1&page_size=20',
+  ])
+})

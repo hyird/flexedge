@@ -127,4 +127,28 @@ describe('application query policy', () => {
     await expect(mutation.execute(undefined)).rejects.toThrow('write failed')
     expect(messages).toEqual(['write failed'])
   })
+
+  it('leaves errors marked inlineError to the view that renders them', async () => {
+    const { client, messages } = setup()
+    const mutation = client.getMutationCache().build(client, {
+      meta: { inlineError: true },
+      mutationFn: async () => {
+        throw new Error('revision conflict')
+      },
+    })
+    await expect(mutation.execute(undefined)).rejects.toThrow(
+      'revision conflict'
+    )
+    await expect(
+      client.fetchQuery({
+        queryKey: ['nodes', 'missing'],
+        meta: { inlineError: true },
+        retry: false,
+        queryFn: async () => {
+          throw new ApiBusinessError(16501, '节点不存在')
+        },
+      })
+    ).rejects.toThrow('节点不存在')
+    expect(messages).toEqual([])
+  })
 })

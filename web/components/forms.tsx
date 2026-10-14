@@ -1,7 +1,6 @@
 import { type ComponentProps, type ReactNode } from 'react'
 import {
   Alert,
-  Button,
   Description,
   FieldError,
   Input,
@@ -166,26 +165,29 @@ export function Toggle({
   onChange: (value: boolean) => void
   disabled?: boolean
 }) {
+  // The whole row is the Switch's label, so pressing the text toggles too.
   return (
-    <div className='flex items-center justify-between gap-5 py-2'>
-      <div className='min-w-0'>
-        <p className='text-sm font-medium'>{label}</p>
-        {hint && <p className='mt-1 text-xs text-muted'>{hint}</p>}
-      </div>
-      <Switch
-        aria-label={label}
-        isSelected={selected}
-        onChange={onChange}
-        isDisabled={disabled}
-        size='sm'
-      >
-        <Switch.Content>
-          <Switch.Control>
-            <Switch.Thumb />
-          </Switch.Control>
-        </Switch.Content>
-      </Switch>
-    </div>
+    <Switch
+      isSelected={selected}
+      onChange={onChange}
+      isDisabled={disabled}
+      size='sm'
+      className='w-full py-2'
+    >
+      <Switch.Content className='flex w-full items-center justify-between gap-5'>
+        <span className='flex min-w-0 flex-col'>
+          <Label className='text-sm font-medium'>{label}</Label>
+          {hint && (
+            <Description className='mt-1 text-xs text-muted'>
+              {hint}
+            </Description>
+          )}
+        </span>
+        <Switch.Control>
+          <Switch.Thumb />
+        </Switch.Control>
+      </Switch.Content>
+    </Switch>
   )
 }
 
@@ -204,33 +206,5 @@ export function Notice({
         <Alert.Description>{children}</Alert.Description>
       </Alert.Content>
     </Alert>
-  )
-}
-
-export function FormActions({
-  onCancel,
-  busy,
-  label = '保存',
-  danger,
-}: {
-  onCancel: () => void
-  busy: boolean
-  label?: string
-  danger?: boolean
-}) {
-  return (
-    <div className='flex justify-end gap-2 pt-3'>
-      <Button size='sm' variant='tertiary' onPress={onCancel} isDisabled={busy}>
-        取消
-      </Button>
-      <Button
-        size='sm'
-        type='submit'
-        variant={danger ? 'danger-soft' : 'primary'}
-        isPending={busy}
-      >
-        {label}
-      </Button>
-    </div>
   )
 }

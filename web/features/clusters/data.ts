@@ -1,6 +1,6 @@
 import { queryOptions } from '@tanstack/react-query'
 import { sendData, streamPath, type PageData } from '@/lib/api'
-import { readLiveQuery } from '@/lib/live-query'
+import { readLiveQuery, snapshotQueryOptions } from '@/lib/live-query'
 import { queryKeys } from '@/lib/query-keys'
 import type { Cluster } from './types'
 
@@ -28,6 +28,22 @@ export function clustersQuery(params: {
         signal
       ),
   })
+}
+
+export const clusterSnapshotKey = [...queryKeys.clusters, 'snapshot'] as const
+
+/** One read of `/api/clusters/:id/stream` (same DTO as list items), closed
+ * after the first frame: the cluster detail's live stream belongs to the
+ * active tab's list. Writes on the page re-read it by invalidating
+ * `clusterSnapshotKey`. */
+export function clusterSnapshotQuery(id: string) {
+  return {
+    ...snapshotQueryOptions<Cluster>(streamPath('/clusters/' + id), [
+      ...clusterSnapshotKey,
+      id,
+    ]),
+    meta: { inlineError: true },
+  }
 }
 
 export type ClusterInput = Pick<

@@ -23,7 +23,7 @@ export type PreviewRule = {
   origin_group: string
 }
 
-export function normalizeRouteHostname(value: string) {
+function normalizeRouteHostname(value: string) {
   return value.trim().split(':')[0].replace(/\.$/, '').toLowerCase()
 }
 
@@ -31,7 +31,7 @@ function hosts(rule: PreviewRule) {
   return (rule.hostnames ?? []).map(normalizeRouteHostname).filter(Boolean)
 }
 
-export function rewriteRoutePath(path: string, rule: PreviewRule) {
+function rewriteRoutePath(path: string, rule: PreviewRule) {
   const mode =
     rule.rewrite_mode || (rule.rewrite_path ? 'replace_path' : 'none')
   if (mode === 'none') return path
@@ -52,7 +52,7 @@ export function rewriteRoutePath(path: string, rule: PreviewRule) {
   return prefix + suffix
 }
 
-export function applyRouteQuery(
+function applyRouteQuery(
   destination: string,
   target: string,
   rule: PreviewRule

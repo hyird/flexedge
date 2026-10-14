@@ -1,0 +1,188 @@
+import { KPIGroup, type DataGridColumn } from '@heroui-pro/react'
+import { KPI } from '@heroui-pro/react/kpi'
+import { Alert, Button, Link } from '@heroui/react'
+import { formatDate } from '@/lib/format'
+import { DataTable } from '@/components/data-table'
+import { Mono } from '@/components/mono'
+import { RelativeTime } from '@/components/relative-time'
+import { DescriptionList, Section } from '@/components/section'
+import { StatusChip } from '@/components/status-chip'
+import { providerLabel } from '@/features/providers/provider-display'
+import { dnsLinePath } from './dns-lines'
+import { displaySyncStatus } from './dns-zone-display'
+import type { DnsZone } from './types'
+import { useZoneDetail } from './use-zone-detail'
+import { useZoneCommands } from './zone-commands'
+
+type Conflict = DnsZone['runtime']['conflicts'][number]
+
+export function ZoneOverview() {
+  const zone = useZoneDetail().data
+  const commands = useZoneCommands()
+  if (!zone) return null
+  const failedRecords = zone.runtime.record_states.filter(
+    (state) => state.sync_status === 'failed'
+  ).length
+  const conflictColumns: DataGridColumn<Conflict>[] = [
+    { id: 'type', header: '类型', accessorKey: 'type', width: 80 },
+    {
+      id: 'name',
+      header: '主机记录',
+      isRowHeader: true,
+      minWidth: 120,
+      cell: (item) => <Mono>{item.name}</Mono>,
+    },
+    {
+      id: 'line',
+      header: '线路',
+      minWidth: 110,
+      cell: (item) => dnsLinePath(zone.runtime.lines, item.line_code),
+    },
+    {
+      id: 'local',
+      header: '本地值',
+      minWidth: 180,
+      cell: (item) => <Mono className='break-all'>{item.local_content}</Mono>,
+    },
+    {
+      id: 'remote',
+      header: '服务商值',
+      minWidth: 180,
+      cell: (item) => <Mono className='break-all'>{item.remote_content}</Mono>,
+    },
+  ]
+  return (
+    <>
+      {zone.last_error && (
+        <Alert status='danger'>
+          <Alert.Indicator />
+          <Alert.Content>
+            <Alert.Title>最近一次同步失败</Alert.Title>
+            <Alert.Description>{zone.last_error}</Alert.Description>
+          </Alert.Content>
+        </Alert>
+      )}
+      <KPIGroup>
+        <KPI>
+          <KPI.Header>
+            <KPI.Title>自定义记录</KPI.Title>
+          </KPI.Header>
+          <KPI.Content>
+            <KPI.Value value={zone.config.records.length} />
+          </KPI.Content>
+        </KPI>
+        <KPIGroup.Separator />
+        <KPI>
+          <KPI.Header>
+            <KPI.Title>系统自动记录</KPI.Title>
+          </KPI.Header>
+          <KPI.Content>
+            <KPI.Value value={zone.runtime.projected_records.length} />
+          </KPI.Content>
+        </KPI>
+        <KPIGroup.Separator />
+        <KPI>
+          <KPI.Header>
+            <KPI.Title>同步失败记录</KPI.Title>
+          </KPI.Header>
+          <KPI.Content>
+            <KPI.Value value={failedRecords} />
+          </KPI.Content>
+        </KPI>
+        <KPIGroup.Separator />
+        <KPI>
+          <KPI.Header>
+            <KPI.Title>关联网站</KPI.Title>
+          </KPI.Header>
+          <KPI.Content>
+            <KPI.Value value={zone.website_count} />
+          </KPI.Content>
+        </KPI>
+      </KPIGroup>
+      {zone.runtime.conflicts.length > 0 && (
+        <Section
+          title={`同步冲突 · ${zone.runtime.conflicts.length}`}
+          description='以下记录在本地与服务商中的值不一致，选择以哪一方为准后会立即同步。'
+          actions={
+            <>
+              <Button
+                size='sm'
+                variant='tertiary'
+                onPress={() => commands.resolve(zone, 'remote')}
+              >
+                使用服务商记录
+              </Button>
+              <Button size='sm' onPress={() => commands.resolve(zone, 'local')}>
+                使用本地记录
+              </Button>
+            </>
+          }
+        >
+          <DataTable
+            label='同步冲突'
+            columns={conflictColumns}
+            data={zone.runtime.conflicts}
+            isLoading={false}
+            minWidth={680}
+            empty={{ title: '没有冲突' }}
+          />
+        </Section>
+      )}
+      <Section title='同步信息'>
+        <DescriptionList
+          columns={3}
+          items={[
+            {
+              label: '同步状态',
+              value: <StatusChip status={displaySyncStatus(zone)} />,
+            },
+            {
+              label: 'DNS 账号',
+              value: (
+                <Link
+                  href={`/providers/dns?q=${encodeURIComponent(zone.dns_provider_name)}`}
+                >
+                  {zone.dns_provider_name}
+                </Link>
+              ),
+            },
+            { label: '平台', value: providerLabel(zone.dns_provider) },
+            {
+              label: '目标版本 / 已同步版本',
+              value: (
+                <span className='tabular-nums'>
+                  {zone.desired_revision} / {zone.synced_revision}
+                </span>
+              ),
+            },
+            {
+              label: '最近同步',
+              value: (
+                <span className='flex flex-wrap gap-x-2'>
+                  {formatDate(zone.last_synced_at)}
+                  {zone.last_synced_at && (
+                    <RelativeTime
+                      value={zone.last_synced_at}
+                      className='text-muted'
+                    />
+                  )}
+                </span>
+              ),
+            },
+            {
+              label: '解析线路更新',
+              value: formatDate(zone.runtime.lines_synced_at),
+            },
+            {
+              label: '已有记录导入',
+              value: zone.runtime.records_imported ? '已导入' : '尚未导入',
+            },
+            { label: '添加时间', value: formatDate(zone.created_at) },
+            { label: '区域 ID', value: <Mono>{zone.id}</Mono> },
+          ]}
+        />
+      </Section>
+      {commands.dialogs}
+    </>
+  )
+}

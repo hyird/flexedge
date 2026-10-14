@@ -16,7 +16,7 @@ const clientIpRanking = ranking.extend({
   asn: z.string(),
   as_name: z.string(),
 })
-export const websiteDashboardSchema = z.object({
+const websiteDashboardSchema = z.object({
   summary: z.object({
     previous_month_peak_bps: z.number().int(),
     current_month_peak_bps: z.number().int(),
@@ -37,7 +37,6 @@ export const websiteDashboardSchema = z.object({
   client_ips_by_requests: z.array(clientIpRanking),
 })
 export type WebsiteDashboard = z.infer<typeof websiteDashboardSchema>
-export type WebsiteDashboardSeriesPoint = z.infer<typeof seriesPoint>
 export type WebsiteDashboardRanking = z.infer<typeof ranking>
 export type WebsiteDashboardClientIpRanking = z.infer<typeof clientIpRanking>
 export function parseWebsiteDashboard(raw: string) {

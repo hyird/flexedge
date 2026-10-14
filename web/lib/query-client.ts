@@ -3,6 +3,22 @@ import { QueryCache, QueryClient } from '@tanstack/react-query'
 import { apiErrorMessage } from './api'
 import { ApiBusinessError, ApiProtocolError } from './api-response'
 
+/** Query/mutation `meta` understood by the shared error handling. */
+declare module '@tanstack/react-query' {
+  interface Register {
+    queryMeta: {
+      /** A 401 is a normal answer (session probe on signed-out routes). */
+      unauthorizedIsExpected?: boolean
+      /** The view renders this error itself (empty/not-found state, Alert). */
+      inlineError?: boolean
+    }
+    mutationMeta: {
+      /** The form, SaveBar or ConfirmDialog shows this error inline. */
+      inlineError?: boolean
+    }
+  }
+}
+
 export function createAppQueryClient(
   notifyError: (message: string) => void,
   handleError?: (error: unknown) => boolean
@@ -27,14 +43,15 @@ export function createAppQueryClient(
         refetchOnReconnect: false,
       },
       mutations: {
-        onError: (error) => {
-          if (!handleError?.(error)) notifyError(apiErrorMessage(error))
+        onError: (error, _variables, _result, context) => {
+          if (handleError?.(error) || context.meta?.inlineError) return
+          notifyError(apiErrorMessage(error))
         },
       },
     },
     queryCache: new QueryCache({
       onError: (error, query) => {
-        if (handleError?.(error)) return
+        if (handleError?.(error) || query.meta?.inlineError) return
         if (
           query.meta?.unauthorizedIsExpected === true &&
           error instanceof AxiosError &&

@@ -1,91 +1,89 @@
 import { useState } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import type { DataGridColumn } from '@heroui-pro/react'
-import { Button, Chip, Tabs } from '@heroui/react'
+import { getRouteApi, Link } from '@tanstack/react-router'
+import { ArrowRotateLeft, Pause, Play } from '@gravity-ui/icons'
+import { Segment, type DataGridColumn } from '@heroui-pro/react'
+import { Button, Tooltip } from '@heroui/react'
 import { formatBytes, formatDate } from '@/lib/format'
-import { Drawer } from '@/components/drawer'
-import { Choice, Field, Notice } from '@/components/forms'
-import { ResourceList } from '@/components/resource-list'
+import { pageLocally, useListSearch } from '@/lib/list-search'
+import { CopyButton } from '@/components/copy-button'
+import { DataTable } from '@/components/data-table'
+import { FormSheet } from '@/components/form-sheet'
+import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
+import { Mono } from '@/components/mono'
+import { EmptyState } from '@/components/page'
+import { DescriptionList, Section } from '@/components/section'
+import { StatusChip } from '@/components/status-chip'
+import { TablePagination } from '@/components/table-pagination'
 import { useLiveLogs } from '@/features/logs/use-live-logs'
+import { accessLogStatusTone, filterAccessLogs } from './access-log-filter'
 import { parseAccessLogs, type AccessLog } from './access-log-schema'
+import {
+  accessLogMethods,
+  accessLogStatusClasses,
+  type AccessLogsSearch,
+} from './access-log-search'
 import { websiteAccessLogHistoryQuery } from './data'
-import type { Website } from './types'
+import { useWebsite } from './website-context'
 
-const methods = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
+const route = getRouteApi('/_authenticated/websites/$websiteId/logs')
+const filterKeys = ['method', 'status_class'] as const
 
-export function AccessLogs({
-  website,
-  onClose,
-}: {
-  website: Website
-  onClose: () => void
-}) {
-  const [mode, setMode] = useState('live')
+/** `/websites/$websiteId/logs`. Live mode tails `access-logs/stream` only while
+ * this tab is mounted and not paused; history mode takes one snapshot per
+ * query (the `/history/stream` connection closes after the first frame). */
+export function AccessLogs() {
+  const website = useWebsite()
+  const list = useListSearch(route)
+  const navigate = route.useNavigate()
+  const { search } = list
+  const history = search.mode === 'history'
   const [paused, setPaused] = useState(false)
-  const [attempt, setAttempt] = useState(0)
-  const [keyword, setKeyword] = useState('')
-  const [search, setSearch] = useState('')
-  const [method, setMethod] = useState('all')
-  const [statusClass, setStatusClass] = useState('all')
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(20)
-  const [selected, setSelected] = useState<AccessLog | null>(null)
+  const filter = {
+    keyword: list.keyword || undefined,
+    method: search.method,
+    status_class: search.status_class,
+  }
   const live = useLiveLogs(
-    `/api/websites/${website.id}/access-logs/stream${attempt ? `?retry=${attempt}` : ''}`,
+    `/api/websites/${website.id}/access-logs/stream`,
     parseAccessLogs,
-    mode === 'live' && !paused
+    !history && !paused
   )
-  const history = useQuery({
+  const historyQuery = useQuery({
     ...websiteAccessLogHistoryQuery(website.id, {
-      page,
-      page_size: pageSize,
-      keyword: search || undefined,
-      method: method === 'all' ? undefined : method,
-      status_class: statusClass === 'all' ? undefined : statusClass,
+      page: list.page,
+      page_size: list.pageSize,
+      ...filter,
     }),
-    enabled: mode === 'history',
+    enabled: history,
+    gcTime: 0,
     placeholderData: keepPreviousData,
   })
-  const filtered = live.logs.filter(
-    (log) =>
-      (method === 'all' || log.method === method) &&
-      (statusClass === 'all' ||
-        String(log.status_code)[0] === statusClass[0]) &&
-      (!search ||
-        [
-          log.host,
-          log.target,
-          log.node_name,
-          log.client_ip,
-          log.client_ip_location,
-          log.protocol,
-          String(log.status_code),
-        ]
-          .join(' ')
-          .toLowerCase()
-          .includes(search.toLowerCase()))
-  )
-  const livePage = {
-    list: filtered.slice((page - 1) * pageSize, page * pageSize),
-    total: filtered.length,
-    page,
-    page_size: pageSize,
-    total_pages: Math.max(1, Math.ceil(filtered.length / pageSize)),
-  }
-  const liveQuery = {
-    data: livePage,
-    isPending: !paused && !live.connected && !live.logs.length,
-    isError: !!live.error,
-    error: live.error ? new Error(live.error) : null,
-    isFetching: false,
-  }
+  const view = history
+    ? historyQuery.data
+    : pageLocally(filterAccessLogs(live.logs, filter), list.page, list.pageSize)
+  const rows = view?.list
+  const total = view?.total ?? 0
+  const filtered =
+    !!list.keyword || filterKeys.some((key) => search[key] !== undefined)
+  const selected = search.log
+    ? (history ? historyQuery.data?.list : live.logs)?.find(
+        (log) => log.id === search.log
+      )
+    : undefined
+  const openLog = (id: string | undefined) =>
+    void navigate({
+      search: (previous: AccessLogsSearch) => ({ ...previous, log: id }),
+      replace: !id,
+    })
+
   const columns: DataGridColumn<AccessLog>[] = [
     {
       id: 'time',
       header: '时间',
       minWidth: 160,
       cell: (log) => (
-        <span className='text-xs tabular-nums'>
+        <span className='text-[13px] tabular-nums'>
           {formatDate(log.occurred_at)}
         </span>
       ),
@@ -93,24 +91,21 @@ export function AccessLogs({
     {
       id: 'request',
       header: '请求',
-      minWidth: 260,
       isRowHeader: true,
+      minWidth: 300,
       cell: (log) => (
-        <div className='flex flex-col items-start gap-1'>
-          <Button
-            size='sm'
-            variant='ghost'
-            className='h-auto justify-start p-0 text-xs'
-            onPress={() => setSelected(log)}
-          >
-            <span className='font-medium'>{log.method}</span>
-            <span className='max-w-64 truncate' title={log.host + log.target}>
-              {log.host}
-              {log.target}
-            </span>
-          </Button>
-          <span className='text-xs text-muted'>{log.protocol}</span>
-        </div>
+        <Button
+          size='sm'
+          variant='ghost'
+          className='h-auto max-w-full min-w-0 justify-start gap-2 px-1 py-0.5 text-left'
+          aria-label={`查看请求 ${log.method} ${log.host}${log.target}`}
+          onPress={() => openLog(log.id)}
+        >
+          <span className='shrink-0 text-xs font-semibold'>{log.method}</span>
+          <Mono truncate className='min-w-0 text-accent'>
+            {log.host + log.target}
+          </Mono>
+        </Button>
       ),
     },
     {
@@ -118,21 +113,10 @@ export function AccessLogs({
       header: '状态',
       minWidth: 80,
       cell: (log) => (
-        <Chip
-          size='sm'
-          variant='soft'
-          color={
-            log.status_code >= 500
-              ? 'danger'
-              : log.status_code >= 400
-                ? 'warning'
-                : log.status_code >= 300
-                  ? 'accent'
-                  : 'success'
-          }
-        >
-          {log.status_code}
-        </Chip>
+        <StatusChip
+          label={String(log.status_code)}
+          tone={accessLogStatusTone(log.status_code)}
+        />
       ),
     },
     {
@@ -140,234 +124,324 @@ export function AccessLogs({
       header: '客户端',
       minWidth: 160,
       cell: (log) => (
-        <div className='flex flex-col gap-1'>
-          <code className='text-xs'>{log.client_ip || '—'}</code>
-          <span className='text-xs text-muted'>
-            {log.client_ip_location || ''}
-          </span>
+        <div className='flex min-w-0 flex-col gap-0.5'>
+          <Mono>{log.client_ip || '—'}</Mono>
+          {log.client_ip_location && (
+            <span className='truncate text-xs text-muted'>
+              {log.client_ip_location}
+            </span>
+          )}
         </div>
       ),
     },
-    { id: 'node', header: '节点', accessorKey: 'node_name', minWidth: 120 },
+    {
+      id: 'node',
+      header: '节点',
+      minWidth: 130,
+      cell: (log) => (
+        <Link
+          to='/nodes/$nodeId'
+          params={{ nodeId: log.node_id }}
+          className='link truncate'
+        >
+          {log.node_name}
+        </Link>
+      ),
+    },
     {
       id: 'duration',
       header: '耗时',
-      minWidth: 95,
+      minWidth: 80,
       cell: (log) => <span className='tabular-nums'>{log.duration_ms} ms</span>,
     },
     {
       id: 'bytes',
       header: '响应',
-      minWidth: 100,
+      minWidth: 90,
       cell: (log) => (
         <span className='tabular-nums'>{formatBytes(log.response_bytes)}</span>
       ),
     },
-    {
-      id: 'cache',
-      header: '缓存',
-      minWidth: 110,
-      cell: (log) => log.cache_status || '—',
-    },
   ]
+
+  const liveState = paused
+    ? { label: '已暂停', tone: 'default' as const }
+    : live.connected
+      ? { label: '实时连接', tone: 'success' as const }
+      : { label: '正在连接', tone: 'accent' as const }
+
   return (
-    <Drawer
-      title={`${website.config.name || website.access_domain} · 访问日志`}
-      onClose={onClose}
-      size='lg'
+    <Section
+      title='访问日志'
+      description={
+        history
+          ? '按条件查询已入库的访问记录。'
+          : '实时接收新请求，浏览器最多保留最近 1000 条。'
+      }
+      actions={
+        <Segment
+          size='sm'
+          aria-label='日志模式'
+          selectedKey={history ? 'history' : 'live'}
+          onSelectionChange={(key) =>
+            void list.setSearch({
+              mode: key === 'history' ? 'history' : undefined,
+              log: undefined,
+            })
+          }
+        >
+          <Segment.Item id='live'>实时</Segment.Item>
+          <Segment.Item id='history'>历史</Segment.Item>
+        </Segment>
+      }
     >
-      <Tabs
-        selectedKey={mode}
-        onSelectionChange={(key) => {
-          setMode(String(key))
-          setPage(1)
-          setSelected(null)
-        }}
-        variant='secondary'
-        className='space-y-5'
+      <div className='flex flex-col gap-4'>
+        {!website.config.access_log_enabled && (
+          <p className='text-[13px] text-warning'>
+            此网站未启用访问日志，节点不会上报新的请求记录。
+          </p>
+        )}
+        <ListToolbar
+          search={{
+            value: list.keyword,
+            onChange: (q) => void list.setSearch({ q }),
+            placeholder: '搜索域名、路径、IP 或节点',
+          }}
+          filters={
+            <>
+              <FilterSelect
+                label='方法'
+                value={search.method ?? ''}
+                onChange={(value) =>
+                  void list.setSearch({
+                    method: (value || undefined) as AccessLogsSearch['method'],
+                  })
+                }
+                options={accessLogMethods.map((method) => ({
+                  id: method,
+                  label: method,
+                }))}
+              />
+              <FilterSelect
+                label='状态码'
+                value={search.status_class ?? ''}
+                onChange={(value) =>
+                  void list.setSearch({
+                    status_class: (value ||
+                      undefined) as AccessLogsSearch['status_class'],
+                  })
+                }
+                options={accessLogStatusClasses.map((value) => ({
+                  id: value,
+                  label: value,
+                }))}
+              />
+            </>
+          }
+          hasFilters={filtered}
+          onClearFilters={() => void list.clearFilters([...filterKeys])}
+          onRefresh={history ? () => historyQuery.refetch() : undefined}
+          isRefreshing={history && historyQuery.isFetching}
+          actions={
+            history ? undefined : (
+              <>
+                <StatusChip label={liveState.label} tone={liveState.tone} />
+                <Tooltip delay={300}>
+                  <Button
+                    size='sm'
+                    variant='tertiary'
+                    isIconOnly
+                    aria-label={paused ? '继续' : '暂停'}
+                    onPress={() => setPaused((value) => !value)}
+                  >
+                    {paused ? <Play /> : <Pause />}
+                  </Button>
+                  <Tooltip.Content>{paused ? '继续' : '暂停'}</Tooltip.Content>
+                </Tooltip>
+                <Tooltip delay={300}>
+                  <Button
+                    size='sm'
+                    variant='tertiary'
+                    isIconOnly
+                    aria-label='重新连接'
+                    onPress={() => {
+                      if (paused) setPaused(false)
+                      else live.reconnect()
+                    }}
+                  >
+                    <ArrowRotateLeft />
+                  </Button>
+                  <Tooltip.Content>重新连接</Tooltip.Content>
+                </Tooltip>
+              </>
+            )
+          }
+        />
+        <DataTable
+          label={history ? '历史访问日志' : '实时访问日志'}
+          columns={columns}
+          data={rows}
+          isLoading={
+            history
+              ? historyQuery.isPending
+              : !paused && !live.connected && live.logs.length === 0
+          }
+          error={
+            history
+              ? historyQuery.isError
+                ? historyQuery.error
+                : undefined
+              : live.error
+                ? new Error(live.error)
+                : undefined
+          }
+          onRetry={() =>
+            history ? void historyQuery.refetch() : live.reconnect()
+          }
+          minWidth={1060}
+          empty={
+            filtered
+              ? {
+                  title: '没有匹配的访问记录',
+                  description: '调整搜索词或筛选条件后重试。',
+                }
+              : history
+                ? {
+                    title: '暂无历史日志',
+                    description: '启用访问日志后，节点上报的请求会保存在这里。',
+                  }
+                : {
+                    title: paused ? '实时日志已暂停' : '等待新的请求',
+                    description: paused
+                      ? '继续后接收新的访问记录。'
+                      : '有请求到达边缘节点时会立即出现在这里。',
+                  }
+          }
+          footer={
+            <TablePagination
+              page={list.page}
+              pageSize={list.pageSize}
+              total={total}
+              onPageChange={(page) => void list.setPage(page)}
+              onPageSizeChange={(size) => void list.setPageSize(size)}
+            />
+          }
+        />
+      </div>
+      <FormSheet
+        isOpen={!!search.log}
+        onClose={() => openLog(undefined)}
+        title='请求详情'
+        size='lg'
+        footer={
+          <Button
+            size='sm'
+            variant='tertiary'
+            onPress={() => openLog(undefined)}
+          >
+            关闭
+          </Button>
+        }
       >
-        <div className='flex flex-wrap items-center justify-between gap-3'>
-          <Tabs.ListContainer>
-            <Tabs.List aria-label='访问日志视图'>
-              <Tabs.Tab id='live'>
-                实时日志
-                <Tabs.Indicator />
-              </Tabs.Tab>
-              <Tabs.Tab id='history'>
-                历史日志
-                <Tabs.Indicator />
-              </Tabs.Tab>
-            </Tabs.List>
-          </Tabs.ListContainer>
-          {mode === 'live' && (
-            <div className='flex items-center gap-2'>
-              <Chip
-                size='sm'
-                variant='soft'
-                color={live.connected ? 'success' : 'default'}
-              >
-                {paused ? '已暂停' : live.connected ? '实时连接' : '正在连接'}
-              </Chip>
-              <Button
-                size='sm'
-                variant='secondary'
-                onPress={() => setPaused((current) => !current)}
-              >
-                {paused ? '继续' : '暂停'}
-              </Button>
-              <Button
-                size='sm'
-                variant='tertiary'
-                onPress={() => {
-                  setAttempt((current) => current + 1)
-                  setPaused(false)
-                }}
-              >
-                重新连接
-              </Button>
-            </div>
-          )}
-        </div>
-        <Tabs.Panel id={mode} className='space-y-5'>
-          <ResourceList
-            label='访问日志'
-            query={mode === 'history' ? history : liveQuery}
-            data={mode === 'history' ? history.data : livePage}
-            columns={columns}
-            page={page}
-            onPageChange={setPage}
-            pageSize={pageSize}
-            onPageSizeChange={(size) => {
-              setPageSize(size)
-              setPage(1)
-            }}
-            onRefresh={
-              mode === 'history' ? () => void history.refetch() : undefined
-            }
-            emptyTitle={mode === 'history' ? '暂无历史日志' : '暂无实时日志'}
-            emptyDescription='符合当前筛选条件的访问记录将在此显示。'
-            filters={
-              <form
-                className='flex flex-wrap items-end gap-2'
-                onSubmit={(event) => {
-                  event.preventDefault()
-                  setSearch(keyword.trim())
-                  setPage(1)
-                }}
-              >
-                <div className='min-w-48 flex-1'>
-                  <Field
-                    label='搜索访问日志'
-                    value={keyword}
-                    onChange={setKeyword}
-                    placeholder='域名、路径、IP 或节点'
-                  />
-                </div>
-                <Choice
-                  compact
-                  label='请求方法'
-                  value={method}
-                  onChange={(value) => {
-                    setMethod(value)
-                    setPage(1)
-                  }}
-                  items={[
-                    { id: 'all', label: '全部方法' },
-                    ...methods.map((value) => ({ id: value, label: value })),
-                  ]}
-                />
-                <Choice
-                  compact
-                  label='状态码'
-                  value={statusClass}
-                  onChange={(value) => {
-                    setStatusClass(value)
-                    setPage(1)
-                  }}
-                  items={[
-                    { id: 'all', label: '全部状态码' },
-                    ...['1xx', '2xx', '3xx', '4xx', '5xx'].map((value) => ({
-                      id: value,
-                      label: value,
-                    })),
-                  ]}
-                />
-                <Button size='sm' type='submit' variant='secondary'>
-                  搜索
-                </Button>
-              </form>
+        {selected ? (
+          <AccessLogDetail log={selected} />
+        ) : (
+            history
+              ? historyQuery.isPending
+              : !live.connected && !live.logs.length
+          ) ? null : (
+          <EmptyState
+            size='sm'
+            title='请求不在当前列表中'
+            description={
+              history
+                ? '该记录不在当前页或筛选结果中。'
+                : '实时日志只保留最近的记录，该请求可能已被移出。'
             }
           />
-          {selected && (
-            <AccessLogDetail log={selected} onClose={() => setSelected(null)} />
-          )}
-        </Tabs.Panel>
-      </Tabs>
-    </Drawer>
+        )}
+      </FormSheet>
+    </Section>
   )
 }
 
-function AccessLogDetail({
-  log,
-  onClose,
-}: {
-  log: AccessLog
-  onClose: () => void
-}) {
+function AccessLogDetail({ log }: { log: AccessLog }) {
+  const url = `${log.host}${log.target}`
   return (
-    <section className='space-y-4 rounded-2xl bg-surface-secondary p-4'>
-      <div className='flex flex-wrap items-center justify-between gap-2'>
-        <h3 className='text-sm font-medium'>请求详情</h3>
-        <Button size='sm' variant='tertiary' onPress={onClose}>
-          收起
-        </Button>
+    <div className='flex flex-col gap-5'>
+      <div className='flex items-start gap-2 rounded-xl bg-surface-secondary p-3'>
+        <span className='shrink-0 text-xs font-semibold'>{log.method}</span>
+        <Mono className='min-w-0 flex-1 break-all'>{url}</Mono>
+        <CopyButton value={url} label='复制地址' />
       </div>
-      <code className='block text-sm break-all'>
-        {log.method} {log.host}
-        {log.target}
-      </code>
-      <dl className='grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3'>
-        {[
-          ['时间', formatDate(log.occurred_at)],
-          ['节点', log.node_name],
-          ['协议', log.protocol],
-          ['状态码', String(log.status_code)],
-          ['客户端 IP', log.client_ip || '—'],
-          ['IP 归属', log.client_ip_location || '—'],
-          ['耗时', `${log.duration_ms} ms`],
-          ['请求流量', formatBytes(log.request_bytes)],
-          ['响应流量', formatBytes(log.response_bytes)],
-          ['缓存状态', log.cache_status || '—'],
-          ['缓存层', log.cache_layer || '—'],
-          ['回源流量', formatBytes(log.origin_bytes)],
-          ['缓存流量', formatBytes(log.cache_bytes)],
-          ['TLS 指纹', log.tls_fingerprint || '—'],
-        ].map(([label, value]) => (
-          <div key={label}>
-            <dt className='text-xs text-muted'>{label}</dt>
-            <dd className='mt-1 break-all tabular-nums'>{value}</dd>
-          </div>
-        ))}
-      </dl>
-      {log.request_body_truncated && <Notice>请求体已截断。</Notice>}
-      {[
-        ['User-Agent', log.user_agent],
-        ['Referer', log.referer],
-        ['查询参数', log.query_string],
-        ['Cookie', log.cookies],
-        ['请求头', log.request_headers],
-        ['请求体', log.request_body],
-        ['响应头', log.response_headers],
-      ]
+      <DescriptionList
+        columns={3}
+        items={[
+          { label: '时间', value: formatDate(log.occurred_at) },
+          {
+            label: '状态码',
+            value: (
+              <StatusChip
+                label={String(log.status_code)}
+                tone={accessLogStatusTone(log.status_code)}
+              />
+            ),
+          },
+          { label: '协议', value: log.protocol },
+          {
+            label: '节点',
+            value: (
+              <Link
+                to='/nodes/$nodeId'
+                params={{ nodeId: log.node_id }}
+                className='link'
+              >
+                {log.node_name}
+              </Link>
+            ),
+          },
+          { label: '客户端 IP', value: <Mono>{log.client_ip || '—'}</Mono> },
+          { label: 'IP 归属', value: log.client_ip_location || '—' },
+          { label: '耗时', value: `${log.duration_ms} ms` },
+          { label: '请求流量', value: formatBytes(log.request_bytes) },
+          { label: '响应流量', value: formatBytes(log.response_bytes) },
+          {
+            label: 'TLS 指纹',
+            value: log.tls_fingerprint ? (
+              <Mono className='break-all'>{log.tls_fingerprint}</Mono>
+            ) : (
+              '—'
+            ),
+            wide: true,
+          },
+        ]}
+      />
+      {log.request_body_truncated && (
+        <p className='text-[13px] text-warning'>请求体超过记录上限，已截断。</p>
+      )}
+      {(
+        [
+          ['User-Agent', log.user_agent],
+          ['Referer', log.referer],
+          ['查询参数', log.query_string],
+          ['Cookie', log.cookies],
+          ['请求头', log.request_headers],
+          ['请求体', log.request_body],
+          ['响应头', log.response_headers],
+        ] as const
+      )
         .filter(([, value]) => value)
         .map(([label, value]) => (
-          <div key={label}>
-            <h4 className='mb-2 text-xs font-medium'>{label}</h4>
-            <pre className='max-h-64 overflow-auto rounded-xl bg-background p-3 text-xs break-all whitespace-pre-wrap'>
+          <div key={label} className='flex flex-col gap-1.5'>
+            <div className='flex items-center justify-between gap-2'>
+              <h4 className='text-xs font-medium text-muted'>{label}</h4>
+              <CopyButton value={value!} />
+            </div>
+            <pre className='max-h-64 overflow-auto rounded-xl bg-surface-secondary p-3 font-mono text-xs break-all whitespace-pre-wrap'>
               {value}
             </pre>
           </div>
         ))}
-    </section>
+    </div>
   )
 }

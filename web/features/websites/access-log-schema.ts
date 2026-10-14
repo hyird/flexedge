@@ -1,8 +1,8 @@
 import { z } from 'zod'
 import { createLogEventParser } from '@/features/logs/log-event'
 
-// service/domains/website/website.types.h: WebsiteAccessLogDto
-export const accessLogSchema = z.object({
+// service/domains/website/website_types.h: WebsiteAccessLogDto
+const accessLogSchema = z.object({
   id: z.string(),
   occurred_at: z.string(),
   node_id: z.string(),
@@ -26,10 +26,6 @@ export const accessLogSchema = z.object({
   query_string: z.string().optional(),
   cookies: z.string().optional(),
   tls_fingerprint: z.string().optional(),
-  cache_status: z.string().optional(),
-  cache_layer: z.string().optional(),
-  origin_bytes: z.number().int().optional(),
-  cache_bytes: z.number().int().optional(),
 })
 export type AccessLog = z.infer<typeof accessLogSchema>
 export const parseAccessLogs = createLogEventParser(accessLogSchema)

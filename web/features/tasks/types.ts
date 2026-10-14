@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { collectionPageSchema } from '@/lib/pagination'
 
-// service/domains/task/task.types.h and task.service.h define the wire contract.
+// service/domains/task/task_types.h and task_service.h define the wire contract.
 export const taskSchema = z.object({
   id: z.string(),
   resource_type: z.enum([
@@ -45,5 +45,4 @@ export const taskHistorySchema = z.object({
   truncated: z.boolean(),
 })
 export type Task = z.infer<typeof taskSchema>
-export type TaskPage = z.infer<typeof taskPageSchema>
 export type TaskHistory = z.infer<typeof taskHistorySchema>

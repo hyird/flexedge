@@ -7,12 +7,6 @@ export type RouteCondition = {
   value: string
 }
 
-export const routeMatchLabels = {
-  exact: '精确',
-  prefix: '前缀',
-  suffix: '后缀',
-  regex: '正则',
-}
 const patterns = new Map<string, RE2JS>()
 const byteLength = (value: string) => new TextEncoder().encode(value).length
 const hasControl = (value: string) =>

@@ -1,6 +1,12 @@
 import { afterEach, expect, it } from 'vitest'
 import { api } from '@/lib/api'
-import { patchWebsiteOriginRuntime, saveWebsite } from './data'
+import { ApiBusinessError, ApiProtocolError } from '@/lib/api-response'
+import {
+  createWebsite,
+  isWebsiteNotFound,
+  patchWebsiteOriginRuntime,
+  updateWebsite,
+} from './data'
 import type { Website } from './types'
 import { defaultWebsiteConfig } from './website-form'
 
@@ -84,6 +90,7 @@ it('applies current origin runtime per node and ignores stale updates', () => {
 
 it('sends cluster selection separately from the website configuration', async () => {
   const config = defaultWebsiteConfig()
+  const id = '00000000-0000-4000-8000-000000000999'
   api.defaults.adapter = async (request) => {
     expect(request.method).toBe('post')
     expect(request.url).toBe('/websites?cluster_id=cluster-one')
@@ -94,15 +101,29 @@ it('sends cluster selection separately from the website configuration', async ()
       status: 200,
       statusText: 'OK',
       headers: {},
-      data: { code: 0, message: 'created', data: null },
+      data: { code: 0, message: 'created', data: { id, revision: 1 } },
     }
   }
-  const response = await saveWebsite({
-    cluster_id: 'cluster-one',
-    status: 'enabled',
-    config,
+  await expect(
+    createWebsite({ cluster_id: 'cluster-one', status: 'enabled', config })
+  ).resolves.toEqual({ id, revision: 1 })
+})
+
+it('rejects a create response without the new website id', async () => {
+  api.defaults.adapter = async (request) => ({
+    config: request,
+    status: 200,
+    statusText: 'OK',
+    headers: {},
+    data: { code: 0, message: 'created', data: { revision: 1 } },
   })
-  expect(response.message).toBe('created')
+  await expect(
+    createWebsite({
+      cluster_id: 'cluster-one',
+      status: 'enabled',
+      config: defaultWebsiteConfig(),
+    })
+  ).rejects.toBeInstanceOf(ApiProtocolError)
 })
 
 it('uses the selected revision when updating an existing website', async () => {
@@ -118,7 +139,7 @@ it('uses the selected revision when updating an existing website', async () => {
       data: { code: 0, message: 'updated', data: null },
     }
   }
-  const response = await saveWebsite(
+  const response = await updateWebsite(
     {
       cluster_id: 'cluster-two',
       status: 'disabled',
@@ -127,4 +148,14 @@ it('uses the selected revision when updating an existing website', async () => {
     { id: 'site-one', revision: 7 }
   )
   expect(response.message).toBe('updated')
+})
+
+it('recognises the website not-found stream error', () => {
+  expect(isWebsiteNotFound(new ApiBusinessError(16601, '网站不存在'))).toBe(
+    true
+  )
+  expect(isWebsiteNotFound(new ApiBusinessError(40001, '资源不存在'))).toBe(
+    false
+  )
+  expect(isWebsiteNotFound(new Error('网站不存在'))).toBe(false)
 })

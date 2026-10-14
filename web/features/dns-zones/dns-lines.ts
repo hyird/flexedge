@@ -1,6 +1,6 @@
 import type { DnsLine } from '@/features/dns-zones/types'
 
-export type DnsLineTreeNode = {
+type DnsLineTreeNode = {
   key: string
   label: string
   path: string[]
