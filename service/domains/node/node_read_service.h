@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "service/common/http.h"
+#include "service/domains/node/node_connection.h"
 #include "service/domains/node/node_error.h"
 #include "service/domains/node/node_mapper.h"
 #include "service/domains/node/node_types.h"
@@ -52,11 +53,7 @@ public:
         }
         if (connection_status) {
             const auto placeholder = "$" + std::to_string(params.size() + 1);
-            where +=
-                " AND (CASE WHEN node.registration_status <> 'registered' THEN 'unregistered' "
-                "WHEN node.status = 'enabled' AND node.last_heartbeat_at >= NOW() - INTERVAL '90 "
-                "seconds' THEN 'online' ELSE 'offline' END) = " +
-                placeholder;
+            where += " AND " + connection_status_sql() + " = " + placeholder;
             params.emplace_back(std::string_view(*connection_status));
         }
 
@@ -174,12 +171,18 @@ private:
                "node.deleted_at IS NULL AND cluster.deleted_at IS NULL";
     }
 
+    // unregistered / online / offline, by the shared online rule of node_connection.h.
+    static std::string connection_status_sql() {
+        return "(CASE WHEN node.registration_status <> 'registered' THEN 'unregistered' WHEN " +
+               node_online_sql() + " THEN 'online' ELSE 'offline' END)";
+    }
+
     static std::string node_columns() {
         return "SELECT node.id, node.cluster_id, cluster.name, node.revision, "
                "node.node_spec_revision, node.config::text, node.runtime::text, "
-               "node.registration_status, CASE WHEN node.registration_status <> 'registered' THEN "
-               "'unregistered' WHEN node.status = 'enabled' AND node.last_heartbeat_at >= NOW() - "
-               "INTERVAL '90 seconds' THEN 'online' ELSE 'offline' END, "
+               "node.registration_status, " +
+               connection_status_sql() +
+               ", "
                "TO_CHAR(node.last_heartbeat_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
                "node.applied_node_spec_revision, TO_CHAR(node.created_at, "
                "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), TO_CHAR(node.updated_at, "

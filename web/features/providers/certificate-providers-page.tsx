@@ -1,10 +1,9 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getRouteApi } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button, Tooltip } from '@heroui/react'
-import { hasListFilters, pageLocally, useListSearch } from '@/lib/list-search'
+import { hasListFilters, pageLocally, useListState } from '@/lib/list-search'
 import { ActionMenu } from '@/components/action-menu'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTable } from '@/components/data-table'
@@ -19,13 +18,17 @@ import { useProviderActions } from './provider-actions'
 import { providerLabel, providerStatusLabels } from './provider-display'
 import type { CertificateProvider } from './types'
 
-const route = getRouteApi('/_authenticated/providers/')
-
-/** The certificate provider stream returns the whole (small) collection, so
- * search and pagination run on the client while still living in the URL. */
-export function CertificateProvidersPage() {
-  const list = useListSearch(route)
-  const navigate = route.useNavigate()
+/** `/providers` 证书供应商 tab. The certificate provider stream returns the
+ * whole (small) collection, so search and pagination run on the client; they
+ * and the add/edit sheets are component state, and `initialQuery` is the
+ * arrival keyword. */
+export function CertificateProvidersPage({
+  initialQuery,
+}: {
+  initialQuery?: string
+}) {
+  const list = useListState<{ q?: string }>({ q: initialQuery })
+  const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<CertificateProvider | null>(null)
   const [removing, setRemoving] = useState<CertificateProvider | null>(null)
   const actions = useProviderActions()
@@ -41,11 +44,6 @@ export function CertificateProvidersPage() {
   )
   const pageData = matches && pageLocally(matches, list.page, list.pageSize)
   const filtered = hasListFilters(list.search, [])
-  const setCreating = (create: boolean) =>
-    navigate({
-      search: (previous) => ({ ...previous, create: create ? 1 : undefined }),
-      replace: !create,
-    })
   const columns: DataGridColumn<CertificateProvider>[] = [
     {
       id: 'provider',
@@ -136,7 +134,7 @@ export function CertificateProvidersPage() {
     },
   ]
   const createButton = (
-    <Button size='sm' onPress={() => void setCreating(true)}>
+    <Button size='sm' onPress={() => setCreating(true)}>
       <Plus className='size-4' />
       添加供应商
     </Button>
@@ -186,8 +184,8 @@ export function CertificateProvidersPage() {
           />
         }
       />
-      {list.search.create === 1 && (
-        <CertificateProviderSheet onClose={() => void setCreating(false)} />
+      {creating && (
+        <CertificateProviderSheet onClose={() => setCreating(false)} />
       )}
       {editing && (
         <CertificateProviderSheet

@@ -2,6 +2,7 @@
 
 #include <ruvia/core/task.h>
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -26,11 +27,13 @@ claim(service::background::worker_context& context) {
         "UPDATE sys_sync_task marker SET lease_owner = $1, lease_until = NOW() + INTERVAL '60 "
         "seconds', "
         "updated_at = NOW() FROM candidate WHERE marker.id = candidate.id RETURNING marker.id, "
-        "marker.tenant_id, marker.resource_id, marker.version, marker.count_fails",
+        "marker.tenant_id, marker.resource_id, marker.version, marker.count_fails, "
+        "marker.operation",
         context.lease_owner());
     if (rows.empty()) {
         co_return std::nullopt;
     }
+    const auto claimed_at = std::chrono::steady_clock::now();
     const auto& row = rows.front();
     service::live_resource::get_hub().publish(row[1].value().value_or(""),
         service::live_resource::resource::tasks,
@@ -44,6 +47,8 @@ claim(service::background::worker_context& context) {
         .certificate_id_ = std::string(row[2].value().value_or("")),
         .version_ = row[3].as<std::int64_t>().value_or(1),
         .failures_ = row[4].as<std::int64_t>().value_or(0),
+        .operation_ = std::string(row[5].value().value_or("")),
+        .claimed_at_ = claimed_at,
     };
 }
 

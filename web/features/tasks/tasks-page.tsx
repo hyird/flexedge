@@ -15,16 +15,18 @@ import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { recentTaskCountQuery, tasksQuery } from './data'
 import { taskFilterKeys, type TasksSearch } from './search'
+import { RedactedText } from './task-attempt-trace'
 import { TaskDetailSheet } from './task-detail-sheet'
 import {
   taskKey,
-  taskResourceHref,
+  taskResourceTarget,
   taskStatusLabels,
   taskStatuses,
   taskStatusTones,
   taskTitle,
   taskTypes,
 } from './task-display'
+import { redactedMarker } from './task-trace'
 import type { Task } from './types'
 
 const route = getRouteApi('/_authenticated/tasks/')
@@ -33,7 +35,6 @@ const sheetClosed = {
   task: undefined,
   resource_id: undefined,
   version: undefined,
-  tab: undefined,
 } satisfies Partial<TasksSearch>
 
 function sheetSearch(task: Task) {
@@ -41,7 +42,6 @@ function sheetSearch(task: Task) {
     task: task.id,
     resource_id: task.resource_id,
     version: task.version,
-    tab: undefined,
   } satisfies Partial<TasksSearch>
 }
 
@@ -105,19 +105,23 @@ export function TasksPage() {
       id: 'resource',
       header: '关联资源',
       minWidth: 200,
-      cell: (task) => (
-        <div className='flex min-w-0 flex-col'>
-          <HeroLink
-            href={taskResourceHref(task)}
-            className='truncate text-sm no-underline hover:underline'
-          >
-            {task.name}
-          </HeroLink>
-          <span className='text-xs text-muted'>
-            {taskTypes[task.resource_type]}
-          </span>
-        </div>
-      ),
+      cell: (task) => {
+        const target = taskResourceTarget(task)
+        return (
+          <div className='flex min-w-0 flex-col'>
+            <HeroLink
+              href={target.href}
+              routerOptions={target.state && { state: target.state }}
+              className='truncate text-sm no-underline hover:underline'
+            >
+              {task.name}
+            </HeroLink>
+            <span className='text-xs text-muted'>
+              {taskTypes[task.resource_type]}
+            </span>
+          </div>
+        )
+      },
     },
     {
       id: 'status',
@@ -135,12 +139,12 @@ export function TasksPage() {
         return task.error ? (
           <Tooltip delay={300}>
             <Tooltip.Trigger
-              aria-label={`${taskStatuses[task.status]}：${task.error}`}
+              aria-label={`${taskStatuses[task.status]}：${task.error.replaceAll(redactedMarker, '（已隐藏）')}`}
             >
               {chip}
             </Tooltip.Trigger>
             <Tooltip.Content className='max-w-80 whitespace-normal'>
-              {task.error}
+              <RedactedText value={task.error} />
             </Tooltip.Content>
           </Tooltip>
         ) : (
@@ -194,7 +198,7 @@ export function TasksPage() {
             {
               id: 'resource',
               label: '前往关联资源',
-              href: taskResourceHref(task),
+              ...taskResourceTarget(task),
             },
           ]}
         />
@@ -317,15 +321,9 @@ export function TasksPage() {
       </div>
       {selection && (
         <TaskDetailSheet
+          key={`${selection.id}:${selection.resource_id}`}
           selection={selection}
           version={search.version}
-          tab={search.tab ?? 'detail'}
-          onTabChange={(tab) =>
-            void updateSheet(
-              { tab: tab === 'history' ? 'history' : undefined },
-              true
-            )
-          }
           onVersionResolved={(version) => void updateSheet({ version }, true)}
           onClose={() => void updateSheet(sheetClosed, true)}
         />

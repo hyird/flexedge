@@ -1,11 +1,13 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import { Cubes3, Globe, Pencil, Plus, Server } from '@gravity-ui/icons'
 import { Button, Meter, Skeleton } from '@heroui/react'
 import { ApiBusinessError } from '@/lib/api-response'
 import { formatPercent, ratioOf } from '@/lib/format'
+import { useArrivalState } from '@/lib/history-state'
 import { statusLabels } from '@/lib/status'
+import { useTabSwitchGuard } from '@/lib/unsaved-changes'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
 import { CopyButton } from '@/components/copy-button'
 import { DetailHeader, DetailHeaderSkeleton } from '@/components/detail-header'
@@ -15,10 +17,10 @@ import { EmptyState, Page, QueryNotice } from '@/components/page'
 import { PageTabs } from '@/components/page-tabs'
 import { Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
+import { watchClusterNodeTransitions } from '@/features/nodes/data'
 import { providerLabel } from '@/features/providers/provider-display'
 import { ClusterActionMenu } from './cluster-action-menu'
 import { ClusterNodes } from './cluster-nodes'
-import type { ClusterDetailTab } from './cluster-search'
 import { ClusterSheet } from './cluster-sheet'
 import { ClusterWebsites } from './cluster-websites'
 import { clusterSnapshotKey, clusterSnapshotQuery } from './data'
@@ -28,11 +30,11 @@ const route = getRouteApi('/_authenticated/clusters/$clusterId')
 // service/domains/cluster/cluster_error.h NOT_FOUND
 const clusterNotFoundCode = 16401
 
-type Tab = 'nodes' | ClusterDetailTab
 const tabs = [
   { id: 'nodes', label: '节点', icon: <Server /> },
   { id: 'websites', label: '网站', icon: <Globe /> },
 ] as const
+type Tab = (typeof tabs)[number]['id']
 const clusterStatusLabels = statusLabels(['enabled', 'disabled'])
 
 function ClusterSummary({ cluster }: { cluster: Cluster }) {
@@ -95,15 +97,34 @@ function ClusterSummary({ cluster }: { cluster: Cluster }) {
   )
 }
 
-/** `/clusters/$clusterId` with in-page tabs (`?tab=websites`, nodes default):
- * header and summary from one snapshot of `/api/clusters/:id/stream`; the
- * active tab's list owns the page's only live stream. Writes on this page
- * re-read the snapshot. */
+/** `/clusters/$clusterId` with in-page tabs held in component state (the URL
+ * never changes): links open a tab with history state `{ cluster: { tab } }`
+ * (nodes by default) and `{ cluster: { createNode: true } }` opens the nodes
+ * tab with the add-node sheet. Header and summary come from one snapshot of
+ * `/api/clusters/:id/stream`; the active tab's list owns the page's only live
+ * stream. Writes on this page re-read the snapshot, and so does an
+ * online/offline transition or node add/remove reported by the live 节点 list
+ * (once per burst; runtime metric patches never trigger it). */
 export function ClusterDetailLayout() {
   const { clusterId } = route.useParams()
-  const { tab = 'nodes' } = route.useSearch()
-  const navigate = route.useNavigate()
+  const [view, setView, arrivalKey] = useArrivalState<{
+    tab: Tab
+    creatingNode: boolean
+  }>((state) => ({
+    tab: state.cluster?.createNode ? 'nodes' : (state.cluster?.tab ?? 'nodes'),
+    creatingNode: state.cluster?.createNode === true,
+  }))
+  const tabGuard = useTabSwitchGuard()
   const client = useQueryClient()
+  useEffect(
+    () =>
+      watchClusterNodeTransitions(client, clusterId, () => {
+        void client.invalidateQueries({
+          queryKey: [...clusterSnapshotKey, clusterId],
+        })
+      }),
+    [client, clusterId]
+  )
   const query = useQuery(clusterSnapshotQuery(clusterId))
   const cluster = query.data
   const [editing, setEditing] = useState(false)
@@ -126,23 +147,6 @@ export function ClusterDetailLayout() {
         />
       </Page>
     )
-  const selectTab = (next: Tab) =>
-    void navigate({
-      to: '.',
-      search: (previous) => ({
-        ...previous,
-        // Every list param belongs to the tab being left.
-        q: undefined,
-        page: undefined,
-        page_size: undefined,
-        cluster_id: undefined,
-        status: undefined,
-        connection_status: undefined,
-        create: undefined,
-        tab: next === 'nodes' ? undefined : next,
-      }),
-      replace: true,
-    })
   return (
     <Page>
       {cluster ? (
@@ -168,10 +172,17 @@ export function ClusterDetailLayout() {
                 <Pencil className='size-4' />
                 编辑集群
               </Button>
-              <LinkButton href={`/clusters/${clusterId}?create=1`}>
-                <Plus />
+              <Button
+                size='sm'
+                onPress={() =>
+                  tabGuard.request(() =>
+                    setView({ tab: 'nodes', creatingNode: true })
+                  )
+                }
+              >
+                <Plus className='size-4' />
                 添加节点
-              </LinkButton>
+              </Button>
             </>
           }
           menu={
@@ -198,13 +209,25 @@ export function ClusterDetailLayout() {
       <PageTabs
         label='集群详情'
         items={tabs}
-        selected={tab}
-        onSelectionChange={selectTab}
+        selected={view.tab}
+        onSelectionChange={(tab) => setView({ tab, creatingNode: false })}
+        guard={tabGuard}
       >
         {/* The tab's live list opens after the header's one-shot read, so
-            the page never holds two connections at once. */}
+            the page never holds two connections at once. Tab content is
+            keyed by arrival so a new arrival starts from a clean list. */}
         {query.isFetchedAfterMount &&
-          (tab === 'nodes' ? <ClusterNodes /> : <ClusterWebsites />)}
+          (view.tab === 'nodes' ? (
+            <ClusterNodes
+              key={`${arrivalKey}:nodes`}
+              isCreating={view.creatingNode}
+              onCreatingChange={(creatingNode) =>
+                setView({ tab: 'nodes', creatingNode })
+              }
+            />
+          ) : (
+            <ClusterWebsites key={`${arrivalKey}:websites`} />
+          ))}
       </PageTabs>
       {cluster && (
         <ClusterSheet

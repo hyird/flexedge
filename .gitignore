@@ -8,3 +8,5 @@ dist
 .codegraph
 tsconfig.web.tsbuildinfo
 /state/
+__pycache__/
+*.pyc

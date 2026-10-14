@@ -18,13 +18,12 @@ export type Node = Revisioned & {
     connection_status: string
     last_heartbeat_at?: string
     applied_node_spec_revision: number
-    active_release_id?: string
-    active_manifest_digest?: string
     agent_version?: string
     cpu_usage?: number
     memory_usage?: number
     traffic_out_bps?: number
     connection_count?: number
+    connected_ip_count?: number
     load_1m?: number
     queued_log_events?: number
     dropped_log_events?: number

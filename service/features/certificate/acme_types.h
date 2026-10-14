@@ -64,6 +64,8 @@ struct issued_certificate final {
     std::string expires_at_;
     std::string serial_number_;
     std::string fingerprint_sha256_;
+    // Issuer distinguished name in RFC 2253 form, e.g. "CN=R11,O=Let's Encrypt,C=US".
+    std::string issuer_;
 };
 
 }  // namespace service::certificate_issuance

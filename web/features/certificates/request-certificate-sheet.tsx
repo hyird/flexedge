@@ -145,7 +145,12 @@ export function RequestCertificateSheet({
       {providers.isSuccess && !providers.data.length && (
         <Notice>
           还没有证书供应商，请先在
-          <Link href='/providers?tab=certificate'>供应商账号 › 证书供应商</Link>
+          <Link
+            href='/providers'
+            routerOptions={{ state: { providers: { tab: 'certificate' } } }}
+          >
+            供应商账号 › 证书供应商
+          </Link>
           中添加。
         </Notice>
       )}

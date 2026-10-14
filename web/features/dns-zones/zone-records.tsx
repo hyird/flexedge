@@ -1,7 +1,6 @@
-import { getRouteApi } from '@tanstack/react-router'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button, Tooltip } from '@heroui/react'
-import { useListSearch } from '@/lib/list-search'
+import { useListState } from '@/lib/list-search'
 import { DataTable } from '@/components/data-table'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
 import { Mono } from '@/components/mono'
@@ -14,27 +13,34 @@ import {
   type ZoneRecordRow,
 } from './dns-zone-display'
 import { RecordsEditor } from './records-editor'
+import type { DnsRecord } from './types'
 import { useZoneDetail } from './use-zone-detail'
 
-const route = getRouteApi('/_authenticated/dns-zones/$zoneId')
+type RecordsSearch = {
+  q?: string
+  type?: DnsRecord['type']
+  source?: ZoneRecordRow['source']
+}
 const filterKeys = ['type', 'source'] as const
 
-export function ZoneRecords() {
+/** The zone's records tab. Search and filters are component state (cleared
+ * when leaving the tab); `editing` swaps the table for the records editor. */
+export function ZoneRecords({
+  editing,
+  onEditingChange,
+}: {
+  editing: boolean
+  onEditingChange: (editing: boolean) => void
+}) {
   const zone = useZoneDetail().data
-  const list = useListSearch(route)
-  const navigate = route.useNavigate()
+  const list = useListState<RecordsSearch>()
   if (!zone) return null
-  const setEditing = (edit: boolean) =>
-    void navigate({
-      search: (previous) => ({ ...previous, edit: edit ? 1 : undefined }),
-      replace: true,
-    })
-  if (list.search.edit === 1)
+  if (editing)
     return (
       <RecordsEditor
         key={zone.id}
         zone={zone}
-        onExit={() => setEditing(false)}
+        onExit={() => onEditingChange(false)}
       />
     )
   const keyword = list.keyword.toLowerCase()
@@ -206,7 +212,7 @@ export function ZoneRecords() {
                 title: '还没有 DNS 记录',
                 description: '添加自定义记录后保存，即可同步到服务商。',
                 action: (
-                  <Button size='sm' onPress={() => setEditing(true)}>
+                  <Button size='sm' onPress={() => onEditingChange(true)}>
                     编辑记录
                   </Button>
                 ),

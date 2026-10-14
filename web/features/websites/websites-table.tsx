@@ -220,12 +220,14 @@ export function WebsitesTable({
             {
               id: 'settings',
               label: '编辑配置',
-              href: `/websites/${website.id}?tab=settings`,
+              href: `/websites/${website.id}`,
+              state: { website: { tab: 'settings' } },
             },
             {
               id: 'logs',
               label: '访问日志',
-              href: `/websites/${website.id}?tab=logs`,
+              href: `/websites/${website.id}`,
+              state: { website: { tab: 'logs' } },
             },
             {
               id: 'delete',

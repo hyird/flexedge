@@ -2,8 +2,10 @@
 
 #include <ruvia/core/task.h>
 #include <ruvia/web/context.h>
+#include <ruvia/web/db/db_query.h>
 #include <ruvia/web/model_json.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -16,6 +18,7 @@
 
 #include "service/domains/agent/agent_types.h"
 #include "service/domains/agent/heartbeat_store.h"
+#include "service/domains/node/node_connection.h"
 #include "service/domains/node/node_types.h"
 #include "service/domains/website/website_types.h"
 #include "service/features/live_resource/fanout.h"
@@ -48,6 +51,9 @@ inline std::string runtime_patch(ruvia::context& c, const service::agent::heartb
     runtime.set<"memory_usage">(report.memory_usage_);
     runtime.set<"traffic_out_bps">(report.traffic_out_bps_);
     runtime.set<"connection_count">(report.connection_count_);
+    if (report.connected_ip_count_) {
+        runtime.set<"connected_ip_count">(*report.connected_ip_count_);
+    }
     runtime.set<"load1m">(report.load1m_);
     runtime.set<"queued_log_events">(report.queued_log_events_);
     runtime.set<"dropped_log_events">(report.dropped_log_events_);
@@ -119,7 +125,7 @@ public:
         changed_.notify_all();
     }
     void touch(std::string_view tenant, std::string_view node,
-        std::chrono::steady_clock::duration remaining = std::chrono::seconds(90)) {
+        std::chrono::steady_clock::duration remaining = service::node::online_window) {
         const std::lock_guard lock(mutex_);
         auto& entry = entries_[std::string(node)];
         entry.tenant_ = std::string(tenant);
@@ -167,16 +173,25 @@ inline node_deadlines& get_node_deadlines() {
     return value;
 }
 
+// Online nodes after a restart get the rest of their window from the stored heartbeat.
 template <typename context_t_type>
 inline ruvia::task<void> seed_node_deadlines(context_t_type& context) {
-    const auto rows = co_await context.db().query(
-        "SELECT tenant_id, id, GREATEST(1, CEIL(EXTRACT(EPOCH FROM "
-        "(last_heartbeat_at + INTERVAL '90 seconds' - NOW())) * 1000))::bigint "
-        "FROM sys_node WHERE deleted_at IS NULL AND registration_status = 'registered' "
-        "AND status = 'enabled' AND last_heartbeat_at >= NOW() - INTERVAL '90 seconds'");
+    ruvia::db_query query;
+    const auto heard_seconds_ago = query.call("date_part",
+        {query.value("epoch"), query.binary(query.call("now"), ruvia::db_binary_operator::subtract,
+                                   query.column("last_heartbeat_at", "node"))});
+    query.select({query.column("tenant_id", "node"), query.column("id", "node"), heard_seconds_ago})
+        .from("sys_node", "node")
+        .where(query.unary(ruvia::db_unary_operator::is_null, query.column("deleted_at", "node")))
+        .and_where(service::node::node_online_predicate(query, "node"));
+    const auto rows = co_await context.db().query(query);
     for (const auto& row : rows) {
-        get_node_deadlines().touch(row[0].value().value_or(""), row[1].value().value_or(""),
-            std::chrono::milliseconds(row[2].template as<std::int64_t>().value_or(1)));
+        const auto heard = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::duration<double>(row[2].template as<double>().value_or(0)));
+        const auto remaining =
+            std::max(std::chrono::milliseconds(1),
+                std::chrono::duration_cast<std::chrono::milliseconds>(service::node::online_window) - heard);
+        get_node_deadlines().touch(row[0].value().value_or(""), row[1].value().value_or(""), remaining);
     }
 }
 

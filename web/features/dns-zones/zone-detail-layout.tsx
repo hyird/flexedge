@@ -1,4 +1,4 @@
-import { getRouteApi, useNavigate } from '@tanstack/react-router'
+import { useNavigate } from '@tanstack/react-router'
 import {
   ArrowsRotateRight,
   Globe,
@@ -6,6 +6,8 @@ import {
   TrashBin,
 } from '@gravity-ui/icons'
 import { Button, Link } from '@heroui/react'
+import { useArrivalState } from '@/lib/history-state'
+import { useTabSwitchGuard } from '@/lib/unsaved-changes'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
 import { ActionMenu, type ActionMenuItem } from '@/components/action-menu'
 import { DetailHeader, DetailHeaderSkeleton } from '@/components/detail-header'
@@ -27,7 +29,6 @@ import { ZoneLines } from './zone-lines'
 import { ZoneOverview } from './zone-overview'
 import { ZoneRecords } from './zone-records'
 
-const route = getRouteApi('/_authenticated/dns-zones/$zoneId')
 type ZoneTab = 'overview' | 'records' | 'lines'
 const tabs = [
   { id: 'overview', label: '概览' },
@@ -35,11 +36,21 @@ const tabs = [
   { id: 'lines', label: '解析线路' },
 ] as const
 
+/** `/dns-zones/$zoneId` with in-page tabs kept in component state (概览 by
+ * default). Links open a tab, or the records editor, through the `dnsZone`
+ * history state; switching tabs never touches the URL. */
 export function ZoneDetailLayout() {
   const navigate = useNavigate()
-  const routeNavigate = route.useNavigate()
-  const tab: ZoneTab =
-    route.useSearch({ select: (search) => search.tab }) ?? 'overview'
+  // The header's 编辑记录 switches tabs too, so it shares the tabs' guard.
+  const tabGuard = useTabSwitchGuard()
+  const [view, setView, arrivalKey] = useArrivalState((state) => {
+    const requested = tabs.find(({ id }) => id === state.dnsZone?.tab)
+    const tab: ZoneTab = requested?.id ?? 'overview'
+    return {
+      tab,
+      editRecords: tab === 'records' && state.dnsZone?.editRecords === true,
+    }
+  })
   // The layout's query is the zone's live detail stream; every tab reads the
   // same query key, so the page keeps exactly one connection.
   const query = useZoneDetail()
@@ -70,19 +81,9 @@ export function ZoneDetailLayout() {
       </Page>
     )
   }
-  const selectTab = (next: ZoneTab) =>
-    void routeNavigate({
-      // q/type/source/edit only belong to the records tab.
-      search: (previous) => ({
-        ...previous,
-        tab: next === 'overview' ? undefined : next,
-        q: undefined,
-        type: undefined,
-        source: undefined,
-        edit: undefined,
-      }),
-      replace: true,
-    })
+  const selectTab = (tab: ZoneTab) => setView({ tab, editRecords: false })
+  const setEditingRecords = (editRecords: boolean) =>
+    setView({ tab: 'records', editRecords })
   const conflictItems: ActionMenuItem[] = hasMeaningfulConflicts(zone)
     ? [
         {
@@ -116,7 +117,10 @@ export function ZoneDetailLayout() {
         meta={[
           <Link
             key='provider'
-            href={`/providers?q=${encodeURIComponent(zone.dns_provider_name)}`}
+            href='/providers'
+            routerOptions={{
+              state: { providers: { q: zone.dns_provider_name } },
+            }}
           >
             {zone.dns_provider_name} · {providerLabel(zone.dns_provider)}
           </Link>,
@@ -135,10 +139,16 @@ export function ZoneDetailLayout() {
               <ArrowsRotateRight className='size-4' />
               立即同步
             </Button>
-            <LinkButton href={`/dns-zones/${zone.id}?tab=records&edit=1`}>
-              <PencilToSquare />
+            <Button
+              size='sm'
+              onPress={() => {
+                if (view.tab === 'records' && view.editRecords) return
+                tabGuard.request(() => setEditingRecords(true))
+              }}
+            >
+              <PencilToSquare className='size-4' />
               编辑记录
-            </LinkButton>
+            </Button>
           </>
         }
         menu={
@@ -160,18 +170,24 @@ export function ZoneDetailLayout() {
       />
       {commands.dialogs}
       <PageTabs
+        guard={tabGuard}
         label='DNS 区域详情'
         items={tabs}
-        selected={tab}
+        selected={view.tab}
         onSelectionChange={selectTab}
       >
-        {/* The records editor's SaveBar is the tab content's last child. */}
-        {tab === 'records' ? (
-          <ZoneRecords />
-        ) : tab === 'lines' ? (
-          <ZoneLines />
+        {/* The records editor's SaveBar is the tab content's last child. A new
+         * arrival remounts the tab, so its search and filters start over. */}
+        {view.tab === 'records' ? (
+          <ZoneRecords
+            key={arrivalKey}
+            editing={view.editRecords}
+            onEditingChange={setEditingRecords}
+          />
+        ) : view.tab === 'lines' ? (
+          <ZoneLines key={arrivalKey} />
         ) : (
-          <ZoneOverview />
+          <ZoneOverview key={arrivalKey} />
         )}
       </PageTabs>
     </Page>

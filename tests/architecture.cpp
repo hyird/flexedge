@@ -19,6 +19,7 @@
 #include "service/config/outbound.h"
 #include "service/config/schema.h"
 #include "service/domains/overview/overview_types.h"
+#include "service/features/attempt_trace/outbound_policy.h"
 #include "service/features/certificate/worker.h"
 #include "service/features/dns/record_reconciliation.h"
 #include "service/features/dns/registry.h"
@@ -28,6 +29,7 @@
 #include "service/features/node_dispatch/protocol.h"
 #include "service/features/node_release/catalog.h"
 #include "service/features/node_runtime/mapper.h"
+#include "service/features/outbound_http/client.h"
 #include "service/features/provider_verification/worker.h"
 #include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
@@ -50,6 +52,14 @@ bool throws_runtime_error(function_type&& function) {
     }
     return false;
 }
+
+// Outbound HTTP of background attempts cannot bypass the attempt trace: the
+// shared client takes the recorder as a required argument.
+template <typename client_type>
+concept untraced_outbound_send = requires(client_type& client, const ruvia::http_client_request_view& request) {
+    service::outbound_http::send_buffered(client, request);
+};
+static_assert(!untraced_outbound_send<ruvia::http_client>);
 
 }  // namespace
 
@@ -227,14 +237,18 @@ int run_architecture_tests() {
         [] { (void)service::sync_runtime::resource_column(static_cast<marker_resource_type>(99)); }));
     REQUIRE(
         throws_runtime_error([] { (void)service::sync_runtime::require_marker_operation("unknown"); }));
-    const auto marker_lease =
-        service::sync_runtime::make_running_lease("tenant", "marker", 7, "worker");
+    const auto marker_started = std::chrono::steady_clock::now();
+    const auto marker_lease = service::sync_runtime::make_running_lease("tenant", "marker", 7,
+        "worker", marker_started);
     REQUIRE(marker_lease.marker_.tenant_id_ == "tenant");
     REQUIRE(marker_lease.marker_.marker_id_ == "marker");
     REQUIRE(marker_lease.marker_.version_ == 7);
     REQUIRE(marker_lease.owner_ == "worker");
-    REQUIRE(throws_runtime_error(
-        [] { (void)service::sync_runtime::make_running_lease("tenant", "marker", 0, "worker"); }));
+    REQUIRE(marker_lease.started_ == marker_started);
+    REQUIRE(throws_runtime_error([] {
+        (void)service::sync_runtime::make_running_lease("tenant", "marker", 0, "worker",
+            std::chrono::steady_clock::time_point{});
+    }));
 
     static_assert(service::dns::dns_providers.size() == 2);
     static_assert(service::dns::find_dns_provider("cloudflare")->supports_proxy_);
@@ -373,10 +387,27 @@ int run_architecture_tests() {
     const auto& schema_migrations = service::config::schema_migrations;
     REQUIRE(schema_migrations.size() >= 20);
     REQUIRE(schema_migrations.front().id() == "0001");
-    REQUIRE(schema_migrations.back().id() == "0022_remove_website_http2");
-    const auto remove_http2_migration = schema_migrations.back().sql();
+    REQUIRE(schema_migrations.back().id() == "0024_task_attempt_traces");
+    const auto remove_http2_migration = schema_migrations[schema_migrations.size() - 3].sql();
+    REQUIRE(schema_migrations[schema_migrations.size() - 3].id() == "0022_remove_website_http2");
     REQUIRE(remove_http2_migration.find("sys_website") != std::string_view::npos);
     REQUIRE(remove_http2_migration.find("http2_enabled") != std::string_view::npos);
+    REQUIRE(schema_migrations[schema_migrations.size() - 2].id() == "0023_task_attempt_details");
+    const auto attempt_details_migration = schema_migrations[schema_migrations.size() - 2].sql();
+    REQUIRE(attempt_details_migration.find("idx_sync_event_task_resource_version") != std::string_view::npos);
+    REQUIRE(attempt_details_migration.find("'node'") != std::string_view::npos);
+    REQUIRE(attempt_details_migration.find("row_number") != std::string_view::npos);
+    const auto attempt_traces_migration = schema_migrations.back().sql();
+    REQUIRE(attempt_traces_migration.find("sys_sync_event_trace") != std::string_view::npos);
+    REQUIRE(attempt_traces_migration.find("ON DELETE CASCADE") != std::string_view::npos);
+    // Every outbound operation has its own allow-list; credentials are never on one.
+    for (const auto& policy : service::attempt_trace::outbound_policies) {
+        REQUIRE(&service::attempt_trace::policy_for(policy.operation_) == &policy);
+        for (const auto parameter : {std::string_view{"AccessKeyId"}, std::string_view{"Signature"},
+                 std::string_view{"SignatureNonce"}, std::string_view{"access_key"}}) {
+            REQUIRE(std::find(policy.query_.begin(), policy.query_.end(), parameter) == policy.query_.end());
+        }
+    }
     const auto& sync_event_migration = schema_migrations[19].sql();
     REQUIRE(sync_event_migration.starts_with("DO $flexedge_sync_result_events$"));
     REQUIRE(sync_event_migration.find("CREATE TABLE public.sys_sync_event") != std::string_view::npos);
@@ -410,6 +441,12 @@ int run_architecture_tests() {
     REQUIRE(service::sync_runtime::bounded_error(
                 std::string(service::sync_runtime::max_error_message_length + 1, 'x'))
                 .size() == service::sync_runtime::max_error_message_length);
+    // 334 three-byte characters: the cut lands inside the last one and backs off.
+    std::string multibyte_error;
+    for (int index = 0; index < 334; ++index) {
+        multibyte_error += "错";
+    }
+    REQUIRE(service::sync_runtime::bounded_error(multibyte_error).size() == 999);
     const auto invalid_provider_failure = service::provider_verification::detail::classify_task_failure(
         std::make_exception_ptr(std::invalid_argument("invalid provider config")));
     REQUIRE(invalid_provider_failure.permanent_);

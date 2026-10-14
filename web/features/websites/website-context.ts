@@ -1,5 +1,10 @@
 import { createContext, useContext } from 'react'
+import type { HistoryState } from '@tanstack/react-router'
 import type { Website } from './types'
+
+/** Arrival request for the detail page (`state.website`). */
+export type WebsiteArrival = NonNullable<HistoryState['website']>
+export type WebsiteDetailTab = NonNullable<WebsiteArrival['tab']>
 
 type WebsiteDetailContext = {
   /** Live detail on the overview/settings tabs, a one-shot snapshot elsewhere. */
@@ -7,6 +12,9 @@ type WebsiteDetailContext = {
   /** Re-reads the header snapshot after a write on a snapshot tab; a no-op
    * where the live detail stream already pushes the change. */
   refresh: () => void
+  /** Switches the in-page tab without touching the URL; `initial` seeds the
+   * opened tab (e.g. the settings group). */
+  openTab: (tab: WebsiteDetailTab, initial?: WebsiteArrival) => void
 }
 
 /** Provided by the detail layout, which renders tabs only after the first
@@ -25,4 +33,8 @@ export function useWebsite() {
 
 export function useRefreshWebsite() {
   return useDetailContext().refresh
+}
+
+export function useOpenWebsiteTab() {
+  return useDetailContext().openTab
 }

@@ -13,7 +13,6 @@ import {
   formatPercent,
   ratioOf,
 } from '@/lib/format'
-import { LinkButton } from '@/components/link-button'
 import { Mono } from '@/components/mono'
 import { EmptyState } from '@/components/page'
 import { Section } from '@/components/section'
@@ -23,7 +22,7 @@ import type {
   WebsiteDashboardRanking,
 } from './dashboard-schema'
 import { useWebsiteDashboard } from './use-website-dashboard'
-import { useWebsite } from './website-context'
+import { useOpenWebsiteTab, useWebsite } from './website-context'
 
 const statusClassColors: Record<string, string> = {
   '1': 'var(--chart-1)',
@@ -33,10 +32,11 @@ const statusClassColors: Record<string, string> = {
   '5': 'var(--danger)',
 }
 
-/** `/websites/$websiteId?tab=traffic`: access-log based statistics. Subscribes to
+/** Website detail “流量分析” tab: access-log based statistics. Subscribes to
  * the dashboard stream only while this tab is mounted. */
 export function WebsiteTraffic() {
   const website = useWebsite()
+  const openTab = useOpenWebsiteTab()
   const dashboard = useWebsiteDashboard(website.id)
   const data = dashboard.data
   const logging = website.config.access_log_enabled
@@ -52,13 +52,14 @@ export function WebsiteTraffic() {
               流量统计基于访问日志，启用后新的请求才会计入。
             </Alert.Description>
           </Alert.Content>
-          <LinkButton
+          <Button
+            size='sm'
             variant='tertiary'
-            href={`/websites/${website.id}?tab=settings&section=logs`}
+            onPress={() => openTab('settings', { section: 'logs' })}
             className='shrink-0 self-center'
           >
             启用访问日志
-          </LinkButton>
+          </Button>
         </Alert>
       )}
       {dashboard.error && (

@@ -82,6 +82,16 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     auto repeated = co_await service::agent::update_heartbeat(tx, principal, repeated_report,
         "{\"health\":\"ok\"}");
     require(repeated.has_value() && !repeated->became_online_);
+    // Coming online follows the 15 second window of node_connection.h, inside one transaction
+    // so both statements share NOW().
+    (void)co_await tx.execute("UPDATE sys_node SET last_heartbeat_at = NOW() - INTERVAL '14 seconds'");
+    const auto within_window = co_await service::agent::update_heartbeat(tx, principal, repeated_report,
+        "{\"health\":\"ok\"}");
+    require(within_window.has_value() && !within_window->became_online_);
+    (void)co_await tx.execute("UPDATE sys_node SET last_heartbeat_at = NOW() - INTERVAL '16 seconds'");
+    const auto after_window = co_await service::agent::update_heartbeat(tx, principal, repeated_report,
+        "{\"health\":\"ok\"}");
+    require(after_window.has_value() && after_window->became_online_);
     auto stale_report = report;
     stale_report.applied_node_spec_revision_ = 1;
     require(!(co_await service::agent::update_heartbeat(tx, principal, stale_report, "{}")));

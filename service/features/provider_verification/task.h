@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 
@@ -18,6 +19,8 @@ struct verification_task final {
     std::int64_t failures_;
     std::string config_json_;
     std::string runtime_json_;
+    // Monotonic instant the claim acquired the lease: the attempt start.
+    std::chrono::steady_clock::time_point claimed_at_{};
 };
 
 }  // namespace service::provider_verification::detail

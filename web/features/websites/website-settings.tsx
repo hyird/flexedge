@@ -11,6 +11,7 @@ import {
   useMediaQuery,
 } from '@heroui/react'
 import { apiErrorMessage, isRevisionConflict } from '@/lib/api'
+import { useArrivalState } from '@/lib/history-state'
 import { LinkButton } from '@/components/link-button'
 import { Page, QueryNotice } from '@/components/page'
 import { SaveBar } from '@/components/save-bar'
@@ -18,6 +19,7 @@ import { createWebsite, updateWebsite, websiteDetailQuery } from './data'
 import { collectOriginGroups } from './origin-groups'
 import { initialRouteEditorView } from './route-tabs'
 import type { Website } from './types'
+import type { WebsiteArrival } from './website-context'
 import { validateWebsiteForm, type WebsiteFormValues } from './website-form'
 import {
   websiteFormToConfig,
@@ -27,9 +29,9 @@ import { WebsiteRouteEditor } from './website-route-editor'
 import {
   collectWebsiteFormErrors,
   countWebsiteSectionErrors,
-  defaultWebsiteSection,
   firstWebsiteErrorTarget,
   websiteSections,
+  websiteSectionFrom,
   type WebsiteSectionId,
 } from './website-sections'
 import {
@@ -45,7 +47,6 @@ import {
 } from './website-settings-sections'
 
 const settingsRoute = getRouteApi('/_authenticated/websites/$websiteId')
-const createRoute = getRouteApi('/_authenticated/websites/new')
 
 const sectionComponents: Record<
   Exclude<WebsiteSectionId, 'routes'>,
@@ -61,27 +62,13 @@ const sectionComponents: Record<
   logs: LogsSection,
 }
 
-/** `?section=` writer shared by the create and settings routes; the default
- * group is represented by absence. */
-function useSectionSearch(section: WebsiteSectionId | undefined) {
-  const navigate = useNavigate()
-  return {
-    section: section ?? defaultWebsiteSection,
-    setSection: (next: WebsiteSectionId) =>
-      void navigate({
-        to: '.',
-        search: (previous: Record<string, unknown>) => ({
-          ...previous,
-          section: next === defaultWebsiteSection ? undefined : next,
-        }),
-        replace: true,
-      }),
-  }
-}
-
-export function WebsiteSettingsPage() {
+/** `/websites/$websiteId` settings tab. The group is component state; the
+ * arrival may request one (`state.website.section`). */
+export function WebsiteSettingsPage({ initial }: { initial?: WebsiteArrival }) {
   const { websiteId } = settingsRoute.useParams()
-  const search = useSectionSearch(settingsRoute.useSearch().section)
+  const [section, setSection] = useState(() =>
+    websiteSectionFrom(initial?.section)
+  )
   const query = useQuery(websiteDetailQuery(websiteId))
   if (!query.data)
     return query.isError ? (
@@ -97,15 +84,19 @@ export function WebsiteSettingsPage() {
     <WebsiteEditor
       key={websiteId}
       website={query.data}
-      section={search.section}
-      onSectionChange={search.setSection}
+      section={section}
+      onSectionChange={setSection}
       onReload={async () => (await query.refetch()).data}
     />
   )
 }
 
+/** `/websites/new`. The group is component state seeded from the arrival
+ * (`state.website.section`). */
 export function WebsiteCreatePage() {
-  const search = useSectionSearch(createRoute.useSearch().section)
+  const [section, setSection] = useArrivalState((state) =>
+    websiteSectionFrom(state.website?.section)
+  )
   return (
     <Page
       title='创建网站'
@@ -116,10 +107,7 @@ export function WebsiteCreatePage() {
         </LinkButton>
       }
     >
-      <WebsiteEditor
-        section={search.section}
-        onSectionChange={search.setSection}
-      />
+      <WebsiteEditor section={section} onSectionChange={setSection} />
     </Page>
   )
 }
@@ -207,10 +195,10 @@ function SectionNav({
 
 type SaveInput = { data: WebsiteFormValues; draft: WebsiteFormValues }
 
-/** Draft editor shared by `/websites/new` (no `website`) and
- * `/websites/$id?tab=settings`. The draft survives group switches; the save
- * bar guards navigation (other pages and other `?tab=`) while it differs from
- * the loaded configuration. */
+/** Draft editor shared by `/websites/new` (no `website`) and the detail
+ * settings tab. The draft survives group switches; the save bar guards
+ * navigation and, inside the detail `PageTabs`, switching tabs while it
+ * differs from the loaded configuration. */
 function WebsiteEditor({
   website,
   section,

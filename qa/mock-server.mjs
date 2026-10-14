@@ -340,6 +340,7 @@ let db = {
         memory_usage: 0.286,
         traffic_out_bps: 3145728,
         connection_count: 426,
+        connected_ip_count: 213,
         load_1m: 0.24,
         queued_log_events: 2,
         dropped_log_events: 0,
@@ -365,7 +366,8 @@ let db = {
         connection_status: 'online',
         last_heartbeat_at: initialTime,
         applied_node_spec_revision: 3,
-        agent_version: '1.8.0',
+        // Still on 0.4.0: its heartbeat has no connected_ip_count (UI shows «—»).
+        agent_version: '0.4.0',
         cpu_usage: 0.082,
         memory_usage: 0.195,
         traffic_out_bps: 1048576,
@@ -738,6 +740,7 @@ generatedNodes.forEach(
                   memory_usage: memory,
                   traffic_out_bps: traffic,
                   connection_count: Math.round(traffic / 8192),
+                  connected_ip_count: Math.round(traffic / 8192 / 3),
                   load_1m: Math.round(cpu * 400) / 100,
                   health: cpu > 0.9 ? 'degraded' : 'healthy',
                 }
@@ -880,6 +883,1652 @@ db.tasks.push(
     next_attempt_at: '',
   }
 )
+// Execution history for `/api/tasks/:id/history/stream?version&resource_id`
+// (local://task-history-contract v1), keyed by `${task id}|${resource id}`
+// and kept out of `db.tasks` so list keyword search ignores it. Times use the
+// backend's `…ffffff+00` format, relative to server start so "下次重试"
+// counts down in the browser. Covered: DNS diff + conflicts + >100 attempts
+// (truncated) + legacy rows, certificate stages, website domain checks, DNS
+// and certificate provider verification, node apply (incl. heartbeat); the
+// running certificate issue has no attempts yet (empty state).
+// `/__qa/control?event=task-history&id=<task>&mode=error|empty|fail|reset`
+// (`fail` appends a failed attempt now with the sync retry 15 s later).
+// Attempt traces (build/task-trace/contract.md): each history item carries a
+// `trace` summary; `/api/tasks/:id/attempts/:attempt_id/trace/stream` serves
+// the full trace as a one-shot snapshot (404 for an attempt of another task).
+// Covered: Cloudflare find_zone transport error, Aliyun 404 with redacted
+// signature parameters (newest 20 of the failure run only, like retention),
+// ACME issue/renew with folded polling and a DoH check, website DoH checks,
+// DNS / ZeroSSL provider verification, node apply messages; legacy rows and
+// heartbeats have `state: none`.
+// `/__qa/control?event=task-trace&mode=error|reset` fails every trace read.
+const historyBase = Date.now()
+const historyStamp = (ms) => new Date(ms).toISOString().replace('Z', '000+00')
+const historyAt = (seconds) => historyStamp(historyBase + seconds * 1000)
+const historyKey = (task) => `${task.id}|${task.resource_id}`
+// Full traces by attempt id; immutable like stored traces, so outside `db`.
+const traceDocuments = new Map()
+let attemptSequence = 48000
+let taskTraceMode = 'reset'
+function historyAttempt(
+  attempt,
+  outcome,
+  {
+    start,
+    duration,
+    error = '',
+    retry = false,
+    detail = { kind: 'none', truncated: false },
+    trace,
+  }
+) {
+  // Pre-upgrade records (and node heartbeats) have no start time; their
+  // duration is 0 and must not be shown.
+  const known = duration !== undefined
+  const emitted = start + (duration ?? 0) / 1000
+  const attemptId = String(++attemptSequence)
+  return {
+    attempt,
+    outcome,
+    error,
+    started_at: known ? historyAt(start) : '',
+    emitted_at: historyAt(emitted),
+    duration_ms: duration ?? 0,
+    // Sync tasks retry 15 s after a failure.
+    next_attempt_at: retry ? historyAt(emitted + 15) : '',
+    detail,
+    trace: trace
+      ? storeTrace(attemptId, start, trace)
+      : traceNone(attemptId),
+  }
+}
+const traceNone = (attemptId) => ({
+  state: 'none',
+  attempt_id: attemptId,
+  step_count: 0,
+  call_count: 0,
+  log_count: 0,
+  truncated: false,
+  failed_step: null,
+  steps: [],
+})
+const redacted = '[REDACTED]'
+const tracePair = (name, value, hidden = false) => ({
+  name,
+  value: hidden ? redacted : value,
+  redacted: hidden,
+})
+const pretty = (value) => JSON.stringify(value, null, 2)
+function traceBody(
+  excerpt,
+  {
+    format = 'json',
+    content_type = 'application/json',
+    bytes,
+    truncated = false,
+    omitted_reason = '',
+  } = {}
+) {
+  return {
+    content_type,
+    format,
+    bytes: bytes ?? Buffer.byteLength(excerpt),
+    excerpt,
+    truncated,
+    omitted_reason,
+  }
+}
+const requestHeaders = (...extra) => [
+  tracePair('accept', 'application/json'),
+  tracePair('user-agent', 'FlexEdge/2.4'),
+  ...extra,
+]
+/** One outbound HTTP call; `at` is its offset into the step, `repeat` the
+ * number of identical requests folded into it. */
+function httpCall(
+  operation,
+  {
+    method = 'GET',
+    origin,
+    path = '/',
+    query = [],
+    status = 200,
+    at = 1,
+    duration = 0,
+    subject = '',
+    request_headers = requestHeaders(),
+    request_body = null,
+    response_headers = [],
+    response_body = null,
+    transport_error = '',
+    provider_request_id = '',
+    provider_code = '',
+    repeat = 1,
+    every = duration,
+    outcome,
+    dns = null,
+  }
+) {
+  const url = new URL(origin)
+  const search = query.map((item) => `${item.name}=${item.value}`).join('&')
+  return {
+    kind: dns ? 'dns' : 'http',
+    operation,
+    subject,
+    at,
+    duration_ms: duration,
+    outcome:
+      outcome ??
+      (transport_error
+        ? 'transport_error'
+        : status >= 200 && status < 300
+          ? 'ok'
+          : 'http_error'),
+    repeat_count: repeat,
+    repeat_total_ms: duration + (repeat - 1) * every,
+    last_at: at + (repeat - 1) * every,
+    provider_request_id,
+    provider_code,
+    error: transport_error,
+    http: {
+      method,
+      url: `${url.origin}${path}${search ? `?${search}` : ''}`,
+      scheme: url.protocol.slice(0, -1),
+      host: url.host,
+      path,
+      query,
+      request_headers,
+      request_body,
+      status,
+      transport_error,
+      response_headers,
+      response_body,
+    },
+    dns,
+    node_message: null,
+  }
+}
+function nodeMessage(direction, message, { at = 1, ...fields } = {}) {
+  const {
+    request_id = '',
+    object_count = 0,
+    bytes = 0,
+    values = [],
+    duration = 0,
+  } = fields
+  return {
+    kind: 'node_message',
+    // Contract v1.1: node messages use one operation per direction.
+    operation: direction === 'sent' ? 'node.send' : 'node.receive',
+    subject: '',
+    at,
+    duration_ms: duration,
+    outcome: 'ok',
+    repeat_count: 1,
+    repeat_total_ms: duration,
+    last_at: at,
+    provider_request_id: '',
+    provider_code: '',
+    error: '',
+    http: null,
+    dns: null,
+    node_message: {
+      direction,
+      message,
+      request_id,
+      object_count,
+      bytes,
+      fields: values.map(([name, value]) => ({ name, value })),
+    },
+  }
+}
+/** `[code, label, duration, options]`; logs are `[at, level, message, repeat]`. */
+const traceStep = (
+  code,
+  label,
+  duration,
+  {
+    subject = '',
+    outcome = 'completed',
+    error = '',
+    related_task = null,
+    calls = [],
+    logs = [],
+    omitted_calls = 0,
+  } = {}
+) => ({
+  code,
+  label,
+  duration,
+  subject,
+  outcome,
+  error,
+  related_task,
+  calls,
+  logs,
+  omitted_calls,
+})
+const stepSeverity = { completed: 0, skipped: 1, interrupted: 2, failed: 3 }
+function storeTrace(attemptId, start, { kind, worker_type, steps, capture }) {
+  const time = (ms) => historyStamp(historyBase + start * 1000 + ms)
+  let offset = 2
+  const stored = steps.map((step, index) => {
+    const base = offset
+    offset += step.duration + 1
+    return {
+      index,
+      code: step.code,
+      label: step.label,
+      subject: step.subject,
+      started_at: time(base),
+      offset_ms: base,
+      duration_ms: step.duration,
+      outcome: step.outcome,
+      error: step.error,
+      related_task: step.related_task,
+      call_count:
+        step.calls.reduce((total, call) => total + call.repeat_count, 0) +
+        step.omitted_calls,
+      omitted_calls: step.omitted_calls,
+      calls: step.calls.map(({ at, last_at, ...call }, callIndex) => ({
+        index: callIndex,
+        ...call,
+        started_at: time(base + at),
+        offset_ms: base + at,
+        last_started_at: time(base + last_at),
+      })),
+      logs: step.logs.map(([at, level, message, repeat = 1]) => ({
+        at: time(base + at),
+        offset_ms: base + at,
+        level,
+        message,
+        repeat_count: repeat,
+      })),
+    }
+  })
+  const serialized = JSON.stringify(stored)
+  traceDocuments.set(attemptId, {
+    kind,
+    worker_type,
+    capture: {
+      truncated: false,
+      degraded: false,
+      bytes: Buffer.byteLength(serialized),
+      omitted_steps: 0,
+      omitted_calls: 0,
+      omitted_logs: 0,
+      omitted_body_bytes: 0,
+      redactions: serialized.split(redacted).length - 1,
+      ...capture,
+    },
+    steps: stored,
+  })
+  // History summary: adjacent steps with the same code merge (worst outcome,
+  // summed duration and calls).
+  const merged = []
+  for (const step of stored) {
+    const last = merged.at(-1)
+    if (last?.code === step.code) {
+      last.count += 1
+      last.duration_ms += step.duration_ms
+      last.call_count += step.call_count
+      if (stepSeverity[step.outcome] > stepSeverity[last.outcome])
+        last.outcome = step.outcome
+    } else
+      merged.push({
+        code: step.code,
+        label: step.label,
+        outcome: step.outcome,
+        duration_ms: step.duration_ms,
+        call_count: step.call_count,
+        count: 1,
+      })
+  }
+  const failed = stored.find((step) => step.outcome === 'failed')
+  return {
+    state: 'available',
+    attempt_id: attemptId,
+    step_count: stored.length,
+    call_count: stored.reduce((total, step) => total + step.call_count, 0),
+    log_count: stored.reduce((total, step) => total + step.logs.length, 0),
+    truncated: Boolean(capture?.truncated) || merged.length > 24,
+    failed_step: failed ? { code: failed.code, label: failed.label } : null,
+    steps: merged.slice(0, 24),
+  }
+}
+const workerTypes = {
+  dns_zone: 'dns-sync',
+  certificate: 'certificate',
+  website: 'website-dispatch',
+  provider: 'provider-verification',
+  node: 'web',
+}
+/** Full trace snapshot: attempt fields from the history row, steps stored. */
+function traceSnapshot(task, item) {
+  const stored = traceDocuments.get(item.trace.attempt_id)
+  return {
+    attempt_id: item.trace.attempt_id,
+    task_id: task.id,
+    resource_type: task.resource_type,
+    resource_id: task.resource_id,
+    kind: stored?.kind ?? item.detail.kind,
+    state: stored ? 'available' : 'none',
+    attempt: item.attempt,
+    outcome: item.outcome,
+    error: item.error,
+    started_at: item.started_at,
+    emitted_at: item.emitted_at,
+    duration_ms: item.duration_ms,
+    worker_type: stored?.worker_type ?? workerTypes[task.resource_type] ?? '',
+    capture: stored?.capture ?? {
+      truncated: false,
+      degraded: false,
+      bytes: 0,
+      omitted_steps: 0,
+      omitted_calls: 0,
+      omitted_logs: 0,
+      omitted_body_bytes: 0,
+      redactions: 0,
+    },
+    steps: stored?.steps ?? [],
+  }
+}
+function historySnapshot(task, attempts) {
+  const failures = attempts.filter((item) => item.outcome === 'failed')
+  return {
+    truncated: attempts.length > 100,
+    summary: {
+      attempt_count: attempts.length,
+      failure_count: failures.length,
+      first_failure_at: failures.at(-1)?.emitted_at ?? '',
+      last_success_at:
+        attempts.find((item) => item.outcome === 'completed')?.emitted_at ?? '',
+      next_attempt_at: task.status === 'retrying' ? task.next_attempt_at : '',
+    },
+    list: attempts.slice(0, 100),
+  }
+}
+const dnsRecord = (
+  name,
+  type,
+  content,
+  { ttl = 600, line_code = 'default', priority = null, proxied = false } = {}
+) => ({ name, type, line_code, content, ttl, priority, proxied })
+function dnsDetail({
+  created = [],
+  updated = [],
+  deleted = [],
+  conflicts = [],
+  ...counts
+} = {}) {
+  return {
+    kind: 'dns_sync',
+    truncated: false,
+    created,
+    updated,
+    deleted,
+    created_count: created.length,
+    updated_count: updated.length,
+    deleted_count: deleted.length,
+    unchanged_count: 18,
+    conflicts,
+    conflict_count: conflicts.length,
+    ...counts,
+  }
+}
+const dnsDiff = dnsDetail({
+  created: [
+    dnsRecord('static', 'CNAME', 'edge-qa.example.test'),
+    dnsRecord('_acme-challenge.static', 'TXT', 'Zq8m1y2QvB7oP0xKk3sNw4rT5uV6', {
+      ttl: 120,
+    }),
+  ],
+  updated: [
+    {
+      before: dnsRecord('www', 'A', '203.0.113.10', { line_code: 'telecom' }),
+      after: dnsRecord('www', 'A', '203.0.113.24', {
+        ttl: 300,
+        line_code: 'telecom',
+      }),
+    },
+    {
+      before: dnsRecord('@', 'MX', 'mx1.example.test', { priority: 10 }),
+      after: dnsRecord('@', 'MX', 'mx2.example.test', { priority: 5 }),
+    },
+  ],
+  deleted: [dnsRecord('old-api', 'AAAA', '2001:db8::17')],
+  unchanged_count: 14,
+})
+const certificateDetail = (operation, stage, success = {}) => ({
+  kind: 'certificate',
+  truncated: false,
+  operation,
+  provider: 'letsencrypt',
+  domains: ['qa.example.test', 'www.qa.example.test'],
+  stage,
+  issuer: '',
+  not_before: '',
+  not_after: '',
+  serial_number: '',
+  fingerprint_sha256: '',
+  ...success,
+})
+const domainResult = (hostname, status, resolved, error = '') => ({
+  hostname,
+  query_name: hostname.startsWith('*.')
+    ? `flexedge-3f9a1c2e.${hostname.slice(2)}`
+    : hostname,
+  expected: 'edge-qa.example.test',
+  resolved,
+  status,
+  error,
+})
+const domainsDetail = (domains, checked = domains.length) => ({
+  kind: 'website_domains',
+  truncated: false,
+  expected_target: 'edge-qa.example.test',
+  domain_count: 4,
+  checked_count: checked,
+  domains,
+})
+const nodeApply = (patch) => ({
+  kind: 'node_apply',
+  truncated: false,
+  node_id: uuid(1003),
+  node_name: 'QA Edge 06',
+  agent_version: '2.4.1',
+  source: 'apply_result',
+  result: 'applied',
+  phase: '',
+  error_code: '',
+  retryable: false,
+  ...patch,
+})
+const providerDetail = (patch) => ({
+  kind: 'provider',
+  truncated: false,
+  provider: 'cloudflare',
+  provider_kind: 'dns',
+  zone_count: 0,
+  zones: [],
+  directory_url: '',
+  external_account: '',
+  ...patch,
+})
+// Trace scenarios, one builder per task kind.
+const cloudflareApi = 'https://api.cloudflare.com'
+const cloudflareZone = '8c1f6d2e4b3a59c7d0e1f2a3b4c5d6e7'
+const cfRay = (suffix) => tracePair('cf-ray', `8d2c4f1a9b7e${suffix}-HKG`)
+const cloudflareAuth = requestHeaders(tracePair('authorization', '', true))
+const syncPreamble = () => [
+  traceStep('load_state', '加载同步状态', 9),
+  traceStep('open_credential', '解密凭据', 0),
+  traceStep('validate_ttl', '校验 TTL', 0),
+]
+const findCloudflareZone = (domain, options = {}) =>
+  httpCall('cloudflare.find_zone', {
+    origin: cloudflareApi,
+    path: '/client/v4/zones',
+    query: [tracePair('name', domain), tracePair('status', 'active')],
+    subject: domain,
+    request_headers: cloudflareAuth,
+    ...options,
+  })
+function cloudflareSyncFailureTrace() {
+  return {
+    kind: 'dns_sync',
+    worker_type: 'dns-sync',
+    steps: [
+      ...syncPreamble(),
+      traceStep('find_zone', '查找远程托管区域', 5012, {
+        subject: 'example.test',
+        outcome: 'failed',
+        error: 'Cloudflare API 连接失败',
+        calls: [
+          findCloudflareZone('example.test', {
+            status: 0,
+            duration: 5003,
+            transport_error: 'connect_failed',
+          }),
+        ],
+        logs: [[5006, 'warning', 'Cloudflare API 连接失败，15 秒后重试']],
+      }),
+      traceStep('record_failure', '记录失败', 4, {
+        logs: [[3, 'error', '同步失败（可重试）：Cloudflare API 连接失败']],
+      }),
+    ],
+  }
+}
+function cloudflareSyncTrace() {
+  const zone = `/client/v4/zones/${cloudflareZone}/dns_records`
+  const created = Array.from({ length: 8 }, (_, index) =>
+    httpCall('cloudflare.create_record', {
+      method: 'POST',
+      origin: cloudflareApi,
+      path: zone,
+      at: 2 + index * 28,
+      duration: 24 + (index % 3) * 6,
+      subject: `node-${index + 1} A`,
+      request_headers: [
+        ...cloudflareAuth,
+        tracePair('content-type', 'application/json'),
+      ],
+      request_body: traceBody(
+        pretty({
+          content: `203.0.113.${index + 31}`,
+          name: `node-${index + 1}.example.test`,
+          proxied: false,
+          ttl: 600,
+          type: 'A',
+        })
+      ),
+      response_headers: [
+        tracePair('content-type', 'application/json'),
+        cfRay(`${index}0`),
+      ],
+      provider_request_id: `8d2c4f1a9b7e${index}0-HKG`,
+      response_body: traceBody(
+        pretty({
+          result: {
+            id: `${index + 1}f0e9d8c7b6a5948372615a4b3c2d1e0`,
+            name: `node-${index + 1}.example.test`,
+            type: 'A',
+          },
+          success: true,
+        })
+      ),
+    })
+  )
+  return {
+    kind: 'dns_sync',
+    worker_type: 'dns-sync',
+    capture: { truncated: true, omitted_calls: 56 },
+    steps: [
+      ...syncPreamble(),
+      traceStep('find_zone', '查找远程托管区域', 212, {
+        subject: 'example.test',
+        calls: [
+          findCloudflareZone('example.test', {
+            duration: 208,
+            response_headers: [
+              tracePair('content-type', 'application/json'),
+              cfRay('a1'),
+            ],
+            provider_request_id: '8d2c4f1a9b7ea1-HKG',
+            response_body: traceBody(
+              pretty({
+                result: [
+                  { id: cloudflareZone, name: 'example.test', status: 'active' },
+                ],
+                result_info: { count: 1, page: 1, total_count: 1 },
+                success: true,
+              })
+            ),
+          }),
+        ],
+      }),
+      traceStep('list_records', '拉取远程记录', 640, {
+        calls: [1, 2].map((page) =>
+          httpCall('cloudflare.list_records', {
+            origin: cloudflareApi,
+            path: zone,
+            query: [
+              tracePair('page', String(page)),
+              tracePair('per_page', '100'),
+            ],
+            at: page === 1 ? 1 : 330,
+            duration: page === 1 ? 318 : 290,
+            request_headers: cloudflareAuth,
+            response_headers: [
+              tracePair('content-type', 'application/json'),
+              cfRay(`b${page}`),
+            ],
+            provider_request_id: `8d2c4f1a9b7eb${page}-HKG`,
+            response_body: traceBody(
+              `{\n  "result": [\n    {\n      "content": "203.0.113.24",\n      "id": "0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f",\n      "name": "www.example.test",\n      "proxied": false,\n      "ttl": 300,\n      "type": "A"\n    },\n    {\n      "content": "edge-qa.example.test",\n      "id": "1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a",\n      "name": "static.example.test",\n      "proxied": false,\n      "ttl": 600,\n      "type": "CNAME"\n    },`,
+              { bytes: 41_872, truncated: true }
+            ),
+          })
+        ),
+        logs: [[628, 'info', '远程记录共 112 条（2 页）']],
+      }),
+      traceStep('list_lines', '拉取解析线路', 0, {
+        outcome: 'skipped',
+        logs: [[0, 'info', 'Cloudflare 只有默认线路，跳过']],
+      }),
+      traceStep('merge_remote', '合并远程变更', 6),
+      traceStep('reconcile_records', '同步期望记录', 1840, {
+        calls: created,
+        omitted_calls: 56,
+        logs: [
+          [1, 'info', '10 条记录已一致'],
+          [1836, 'info', '新增 64 条记录'],
+        ],
+      }),
+      traceStep('persist_result', '保存同步结果', 15),
+    ],
+  }
+}
+function aliyunSyncFailureTrace() {
+  const requestId = '5E7C2A1B-93F4-4D8A-B6E2-1C0F9A7D3B54'
+  return {
+    kind: 'dns_sync',
+    worker_type: 'dns-sync',
+    steps: [
+      ...syncPreamble(),
+      traceStep('find_zone', '查找远程托管区域', 186, {
+        subject: 'backup.test',
+        outcome: 'failed',
+        error:
+          'DescribeDomains 返回 InvalidAccessKeyId.NotFound：Specified access key is not found.',
+        calls: [
+          httpCall('aliyun.describe_domains', {
+            origin: 'https://alidns.aliyuncs.com',
+            query: [
+              tracePair('AccessKeyId', '', true),
+              tracePair('Action', 'DescribeDomains'),
+              tracePair('Format', 'JSON'),
+              tracePair('KeyWord', 'backup.test'),
+              tracePair('PageNumber', '1'),
+              tracePair('PageSize', '100'),
+              tracePair('Signature', '', true),
+              tracePair('SignatureMethod', 'HMAC-SHA1'),
+              tracePair('SignatureNonce', '', true),
+              tracePair('SignatureVersion', '1.0'),
+              tracePair('Timestamp', '2026-10-14T14%3A16%3A44Z'),
+              tracePair('Version', '2015-01-09'),
+            ],
+            subject: 'backup.test',
+            status: 404,
+            duration: 181,
+            provider_request_id: requestId,
+            provider_code: 'InvalidAccessKeyId.NotFound',
+            response_headers: [
+              tracePair('content-type', 'application/json;charset=utf-8'),
+              tracePair('x-acs-request-id', requestId),
+              tracePair('set-cookie', '', true),
+            ],
+            response_body: traceBody(
+              pretty({
+                Code: 'InvalidAccessKeyId.NotFound',
+                HostId: 'alidns.aliyuncs.com',
+                Message: 'Specified access key is not found.',
+                Recommend:
+                  'https://api.aliyun.com/troubleshoot?q=InvalidAccessKeyId.NotFound&product=Alidns',
+                RequestId: requestId,
+              })
+            ),
+          }),
+        ],
+        logs: [[183, 'warning', '阿里云拒绝访问密钥，15 秒后重试']],
+      }),
+      traceStep('record_failure', '记录失败', 5, {
+        logs: [[4, 'error', '同步失败（可重试）：访问密钥不存在']],
+      }),
+    ],
+  }
+}
+const letsEncrypt = 'https://acme-v02.api.letsencrypt.org'
+const acmeAccount = `${letsEncrypt}/acme/acct/1789320`
+const nonceHeaders = () => [
+  tracePair('replay-nonce', '', true),
+  tracePair('cache-control', 'no-store'),
+]
+const jws = (url, payload) =>
+  traceBody(
+    pretty({
+      protected: { alg: 'ES256', kid: acmeAccount, url },
+      payload,
+    }),
+    { format: 'jws_decoded', content_type: 'application/jose+json' }
+  )
+const acmeDirectory = (at) =>
+  httpCall('acme.directory', {
+    origin: letsEncrypt,
+    path: '/directory',
+    at,
+    duration: 142,
+    response_headers: [tracePair('content-type', 'application/json')],
+    response_body: traceBody(
+      pretty({
+        keyChange: `${letsEncrypt}/acme/key-change`,
+        meta: {
+          caaIdentities: ['letsencrypt.org'],
+          termsOfService:
+            'https://letsencrypt.org/documents/LE-SA-v1.5-February-24-2025.pdf',
+        },
+        newAccount: `${letsEncrypt}/acme/new-acct`,
+        newNonce: `${letsEncrypt}/acme/new-nonce`,
+        newOrder: `${letsEncrypt}/acme/new-order`,
+        revokeCert: `${letsEncrypt}/acme/revoke-cert`,
+      })
+    ),
+  })
+const acmeNonce = (at, repeat = 1) =>
+  httpCall('acme.new_nonce', {
+    method: 'HEAD',
+    origin: letsEncrypt,
+    path: '/acme/new-nonce',
+    at,
+    duration: 38,
+    repeat,
+    every: 2100,
+    response_headers: nonceHeaders(),
+  })
+const authzPath = (index) => `/acme/authz/237841${index}/5678${index}`
+function acmeAuthorization(index, status, { at = 1, repeat = 1 } = {}) {
+  const domain = index ? 'www.qa.example.test' : 'qa.example.test'
+  return httpCall('acme.authorization', {
+    method: 'POST',
+    origin: letsEncrypt,
+    path: authzPath(index),
+    at,
+    duration: 96,
+    repeat,
+    every: 2000,
+    subject: domain,
+    request_headers: requestHeaders(
+      tracePair('content-type', 'application/jose+json')
+    ),
+    request_body: jws(`${letsEncrypt}${authzPath(index)}`, '(POST-as-GET)'),
+    response_headers: nonceHeaders(),
+    response_body: traceBody(
+      pretty({
+        challenges: [
+          {
+            status,
+            token: redacted,
+            type: 'dns-01',
+            url: `${letsEncrypt}/acme/chall/237841${index}/5678${index}/Ab12`,
+          },
+        ],
+        expires: '2026-10-21T14:16:44Z',
+        identifier: { type: 'dns', value: domain },
+        status,
+      })
+    ),
+  })
+}
+const relatedSync = () => ({
+  task_id: 'dns-zone:sync:example',
+  resource_type: 'dns_zone',
+  resource_id: zoneId,
+  label: 'DNS 同步',
+})
+function challengeCheck(at, repeat, data) {
+  const name = '_acme-challenge.qa.example.test'
+  return httpCall('doh.resolve', {
+    origin: 'https://dns.alidns.com',
+    path: '/resolve',
+    query: [
+      tracePair('name', name),
+      tracePair('type', 'TXT'),
+      tracePair('cd', '0'),
+      tracePair('do', '0'),
+    ],
+    at,
+    duration: 31,
+    repeat,
+    every: 8000,
+    subject: name,
+    response_headers: [tracePair('content-type', 'application/dns-json')],
+    response_body: traceBody(
+      pretty({
+        Answer: [{ TTL: 120, data, name: `${name}.`, type: 16 }],
+        Status: 0,
+      }),
+      { content_type: 'application/dns-json' }
+    ),
+    dns: {
+      resolver: 'dns.alidns.com',
+      transport: 'doh_json',
+      name,
+      type: 'TXT',
+      rcode: 'NOERROR',
+      answers: [{ name: `${name}.`, type: 'TXT', ttl: 120, data }],
+      truncated: false,
+    },
+  })
+}
+const certificatePrepare = (operation) =>
+  traceStep('prepare', '准备签发', 21, {
+    logs: [
+      [
+        5,
+        'info',
+        `${operation === 'renew' ? '续期' : '签发'}证书：qa.example.test、www.qa.example.test`,
+      ],
+    ],
+  })
+const certificateOrder = () =>
+  traceStep('order', '创建订单', 455, {
+    calls: [
+      acmeNonce(1),
+      httpCall('acme.new_order', {
+        method: 'POST',
+        origin: letsEncrypt,
+        path: '/acme/new-order',
+        at: 42,
+        duration: 402,
+        status: 201,
+        request_headers: requestHeaders(
+          tracePair('content-type', 'application/jose+json')
+        ),
+        request_body: jws(`${letsEncrypt}/acme/new-order`, {
+          identifiers: [
+            { type: 'dns', value: 'qa.example.test' },
+            { type: 'dns', value: 'www.qa.example.test' },
+          ],
+        }),
+        response_headers: [
+          tracePair('location', `${letsEncrypt}/acme/order/1789320/30419875`),
+          ...nonceHeaders(),
+        ],
+        response_body: traceBody(
+          pretty({
+            authorizations: [0, 1].map(
+              (index) => `${letsEncrypt}${authzPath(index)}`
+            ),
+            finalize: `${letsEncrypt}/acme/finalize/1789320/30419875`,
+            status: 'pending',
+          })
+        ),
+      }),
+    ],
+  })
+const certificateAuthorization = () =>
+  traceStep('authorization', '获取域名授权', 210, {
+    calls: [
+      acmeAuthorization(0, 'pending'),
+      acmeAuthorization(1, 'pending', { at: 104 }),
+    ],
+  })
+function certificateRenewFailureTrace(wait) {
+  return {
+    kind: 'certificate',
+    worker_type: 'certificate',
+    steps: [
+      certificatePrepare('renew'),
+      traceStep('account', 'ACME 账户', 190, {
+        calls: [acmeDirectory(1), acmeNonce(150)],
+        logs: [[188, 'info', '复用已注册的 ACME 账户']],
+      }),
+      certificateOrder(),
+      certificateAuthorization(),
+      traceStep('dns_challenge', '写入 DNS 验证记录并等待生效', wait, {
+        subject: '_acme-challenge.qa.example.test',
+        outcome: 'failed',
+        error:
+          'DNS-01 验证超时：_acme-challenge.qa.example.test 的 TXT 记录在 120 秒内未在权威服务器上生效。',
+        related_task: relatedSync(),
+        calls: [challengeCheck(10_200, 14, `"${redacted}"`)],
+        logs: [
+          [8, 'info', '已写入 2 条验证记录，等待 DNS 同步任务完成'],
+          [10_100, 'info', 'DNS 同步已完成，开始检查公共解析'],
+          [18_300, 'warning', 'TXT 记录尚未生效：解析结果与期望值不一致', 14],
+          [wait - 4, 'error', '120 秒内 TXT 记录未生效，停止等待'],
+        ],
+      }),
+      traceStep('cleanup', '清理 DNS 验证记录', 3100, {
+        related_task: relatedSync(),
+        logs: [[3096, 'info', '已删除 2 条验证记录']],
+      }),
+      traceStep('record_failure', '记录失败', 6, {
+        logs: [[5, 'error', '续期失败，将在下一个续期窗口重试']],
+      }),
+    ],
+  }
+}
+function certificateIssueTrace() {
+  const order = `${letsEncrypt}/acme/order/1789320/30419875`
+  const orderPoll = (status, at, repeat) =>
+    httpCall('acme.order_poll', {
+      method: 'POST',
+      origin: letsEncrypt,
+      path: '/acme/order/1789320/30419875',
+      at,
+      duration: 88,
+      repeat,
+      every: 2000,
+      request_body: jws(order, '(POST-as-GET)'),
+      response_headers: nonceHeaders(),
+      response_body: traceBody(pretty({ status })),
+    })
+  return {
+    kind: 'certificate',
+    worker_type: 'certificate',
+    steps: [
+      certificatePrepare('issue'),
+      traceStep('account', 'ACME 账户', 980, {
+        calls: [
+          acmeDirectory(1),
+          acmeNonce(150),
+          httpCall('acme.new_account', {
+            method: 'POST',
+            origin: letsEncrypt,
+            path: '/acme/new-acct',
+            at: 196,
+            duration: 780,
+            status: 201,
+            request_body: traceBody(
+              pretty({
+                protected: {
+                  alg: 'ES256',
+                  jwk: { crv: 'P-256', kty: 'EC', x: redacted, y: redacted },
+                  url: `${letsEncrypt}/acme/new-acct`,
+                },
+                payload: {
+                  contact: [`mailto:${redacted}`],
+                  termsOfServiceAgreed: true,
+                },
+              }),
+              { format: 'jws_decoded', content_type: 'application/jose+json' }
+            ),
+            response_headers: [
+              tracePair('location', acmeAccount),
+              ...nonceHeaders(),
+            ],
+            response_body: traceBody(
+              pretty({ contact: [`mailto:${redacted}`], status: 'valid' })
+            ),
+          }),
+        ],
+        logs: [[978, 'info', '已注册新的 ACME 账户']],
+      }),
+      certificateOrder(),
+      certificateAuthorization(),
+      traceStep('dns_challenge', '写入 DNS 验证记录并等待生效', 31_000, {
+        subject: '_acme-challenge.qa.example.test',
+        related_task: relatedSync(),
+        calls: [challengeCheck(10_400, 3, `"${redacted}"`)],
+        logs: [
+          [8, 'info', '已写入 2 条验证记录，等待 DNS 同步任务完成'],
+          [20_900, 'info', 'TXT 记录已在公共解析生效，固定等待 10 秒'],
+        ],
+      }),
+      traceStep('validation', '证书颁发机构验证', 22_000, {
+        calls: [
+          ...[0, 1].map((index) =>
+            httpCall('acme.challenge', {
+              method: 'POST',
+              origin: letsEncrypt,
+              path: `/acme/chall/237841${index}/5678${index}/Ab12`,
+              at: 1 + index * 120,
+              duration: 110,
+              request_body: jws(
+                `${letsEncrypt}/acme/chall/237841${index}/5678${index}/Ab12`,
+                {}
+              ),
+              response_headers: nonceHeaders(),
+              response_body: traceBody(
+                pretty({ status: 'processing', type: 'dns-01' })
+              ),
+            })
+          ),
+          acmeNonce(260, 11),
+          acmeAuthorization(0, 'pending', { at: 300, repeat: 9 }),
+          acmeAuthorization(0, 'valid', { at: 18_400 }),
+          acmeAuthorization(1, 'valid', { at: 18_600 }),
+        ],
+        logs: [
+          [300, 'info', '授权状态 pending，2 秒后再次检查', 9],
+          [18_700, 'info', '全部授权已生效'],
+        ],
+      }),
+      traceStep('cleanup', '清理 DNS 验证记录', 2800, {
+        related_task: relatedSync(),
+      }),
+      traceStep('finalize', '提交证书请求并等待签发', 9000, {
+        calls: [
+          httpCall('acme.finalize', {
+            method: 'POST',
+            origin: letsEncrypt,
+            path: '/acme/finalize/1789320/30419875',
+            duration: 640,
+            request_body: traceBody('', {
+              format: 'omitted',
+              content_type: 'application/jose+json',
+              bytes: 1312,
+              omitted_reason: 'policy',
+            }),
+            response_headers: nonceHeaders(),
+            response_body: traceBody(pretty({ status: 'processing' })),
+          }),
+          orderPoll('processing', 700, 3),
+          orderPoll('valid', 6800, 1),
+        ],
+      }),
+      traceStep('download', '下载并校验证书', 640, {
+        calls: [
+          httpCall('acme.certificate', {
+            method: 'POST',
+            origin: letsEncrypt,
+            path: '/acme/cert/04a1f3c2b9d87e6510fa33c1d2e4b5a69c70',
+            duration: 610,
+            request_body: jws(
+              `${letsEncrypt}/acme/cert/04a1f3c2b9d87e6510fa33c1d2e4b5a69c70`,
+              '(POST-as-GET)'
+            ),
+            response_headers: [
+              tracePair('content-type', 'application/pem-certificate-chain'),
+              ...nonceHeaders(),
+            ],
+            response_body: traceBody(
+              pretty([
+                {
+                  issuer: "CN=R11,O=Let's Encrypt,C=US",
+                  not_after: '2026-11-13T07:12:43Z',
+                  serial_number: '04A1F3C2B9D87E6510FA33C1D2E4B5A69C70',
+                  subject: 'CN=qa.example.test',
+                },
+                {
+                  issuer: 'CN=ISRG Root X1,O=Internet Security Research Group,C=US',
+                  not_after: '2027-03-12T23:59:59Z',
+                  serial_number: '8A7D3E13D62F30EF2386BD29076B34F8',
+                  subject: "CN=R11,O=Let's Encrypt,C=US",
+                },
+              ]),
+              {
+                format: 'pem_summary',
+                content_type: 'application/pem-certificate-chain',
+                bytes: 3826,
+              }
+            ),
+          }),
+        ],
+        logs: [[630, 'info', '证书 SAN 与申请域名一致']],
+      }),
+      traceStep('persist', '保存证书', 40, {
+        logs: [[38, 'info', '已通知 3 个节点发布消费者']],
+      }),
+    ],
+  }
+}
+function domainCheck(hostname, target, { at = 1, outcome } = {}) {
+  const name = hostname.startsWith('*.')
+    ? `flexedge-3f9a1c2e.${hostname.slice(2)}`
+    : hostname
+  const failed = outcome === 'timeout'
+  return httpCall('doh.resolve', {
+    origin: 'https://dns.alidns.com',
+    path: '/resolve',
+    query: [
+      tracePair('name', name),
+      tracePair('type', 'CNAME'),
+      tracePair('cd', '0'),
+      tracePair('do', '0'),
+    ],
+    at,
+    duration: failed ? 5000 : 28,
+    subject: hostname,
+    status: failed ? 0 : 200,
+    transport_error: failed ? 'timeout' : '',
+    response_headers: failed
+      ? []
+      : [tracePair('content-type', 'application/dns-json')],
+    response_body: failed
+      ? null
+      : traceBody(
+          pretty({
+            Answer: [{ TTL: 600, data: `${target}.`, name: `${name}.`, type: 5 }],
+            Status: 0,
+          }),
+          { content_type: 'application/dns-json' }
+        ),
+    dns: {
+      resolver: 'dns.alidns.com',
+      transport: 'doh_json',
+      name,
+      type: 'CNAME',
+      rcode: failed ? '' : 'NOERROR',
+      answers: failed
+        ? []
+        : [{ name: `${name}.`, type: 'CNAME', ttl: 600, data: `${target}.` }],
+      truncated: false,
+    },
+  })
+}
+function websiteCheckTrace(results) {
+  return {
+    kind: 'website_domains',
+    worker_type: 'website-dispatch',
+    steps: [
+      traceStep('load_website', '读取网站配置', 7),
+      ...results.map(([hostname, target, outcome]) =>
+        traceStep('check_domain', '检测域名解析', outcome === 'timeout' ? 5003 : 31, {
+          subject: hostname,
+          outcome: outcome === 'timeout' ? 'failed' : 'completed',
+          error: outcome === 'timeout' ? '公共 DNS 查询超时' : '',
+          calls: [domainCheck(hostname, target, { outcome })],
+          logs:
+            target === 'edge-qa.example.test' || outcome === 'timeout'
+              ? []
+              : [
+                  [
+                    30,
+                    'warning',
+                    `期望 edge-qa.example.test，实际 ${target}`,
+                  ],
+                ],
+        })
+      ),
+      traceStep('save_runtime', '保存解析结果', 12),
+    ],
+  }
+}
+function cloudflareVerificationTrace(failed) {
+  const listZones = httpCall('cloudflare.list_zones', {
+    origin: cloudflareApi,
+    path: '/client/v4/zones',
+    query: [tracePair('page', '1'), tracePair('per_page', '50')],
+    at: 150,
+    duration: failed ? 162 : 231,
+    status: failed ? 403 : 200,
+    request_headers: cloudflareAuth,
+    provider_request_id: '8d2c4f1a9b7ec2-HKG',
+    provider_code: failed ? '9109' : '',
+    response_headers: [
+      tracePair('content-type', 'application/json'),
+      cfRay('c2'),
+    ],
+    response_body: traceBody(
+      pretty(
+        failed
+          ? {
+              errors: [
+                {
+                  code: 9109,
+                  message: 'Unauthorized to access requested resource',
+                },
+              ],
+              success: false,
+            }
+          : {
+              result: [
+                { id: cloudflareZone, name: 'example.test', status: 'active' },
+                { id: redacted, name: 'backup.test', status: 'active' },
+                {
+                  id: redacted,
+                  name: 'staging.example.test',
+                  status: 'pending',
+                },
+              ],
+              result_info: { count: 3, page: 1, total_count: 3 },
+              success: true,
+            }
+      )
+    ),
+  })
+  return {
+    kind: 'provider',
+    worker_type: 'provider-verification',
+    steps: [
+      traceStep('load_provider', '读取供应商状态', 6),
+      traceStep('decrypt_credential', '解密凭据', 0),
+      traceStep('verify_dns_credential', '校验 DNS 服务商凭据', failed ? 318 : 392, {
+        outcome: failed ? 'failed' : 'completed',
+        error: failed ? 'Cloudflare API 返回 403：令牌缺少 Zone:Read 权限' : '',
+        calls: [
+          httpCall('cloudflare.verify_token', {
+            origin: cloudflareApi,
+            path: '/client/v4/user/tokens/verify',
+            duration: 141,
+            request_headers: cloudflareAuth,
+            provider_request_id: '8d2c4f1a9b7ec1-HKG',
+            response_headers: [
+              tracePair('content-type', 'application/json'),
+              cfRay('c1'),
+            ],
+            response_body: traceBody(
+              pretty({
+                result: { id: redacted, status: 'active' },
+                success: true,
+              })
+            ),
+          }),
+          listZones,
+        ],
+        logs: failed ? [] : [[390, 'info', '可见托管域 3 个']],
+      }),
+      failed
+        ? traceStep('record_failure', '记录失败', 5, {
+            logs: [[4, 'error', '凭据权限不足，供应商已标记为无效']],
+          })
+        : traceStep('save_result', '保存检测结果', 9),
+    ],
+  }
+}
+function zeroSslVerificationTrace() {
+  return {
+    kind: 'provider',
+    worker_type: 'provider-verification',
+    steps: [
+      traceStep('load_provider', '读取供应商状态', 5),
+      traceStep('load_acme_settings', '解析证书供应商配置', 0),
+      traceStep('load_eab', '获取 EAB 凭据', 1302, {
+        calls: [
+          httpCall('zerossl_api.eab_by_email', {
+            method: 'POST',
+            origin: 'https://api.zerossl.com',
+            path: '/acme/eab-credentials-email',
+            duration: 1296,
+            request_headers: requestHeaders(
+              tracePair('content-type', 'application/x-www-form-urlencoded')
+            ),
+            request_body: traceBody(`email=${redacted}`, {
+              format: 'form',
+              content_type: 'application/x-www-form-urlencoded',
+              bytes: 27,
+            }),
+            response_headers: [tracePair('content-type', 'application/json')],
+            response_body: traceBody('', {
+              format: 'omitted',
+              bytes: 214,
+              omitted_reason: 'secret_material',
+            }),
+          }),
+        ],
+        logs: [[1300, 'info', '已获取新的 EAB 凭据']],
+      }),
+      traceStep('check_acme_directory', '检测 ACME 目录', 880, {
+        calls: [
+          httpCall('acme.directory', {
+            origin: 'https://acme.zerossl.com',
+            path: '/v2/DV90',
+            duration: 874,
+            response_headers: [tracePair('content-type', 'application/json')],
+            response_body: traceBody(
+              pretty({
+                meta: {
+                  externalAccountRequired: true,
+                  termsOfService:
+                    'https://secure.trust-provider.com/repository/docs/Legacy/Agreements/ZeroSSL_Terms.pdf',
+                },
+                newAccount: 'https://acme.zerossl.com/v2/DV90/newAccount',
+                newNonce: 'https://acme.zerossl.com/v2/DV90/newNonce',
+                newOrder: 'https://acme.zerossl.com/v2/DV90/newOrder',
+              })
+            ),
+          }),
+        ],
+      }),
+      traceStep('save_result', '保存检测结果', 11),
+    ],
+  }
+}
+function nodeApplyTrace(attempt, phase, error = '') {
+  const phases = [
+    ['stage', 'stage_config', '暂存配置'],
+    ['validate', 'validate_config', '校验配置'],
+    ['activate', 'activate_config', '激活配置'],
+  ]
+  const failedAt = phases.findIndex(([name]) => name === phase)
+  const requestId = `release-probe-${attempt}`
+  return {
+    kind: 'node_apply',
+    worker_type: 'web',
+    steps: [
+      traceStep('send_desired_state', '下发期望状态', 3, {
+        calls: [
+          nodeMessage('sent', 'DesiredState', {
+            request_id: requestId,
+            bytes: 1840,
+            values: [['release_id', 'rel-20261014-0007']],
+          }),
+        ],
+      }),
+      traceStep('fetch_objects', '节点拉取发布对象', 420, {
+        calls: [
+          nodeMessage('received', 'ObjectRequest', {
+            at: 2,
+            request_id: requestId,
+            object_count: 12,
+            bytes: 410,
+          }),
+          nodeMessage('sent', 'ObjectBatch', {
+            at: 30,
+            request_id: requestId,
+            object_count: 12,
+            bytes: 182_344,
+            duration: 388,
+          }),
+        ],
+      }),
+      ...phases.map(([, code, label], index) =>
+        traceStep(code, label, 0, {
+          outcome:
+            failedAt < 0 || index < failedAt
+              ? 'completed'
+              : index === failedAt
+                ? 'failed'
+                : 'skipped',
+          error: index === failedAt ? error : '',
+          logs: index === 0 ? [[0, 'info', '节点未上报阶段耗时']] : [],
+        })
+      ),
+      traceStep('record_result', '记录应用结果', 12, {
+        calls: [
+          nodeMessage('received', 'ApplyResult', {
+            request_id: requestId,
+            bytes: 214,
+            values: [
+              ['applied', String(failedAt < 0)],
+              ...(failedAt < 0
+                ? []
+                : [
+                    ['failed_phase', phase],
+                    [
+                      'error_code',
+                      phase === 'validate' ? 'artifact_invalid' : 'apply_failed',
+                    ],
+                    ['retryable', String(phase === 'activate')],
+                    ['error', error],
+                  ]),
+              ['release_id', 'rel-20261014-0007'],
+            ],
+          }),
+        ],
+      }),
+    ],
+  }
+}
+function buildTaskHistories() {
+  // backup.test sync: 137 attempts, list truncated to the newest 100. Runs of
+  // identical failures collapse; a success with a diff breaks them. Only the
+  // newest 20 failures keep a full trace (the retention limit).
+  const backup = []
+  for (let attempt = 137, start = -40; attempt >= 1; attempt -= 1) {
+    const step = 137 - attempt
+    if (step < 42)
+      backup.push(
+        historyAttempt(attempt, 'failed', {
+          start,
+          duration: 204 + step * 3,
+          error:
+            'DescribeDomains 返回 InvalidAccessKeyId.NotFound：Specified access key is not found.',
+          retry: true,
+          trace: step < 20 ? aliyunSyncFailureTrace() : undefined,
+        })
+      )
+    else if (step === 42)
+      backup.push(
+        historyAttempt(attempt, 'completed', {
+          start,
+          duration: 3480,
+          detail: dnsDiff,
+        })
+      )
+    else if (step < 78)
+      backup.push(
+        historyAttempt(attempt, 'failed', {
+          start,
+          duration: 30_000,
+          error:
+            '请求 dnsapi.cn 超时（30 秒）\nPOST https://dnsapi.cn/Record.List\ncontext deadline exceeded (Client.Timeout exceeded while awaiting headers)',
+          retry: true,
+          // Only the operations finished before the failure are listed.
+          detail: dnsDetail({
+            deleted: [dnsRecord('legacy-cdn', 'CNAME', 'cdn.old-vendor.test')],
+            unchanged_count: 0,
+          }),
+        })
+      )
+    else
+      backup.push(
+        historyAttempt(attempt, 'completed', {
+          start,
+          duration: 900 + (step % 5) * 110,
+          detail: dnsDetail(),
+        })
+      )
+    start -= step < 42 ? 16 : 300
+  }
+  // example.test sync: recovered after a Cloudflare connection failure at
+  // find_zone; conflicts block one push, the newest detail is truncated and
+  // the oldest two rows predate the upgrade (no trace).
+  const example = [
+    historyAttempt(5, 'completed', {
+      start: -1500,
+      duration: 2731,
+      detail: dnsDetail({
+        created: Array.from({ length: 50 }, (_, index) =>
+          dnsRecord(`node-${index + 1}`, 'A', `203.0.113.${index + 31}`)
+        ),
+        created_count: 64,
+        unchanged_count: 10,
+        truncated: true,
+      }),
+      trace: cloudflareSyncTrace(),
+    }),
+    historyAttempt(4, 'completed', {
+      start: -2400,
+      duration: 1650,
+      // Conflicts block the push; the attempt itself still completes.
+      detail: dnsDetail({
+        conflicts: [
+          {
+            name: 'www',
+            type: 'A',
+            line_code: 'telecom',
+            local_content: '203.0.113.10',
+            remote_content: '198.51.100.77',
+          },
+          {
+            name: 'api',
+            type: 'CNAME',
+            line_code: 'default',
+            local_content: 'edge-qa.example.test',
+            remote_content: '（远端已删除）',
+          },
+        ],
+        unchanged_count: 16,
+      }),
+    }),
+    historyAttempt(3, 'failed', {
+      start: -9000,
+      duration: 5030,
+      error: 'Cloudflare API 连接失败',
+      retry: true,
+      detail: dnsDetail({ unchanged_count: 0 }),
+      trace: cloudflareSyncFailureTrace(),
+    }),
+    historyAttempt(2, 'failed', {
+      start: -86_400,
+      error: '供应商接口返回 HTTP 502',
+    }),
+    historyAttempt(1, 'completed', { start: -90_000 }),
+  ]
+  const renew = [
+    ...[4, 3, 2].map((attempt, index) =>
+      historyAttempt(attempt, 'failed', {
+        start: -600 - index * 1800,
+        duration: 120_000 + index * 4000,
+        error:
+          'DNS-01 验证超时：_acme-challenge.qa.example.test 的 TXT 记录在 120 秒内未在权威服务器上生效。',
+        detail: certificateDetail('renew', 'dns_challenge'),
+        trace: certificateRenewFailureTrace(116_010 + index * 4000),
+      })
+    ),
+    historyAttempt(1, 'completed', {
+      start: -5_184_000,
+      duration: 74_500,
+      detail: certificateDetail('issue', 'completed', {
+        issuer: "CN=R11,O=Let's Encrypt,C=US",
+        not_before: '2026-08-15T07:12:44Z',
+        not_after: '2026-11-13T07:12:43Z',
+        serial_number: '04A1F3C2B9D87E6510FA33C1D2E4B5A69C70',
+        fingerprint_sha256:
+          '3B:7E:91:0C:44:A2:5D:E8:19:6F:C0:B3:72:58:9A:DE:01:F4:6C:28:B5:93:7A:E0:4D:16:C9:8B:52:3F:A7:E1',
+      }),
+      trace: certificateIssueTrace(),
+    }),
+  ]
+  const website = [
+    historyAttempt(3, 'completed', {
+      start: -120,
+      duration: 152,
+      detail: domainsDetail(
+        [
+          'qa.example.test',
+          'www.qa.example.test',
+          '*.img.qa.example.test',
+          'legacy.qa.example.test',
+        ].map((hostname) =>
+          domainResult(hostname, 'verified', ['edge-qa.example.test'])
+        )
+      ),
+      trace: websiteCheckTrace([
+        ['qa.example.test', 'edge-qa.example.test'],
+        ['www.qa.example.test', 'edge-qa.example.test'],
+        ['*.img.qa.example.test', 'edge-qa.example.test'],
+        ['legacy.qa.example.test', 'edge-qa.example.test'],
+      ]),
+    }),
+    historyAttempt(2, 'failed', {
+      start: -3720,
+      duration: 5120,
+      error: '2 个域名未指向集群接入域名',
+      retry: true,
+      detail: domainsDetail(
+        [
+          domainResult('qa.example.test', 'verified', ['edge-qa.example.test']),
+          domainResult(
+            'www.qa.example.test',
+            'invalid',
+            ['cdn.old-vendor.test'],
+            'CNAME 指向 cdn.old-vendor.test，不是集群接入域名'
+          ),
+          domainResult(
+            '*.img.qa.example.test',
+            'unverified',
+            [],
+            '公共 DNS 查询超时'
+          ),
+        ],
+        3
+      ),
+      trace: websiteCheckTrace([
+        ['qa.example.test', 'edge-qa.example.test'],
+        ['www.qa.example.test', 'cdn.old-vendor.test'],
+        ['*.img.qa.example.test', '', 'timeout'],
+      ]),
+    }),
+    historyAttempt(1, 'completed', { start: -86_000 }),
+  ]
+  const provider = [
+    historyAttempt(2, 'completed', {
+      start: -900,
+      duration: 412,
+      detail: providerDetail({
+        zone_count: 3,
+        zones: [
+          { name: 'example.test', status: 'active' },
+          { name: 'backup.test', status: 'active' },
+          { name: 'staging.example.test', status: 'pending' },
+        ],
+      }),
+      trace: cloudflareVerificationTrace(false),
+    }),
+    historyAttempt(1, 'failed', {
+      start: -1800,
+      duration: 333,
+      error: 'Cloudflare API 返回 403：令牌缺少 Zone:Read 权限',
+      detail: providerDetail(),
+      trace: cloudflareVerificationTrace(true),
+    }),
+  ]
+  const certificateProvider = [
+    historyAttempt(1, 'completed', {
+      start: -5400,
+      duration: 2210,
+      detail: providerDetail({
+        provider: 'zerossl',
+        provider_kind: 'certificate',
+        directory_url: 'https://acme.zerossl.com/v2/DV90',
+        external_account: 'fetched',
+      }),
+      trace: zeroSslVerificationTrace(),
+    }),
+  ]
+  // Node publish: no control-plane retry schedule; the newest record is a
+  // heartbeat confirmation without a start time.
+  const node = [
+    historyAttempt(4, 'completed', {
+      start: -30,
+      detail: nodeApply({ source: 'heartbeat' }),
+    }),
+    historyAttempt(3, 'failed', {
+      start: -400,
+      duration: 2300,
+      error: 'nginx 配置校验失败：unknown directive "proxy_cache_lock_age"',
+      detail: nodeApply({
+        result: 'failed',
+        phase: 'validate',
+        error_code: 'artifact_invalid',
+      }),
+      trace: nodeApplyTrace(
+        3,
+        'validate',
+        'nginx 配置校验失败：unknown directive "proxy_cache_lock_age"'
+      ),
+    }),
+    historyAttempt(2, 'failed', {
+      start: -900,
+      duration: 15_400,
+      error: '激活配置失败：reload 超时',
+      detail: nodeApply({
+        result: 'failed',
+        phase: 'activate',
+        error_code: 'apply_failed',
+        retryable: true,
+      }),
+      trace: nodeApplyTrace(2, 'activate', '激活配置失败：reload 超时'),
+    }),
+    historyAttempt(1, 'completed', {
+      start: -7200,
+      duration: 1830,
+      detail: nodeApply(),
+      trace: nodeApplyTrace(1, ''),
+    }),
+  ]
+  const histories = {
+    'dns-zone:sync:qa': backup,
+    'dns-zone:sync:example': example,
+    'certificate:renew:qa': renew,
+    'website:deploy:qa': website,
+    'provider:verify:cloudflare': provider,
+    'provider:verify:zerossl': certificateProvider,
+    'node:deploy:qa-06': node,
+  }
+  return Object.fromEntries(
+    db.tasks
+      .filter((task) => histories[task.id])
+      .map((task) => [historyKey(task), histories[task.id]])
+  )
+}
+db.tasks.push({
+  id: 'provider:verify:zerossl',
+  resource_type: 'provider',
+  resource_id: certificateProviderId,
+  name: 'zerossl',
+  operation: 'verify',
+  version: 1,
+  status: 'completed',
+  error: '',
+  failures: 0,
+  updated_at: '2026-10-01T00:20:00Z',
+  next_attempt_at: '',
+})
+db.taskHistories = buildTaskHistories()
+// The retrying sync's next attempt matches its newest history record.
+{
+  const task = find(db.tasks, 'dns-zone:sync:qa')
+  const newest = db.taskHistories[historyKey(task)][0]
+  Object.assign(task, {
+    updated_at: newest.emitted_at,
+    next_attempt_at: newest.next_attempt_at,
+  })
+}
 const seed = structuredClone(db)
 // Like the backend: `node_id` is the agent id (32 lowercase hex, not the node
 // UUID) and `secret` is 64 lowercase hex; both are regenerated on reset.
@@ -1079,7 +2728,7 @@ function overview() {
       certificate_count: db.certificates.length,
       cluster_count: db.clusters.length,
       node_count: db.nodes.length,
-      // Backend: registered + enabled + heartbeat within 90 s; the mock keeps
+      // Backend: registered + enabled + heartbeat within 15 s; the mock keeps
       // fixed heartbeat times, so its connection_status stands in for liveness.
       online_node_count: db.nodes.filter(
         (node) =>
@@ -1370,19 +3019,35 @@ function readStream(url) {
       failed: db.tasks.filter((task) => task.status === 'failed').length,
     }
   if (part[1] === 'tasks') {
-    const task = find(db.tasks, decodeURIComponent(part[2]))
-    return part[3] === 'history'
-      ? {
-          list: [
-            {
-              outcome: task.error ? 'failed' : 'completed',
-              error: task.error,
-              emitted_at: task.updated_at,
-            },
-          ],
-          truncated: false,
-        }
-      : task
+    // Publish ids are shared by every node; resource_id selects one row.
+    const id = decodeURIComponent(part[2]),
+      resourceId = query.get('resource_id')
+    if (resourceId !== null && !/^[0-9a-f-]{36}$/.test(resourceId))
+      fail('resource_id 不合法', 400, 10001)
+    const task =
+      db.tasks.find(
+        (item) =>
+          item.id === id && (!resourceId || item.resource_id === resourceId)
+      ) ?? fail('任务不存在', 404, 16701)
+    if (part[3] === 'attempts' && part[5] === 'trace') {
+      // One attempt across every resource of the task (publish ids are
+      // shared); an attempt of another task reads as not found.
+      if (!/^[1-9]\d*$/.test(part[4])) fail('attempt_id 不合法', 400, 10001)
+      if (taskTraceMode === 'error')
+        fail('QA 场景：执行详情读取失败', 500, 50001)
+      for (const owner of db.tasks.filter((item) => item.id === id)) {
+        const history = db.taskHistories[historyKey(owner)]
+        const item = Array.isArray(history)
+          ? history.find((entry) => entry.trace.attempt_id === part[4])
+          : undefined
+        if (item) return traceSnapshot(owner, item)
+      }
+      fail('任务不存在', 404, 16701)
+    }
+    if (part[3] !== 'history') return task
+    const history = db.taskHistories[historyKey(task)] ?? []
+    if (history === 'error') fail('QA 场景：执行记录读取失败', 500, 50001)
+    return historySnapshot(task, history)
   }
   fail(`QA mock 未实现流：${path}`, 404)
 }
@@ -1578,10 +3243,61 @@ function control(query) {
     db = structuredClone(seed)
     tick = 0
     ingestedTraffic.clear()
+    taskTraceMode = 'reset'
     for (const stream of targets)
       if (!/\/(?:logs|access-logs)\/stream$/.test(stream.url.pathname))
         emitSnapshot(stream, true)
     return { reset: true }
+  }
+  if (event === 'task-history') {
+    // History is a one-shot snapshot: the next read (tab open or 刷新记录)
+    // returns the new state; only `fail` pushes the changed task streams.
+    const task = find(db.tasks, query.get('id') ?? 'dns-zone:sync:qa')
+    const key = historyKey(task),
+      mode = query.get('mode') ?? 'reset'
+    if (mode === 'fail') {
+      // A new failed attempt right now that repeats the newest error (joins
+      // its collapsed run) and schedules the sync retry 15 s later.
+      const history = Array.isArray(db.taskHistories[key])
+        ? db.taskHistories[key]
+        : []
+      const now = Date.now()
+      const error = history[0]?.error || 'QA 场景：同步失败'
+      history.unshift({
+        attempt: (history[0]?.attempt ?? 0) + 1,
+        outcome: 'failed',
+        error,
+        started_at: historyStamp(now - 1200),
+        emitted_at: historyStamp(now),
+        duration_ms: 1200,
+        next_attempt_at: historyStamp(now + 15_000),
+        detail: history[0]?.detail ?? { kind: 'none', truncated: false },
+        trace: traceNone(String(++attemptSequence)),
+      })
+      db.taskHistories[key] = history
+      Object.assign(task, {
+        status: 'retrying',
+        error,
+        failures: task.failures + 1,
+        updated_at: history[0].emitted_at,
+        next_attempt_at: history[0].next_attempt_at,
+      })
+      broadcast(['tasks'])
+    } else
+      db.taskHistories[key] =
+        mode === 'error'
+          ? 'error'
+          : mode === 'empty'
+            ? []
+            : structuredClone(seed.taskHistories[key] ?? [])
+    return { id: task.id, mode }
+  }
+  if (event === 'task-trace') {
+    // Traces are one-shot snapshots: `error` fails the next trace reads
+    // (expand an attempt or 重试), `reset` restores them.
+    const mode = query.get('mode') ?? 'reset'
+    taskTraceMode = mode === 'error' ? 'error' : 'reset'
+    return { mode: taskTraceMode }
   }
   if (event === 'node-runtime') {
     const node = find(db.nodes, query.get('id') ?? nodeId)
@@ -1590,6 +3306,10 @@ function control(query) {
       1,
       Number(query.get('cpu') ?? (node.runtime.cpu_usage ?? 0) + 0.01)
     )
+    // `ips=<n>` sets the connected IP count; `ips=` drops it (a 0.4.0 node).
+    const ips = query.get('ips')
+    if (ips === '') delete node.runtime.connected_ip_count
+    else if (ips !== null) node.runtime.connected_ip_count = Number(ips)
     for (const stream of targets)
       if (
         stream.url.pathname === `/api/nodes/${node.id}/stream` ||
@@ -1606,7 +3326,11 @@ function control(query) {
           { id: node.id, node_revision: node.revision, runtime: node.runtime },
           { force: true }
         )
-    return { node_id: node.id, cpu_usage: node.runtime.cpu_usage }
+    return {
+      node_id: node.id,
+      cpu_usage: node.runtime.cpu_usage,
+      connected_ip_count: node.runtime.connected_ip_count,
+    }
   }
   if (event === 'node-connection') {
     // Node goes online/offline: list, detail, cluster and overview snapshots change.

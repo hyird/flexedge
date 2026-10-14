@@ -53,6 +53,20 @@ int main() {
         REQUIRE(report.active_manifest_digest_ == digest && report.queued_log_events_ == 42);
         REQUIRE(report.cpu_usage_ == 0.5 && report.memory_usage_ == 0.25);
         REQUIRE(report.origin_health_.size() == 1 && report.origin_health_[0].latency_millis_ == 17);
+        // Nodes before 0.4.1 never send connected_ip_count: absent stays absent, 0 stays 0.
+        REQUIRE(!report.connected_ip_count_.has_value());
+        heartbeat.set_connection_count(2);
+        heartbeat.set_connected_ip_count(0);
+        REQUIRE(service::agent::valid_heartbeat(heartbeat));
+        REQUIRE(service::agent::to_heartbeat_report(heartbeat).connected_ip_count_ == 0);
+        // Sampled apart from the connection count, so a larger value is still accepted.
+        heartbeat.set_connected_ip_count(3);
+        REQUIRE(service::agent::valid_heartbeat(heartbeat));
+        REQUIRE(service::agent::to_heartbeat_report(heartbeat).connected_ip_count_ == 3);
+        heartbeat.set_connected_ip_count(-1);
+        REQUIRE(!service::agent::valid_heartbeat(heartbeat));
+        heartbeat.clear_connected_ip_count();
+        REQUIRE(service::agent::valid_heartbeat(heartbeat));
         heartbeat.set_queued_log_events((std::numeric_limits<std::uint64_t>::max)());
         REQUIRE(!service::agent::valid_heartbeat(heartbeat));
         heartbeat.set_queued_log_events(0);

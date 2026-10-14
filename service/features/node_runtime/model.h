@@ -21,6 +21,7 @@ struct node_runtime_data final {
     std::optional<double> memory_usage_;
     std::optional<std::int64_t> traffic_out_bps_;
     std::optional<std::int64_t> connection_count_;
+    std::optional<std::int64_t> connected_ip_count_;
     std::optional<double> load1m_;
     std::optional<std::int64_t> queued_log_events_;
     std::optional<std::int64_t> dropped_log_events_;

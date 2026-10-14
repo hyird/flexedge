@@ -14,6 +14,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -44,6 +45,7 @@
 #include "node/data/origin_selection.h"
 #include "node/proto/release_metadata.h"
 #include "node/proto/schema_version.h"
+#include "node/runtime/connected_clients.h"
 #include "node/runtime/http_redirect.h"
 #include "node/runtime/node_credentials.h"
 #include "node/runtime/runtime_state.h"
@@ -242,6 +244,33 @@ std::string response_body(std::string_view response) {
     const auto offset = response.find("\r\n\r\n");
     return offset == std::string_view::npos ? std::string{}
                                             : std::string(response.substr(offset + 4));
+}
+
+// Connects from a chosen local address, so one host acts as several clients.
+asio::ip::tcp::socket connect_from(asio::io_context& context, std::string_view source,
+    std::string_view target, std::uint16_t port) {
+    const auto source_address = asio::ip::make_address(std::string(source));
+    asio::ip::tcp::socket socket(context);
+    socket.open(source_address.is_v4() ? asio::ip::tcp::v4() : asio::ip::tcp::v6());
+    socket.bind({source_address, 0});
+    socket.connect({asio::ip::make_address(std::string(target)), port});
+    return socket;
+}
+
+std::string read_until_closed(asio::ip::tcp::socket& socket) {
+    std::string bytes;
+    std::array<char, 4096> buffer{};
+    std::error_code error;
+    for (;;) {
+        const auto size = socket.read_some(asio::buffer(buffer), error);
+        bytes.append(buffer.data(), size);
+        if (error == asio::error::eof) {
+            return bytes;
+        }
+        if (error) {
+            throw std::system_error(error, "could not read edge response");
+        }
+    }
 }
 
 void append_varint(std::string& output, std::uint64_t value) {
@@ -989,6 +1018,9 @@ int main(int argc, char* argv[]) {
         REQUIRE(previous->website("www.example.com") != nullptr);
         std::int64_t next_generation{5};
 
+        // Declared before the loops so sessions retiring on them never outlive their registry.
+        flexedge::node::connected_clients first_clients;
+        flexedge::node::connected_clients second_clients;
         ruvia::event_loop_pool loops({.loop_count_ = 2});
         flexedge::node::origin_health_registry listener_health;
         flexedge::node::origin_tls_context first_origin_tls;
@@ -1007,17 +1039,17 @@ int main(int argc, char* argv[]) {
         auto second_worker_logs = log_buffer.worker_producer(1);
         (void)runtime_metrics.sample();
         auto first_listener = flexedge::node::http_listener::create(
-            loops.loop(0), runtime, listener_health, runtime_metrics, first_worker_logs,
+            loops.loop(0), runtime, listener_health, runtime_metrics, first_clients, first_worker_logs,
             first_origin_connections, request_buffers, response_buffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto port = first_listener->local_endpoint().port();
         auto second_listener = flexedge::node::http_listener::create(
-            loops.loop(1), runtime, listener_health, runtime_metrics, second_worker_logs,
+            loops.loop(1), runtime, listener_health, runtime_metrics, second_clients, second_worker_logs,
             second_origin_connections, request_buffers, response_buffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), port));
         flexedge::node::buffered_bytes_budget constrained_request_buffers(32);
         auto constrained_listener = flexedge::node::http_listener::create(
-            loops.loop(0), runtime, listener_health, runtime_metrics, first_worker_logs,
+            loops.loop(0), runtime, listener_health, runtime_metrics, first_clients, first_worker_logs,
             first_origin_connections, constrained_request_buffers, response_buffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto constrained_port = constrained_listener->local_endpoint().port();
@@ -1037,14 +1069,14 @@ int main(int argc, char* argv[]) {
             REQUIRE(waitUntil([&] { return weak.expired(); }, std::chrono::seconds(2)));
         };
         verify_stopped_before_activation(flexedge::node::http_listener::create(
-            loops.loop(0), runtime, listener_health, runtime_metrics, first_worker_logs,
+            loops.loop(0), runtime, listener_health, runtime_metrics, first_clients, first_worker_logs,
             first_origin_connections, request_buffers, response_buffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0)));
         flexedge::node::tls_context_registry inactive_tls_contexts;
         verify_stopped_before_activation(flexedge::node::https_listener::create(
             loops.loop(0), runtime, listener_health, inactive_tls_contexts, runtime_metrics,
-            first_worker_logs, first_origin_connections, request_buffers, response_buffers,
-            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0)));
+            first_clients, first_worker_logs, first_origin_connections, request_buffers,
+            response_buffers, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0)));
         const auto constrained_response = request(constrained_port);
         REQUIRE(constrained_response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
         REQUIRE(waitUntil([&] { return constrained_request_buffers.used_bytes() == 0; },
@@ -1099,6 +1131,144 @@ int main(int argc, char* argv[]) {
         REQUIRE(observed_metrics.connection_count_ == 0);
         REQUIRE(observed_metrics.cpu_usage_ >= 0 && observed_metrics.cpu_usage_ <= 1);
         REQUIRE(observed_metrics.memory_usage_ >= 0 && observed_metrics.memory_usage_ <= 1);
+
+        // Per-IP accounting over real sockets. Each worker owns its registry; a separate control
+        // loop counts the union of their immutable copies, as the heartbeat does.
+        using flexedge::node::connected_clients;
+        REQUIRE(connected_clients::get_key(asio::ip::make_address("127.0.0.1")) ==
+                connected_clients::get_key(asio::ip::make_address("::ffff:127.0.0.1")));
+        REQUIRE(connected_clients::get_key(asio::ip::make_address("::1")) !=
+                connected_clients::get_key(asio::ip::make_address("127.0.0.1")));
+        {
+            connected_clients registry;
+            const auto client = connected_clients::get_key(asio::ip::make_address("192.0.2.1"));
+            registry.opened(client);
+            registry.opened(client);
+            registry.closed(client);
+            REQUIRE(registry.snapshot().size() == 1);
+            registry.closed(client);
+            REQUIRE(registry.snapshot().empty());
+            registry.closed(client);
+            REQUIRE(registry.snapshot().empty());
+        }
+        ruvia::event_loop_pool control_loops({.loop_count_ = 1});
+        control_loops.start();
+        const std::array connected_workers{
+            flexedge::node::worker_connected_clients{.loop_ = loops.loop(0), .clients_ = &first_clients},
+            flexedge::node::worker_connected_clients{.loop_ = loops.loop(1), .clients_ = &second_clients},
+        };
+        const auto count_ips = [&](std::span<const flexedge::node::worker_connected_clients> workers) {
+            const auto owner = control_loops.loop(0);
+            return owner.start(flexedge::node::count_connected_ips(owner.handle(), workers, {})).get();
+        };
+        const auto connected_ips_reach = [&](std::int64_t expected) {
+            return waitUntil([&] { return count_ips(connected_workers) == expected; },
+                std::chrono::seconds(2));
+        };
+        const auto connections_reach = [&](std::int64_t expected) {
+            return waitUntil([&] { return runtime_metrics.connection_count() == expected; },
+                std::chrono::seconds(2));
+        };
+        REQUIRE(count_ips({}) == 0);
+        REQUIRE(count_ips(connected_workers) == 0);
+        asio::io_context client_context;
+        {
+            // One client connected to both workers is one IP: per worker 1 and 2, together 2.
+            auto first_only = flexedge::node::http_listener::create(loops.loop(0), runtime,
+                listener_health, runtime_metrics, first_clients, first_worker_logs,
+                first_origin_connections, request_buffers, response_buffers,
+                asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+            auto second_only = flexedge::node::http_listener::create(loops.loop(1), runtime,
+                listener_health, runtime_metrics, second_clients, second_worker_logs,
+                second_origin_connections, request_buffers, response_buffers,
+                asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+            first_only->request_start();
+            second_only->request_start();
+            const auto first_port = first_only->local_endpoint().port();
+            const auto second_port = second_only->local_endpoint().port();
+            auto on_first = connect_from(client_context, "127.0.0.1", "127.0.0.1", first_port);
+            auto on_second = connect_from(client_context, "127.0.0.1", "127.0.0.1", second_port);
+            auto other_on_second = connect_from(client_context, "127.0.0.2", "127.0.0.1", second_port);
+            REQUIRE(connections_reach(3));
+            REQUIRE(count_ips(std::span(connected_workers).first(1)) == 1);
+            REQUIRE(count_ips(std::span(connected_workers).last(1)) == 2);
+            REQUIRE(count_ips(connected_workers) == 2);
+            on_first.close();
+            REQUIRE(connections_reach(2));
+            REQUIRE(count_ips(std::span(connected_workers).first(1)) == 0);
+            REQUIRE(count_ips(connected_workers) == 2);
+            on_second.close();
+            REQUIRE(connected_ips_reach(1));
+            other_on_second.close();
+            REQUIRE(connected_ips_reach(0));
+            first_only->request_stop();
+            second_only->request_stop();
+        }
+        {
+            // Connections from one client on the shared port count once wherever SO_REUSEPORT
+            // places them, and each stays counted for its socket's lifetime, not per request.
+            std::vector<asio::ip::tcp::socket> held;
+            for (int index = 0; index < 3; ++index) {
+                held.push_back(connect_from(client_context, "127.0.0.1", "127.0.0.1", port));
+            }
+            held.push_back(connect_from(client_context, "127.0.0.2", "127.0.0.1", port));
+            REQUIRE(connections_reach(4));
+            REQUIRE(count_ips(connected_workers) == 2);
+            held[0].close();
+            held[1].close();
+            REQUIRE(connections_reach(2));
+            REQUIRE(count_ips(connected_workers) == 2);
+            held[2].close();
+            REQUIRE(connected_ips_reach(1));
+            // Asking for keep-alive keeps the client counted until the edge closes its socket
+            // after the response.
+            auto keep_alive = connect_from(client_context, "127.0.0.3", "127.0.0.1", port);
+            REQUIRE(connected_ips_reach(2));
+            asio::write(keep_alive, asio::buffer(std::string_view(
+                                        "GET / HTTP/1.1\r\nHost: unknown.example.com\r\n"
+                                        "Connection: keep-alive\r\n\r\n")));
+            REQUIRE(read_until_closed(keep_alive).starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
+            REQUIRE(connected_ips_reach(1));
+            held[3].close();
+            REQUIRE(connected_ips_reach(0));
+            REQUIRE(connections_reach(0));
+        }
+        {
+            // IPv6 clients are distinct addresses. An IPv4 client reaching an IPv6 socket appears
+            // as ::ffff:127.0.0.1 and is the same client as on an IPv4 listener.
+            auto ipv6_listener = flexedge::node::http_listener::create(loops.loop(1), runtime,
+                listener_health, runtime_metrics, second_clients, second_worker_logs,
+                second_origin_connections, request_buffers, response_buffers,
+                asio::ip::tcp::endpoint(asio::ip::address_v6::loopback(), 0));
+            ipv6_listener->request_start();
+            auto ipv4 = connect_from(client_context, "127.0.0.1", "127.0.0.1", port);
+            auto ipv6 = connect_from(client_context, "::1", "::1", ipv6_listener->local_endpoint().port());
+            REQUIRE(connections_reach(2));
+            REQUIRE(count_ips(connected_workers) == 2);
+#if !defined(_WIN32)
+            // Windows IPv6 sockets are IPv6-only by default and cannot accept IPv4 clients.
+            auto mapped_listener = flexedge::node::http_listener::create(loops.loop(0), runtime,
+                listener_health, runtime_metrics, first_clients, first_worker_logs,
+                first_origin_connections, request_buffers, response_buffers,
+                asio::ip::tcp::endpoint(asio::ip::make_address("::ffff:127.0.0.1"), 0));
+            mapped_listener->request_start();
+            auto mapped = connect_from(client_context, "127.0.0.1", "127.0.0.1",
+                mapped_listener->local_endpoint().port());
+            REQUIRE(connections_reach(3));
+            REQUIRE(count_ips(connected_workers) == 2);
+            ipv4.close();
+            REQUIRE(connections_reach(2));
+            REQUIRE(count_ips(connected_workers) == 2);
+            mapped.close();
+            mapped_listener->request_stop();
+#else
+            ipv4.close();
+#endif
+            REQUIRE(connected_ips_reach(1));
+            ipv6.close();
+            REQUIRE(connected_ips_reach(0));
+            ipv6_listener->request_stop();
+        }
 
         auto redirect_snapshot = snapshot(true);
         redirect_snapshot.setGeneration(next_generation++);
@@ -1500,8 +1670,8 @@ int main(int argc, char* argv[]) {
         tls_contexts.publish(
             std::make_shared<const flexedge::node::tls_context_set>(*runtime.config()));
         auto https_listener = flexedge::node::https_listener::create(
-            loops.loop(0), runtime, node_health, tls_contexts, runtime_metrics, first_worker_logs,
-            first_origin_connections, request_buffers, response_buffers,
+            loops.loop(0), runtime, node_health, tls_contexts, runtime_metrics, first_clients,
+            first_worker_logs, first_origin_connections, request_buffers, response_buffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto https_port = https_listener->local_endpoint().port();
         https_listener->request_start();
@@ -1524,6 +1694,23 @@ int main(int argc, char* argv[]) {
             unknown_sni_rejected = true;
         }
         REQUIRE(unknown_sni_rejected);
+        {
+            // A TLS client counts once its handshake completes, like the connection count.
+            REQUIRE(connected_ips_reach(0));
+            asio::ssl::context tls_client(asio::ssl::context::tls_client);
+            tls_client.set_verify_mode(asio::ssl::verify_none);
+            asio::ssl::stream<asio::ip::tcp::socket> held(client_context, tls_client);
+            REQUIRE(SSL_set_tlsext_host_name(held.native_handle(), "www.example.com") == 1);
+            held.lowest_layer().open(asio::ip::tcp::v4());
+            held.lowest_layer().bind({asio::ip::make_address("127.0.0.5"), 0});
+            held.lowest_layer().connect({asio::ip::address_v4::loopback(), https_port});
+            REQUIRE(count_ips(connected_workers) == 0);
+            held.handshake(asio::ssl::stream_base::client);
+            REQUIRE(connected_ips_reach(1));
+            REQUIRE(count_ips(std::span(connected_workers).first(1)) == 1);
+            held.lowest_layer().close();
+            REQUIRE(connected_ips_reach(0));
+        }
 
         const auto refreshed_identity = make_identity("refreshed.example.com", 3);
         auto refreshed_snapshot = snapshot(false);
@@ -1590,8 +1777,8 @@ int main(int argc, char* argv[]) {
         flexedge::node::origin_health_registry secure_origin_health;
         secure_origin_health.publish(secure_origin_health.prepare({flexedge::node::origin_health_registry::get_key("website-1", "origin-1")}));
         auto secure_origin_listener = flexedge::node::http_listener::create(
-            loops.loop(0), runtime, secure_origin_health, runtime_metrics, first_worker_logs,
-            trusted_origin_connections, request_buffers, response_buffers,
+            loops.loop(0), runtime, secure_origin_health, runtime_metrics, first_clients,
+            first_worker_logs, trusted_origin_connections, request_buffers, response_buffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto secure_edge_port = secure_origin_listener->local_endpoint().port();
         secure_origin_listener->request_start();
@@ -1663,8 +1850,8 @@ int main(int argc, char* argv[]) {
         buffered_origin_website->mutable_origins(0)->set_port(buffered_origin_port);
         apply(runtime, std::move(buffered_origin_snapshot));
         auto buffered_origin_listener = flexedge::node::http_listener::create(
-            loops.loop(0), runtime, secure_origin_health, runtime_metrics, first_worker_logs,
-            trusted_origin_connections, request_buffers, response_buffers,
+            loops.loop(0), runtime, secure_origin_health, runtime_metrics, first_clients,
+            first_worker_logs, trusted_origin_connections, request_buffers, response_buffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto buffered_origin_edge_port = buffered_origin_listener->local_endpoint().port();
         buffered_origin_listener->request_start();
@@ -1777,8 +1964,8 @@ int main(int argc, char* argv[]) {
         apply(runtime, std::move(reusable_origin_snapshot));
         flexedge::node::origin_health_registry reusable_origin_health;
         auto reusable_edge_listener = flexedge::node::http_listener::create(
-            loops.loop(0), runtime, reusable_origin_health, runtime_metrics, first_worker_logs,
-            first_origin_connections, request_buffers, response_buffers,
+            loops.loop(0), runtime, reusable_origin_health, runtime_metrics, first_clients,
+            first_worker_logs, first_origin_connections, request_buffers, response_buffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto reusable_edge_port = reusable_edge_listener->local_endpoint().port();
         reusable_edge_listener->request_start();
@@ -1794,10 +1981,12 @@ int main(int argc, char* argv[]) {
         // Posting cleanup after shutdown must not keep an otherwise unused
         // listener (and its event loop handle) alive indefinitely.
         auto stopped_loop_listener = flexedge::node::http_listener::create(
-            loops.loop(0), runtime, listener_health, runtime_metrics, first_worker_logs,
+            loops.loop(0), runtime, listener_health, runtime_metrics, first_clients, first_worker_logs,
             first_origin_connections, request_buffers, response_buffers,
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const std::weak_ptr stopped_loop_weak(stopped_loop_listener);
+        control_loops.stop();
+        control_loops.join();
         loops.stop();
         loops.join();
         first_listener->request_stop();

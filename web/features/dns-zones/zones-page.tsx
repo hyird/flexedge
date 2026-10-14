@@ -76,7 +76,8 @@ export function DnsZonesPage() {
       id: 'records',
       label: '编辑记录',
       icon: <PencilToSquare />,
-      href: `/dns-zones/${zone.id}?tab=records&edit=1`,
+      href: `/dns-zones/${zone.id}`,
+      state: { dnsZone: { tab: 'records', editRecords: true } },
     },
     {
       id: 'sync',

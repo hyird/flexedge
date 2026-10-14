@@ -15,7 +15,6 @@ import {
   formatPercent,
   ratioOf,
 } from '@/lib/format'
-import { statusLabels } from '@/lib/status'
 import { cn } from '@/lib/utils'
 import { DataTable, TruncatedText } from '@/components/data-table'
 import { LinkButton } from '@/components/link-button'
@@ -24,10 +23,11 @@ import { EmptyState, Page, QueryNotice } from '@/components/page'
 import { RelativeTime } from '@/components/relative-time'
 import { Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
+import { NodeConnectionChip } from '@/features/nodes/node-connection-chip'
 import type { Node } from '@/features/nodes/types'
 import {
   taskHref,
-  taskResourceHref,
+  taskResourceTarget,
   taskStatusLabels,
   taskStatuses,
   taskStatusTones,
@@ -70,7 +70,7 @@ export function OverviewPage() {
   const kpis: Kpi[] = [
     {
       id: 'egress',
-      title: '当前出口带宽',
+      title: '当前带宽',
       value: health && formatBitsPerSecond(health.egressBps),
       detail:
         resources && resources.node_count > overviewNodePageSize
@@ -326,12 +326,10 @@ function NodeHealthPanel({
   )
 }
 
-const connectionLabels = statusLabels(['online', 'offline', 'unregistered'])
-
 /** Fixed structure whatever the node's state: name + cluster (two lines),
- * connection chip with a reserved width, then one detail slot of fixed size
- * (meters when online, last heartbeat otherwise). Narrow cards put the
- * detail slot on its own line in every row. */
+ * online chip with a reserved width (latest heartbeat in its tooltip), then
+ * the CPU and memory meters, shown as «—» unless the node is online. Narrow
+ * cards put the meters on their own line in every row. */
 function NodeHealthRow({ node }: { node: Node }) {
   const online = node.runtime.connection_status === 'online'
   return (
@@ -347,37 +345,24 @@ function NodeHealthRow({ node }: { node: Node }) {
           {node.cluster_name || '—'}
         </span>
       </div>
-      <StatusChip
-        status={node.runtime.connection_status}
-        reserve={connectionLabels}
-      />
+      <NodeConnectionChip runtime={node.runtime} />
       <div className='col-span-2 flex h-5 min-w-0 items-center gap-3 text-xs whitespace-nowrap text-muted @lg:col-span-1'>
-        {online ? (
-          <>
-            <span className='flex min-w-0 flex-1 items-center gap-1.5'>
-              CPU
-              <MetricMeter
-                label={`${node.name} CPU`}
-                value={node.runtime.cpu_usage}
-                className='min-w-0 flex-1'
-              />
-            </span>
-            <span className='flex min-w-0 flex-1 items-center gap-1.5'>
-              内存
-              <MetricMeter
-                label={`${node.name} 内存`}
-                value={node.runtime.memory_usage}
-                className='min-w-0 flex-1'
-              />
-            </span>
-          </>
-        ) : node.runtime.last_heartbeat_at ? (
-          <span className='truncate'>
-            最后心跳 <RelativeTime value={node.runtime.last_heartbeat_at} />
-          </span>
-        ) : (
-          <span className='truncate'>尚未接入</span>
-        )}
+        <span className='flex min-w-0 flex-1 items-center gap-1.5'>
+          CPU
+          <MetricMeter
+            label={`${node.name} CPU`}
+            value={online ? node.runtime.cpu_usage : undefined}
+            className='min-w-0 flex-1'
+          />
+        </span>
+        <span className='flex min-w-0 flex-1 items-center gap-1.5'>
+          内存
+          <MetricMeter
+            label={`${node.name} 内存`}
+            value={online ? node.runtime.memory_usage : undefined}
+            className='min-w-0 flex-1'
+          />
+        </span>
       </div>
     </li>
   )
@@ -399,18 +384,22 @@ const markerColumns: DataGridColumn<OverviewMarker>[] = [
     id: 'resource',
     header: '关联资源',
     minWidth: 180,
-    cell: (marker) => (
-      <Link
-        href={taskResourceHref({
-          resource_type: marker.resource_type,
-          resource_id: marker.resource_id,
-          name: marker.resource_name,
-        })}
-        className='truncate'
-      >
-        {marker.resource_name}
-      </Link>
-    ),
+    cell: (marker) => {
+      const target = taskResourceTarget({
+        resource_type: marker.resource_type,
+        resource_id: marker.resource_id,
+        name: marker.resource_name,
+      })
+      return (
+        <Link
+          href={target.href}
+          routerOptions={target.state && { state: target.state }}
+          className='truncate'
+        >
+          {marker.resource_name}
+        </Link>
+      )
+    },
   },
   {
     id: 'status',

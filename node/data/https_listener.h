@@ -66,14 +66,16 @@ public:
 
     tls_session(asio::ip::tcp::socket socket, runtime_state& runtime, origin_health_registry& health,
         std::shared_ptr<const tls_context_set> contexts, runtime_metrics& metrics,
-        node_log_buffer::producer& logs, origin_connection_pool& origin_connections,
-        buffered_bytes_budget& request_buffers, buffered_bytes_budget& response_buffers,
-        std::uint64_t sequence, std::shared_ptr<https_connection> connection)
+        connected_clients& clients, node_log_buffer::producer& logs,
+        origin_connection_pool& origin_connections, buffered_bytes_budget& request_buffers,
+        buffered_bytes_budget& response_buffers, std::uint64_t sequence,
+        std::shared_ptr<https_connection> connection)
         : stream_(std::move(socket), contexts->default_context()),
           runtime_(runtime),
           health_(health),
           contexts_(std::move(contexts)),
           metrics_(metrics),
+          clients_(clients),
           logs_(logs),
           origin_connections_(origin_connections),
           request_buffers_(request_buffers),
@@ -112,9 +114,9 @@ public:
                     auto connection = self->connection_;
                     auto session = std::make_shared<basic_http_session<stream>>(
                         std::move(self->stream_), self->runtime_, self->health_, self->metrics_,
-                        self->logs_, self->origin_connections_, self->request_buffers_,
-                        self->response_buffers_, self->sequence_, self->contexts_, true,
-                        std::move(tls_fingerprint), [connection] {});
+                        self->clients_, self->logs_, self->origin_connections_,
+                        self->request_buffers_, self->response_buffers_, self->sequence_,
+                        self->contexts_, true, std::move(tls_fingerprint), [connection] {});
                     connection->set_close([weak = std::weak_ptr<basic_http_session<stream>>(session)] {
                         if (const auto active = weak.lock()) {
                             active->close();
@@ -148,6 +150,7 @@ private:
     origin_health_registry& health_;
     std::shared_ptr<const tls_context_set> contexts_;
     runtime_metrics& metrics_;
+    connected_clients& clients_;
     node_log_buffer::producer& logs_;
     origin_connection_pool& origin_connections_;
     buffered_bytes_budget& request_buffers_;
@@ -175,7 +178,7 @@ public:
 
 private:
     https_listener(ruvia::event_loop owner, runtime_state& runtime, origin_health_registry& health,
-        tls_context_registry& tls_contexts, runtime_metrics& metrics,
+        tls_context_registry& tls_contexts, runtime_metrics& metrics, connected_clients& clients,
         node_log_buffer::producer& logs, origin_connection_pool& origin_connections,
         buffered_bytes_budget& request_buffers, buffered_bytes_budget& response_buffers,
         const asio::ip::tcp::endpoint& endpoint)
@@ -185,6 +188,7 @@ private:
           health_(health),
           tls_contexts_(tls_contexts),
           metrics_(metrics),
+          clients_(clients),
           logs_(logs),
           origin_connections_(origin_connections),
           request_buffers_(request_buffers),
@@ -386,9 +390,9 @@ private:
                                 self->connections_.push_back(connection);
                                 auto session = std::make_shared<tls_session>(
                                     std::move(*socket), self->runtime_, self->health_, contexts,
-                                    self->metrics_, self->logs_, self->origin_connections_,
-                                    self->request_buffers_, self->response_buffers_,
-                                    ++self->sequence_, connection);
+                                    self->metrics_, self->clients_, self->logs_,
+                                    self->origin_connections_, self->request_buffers_,
+                                    self->response_buffers_, ++self->sequence_, connection);
                                 session->start();
                             } catch (...) {
                                 if (connection) {
@@ -418,6 +422,7 @@ private:
     origin_health_registry& health_;
     tls_context_registry& tls_contexts_;
     runtime_metrics& metrics_;
+    connected_clients& clients_;
     node_log_buffer::producer& logs_;
     origin_connection_pool& origin_connections_;
     buffered_bytes_budget& request_buffers_;

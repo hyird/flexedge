@@ -9,6 +9,7 @@ import {
   taskSchema,
   taskPageSchema,
   taskHistorySchema,
+  taskAttemptTraceSchema,
   type Task,
 } from './types'
 
@@ -132,23 +133,53 @@ export function taskDetailQuery(task: TaskSelection | null) {
   })
 }
 
-export function taskHistoryQuery(
-  task: Pick<Task, 'id' | 'version' | 'resource_type'> | null
-) {
+/** Execution history: a one-shot snapshot (the stream closes after its first
+ * frame), read when the history tab opens and on manual refresh. It is the
+ * brief read allowed next to the page's single live stream. `resource_id`
+ * selects one node of a publish (all its nodes share the task id). */
+export function taskHistoryQuery(task: TaskSelection | null) {
   return queryOptions({
     retry: false,
-    queryKey: [...queryKeys.tasks, 'history', task?.id, task?.version],
-    queryFn:
-      task && task.resource_type !== 'node'
-        ? ({ queryKey, signal }) =>
-            readLiveQuery(
-              streamPath(`/tasks/${task.id}/history`, {
-                version: task.version,
-              }),
-              queryKey,
-              signal,
-              (data) => parse(taskHistorySchema, data)
-            )
-        : skipToken,
+    gcTime: 0,
+    queryKey: [
+      ...queryKeys.tasks,
+      'history',
+      task?.id,
+      task?.resource_id,
+      task?.version,
+    ],
+    queryFn: task
+      ? ({ queryKey, signal }) =>
+          readLiveSnapshot(
+            streamPath(`/tasks/${task.id}/history`, {
+              version: task.version,
+              resource_id: task.resource_id,
+            }),
+            queryKey,
+            signal,
+            (data) => parse(taskHistorySchema, data)
+          )
+      : skipToken,
+  })
+}
+
+/** Full trace of one attempt: a one-shot snapshot (the stream closes after
+ * its first frame) read only while the attempt's trace view is expanded,
+ * never with the history itself. Stored traces never change, so the cached
+ * snapshot stays fresh: re-expanding within `gcTime` reads nothing, and no
+ * event or refresh invalidates it. */
+export function taskAttemptTraceQuery(taskId: string, attemptId: string) {
+  return queryOptions({
+    retry: false,
+    staleTime: Infinity,
+    gcTime: 5 * 60_000,
+    queryKey: [...queryKeys.tasks, 'trace', taskId, attemptId],
+    queryFn: ({ queryKey, signal }) =>
+      readLiveSnapshot(
+        streamPath(`/tasks/${taskId}/attempts/${attemptId}/trace`),
+        queryKey,
+        signal,
+        (data) => parse(taskAttemptTraceSchema, data)
+      ),
   })
 }

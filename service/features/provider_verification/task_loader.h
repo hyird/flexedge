@@ -2,6 +2,7 @@
 
 #include <ruvia/core/task.h>
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -33,6 +34,7 @@ claim(service::background::worker_context& context) {
     if (rows.empty()) {
         co_return std::nullopt;
     }
+    const auto claimed_at = std::chrono::steady_clock::now();
     const auto& row = rows.front();
     service::live_resource::get_hub().publish(row[1].value().value_or(""),
         service::live_resource::resource::tasks,
@@ -50,6 +52,7 @@ claim(service::background::worker_context& context) {
         .failures_ = row[4].as<std::int64_t>().value_or(0),
         .config_json_ = std::string(row[10].value().value_or("{}")),
         .runtime_json_ = std::string(row[11].value().value_or("{}")),
+        .claimed_at_ = claimed_at,
     };
 }
 

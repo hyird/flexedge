@@ -74,7 +74,11 @@ export function FormSheet({
                   <p className='text-sm leading-6 text-muted'>{description}</p>
                 )}
               </Sheet.Header>
-              <Sheet.Body className='flex min-h-0 flex-col gap-4 pb-6'>
+              {/* `relative`: absolutely positioned descendants (sr-only text)
+                  must lay out inside the scrolling body; otherwise they
+                  overflow the clipped dialog, which scrollIntoView then
+                  scrolls, moving the header and footer. */}
+              <Sheet.Body className='relative flex min-h-0 flex-col gap-4 pb-6'>
                 {error && (
                   <Alert status='danger'>
                     <Alert.Indicator />

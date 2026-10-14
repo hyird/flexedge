@@ -257,3 +257,99 @@ test('an opened connection resets the refused-handshake budget', async () => {
   expect(exhausted).toBe(0)
   stream.close()
 })
+
+const pageTransition = (type: 'pagehide' | 'pageshow', persisted: boolean) =>
+  Object.assign(new Event(type), { persisted })
+
+test('the back/forward cache closes the connection and a restore reopens it once', async () => {
+  const page = new EventTarget()
+  const sources: Source[] = []
+  const stream = reconnectingEventSource('/events', {
+    retryDelayMs: 1,
+    idleTimeoutMs: null,
+    pageLifecycle: page,
+    createSource: () => {
+      const source = new Source()
+      sources.push(source)
+      return source as unknown as EventSource
+    },
+  })
+  const frames: string[] = []
+  stream.addEventListener('snapshot', (event) => {
+    frames.push((event as MessageEvent<string>).data)
+  })
+  try {
+    // A refused handshake schedules a retry; leaving the page cancels it.
+    sources[0].fail(2)
+    page.dispatchEvent(pageTransition('pagehide', true))
+    expect(sources[0].closed).toBe(true)
+    await settle()
+    expect(sources).toHaveLength(1)
+    // Listeners registered while away attach to the restored connection.
+    stream.addEventListener('nodes', () => frames.push('nodes'))
+    page.dispatchEvent(pageTransition('pageshow', true))
+    page.dispatchEvent(pageTransition('pageshow', true))
+    await settle()
+    expect(sources).toHaveLength(2)
+    sources[1].dispatchEvent(new MessageEvent('snapshot', { data: 'again' }))
+    sources[1].dispatchEvent(new MessageEvent('nodes', { data: '{}' }))
+    expect(frames).toEqual(['again', 'nodes'])
+  } finally {
+    stream.close()
+  }
+})
+
+test('a fresh pageshow does not reconnect and closed streams stay closed', async () => {
+  const page = new EventTarget()
+  const sources: Source[] = []
+  const open = () =>
+    reconnectingEventSource('/events', {
+      idleTimeoutMs: null,
+      pageLifecycle: page,
+      createSource: () => {
+        const source = new Source()
+        sources.push(source)
+        return source as unknown as EventSource
+      },
+    })
+  const kept = open()
+  const released = open()
+  page.dispatchEvent(pageTransition('pageshow', false))
+  expect(sources).toHaveLength(2)
+  released.close()
+  page.dispatchEvent(pageTransition('pagehide', true))
+  expect(sources.every((source) => source.closed)).toBe(true)
+  page.dispatchEvent(pageTransition('pageshow', true))
+  await settle()
+  // Only the stream still owned by the page reopens.
+  expect(sources).toHaveLength(3)
+  kept.close()
+  page.dispatchEvent(pageTransition('pagehide', true))
+  page.dispatchEvent(pageTransition('pageshow', true))
+  expect(sources).toHaveLength(3)
+})
+
+test('a restored cursor stream resumes after its latest delivered id', () => {
+  const page = new EventTarget()
+  const urls: string[] = []
+  const sources: Source[] = []
+  const stream = reconnectingEventSource('/logs', {
+    idleTimeoutMs: null,
+    resumeQueryParam: 'after',
+    pageLifecycle: page,
+    createSource: (url) => {
+      urls.push(url)
+      const source = new Source()
+      sources.push(source)
+      return source as unknown as EventSource
+    },
+  })
+  stream.addEventListener('logs', () => undefined)
+  sources[0].dispatchEvent(
+    new MessageEvent('logs', { lastEventId: 'cursor:7', data: '{}' })
+  )
+  page.dispatchEvent(pageTransition('pagehide', true))
+  page.dispatchEvent(pageTransition('pageshow', true))
+  expect(urls).toEqual(['/logs', '/logs?after=cursor%3A7'])
+  stream.close()
+})

@@ -23,6 +23,7 @@
 #include "service/features/certificate/acme_jws.h"
 #include "service/features/certificate/acme_transport.h"
 #include "service/features/certificate/acme_types.h"
+#include "service/features/certificate/attempt_detail.h"
 #include "service/features/certificate/certificate_inspection.h"
 #include "service/features/certificate/certificate_request.h"
 #include "service/features/certificate/dns_challenge.h"
@@ -97,12 +98,40 @@ inline std::string problem_detail(const std::optional<acme_problem_input>& probl
     return {};
 }
 
+[[nodiscard]] inline bool permanent_problem(std::string_view type, ruvia::http_status_code status) {
+    if (status.value() == 429 || status.is_server_error()) {
+        return false;
+    }
+    return type.ends_with(":malformed") || type.ends_with(":unauthorized") ||
+           type.ends_with(":rejectedIdentifier") || type.ends_with(":accountDoesNotExist");
+}
+
+// The error of a failed ACME reply: the fallback, then the problem's
+// `detail` when the reply carries one. The text passes the attempt's
+// redaction (EAB key and kid, account e-mail, any echoed credential) before
+// it can reach the task error or the server log.
+[[nodiscard]] inline acme_error acme_problem_error(service::attempt_trace::recorder& trace, std::string_view body,
+    ruvia::http_status_code status, std::string_view fallback, std::pmr::memory_resource* resource) {
+    const std::optional<acme_problem_input> parsed = ruvia::from_json<acme_problem_input>(body, {.resource_ = resource});
+    std::string type;
+    std::string message(fallback);
+    if (parsed) {
+        type = optional_string(parsed->get<"type">());
+        const auto detail_value = optional_string(parsed->get<"detail">());
+        if (!detail_value.empty()) {
+            message.append("：").append(detail_value);
+        }
+    }
+    return acme_error(trace.redact_error(message), permanent_problem(type, status));
+}
+
 }  // namespace detail
 
 class acme_client final {
 public:
-    explicit acme_client(acme_settings settings)
-        : settings_(std::move(settings)) {}
+    acme_client(acme_settings settings, service::attempt_trace::recorder& trace)
+        : settings_(std::move(settings)),
+          trace_(trace) {}
 
     [[nodiscard]] const acme_settings& settings() const noexcept {
         return settings_;
@@ -117,6 +146,13 @@ public:
     ruvia::task<std::string> register_account(runtime_type& context, std::string_view private_key_pem,
         std::optional<std::string_view> account_email,
         const std::optional<eab_credentials>& eab) const {
+        if (account_email) {
+            trace_.register_secret(*account_email);
+        }
+        if (eab) {
+            trace_.register_secret(eab->key_id_);
+            trace_.register_secret(eab->hmac_key_.view());
+        }
         auto key = detail::load_private_key(private_key_pem);
         const auto directory = co_await load_directory(context);
         acme_account_payload_output payload({.resource_ = context.pool()});
@@ -132,40 +168,66 @@ public:
         }
         const auto response =
             co_await signed_post(context, directory, directory.new_account_, key.get(), std::nullopt,
-                detail::json_string(std::move(payload), context.pool()));
+                detail::json_string(std::move(payload), context.pool()),
+                service::attempt_trace::outbound_operation::acme_new_account);
         const auto location = response.header("location");
         if (!location || location->empty()) {
             throw acme_error("ACME 账户响应缺少 Location", true);
         }
         (void)target_from_url(*location);
+        trace_.log(service::attempt_trace::log_level::info, "已注册新的 ACME 账户");
         co_return std::string(*location);
     }
 
+    // `stage` follows the flow so a failed attempt reports where it stopped.
     template <typename runtime_type>
     ruvia::task<issued_certificate>
     issue(runtime_type& context, std::string_view account_private_key_pem, std::string_view account_url,
         const std::vector<std::string>& domains, const dns_challenge_config_view& dns,
-        const service::sync_runtime::running_marker_lease& certificate_task) const {
+        const service::sync_runtime::running_marker_lease& certificate_task,
+        certificate_stage& stage) const {
+        using service::attempt_trace::log_level;
+        using service::attempt_trace::step_code;
+        stage = certificate_stage::order;
         auto account_key = detail::load_private_key(account_private_key_pem);
+        auto order_step = trace_.begin_step(step_code::order);
         const auto order_session =
             co_await create_order(context, account_key.get(), account_url, domains);
+        trace_.log(log_level::info, "订单状态 " + order_session.order_.status_ + "，包含 " +
+                                        std::to_string(order_session.order_.authorizations_.size()) + " 个授权");
+        order_step.complete();
+        stage = certificate_stage::authorization;
+        auto authorization_step = trace_.begin_step(step_code::authorization);
         const auto authorization_plan =
             co_await collect_authorization_plan(context, order_session, account_key.get(), account_url);
+        authorization_step.complete();
         bool challenges_persisted = false;
         std::exception_ptr validation_failure;
         try {
             co_await validate_authorizations(context, order_session, authorization_plan,
                 account_key.get(), account_url, dns, certificate_task,
-                challenges_persisted);
+                challenges_persisted, stage);
         } catch (...) {
             validation_failure = std::current_exception();
         }
+        // A validation failure stays the reported stage unless cleanup itself fails.
+        const auto validated_stage = stage;
+        if (challenges_persisted) {
+            stage = certificate_stage::cleanup;
+        }
+        auto cleanup_step = trace_.begin_step(step_code::cleanup);
+        if (!challenges_persisted) {
+            cleanup_step.skip("没有写入 DNS 验证记录，无需清理");
+        }
         co_await cleanup_challenges(context, dns, certificate_task, challenges_persisted);
+        cleanup_step.complete();
         if (validation_failure) {
+            stage = validated_stage;
             std::rethrow_exception(validation_failure);
         }
+        stage = certificate_stage::finalize;
         co_return co_await finalize_order(context, order_session, account_key.get(), account_url,
-            domains, certificate_task);
+            domains, certificate_task, stage);
     }
 
 private:
@@ -176,7 +238,7 @@ private:
         auto directory = co_await load_directory(context);
         const auto order_payload = build_order_payload(context, domains);
         const auto order_response = co_await signed_post(context, directory, directory.new_order_,
-            account_key, account_url, order_payload);
+            account_key, account_url, order_payload, service::attempt_trace::outbound_operation::acme_new_order);
         const auto order_url_header = order_response.header("location");
         if (!order_url_header || order_url_header->empty()) {
             throw acme_error("ACME 订单响应缺少 Location", true);
@@ -202,12 +264,13 @@ private:
             auto authorization = co_await load_authorization(
                 context, order_session.directory_, authorization_url, account_key, account_url);
             if (authorization.status_ == "valid") {
+                trace_.log(service::attempt_trace::log_level::info, authorization.identifier_ + " 的授权已有效");
                 continue;
             }
             if (authorization.status_ == "invalid") {
-                throw acme_error(authorization.error_.empty()
-                                     ? "ACME 授权已失效"
-                                     : "ACME 授权失败：" + authorization.error_,
+                throw acme_error(trace_.redact_error(authorization.error_.empty()
+                                                         ? "ACME 授权已失效"
+                                                         : "ACME 授权失败：" + authorization.error_),
                     false);
             }
             if (!authorization.dns_challenge_) {
@@ -223,6 +286,9 @@ private:
                 .challenge_url_ = authorization.dns_challenge_->url_,
             });
         }
+        trace_.log(service::attempt_trace::log_level::info,
+            plan.pending_.empty() ? std::string("授权均已有效，跳过 DNS 验证")
+                                  : "需要完成 " + std::to_string(plan.pending_.size()) + " 个 DNS-01 验证");
         co_return plan;
     }
 
@@ -232,29 +298,46 @@ private:
         const detail::authorization_plan& plan, EVP_PKEY* account_key,
         std::string_view account_url, const dns_challenge_config_view& dns,
         const service::sync_runtime::running_marker_lease& certificate_task,
-        bool& challenges_persisted) const {
-        if (!plan.pending_.empty()) {
-            const auto dns_task_id =
-                co_await persist_dns_challenges(context, certificate_task, dns, plan.challenge_specs_);
-            challenges_persisted = true;
-            co_await wait_for_dns_marker(context, dns_task_id, certificate_task);
-            if (co_await ruvia::sleep_for(context.worker(), std::chrono::seconds(10),
-                    context.get_stop_token()) ==
-                ruvia::timer_sleep_result::stop_requested) {
-                throw acme_error("证书签发已停止", false);
-            }
-            const auto empty_payload = build_empty_payload(context);
-            for (const auto& pending : plan.pending_) {
-                (void)co_await signed_post(context, order_session.directory_, pending.challenge_url_,
-                    account_key, account_url, empty_payload);
-            }
-            for (const auto& pending : plan.pending_) {
-                co_await wait_for_authorization(context, order_session.directory_,
-                    pending.authorization_url_, account_key, account_url,
-                    certificate_task);
-            }
+        bool& challenges_persisted, certificate_stage& stage) const {
+        using service::attempt_trace::log_level;
+        using service::attempt_trace::step_code;
+        if (plan.pending_.empty()) {
+            trace_.begin_step(step_code::dns_challenge).skip("授权均已有效");
+            trace_.begin_step(step_code::validation).skip("授权均已有效");
+            co_return;
         }
-        co_return;
+        stage = certificate_stage::dns_challenge;
+        auto challenge_step = trace_.begin_step(step_code::dns_challenge, dns.zone_domain_);
+        const auto dns_task_id =
+            co_await persist_dns_challenges(context, certificate_task, dns, plan.challenge_specs_);
+        challenges_persisted = true;
+        trace_.link_task({.task_id_ = dns_task_id,
+            .resource_type_ = "dns_zone",
+            .resource_id_ = dns.dns_zone_id_,
+            .label_ = "DNS 同步"});
+        trace_.log(log_level::info, "已写入 " + std::to_string(plan.challenge_specs_.size()) +
+                                        " 条 _acme-challenge TXT 记录，等待 DNS 同步任务完成");
+        co_await wait_for_dns_marker(context, dns_task_id, certificate_task);
+        trace_.log(log_level::info, "DNS 同步已完成，等待 10 秒让记录生效");
+        if (co_await ruvia::sleep_for(context.worker(), std::chrono::seconds(10),
+                context.get_stop_token()) ==
+            ruvia::timer_sleep_result::stop_requested) {
+            throw acme_error("证书签发已停止", false);
+        }
+        challenge_step.complete();
+        stage = certificate_stage::validation;
+        auto validation_step = trace_.begin_step(step_code::validation);
+        const auto empty_payload = build_empty_payload(context);
+        for (const auto& pending : plan.pending_) {
+            (void)co_await signed_post(context, order_session.directory_, pending.challenge_url_,
+                account_key, account_url, empty_payload, service::attempt_trace::outbound_operation::acme_challenge);
+        }
+        for (const auto& pending : plan.pending_) {
+            co_await wait_for_authorization(context, order_session.directory_,
+                pending.authorization_url_, account_key, account_url,
+                certificate_task);
+        }
+        validation_step.complete();
     }
 
     template <typename runtime_type>
@@ -270,6 +353,11 @@ private:
             const auto dns_task_id = co_await retire_dns_challenges(context, dns.dns_zone_id_,
                 dns.certificate_id_, certificate_task);
             if (!dns_task_id.empty()) {
+                trace_.link_task({.task_id_ = dns_task_id,
+                    .resource_type_ = "dns_zone",
+                    .resource_id_ = dns.dns_zone_id_,
+                    .label_ = "DNS 同步"});
+                trace_.log(service::attempt_trace::log_level::info, "已移除 DNS 验证记录，等待 DNS 同步任务完成");
                 co_await wait_for_dns_marker(context, dns_task_id, certificate_task);
             }
         } catch (...) {
@@ -285,37 +373,49 @@ private:
     ruvia::task<issued_certificate>
     finalize_order(runtime_type& context, const detail::order_session& order_session, EVP_PKEY* account_key,
         std::string_view account_url, const std::vector<std::string>& domains,
-        const service::sync_runtime::running_marker_lease& certificate_task) const {
+        const service::sync_runtime::running_marker_lease& certificate_task,
+        certificate_stage& stage) const {
+        using service::attempt_trace::step_code;
+        auto finalize_step = trace_.begin_step(step_code::finalize);
         auto certificate_request = detail::create_certificate_request(domains);
         acme_finalize_payload_output finalize_payload({.resource_ = context.pool()});
         finalize_payload.set<"csr">(certificate_request.csr_);
         (void)co_await signed_post(
             context, order_session.directory_, order_session.order_.finalize_, account_key, account_url,
-            detail::json_string(std::move(finalize_payload), context.pool()));
+            detail::json_string(std::move(finalize_payload), context.pool()),
+            service::attempt_trace::outbound_operation::acme_finalize);
         const auto order = co_await wait_for_order(context, order_session.directory_, order_session.url_,
             account_key, account_url, certificate_task);
         if (order.certificate_.empty()) {
             throw acme_error("ACME 有效订单缺少证书下载地址", true);
         }
-        const auto certificate_response = co_await signed_post(
-            context, order_session.directory_, order.certificate_, account_key, account_url, "");
+        finalize_step.complete();
+        stage = certificate_stage::download;
+        auto download_step = trace_.begin_step(step_code::download);
+        const auto certificate_response = co_await signed_post(context, order_session.directory_,
+            order.certificate_, account_key, account_url, "", service::attempt_trace::outbound_operation::acme_certificate);
         if (certificate_response.body().empty()) {
             throw acme_error("ACME 返回的证书链为空", false);
         }
-        co_return detail::inspect_certificate(
+        auto issued = detail::inspect_certificate(
             std::move(certificate_request.private_key_pem_),
             std::string(certificate_response.body().data(), certificate_response.body().size()),
             domains);
+        trace_.log(service::attempt_trace::log_level::info, "证书链与私钥、域名校验通过，有效期至 " + issued.expires_at_);
+        download_step.complete();
+        co_return issued;
     }
 
     template <typename runtime_type>
     ruvia::task<detail::directory> load_directory(runtime_type& context) const {
         const std::array headers{ruvia::http_header_view{"accept", "application/json"}};
-        const auto response = co_await send(context, {
-                                                         .method_ = "GET",
-                                                         .target_ = settings_.directory_target_,
-                                                         .headers_ = headers,
-                                                     });
+        const auto response = co_await send(context,
+            {
+                .method_ = "GET",
+                .target_ = settings_.directory_target_,
+                .headers_ = headers,
+            },
+            service::attempt_trace::outbound_operation::acme_directory);
         if (!response.status().is_successful()) {
             throw_http_problem(context, response, "ACME Directory 查询失败");
         }
@@ -345,7 +445,8 @@ private:
     ruvia::task<std::string> fetch_nonce(runtime_type& context,
         const detail::directory& directory) const {
         const auto target = target_from_url(directory.new_nonce_);
-        const auto response = co_await send(context, {.method_ = "HEAD", .target_ = target});
+        const auto response = co_await send(context, {.method_ = "HEAD", .target_ = target},
+            service::attempt_trace::outbound_operation::acme_new_nonce);
         if (!response.status().is_successful()) {
             throw_http_problem(context, response, "ACME Nonce 获取失败");
         }
@@ -360,7 +461,7 @@ private:
     ruvia::task<service::outbound_http::buffered_response>
     signed_post(runtime_type& context, const detail::directory& directory, std::string_view url,
         EVP_PKEY* key, std::optional<std::string_view> account_url,
-        std::string_view payload) const {
+        std::string_view payload, service::attempt_trace::outbound_operation operation) const {
         for (int attempt = 0; attempt < 2; ++attempt) {
             const auto nonce = co_await fetch_nonce(context, directory);
             const auto body = build_jws(context, url, nonce, key, account_url, payload);
@@ -376,11 +477,13 @@ private:
                              .target_ = target,
                              .headers_ = headers,
                              .content_ = ruvia::http_client_request_content_view::bytes(body),
-                         });
+                         },
+                operation);
             if (response.status().is_successful()) {
                 co_return response;
             }
             if (attempt == 0 && is_bad_nonce(context, response)) {
+                trace_.log(service::attempt_trace::log_level::warning, "ACME 返回 badNonce，重新获取 Nonce 后重试");
                 continue;
             }
             throw_http_problem(context, response, "ACME 请求失败");
@@ -390,12 +493,13 @@ private:
 
     template <typename runtime_type>
     ruvia::task<service::outbound_http::buffered_response>
-    send(runtime_type& context, const ruvia::http_client_request_view& request) const {
+    send(runtime_type& context, const ruvia::http_client_request_view& request,
+        service::attempt_trace::outbound_operation operation) const {
         try {
-            auto&& client = context.get_http_client(
-                service::config::outbound_origin_alias(service::config::acme_origin(settings_.host_)));
-            co_return co_await service::outbound_http::send_buffered(
-                client, request,
+            const auto alias = service::config::outbound_origin_alias(service::config::acme_origin(settings_.host_));
+            auto&& client = context.get_http_client(alias);
+            co_return co_await service::outbound_http::send_buffered(client,
+                {.origin_alias_ = alias, .operation_ = operation}, trace_, request,
                 {.timeout_ = std::chrono::seconds(30), .stop_token_ = context.get_stop_token()});
         } catch (const ruvia::http_client_error& error) {
             using code = ruvia::http_client_error::code_type;
@@ -551,8 +655,8 @@ private:
     ruvia::task<detail::authorization>
     load_authorization(runtime_type& context, const detail::directory& directory, std::string_view url,
         EVP_PKEY* key, std::string_view account_url) const {
-        const auto response =
-            co_await signed_post(context, directory, url, key, account_url, std::string_view{});
+        const auto response = co_await signed_post(context, directory, url, key, account_url, std::string_view{},
+            service::attempt_trace::outbound_operation::acme_authorization);
         co_return parse_authorization(context, response.body());
     }
 
@@ -569,13 +673,14 @@ private:
             }
             const auto authorization =
                 co_await load_authorization(context, directory, authorization_url, key, account_url);
+            trace_.log(service::attempt_trace::log_level::info, "授权状态 " + authorization.status_);
             if (authorization.status_ == "valid") {
                 co_return;
             }
             if (authorization.status_ == "invalid") {
-                throw acme_error(authorization.error_.empty()
-                                     ? "ACME DNS-01 验证失败"
-                                     : "ACME DNS-01 验证失败：" + authorization.error_,
+                throw acme_error(trace_.redact_error(authorization.error_.empty()
+                                                         ? "ACME DNS-01 验证失败"
+                                                         : "ACME DNS-01 验证失败：" + authorization.error_),
                     false);
             }
             if (co_await ruvia::sleep_for(context.worker(), std::chrono::seconds(2),
@@ -598,14 +703,15 @@ private:
                 throw std::runtime_error("证书任务 lease 已失效");
             }
             const auto response = co_await signed_post(context, directory, order_url, key, account_url,
-                std::string_view{});
+                std::string_view{}, service::attempt_trace::outbound_operation::acme_order);
             auto order = parse_order(context, response.body());
+            trace_.log(service::attempt_trace::log_level::info, "订单状态 " + order.status_);
             if (order.status_ == "valid") {
                 co_return order;
             }
             if (order.status_ == "invalid") {
-                throw acme_error(order.error_.empty() ? "ACME 证书订单失败"
-                                                      : "ACME 证书订单失败：" + order.error_,
+                throw acme_error(trace_.redact_error(order.error_.empty() ? "ACME 证书订单失败"
+                                                                          : "ACME 证书订单失败：" + order.error_),
                     true);
             }
             if (co_await ruvia::sleep_for(context.worker(), std::chrono::seconds(2),
@@ -639,14 +745,6 @@ private:
         return "_acme-challenge." + std::string(identifier);
     }
 
-    static bool permanent_problem(std::string_view type, ruvia::http_status_code status) {
-        if (status.value() == 429 || status.is_server_error()) {
-            return false;
-        }
-        return type.ends_with(":malformed") || type.ends_with(":unauthorized") ||
-               type.ends_with(":rejectedIdentifier") || type.ends_with(":accountDoesNotExist");
-    }
-
     template <typename runtime_type>
     static bool is_bad_nonce(runtime_type& context,
         const service::outbound_http::buffered_response& response) {
@@ -660,24 +758,13 @@ private:
     }
 
     template <typename runtime_type>
-    [[noreturn]] static void
-    throw_http_problem(runtime_type& context, const service::outbound_http::buffered_response& response,
-        std::string_view fallback) {
-        const std::optional<acme_problem_input> parsed =
-            ruvia::from_json<acme_problem_input>(response.body(), {.resource_ = context.pool()});
-        std::string type;
-        std::string message(fallback);
-        if (parsed) {
-            type = detail::optional_string(parsed->get<"type">());
-            const auto detail_value = detail::optional_string(parsed->get<"detail">());
-            if (!detail_value.empty()) {
-                message.append("：").append(detail_value);
-            }
-        }
-        throw acme_error(std::move(message), permanent_problem(type, response.status()));
+    [[noreturn]] void throw_http_problem(runtime_type& context, const service::outbound_http::buffered_response& response,
+        std::string_view fallback) const {
+        throw detail::acme_problem_error(trace_, response.body(), response.status(), fallback, context.pool());
     }
 
     acme_settings settings_;
+    service::attempt_trace::recorder& trace_;
 };
 
 }  // namespace service::certificate_issuance

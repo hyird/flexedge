@@ -516,6 +516,29 @@ ruvia::task<void> verify_details(read_context& c) {
     }
 }
 
+// Every projection uses the 15 second window of node_connection.h. The fixture runs in one
+// transaction, so NOW() is the same for the update and the reads.
+ruvia::task<void> verify_online_window(read_context& c, ruvia::db_transaction& tx) {
+    const std::string tenant(tenant_a);
+    const auto online_total = [&](std::string_view status) -> ruvia::task<std::int64_t> {
+        co_return co_await total_of(service::node::get_node_read_service().list(c, tenant, 1, 100, 0,
+            std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::string(status)));
+    };
+    for (const auto& [age, online] : {std::pair{"14 seconds", true}, std::pair{"16 seconds", false}}) {
+        (void)co_await tx.execute("UPDATE sys_node SET last_heartbeat_at = NOW() - INTERVAL '" +
+                                  std::string(age) + "' WHERE id = '" + std::string(node_online) + "'");
+        const auto node = co_await service::node::get_node_read_service().get(c, tenant, std::string(node_online));
+        REQUIRE(node.get<"runtime">().get<"connection_status">().view() == (online ? "online" : "offline"));
+        REQUIRE((co_await online_total("online")) == (online ? 1 : 0));
+        // node-2 (disabled) and node-4 (ten minutes old) are offline throughout.
+        REQUIRE((co_await online_total("offline")) == (online ? 2 : 3));
+        const auto cluster = co_await service::cluster::get_cluster_read_service().get(c, tenant, std::string(cluster_a));
+        REQUIRE(integer(cluster.get<"online_node_count">()) == (online ? 1 : 0));
+        auto overview = co_await service::overview::get_overview_service().get(c, tenant);
+        REQUIRE(integer(overview.get<"resources">().get<"online_node_count">()) == (online ? 1 : 0));
+    }
+}
+
 template <typename parse_type>
 void require_bad_request(parse_type parse) {
     try {
@@ -570,6 +593,7 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     co_await verify_traffic(c, tx);
     co_await verify_overview_and_filters(c);
     co_await verify_details(c);
+    co_await verify_online_window(c, tx);
     co_await verify_dashboard_without_geoip(c);
     co_await tx.rollback();
 }

@@ -121,7 +121,7 @@ private:
             "control plane did not authenticate the device");
     }
 
-    v2::ClientEnvelope heartbeat(std::string_view node_id, std::uint64_t sequence) {
+    ruvia::task<v2::ClientEnvelope> heartbeat(std::string_view node_id, std::uint64_t sequence) {
         v2::ClientEnvelope envelope;
         envelope.set_request_id("heartbeat-" + std::to_string(sequence));
         auto* value = envelope.mutable_heartbeat();
@@ -135,6 +135,9 @@ private:
         value->set_memory_usage(metrics.memory_usage_);
         value->set_traffic_out_bps(metrics.traffic_out_bps_);
         value->set_connection_count(metrics.connection_count_);
+        if (const auto connected_ips = co_await data_plane_.connected_ip_count(config_.stop_token_)) {
+            value->set_connected_ip_count(*connected_ips);
+        }
         value->set_load_1m(metrics.load1m_);
         value->set_health(last_error_.empty() && data_plane_.healthy() ? "healthy" : "degraded");
         value->set_last_error(last_error_);
@@ -149,7 +152,7 @@ private:
             item->set_latency_millis(report.latency_millis_);
             item->set_last_error(report.last_error_);
         }
-        return envelope;
+        co_return envelope;
     }
 
     v2::ClientEnvelope release_probe(std::uint64_t sequence, std::uint32_t wait_seconds) {
@@ -236,16 +239,35 @@ private:
             throw std::runtime_error("control plane sent invalid desired state");
         }
 
+        apply_trace trace;
         std::unordered_map<std::string, v2::DeliveryObject> objects_by_digest;
         std::vector<std::string> missing;
+        std::size_t discarded_objects{};
         objects_by_digest.reserve(
             static_cast<std::size_t>(desired.release().content().objects_size()));
-        for (const auto& reference : desired.release().content().objects()) {
-            if (auto object = load_cached_object(reference.digest_sha256()); object) {
-                objects_by_digest.emplace(reference.digest_sha256(), std::move(*object));
-            } else {
-                missing.push_back(reference.digest_sha256());
+        trace.run_step("load_objects", [&] {
+            for (const auto& reference : desired.release().content().objects()) {
+                if (auto object = load_cached_object(reference.digest_sha256(), discarded_objects); object) {
+                    objects_by_digest.emplace(reference.digest_sha256(), std::move(*object));
+                } else {
+                    missing.push_back(reference.digest_sha256());
+                }
             }
+        });
+        const auto referenced = static_cast<std::size_t>(desired.release().content().objects_size());
+        trace.log(apply_log_level::info,
+            "release has " + std::to_string(referenced) + " objects: " +
+                std::to_string(referenced - missing.size()) + " from the local cache, " +
+                std::to_string(missing.size()) + " requested from the control plane");
+        if (discarded_objects != 0) {
+            trace.log(apply_log_level::warning,
+                std::to_string(discarded_objects) +
+                    " cached objects failed verification and were requested again");
+        }
+        // Only a fetch that happens is a step; its lines must not claim one otherwise.
+        std::optional<apply_trace::step_start> fetch;
+        if (!missing.empty()) {
+            fetch = trace.begin_step("fetch_objects");
         }
         for (std::size_t offset = 0; offset < missing.size(); offset += 64) {
             v2::ClientEnvelope request;
@@ -270,6 +292,9 @@ private:
                 }
             }
         }
+        if (fetch) {
+            trace.end_step(*fetch, true);
+        }
         std::vector<v2::DeliveryObject> objects;
         objects.reserve(static_cast<std::size_t>(desired.release().content().objects_size()));
         for (const auto& reference : desired.release().content().objects()) {
@@ -287,21 +312,9 @@ private:
         result->set_node_spec_revision(desired.node_spec().content().revision());
         result->set_release_id(desired.release().content().release_id());
         result->set_manifest_digest(desired.release().digest_sha256());
-        v2::ApplyPhase phase = v2::APPLY_PHASE_STAGE;
-        std::exception_ptr failure;
-        try {
-            activate_desired_config(store_, data_plane_, desired, objects, phase);
+        const auto failure = apply_desired_config(store_, data_plane_, desired, objects, trace, *result);
+        if (!failure) {
             last_error_.clear();
-            result->set_applied(true);
-            result->set_failed_phase(v2::APPLY_PHASE_UNSPECIFIED);
-        } catch (const std::exception& error) {
-            result->set_applied(false);
-            result->set_failed_phase(phase);
-            result->set_error_code(phase == v2::APPLY_PHASE_VALIDATE ? "artifact_invalid"
-                                                                     : "apply_failed");
-            result->set_error(error.what());
-            result->set_retryable(phase != v2::APPLY_PHASE_VALIDATE);
-            failure = std::current_exception();
         }
         co_await client.binary(serialize(acknowledgement));
         const auto committed = co_await read_server_envelope(client);
@@ -335,7 +348,7 @@ private:
     ruvia::task<std::chrono::seconds>
     process_heartbeat(const ruvia::websocket_client_handle& connection, std::string_view node_id,
         std::uint64_t& sequence) {
-        const auto request = heartbeat(node_id, ++sequence);
+        const auto request = co_await heartbeat(node_id, ++sequence);
         co_await connection.binary(serialize(request));
         const auto acknowledgement = co_await read_server_envelope(connection);
         if (!matches_heartbeat_ack(acknowledgement, request.request_id())) {
@@ -364,20 +377,14 @@ private:
                 interval = co_await process_heartbeat(connection, node_id, heartbeat_sequence);
                 next_heartbeat = std::chrono::steady_clock::now() + interval;
             }
-            const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
-                next_heartbeat - std::chrono::steady_clock::now())
-                                       .count();
-            if (remaining <= 0) {
-                interval = co_await process_heartbeat(connection, node_id, heartbeat_sequence);
-                next_heartbeat = std::chrono::steady_clock::now() + interval;
+            const auto watch_seconds =
+                release_watch_seconds(next_heartbeat - std::chrono::steady_clock::now());
+            if (watch_seconds == 0) {
                 continue;
             }
             // One outstanding watch owns the read path. A committed change wakes it;
             // the deadline leaves room for heartbeats without interleaving object replies.
-            co_await process_release_probe(
-                connection, node_id, release_probe_sequence,
-                static_cast<std::uint32_t>(
-                    (std::min<std::int64_t>)(remaining, release_watch_maximum_seconds)));
+            co_await process_release_probe(connection, node_id, release_probe_sequence, watch_seconds);
         }
     }
 
@@ -407,12 +414,14 @@ private:
 
     // A cached object that fails verification is requested again; objects from the control
     // plane are still verified before they are staged.
-    std::optional<v2::DeliveryObject> load_cached_object(std::string_view digest) {
+    std::optional<v2::DeliveryObject> load_cached_object(std::string_view digest,
+        std::size_t& discarded) {
         try {
             return store_.load_object(digest);
         } catch (const stored_state_unusable& error) {
             store_.discard_object(digest);
             report_discarded_state(error.what());
+            ++discarded;
         }
         return std::nullopt;
     }

@@ -13,6 +13,7 @@
 #include "service/common/http.h"
 #include "service/domains/cluster/cluster_error.h"
 #include "service/domains/cluster/cluster_types.h"
+#include "service/domains/node/node_connection.h"
 
 namespace service::cluster {
 
@@ -95,10 +96,9 @@ private:
                "(SELECT COUNT(*) FROM sys_node node WHERE node.tenant_id = cluster.tenant_id "
                "AND node.cluster_id = cluster.id AND node.deleted_at IS NULL), (SELECT COUNT(*) FROM "
                "sys_node node WHERE node.tenant_id = cluster.tenant_id AND node.cluster_id = "
-               "cluster.id AND node.deleted_at IS NULL AND node.registration_status = 'registered' "
-               "AND "
-               "node.status = 'enabled' AND node.last_heartbeat_at >= NOW() - INTERVAL '90 "
-               "seconds'), cluster.status, cluster.revision, "
+               "cluster.id AND node.deleted_at IS NULL AND " +
+               service::node::node_online_sql() +
+               "), cluster.status, cluster.revision, "
                "TO_CHAR(cluster.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
                "TO_CHAR(cluster.updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')";
     }

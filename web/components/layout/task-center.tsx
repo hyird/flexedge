@@ -63,7 +63,8 @@ export function TaskCenter() {
                 <Sheet.Header>
                   <Sheet.Heading>最近任务</Sheet.Heading>
                 </Sheet.Header>
-                <Sheet.Body className='pb-6'>
+                {/* Contains absolutely positioned descendants (see FormSheet). */}
+                <Sheet.Body className='relative pb-6'>
                   <RecentTasks onNavigate={() => setOpen(false)} />
                 </Sheet.Body>
               </Sheet.Dialog>

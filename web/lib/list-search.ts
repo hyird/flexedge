@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { z } from 'zod'
 import { useNavigate } from '@tanstack/react-router'
 import type { PageData } from './api'
@@ -41,7 +42,7 @@ export const listSearchSchema = z.object({
       .refine((value) => (pageSizeOptions as readonly number[]).includes(value))
   ),
 })
-type ListSearch = z.infer<typeof listSearchSchema>
+type ListSearch = { q?: string; page?: number; page_size?: number }
 type SearchRecord = Record<string, unknown>
 
 const searchDefaults: SearchRecord = { page: 1, page_size: defaultPageSize }
@@ -83,7 +84,7 @@ export type ListSearchState<TSearch extends ListSearch> = {
   ) => Promise<void>
   setPage: (page: number) => Promise<void>
   setPageSize: (pageSize: number) => Promise<void>
-  /** Clears `q` and the given filter keys, keeping other params such as `tab`. */
+  /** Clears `q` and the given filter keys, keeping other params. */
   clearFilters: (
     filterKeys: readonly (keyof TSearch & string)[]
   ) => Promise<void>
@@ -112,6 +113,44 @@ export function useListSearch<TSearch extends ListSearch>(route: {
     setSearch,
     setPage: (page: number) =>
       setSearch({ page } as Partial<TSearch>, { push: true }),
+    setPageSize: (pageSize: number) =>
+      setSearch({ page_size: pageSize } as Partial<TSearch>),
+    clearFilters: (filterKeys: readonly (keyof TSearch & string)[]) =>
+      setSearch(
+        Object.fromEntries(
+          ['q', ...filterKeys].map((key) => [key, undefined])
+        ) as Partial<TSearch>
+      ),
+  }
+}
+
+/** List state kept in the component instead of the URL, for lists inside an
+ * in-page tab (cluster detail tabs, `/providers`, DNS records, access logs):
+ * switching tabs must not change the URL. Same shape and patch rules as
+ * `useListSearch`; `initial` seeds it on mount (e.g. from an arrival `q`). */
+export function useListState<TSearch extends ListSearch>(
+  initial: TSearch = {} as TSearch
+): ListSearchState<TSearch> {
+  const [search, setSearchState] = useState<TSearch>(
+    () => applyListSearchPatch(initial as SearchRecord, {}) as TSearch
+  )
+  const setSearch = (patch: Partial<TSearch>) => {
+    setSearchState(
+      (previous) =>
+        applyListSearchPatch(
+          previous as SearchRecord,
+          patch as SearchRecord
+        ) as TSearch
+    )
+    return Promise.resolve()
+  }
+  return {
+    search,
+    keyword: search.q ?? '',
+    page: search.page ?? 1,
+    pageSize: search.page_size ?? defaultPageSize,
+    setSearch,
+    setPage: (page: number) => setSearch({ page } as Partial<TSearch>),
     setPageSize: (pageSize: number) =>
       setSearch({ page_size: pageSize } as Partial<TSearch>),
     clearFilters: (filterKeys: readonly (keyof TSearch & string)[]) =>

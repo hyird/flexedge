@@ -5,12 +5,16 @@
 #include <ruvia/web/controller.h>
 #include <ruvia/web/websocket.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 #include <asio/error.hpp>
 #include <openssl/crypto.h>
@@ -27,9 +31,12 @@
 #include "service/domains/agent/agent_read_service.h"
 #include "service/domains/agent/agent_report_mapper.h"
 #include "service/domains/agent/agent_transport.h"
+#include "service/domains/node/node_connection.h"
+#include "service/features/attempt_trace/recorder.h"
 #include "service/features/log_ingest/ingest.h"
 #include "service/features/node_dispatch/notifications.h"
 #include "service/features/node_release/catalog.h"
+#include "service/features/sync_runtime/attempt_record.h"
 #include "service/utils/sensitive_string.h"
 
 namespace service::agent {
@@ -73,7 +80,8 @@ public:
     RUVIA_ROUTES_END
 
 private:
-    static constexpr std::uint32_t heartbeat_interval_seconds{30};
+    static constexpr auto heartbeat_interval_seconds =
+        static_cast<std::uint32_t>(service::node::agent_heartbeat_interval.count());
 
     class web_socket_session_ended final {};
 
@@ -86,6 +94,13 @@ private:
         std::string active_manifest_digest_;
         std::uint32_t heartbeat_interval_{};
         bool require_apply_ack_{};
+        // Release of the last desired state sent on this connection and when it
+        // was sent (monotonic), timing the node's next apply result for it.
+        std::string dispatched_release_id_;
+        std::chrono::steady_clock::time_point dispatched_at_{};
+        // Trace of the node's apply of the dispatched release, owned by this
+        // connection; it ends with the node's ApplyResult for that release.
+        std::unique_ptr<service::attempt_trace::recorder> apply_trace_{};
     };
 
     struct node_release_transfer final {
@@ -164,12 +179,121 @@ private:
     }
 
     ruvia::task<void> push_desired_state(ruvia::context& c, std::string_view request_id,
-        const agent_principal& principal) {
-        auto desired = co_await get_agent_command_service().desired_state(c, principal);
+        authenticated_session& session) {
+        auto desired = co_await get_agent_command_service().desired_state(c, session.principal_);
         flexedge::node::v2::ServerEnvelope response;
         response.set_request_id(request_id);
         *response.mutable_desired_state() = std::move(desired);
         co_await send(c, response);
+        record_dispatch(session, response);
+    }
+
+    // Times the node's next apply result for the dispatched release and starts
+    // its trace. A trace that cannot be started leaves the dispatch untouched.
+    static void record_dispatch(authenticated_session& session, const flexedge::node::v2::ServerEnvelope& envelope) {
+        const auto& content = envelope.desired_state().release().content();
+        session.dispatched_release_id_ = content.release_id();
+        session.dispatched_at_ = std::chrono::steady_clock::now();
+        try {
+            session.apply_trace_ = std::make_unique<service::attempt_trace::recorder>(
+                service::attempt_trace::trace_kind::node_apply, "web", session.dispatched_at_);
+            auto& trace = *session.apply_trace_;
+            auto step = trace.begin_step(service::attempt_trace::step_code::send_desired_state);
+            const std::array fields{service::attempt_trace::node_message_field{.name_ = "release_id",
+                .value_ = content.release_id()}};
+            trace.record_node_message({.direction_ = "sent",
+                                          .message_ = "DesiredState",
+                                          .request_id_ = envelope.request_id(),
+                                          .object_count_ = content.objects_size(),
+                                          .bytes_ = static_cast<std::int64_t>(envelope.ByteSizeLong()),
+                                          .fields_ = fields},
+                session.dispatched_at_);
+            step.complete();
+        } catch (...) {
+            session.apply_trace_.reset();
+        }
+    }
+
+    // The trace of the apply `result` answers: the one started when this
+    // connection dispatched that release, otherwise none.
+    static std::unique_ptr<service::attempt_trace::recorder> take_apply_trace(authenticated_session& session,
+        std::string_view release_id) {
+        if (session.dispatched_release_id_.empty() || session.dispatched_release_id_ != release_id) {
+            return {};
+        }
+        return std::move(session.apply_trace_);
+    }
+
+    // Start of a node's apply as its earliest reported step, on this
+    // process's monotonic clock; now when the node reported none.
+    static std::chrono::steady_clock::time_point reported_apply_start(const flexedge::node::v2::ApplyResult& result) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto wall_now = std::chrono::system_clock::now();
+        auto earliest = wall_now;
+        for (const auto& step : result.steps()) {
+            earliest = std::min(earliest, reported_time(step.started_unix_ms(), wall_now));
+        }
+        return now - std::chrono::duration_cast<std::chrono::steady_clock::duration>(wall_now - earliest);
+    }
+
+    // A node's wall-clock time, or now when it is missing or more than a day off.
+    static std::chrono::system_clock::time_point reported_time(std::int64_t unix_ms,
+        std::chrono::system_clock::time_point now) {
+        const auto value = std::chrono::system_clock::time_point(std::chrono::milliseconds(unix_ms));
+        if (unix_ms <= 0 || value > now + std::chrono::hours(24) || value < now - std::chrono::hours(24)) {
+            return now;
+        }
+        return value;
+    }
+
+    // Adds the node's own apply steps and log lines (ApplyResult fields 10 and
+    // 11, node 0.4.1+), within the node's caps, through the trace redactor.
+    static void import_reported_apply(service::attempt_trace::recorder& trace,
+        const flexedge::node::v2::ApplyResult& result) {
+        constexpr int maximum_steps = 16;
+        constexpr int maximum_logs = 100;
+        const auto now = std::chrono::system_clock::now();
+        for (int index = 0; index < std::min(result.steps_size(), maximum_steps); ++index) {
+            const auto& step = result.steps(index);
+            const auto code = service::attempt_trace::node_phase_step(step.phase());
+            trace.record_reported_step(code, step.phase(),
+                code == service::attempt_trace::step_code::node_step ? std::string_view(step.phase()) : std::string_view{},
+                reported_time(step.started_unix_ms(), now),
+                std::clamp<std::int64_t>(step.duration_ms(), 0, 24LL * 3600 * 1000), step.ok(), step.error());
+        }
+        for (int index = 0; index < std::min(result.logs_size(), maximum_logs); ++index) {
+            const auto& line = result.logs(index);
+            const auto level = line.level() == "error"     ? service::attempt_trace::log_level::error
+                               : line.level() == "warning" ? service::attempt_trace::log_level::warning
+                                                           : service::attempt_trace::log_level::info;
+            trace.record_reported_log(level, reported_time(line.unix_ms(), now), line.phase(), line.message());
+        }
+    }
+
+    static std::string_view reported_phase_name(flexedge::node::v2::ApplyPhase phase) noexcept {
+        switch (phase) {
+            case flexedge::node::v2::APPLY_PHASE_STAGE:
+                return "stage";
+            case flexedge::node::v2::APPLY_PHASE_VALIDATE:
+                return "validate";
+            case flexedge::node::v2::APPLY_PHASE_ACTIVATE:
+                return "activate";
+            default:
+                return "";
+        }
+    }
+
+    // Milliseconds since this connection sent the desired state `release_id`
+    // answers; each dispatch times one result.
+    static std::optional<std::int64_t> take_dispatch_elapsed(authenticated_session& session,
+        std::string_view release_id) {
+        if (session.dispatched_release_id_.empty() || session.dispatched_release_id_ != release_id) {
+            return std::nullopt;
+        }
+        session.dispatched_release_id_.clear();
+        const auto elapsed = service::sync_runtime::elapsed_milliseconds(session.dispatched_at_);
+        session.dispatched_at_ = {};
+        return elapsed;
     }
 
     ruvia::task<void> serve_log_ingest(ruvia::context& c, const agent_principal& principal) {
@@ -224,6 +348,8 @@ private:
             .active_manifest_digest_ = active_manifest_digest,
             .heartbeat_interval_ = heartbeat_interval_seconds,
             .require_apply_ack_ = authentication.require_apply_ack(),
+            .dispatched_release_id_ = {},
+            .dispatched_at_ = {},
         };
     }
 
@@ -244,16 +370,36 @@ private:
             co_await close(c.get_websocket(), {.code_ = 1008, .reason_ = "invalid object request"});
             co_return false;
         }
+        const auto received_at = std::chrono::steady_clock::now();
         auto objects = co_await get_agent_read_service().objects(
             c, session.principal_, request.release_id(), request.digest_sha256());
         flexedge::node::v2::ServerEnvelope response;
         response.set_request_id(incoming.request_id());
         *response.mutable_object_batch() = std::move(objects);
         co_await send(c, response);
+        if (session.apply_trace_ && session.dispatched_release_id_ == request.release_id()) {
+            auto& trace = *session.apply_trace_;
+            auto step = trace.begin_step(service::attempt_trace::step_code::serve_objects);
+            trace.record_node_message({.direction_ = "received",
+                                          .message_ = "ObjectRequest",
+                                          .request_id_ = incoming.request_id(),
+                                          .object_count_ = request.digest_sha256_size(),
+                                          .bytes_ = static_cast<std::int64_t>(incoming.ByteSizeLong()),
+                                          .fields_ = {}},
+                received_at);
+            trace.record_node_message({.direction_ = "sent",
+                                          .message_ = "ObjectBatch",
+                                          .request_id_ = response.request_id(),
+                                          .object_count_ = response.object_batch().objects_size(),
+                                          .bytes_ = static_cast<std::int64_t>(response.ByteSizeLong()),
+                                          .fields_ = {}},
+                std::chrono::steady_clock::now());
+            step.complete();
+        }
         co_return true;
     }
 
-    ruvia::task<bool> handle_release_probe(ruvia::context& c, const authenticated_session& session,
+    ruvia::task<bool> handle_release_probe(ruvia::context& c, authenticated_session& session,
         const flexedge::node::v2::ClientEnvelope& incoming) {
         const auto& probe = incoming.release_probe();
         if (probe.wait_seconds() > flexedge::node::release_watch_maximum_seconds) {
@@ -295,6 +441,9 @@ private:
             desired.node_spec_revision_, desired.release_id_, desired.manifest_digest_, std::move(state));
         for (const auto& reply : replies) {
             co_await send(c, reply);
+            if (reply.has_desired_state()) {
+                record_dispatch(session, reply);
+            }
         }
         co_return true;
     }
@@ -366,7 +515,33 @@ private:
             co_await close(c.get_websocket(), {.code_ = 1008, .reason_ = "invalid apply result"});
             co_return false;
         }
-        co_await get_agent_command_service().record_apply_result(c, session.principal_, result);
+        // Recording the trace never changes how the result is recorded.
+        auto owned_trace = take_apply_trace(session, result.release_id());
+        service::attempt_trace::recorder reported_trace(service::attempt_trace::trace_kind::node_apply, "web",
+            reported_apply_start(result));
+        auto& trace = owned_trace ? *owned_trace : reported_trace;
+        import_reported_apply(trace, result);
+        auto step = trace.begin_step(service::attempt_trace::step_code::record_result);
+        const auto applied = result.applied() ? std::string_view{"true"} : std::string_view{"false"};
+        const auto retryable = result.retryable() ? std::string_view{"true"} : std::string_view{"false"};
+        const std::array fields{
+            service::attempt_trace::node_message_field{.name_ = "release_id", .value_ = result.release_id()},
+            service::attempt_trace::node_message_field{.name_ = "applied", .value_ = applied},
+            service::attempt_trace::node_message_field{.name_ = "failed_phase",
+                .value_ = reported_phase_name(result.failed_phase())},
+            service::attempt_trace::node_message_field{.name_ = "error_code", .value_ = result.error_code()},
+            service::attempt_trace::node_message_field{.name_ = "retryable", .value_ = retryable},
+            service::attempt_trace::node_message_field{.name_ = "error", .value_ = result.error()}};
+        trace.record_node_message({.direction_ = "received",
+                                      .message_ = "ApplyResult",
+                                      .request_id_ = incoming.request_id(),
+                                      .object_count_ = 0,
+                                      .bytes_ = static_cast<std::int64_t>(incoming.ByteSizeLong()),
+                                      .fields_ = fields},
+            std::chrono::steady_clock::now());
+        co_await get_agent_command_service().record_apply_result(c, session.principal_, result,
+            take_dispatch_elapsed(session, result.release_id()), trace);
+        step.complete();
         if (result.applied()) {
             session.applied_node_spec_revision_ = result.node_spec_revision();
             session.active_release_id_ = result.release_id();
@@ -464,7 +639,7 @@ private:
         co_await send(c, welcome);
         if (differs(session.applied_node_spec_revision_, session.active_release_id_,
                 session.active_manifest_digest_, desired)) {
-            co_await push_desired_state(c, session.request_id_, session.principal_);
+            co_await push_desired_state(c, session.request_id_, session);
         }
         co_await serve_control_messages(c, session);
     }
@@ -492,12 +667,12 @@ private:
             co_return;
         }
 
-        const auto session = co_await authenticate_session(c, envelope);
+        auto session = co_await authenticate_session(c, envelope);
         if (session.purpose_ == flexedge::node::v2::AGENT_SESSION_PURPOSE_LOG_INGEST) {
             co_await serve_log_session(c, session);
             co_return;
         }
-        co_await serve_control_session(c, session);
+        co_await serve_control_session(c, std::move(session));
     }
 };
 

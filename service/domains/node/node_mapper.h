@@ -50,6 +50,9 @@ inline node_runtime_dto get_node_runtime_dto(auto& c,
     if (input.connection_count_) {
         output.set<"connection_count">(*input.connection_count_);
     }
+    if (input.connected_ip_count_) {
+        output.set<"connected_ip_count">(*input.connected_ip_count_);
+    }
     if (input.load1m_) {
         output.set<"load1m">(*input.load1m_);
     }

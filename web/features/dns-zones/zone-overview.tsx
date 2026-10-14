@@ -154,7 +154,10 @@ export function ZoneOverview() {
               label: 'DNS 账号',
               value: (
                 <Link
-                  href={`/providers?q=${encodeURIComponent(zone.dns_provider_name)}`}
+                  href='/providers'
+                  routerOptions={{
+                    state: { providers: { q: zone.dns_provider_name } },
+                  }}
                 >
                   {zone.dns_provider_name}
                 </Link>

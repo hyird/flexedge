@@ -15,6 +15,9 @@ inline heartbeat_report to_heartbeat_report(const flexedge::node::v2::Heartbeat&
         .memory_usage_ = value.memory_usage(),
         .traffic_out_bps_ = value.traffic_out_bps(),
         .connection_count_ = value.connection_count(),
+        .connected_ip_count_ = value.has_connected_ip_count()
+                                   ? std::optional<std::int64_t>(value.connected_ip_count())
+                                   : std::nullopt,
         .load1m_ = value.load_1m(),
         .queued_log_events_ = static_cast<std::int64_t>(value.queued_log_events()),
         .dropped_log_events_ = static_cast<std::int64_t>(value.dropped_log_events()),

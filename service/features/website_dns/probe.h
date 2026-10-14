@@ -9,6 +9,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "ruvia/web/model.h"
 
@@ -27,6 +29,8 @@ struct probe_result final {
     bool matched_;
     std::string query_name_;
     std::string observed_target_;
+    // Every CNAME target in the answer, normalized, in answer order.
+    std::vector<std::string> answers_;
 };
 
 inline std::string normalize_dns_name(std::string_view value) {
@@ -58,8 +62,7 @@ inline std::string probe_name(std::string_view hostname, std::string_view websit
 }
 
 inline ruvia::task<probe_result> probe_cname(service::background::worker_context& context,
-    std::string_view hostname,
-    std::string_view expected_target,
+    service::attempt_trace::recorder& trace, std::string_view hostname, std::string_view expected_target,
     std::string_view website_domain_id) {
     const auto query_name = probe_name(hostname, website_domain_id);
     auto&& client = context.get_http_client(service::config::ali_dns_doh_origin_alias);
@@ -68,6 +71,10 @@ inline ruvia::task<probe_result> probe_cname(service::background::worker_context
     const auto target = "/resolve?name=" + query_name + "&type=CNAME&cd=0&do=0";
     const auto response = co_await service::outbound_http::send_buffered(
         client,
+        {.origin_alias_ = service::config::ali_dns_doh_origin_alias,
+            .operation_ = service::attempt_trace::outbound_operation::doh_resolve,
+            .subject_ = hostname},
+        trace,
         {
             .method_ = ruvia::known_http_method_token(ruvia::http_known_method::get),
             .target_ = target,
@@ -81,11 +88,12 @@ inline ruvia::task<probe_result> probe_cname(service::background::worker_context
     const std::optional<dns_doh_envelope_input> parsed =
         ruvia::from_json<dns_doh_envelope_input>(response.body(), {.resource_ = context.pool()});
     if (!parsed || !parsed->get<"status">()) {
+        trace.mark_invalid_response("公共 DNS 探测响应无效");
         throw std::runtime_error("公共 DNS 探测响应无效");
     }
 
     const auto expected = normalize_dns_name(expected_target);
-    std::string observed;
+    probe_result result{.matched_ = false, .query_name_ = query_name, .observed_target_ = {}, .answers_ = {}};
     if (const auto& answers = parsed->get<"answer">(); answers) {
         for (const auto& answer : *answers) {
             const auto& type = answer.get<"type">();
@@ -93,16 +101,18 @@ inline ruvia::task<probe_result> probe_cname(service::background::worker_context
             if (!type || static_cast<std::int64_t>(*type) != 5 || !data) {
                 continue;
             }
-            const auto answer_target = normalize_dns_name(data->view());
-            if (observed.empty()) {
-                observed = answer_target;
+            auto answer_target = normalize_dns_name(data->view());
+            if (result.observed_target_.empty()) {
+                result.observed_target_ = answer_target;
             }
-            if (answer_target == expected) {
-                co_return probe_result{true, query_name, answer_target};
+            if (!result.matched_ && answer_target == expected) {
+                result.matched_ = true;
+                result.observed_target_ = answer_target;
             }
+            result.answers_.push_back(std::move(answer_target));
         }
     }
-    co_return probe_result{false, query_name, observed};
+    co_return result;
 }
 
 }  // namespace service::website_dns

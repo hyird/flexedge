@@ -7,6 +7,8 @@
 #include <string_view>
 
 #include "service/domains/node/node_types.h"
+#include "service/features/node_runtime/mapper.h"
+#include "service/features/node_runtime/transport.h"
 
 namespace {
 
@@ -215,6 +217,29 @@ int main() try {
                R"({"endpoints":[{"id":"aaaaaaaa-0000-0000-0000-000000000002","ip_address":"192.0.2.1","line_code":"default"}]})")
                .has_value(),
         "complete stored node configuration was rejected");
+
+    // connected_ip_count round-trips through stored runtime JSON: 0 is kept, absence (nodes
+    // before 0.4.1) stays absent, and the node runtime DTO emits 0 rather than omitting it.
+    service::node_runtime::node_runtime_output stored_runtime;
+    stored_runtime.set<"connection_count">(2);
+    stored_runtime.set<"connected_ip_count">(0);
+    const auto stored_json = std::string(ruvia::to_json(stored_runtime));
+    expect(stored_json.find("\"connected_ip_count\":0") != std::string::npos,
+        "stored runtime must keep a zero connected IP count");
+    const auto parsed_runtime = service::node_runtime::parse_stored(stored_json);
+    expect(parsed_runtime && parsed_runtime->connected_ip_count_ == 0 &&
+               parsed_runtime->connection_count_ == 2,
+        "stored connected IP count did not round-trip");
+    const auto legacy_runtime = service::node_runtime::parse_stored(R"({"connection_count":2})");
+    expect(legacy_runtime && !legacy_runtime->connected_ip_count_,
+        "a runtime without connected IP count must stay without it");
+    service::node::node_runtime_dto runtime_dto;
+    runtime_dto.set<"registration_status">("registered");
+    runtime_dto.set<"connection_status">("online");
+    runtime_dto.set<"applied_node_spec_revision">(1);
+    runtime_dto.set<"connected_ip_count">(0);
+    expect(std::string(ruvia::to_json(runtime_dto)).find("\"connected_ip_count\":0") != std::string::npos,
+        "node runtime DTO must emit a zero connected IP count");
 
     const auto wrong_content_type = app.request(
         ruvia::test_request::post("/node-model-contract").body("{}", "text/plain"));

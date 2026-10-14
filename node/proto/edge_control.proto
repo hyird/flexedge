@@ -73,6 +73,9 @@ message Heartbeat {
     uint64 queued_log_events = 13;
     uint64 dropped_log_events = 14;
     repeated OriginHealth origin_health = 15;
+    // Distinct client IP addresses with an open data-plane connection. Absent when the node
+    // could not count them and from nodes before 0.4.1, so readers can tell it apart from 0.
+    optional int64 connected_ip_count = 16;
 }
 
 message OriginHealth {
@@ -140,6 +143,42 @@ message ApplyResult {
     string error_code = 7;
     string error = 8;
     bool retryable = 9;
+    // Local steps in the order the node ran them; steps after a failed one are absent.
+    // At most 16 steps and 100 log lines, every string at most 512 bytes. Neither carries
+    // secrets, key or certificate material, object payloads, credentials, digests or
+    // revision numbers. Absent from nodes before 0.4.1.
+    repeated ApplyStep steps = 10;
+    repeated ApplyLog logs = 11;
+}
+
+// One local apply step. phase is one of:
+//   load_objects       read the release objects the node already holds from its local cache
+//   fetch_objects      request the missing objects from the control plane (only when some are missing)
+//   stage              write the desired state and objects to the staging directory
+//   validate           compile the configuration (ApplyPhase VALIDATE)
+//   prepare_listeners  check the release follows the active one, build TLS contexts and bind
+//                      new listeners (ApplyPhase VALIDATE)
+//   activate           start listeners, persist the staged state as active and switch traffic
+// Steps before stage run before ApplyResult exists; a failure there ends the session
+// without a result, so they are only reported as ok.
+message ApplyStep {
+    string phase = 1;
+    int64 started_unix_ms = 2;  // Wall clock.
+    int64 duration_ms = 3;      // Monotonic clock.
+    bool ok = 4;
+    string error = 5;           // Empty when ok; otherwise the error text of ApplyResult.error.
+}
+
+// A log line the node emitted while applying this release.
+message ApplyLog {
+    string level = 1;  // info, warning or error.
+    int64 unix_ms = 2;
+    string message = 3;
+    // ApplyStep.phase of the step the line belongs to: the step running when it was written,
+    // else the step that finished last (a step's summary line is written after it ends).
+    // Empty before the first step. The controller attaches the line to the most recent step
+    // with this phase, and attaches lines without one by unix_ms.
+    string phase = 4;
 }
 
 message LogDelivery {

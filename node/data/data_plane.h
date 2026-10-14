@@ -2,6 +2,7 @@
 
 #include <ruvia/core/event_loop.h>
 #include <ruvia/core/event_loop_pool.h>
+#include <ruvia/core/stop_token.h>
 #include <ruvia/core/task.h>
 
 #include <cstdint>
@@ -22,6 +23,7 @@
 #include "node/data/http_listener.h"
 #include "node/data/https_listener.h"
 #include "node/runtime/compiled_config.h"
+#include "node/runtime/connected_clients.h"
 #include "node/runtime/log_buffer.h"
 
 namespace flexedge::node {
@@ -32,6 +34,13 @@ public:
     prepared_data_plane_reload& operator=(prepared_data_plane_reload&&) noexcept = default;
     prepared_data_plane_reload(const prepared_data_plane_reload&) = delete;
     prepared_data_plane_reload& operator=(const prepared_data_plane_reload&) = delete;
+
+    [[nodiscard]] std::size_t added_listeners() const noexcept {
+        return additions_.size() + https_additions_.size();
+    }
+    [[nodiscard]] std::size_t retired_listeners() const noexcept {
+        return retired_.size() + https_retired_.size();
+    }
 
 private:
     friend class data_plane;
@@ -110,6 +119,20 @@ public:
         return result;
     }
 
+    // Distinct client IP addresses with an open connection on any worker, gathered from each
+    // worker's own registry (count_connected_ips). Runs on the owner loop.
+    [[nodiscard]] ruvia::task<std::optional<std::int64_t>> connected_ip_count(ruvia::stop_token stop) {
+        if (!owner_.is_current()) {
+            throw std::logic_error("connected client count must run on the data plane owner");
+        }
+        std::vector<worker_connected_clients> workers;
+        workers.reserve(workers_.size());
+        for (std::size_t index = 0; index < workers_.size(); ++index) {
+            workers.push_back({.loop_ = loops_.loop(index), .clients_ = &workers_[index]->clients_});
+        }
+        co_return co_await count_connected_ips(owner_.handle(), workers, std::move(stop));
+    }
+
     [[nodiscard]] bool drained() const noexcept {
         return std::ranges::all_of(
             workers_, [](const auto& worker) { return worker->metrics_.connection_count() == 0; });
@@ -157,7 +180,8 @@ public:
                     reload.additions_.emplace_back(
                         key, http_listener::create(
                                  loops_.loop(worker_index), runtime_, health_,
-                                 workers_[worker_index]->metrics_, workers_[worker_index]->logs_,
+                                 workers_[worker_index]->metrics_, workers_[worker_index]->clients_,
+                                 workers_[worker_index]->logs_,
                                  workers_[worker_index]->origin_connections_, request_buffers_,
                                  response_buffers_,
                                  asio::ip::tcp::endpoint(
@@ -180,7 +204,9 @@ public:
                     reload.https_additions_.emplace_back(
                         https_key, https_listener::create(
                                        loops_.loop(worker_index), runtime_, health_, tls_contexts_,
-                                       workers_[worker_index]->metrics_, workers_[worker_index]->logs_,
+                                       workers_[worker_index]->metrics_,
+                                       workers_[worker_index]->clients_,
+                                       workers_[worker_index]->logs_,
                                        workers_[worker_index]->origin_connections_, request_buffers_,
                                        response_buffers_,
                                        asio::ip::tcp::endpoint(
@@ -246,6 +272,7 @@ private:
               logs_(producer) {}
 
         runtime_metrics metrics_;
+        connected_clients clients_;
         origin_tls_context origin_tls_;
         origin_connection_pool origin_connections_;
         node_log_buffer::producer logs_;

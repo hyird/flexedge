@@ -1,6 +1,7 @@
 import type { WebsiteFormValues } from './website-form'
 
-/** Settings editor groups in navigation order; `?section=` holds the id. */
+/** Settings editor groups in navigation order; the selected group is
+ * component state (an arrival may request one via `state.website.section`). */
 export const websiteSections = [
   {
     id: 'basic',
@@ -56,6 +57,14 @@ export const websiteSectionIds = websiteSections.map(
 ) as [WebsiteSectionId, ...WebsiteSectionId[]]
 
 export const defaultWebsiteSection: WebsiteSectionId = 'basic'
+
+/** Group requested by an arrival state; values read back from history may be
+ * stale, so unknown ids fall back to the default group. */
+export function websiteSectionFrom(id: string | undefined): WebsiteSectionId {
+  return (websiteSectionIds as readonly string[]).includes(id ?? '')
+    ? (id as WebsiteSectionId)
+    : defaultWebsiteSection
+}
 
 /** Every form field belongs to exactly one group; the record type keeps the
  * mapping exhaustive when the form schema gains a field. */

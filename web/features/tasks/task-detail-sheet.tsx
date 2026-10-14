@@ -1,7 +1,5 @@
-import { useEffect, useEffectEvent } from 'react'
+import { useEffect, useEffectEvent, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRotateLeft } from '@gravity-ui/icons'
-import { Timeline } from '@heroui-pro/react'
 import { Alert, Button, Link, Skeleton, Tabs } from '@heroui/react'
 import { ApiBusinessError } from '@/lib/api-response'
 import { formatDate } from '@/lib/format'
@@ -13,41 +11,37 @@ import { EmptyState, QueryNotice } from '@/components/page'
 import { RelativeTime } from '@/components/relative-time'
 import { DescriptionList } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
+import { latestTaskVersionQuery, taskDetailQuery } from './data'
+import { RedactedText } from './task-attempt-trace'
 import {
-  latestTaskVersionQuery,
-  taskDetailQuery,
-  taskHistoryQuery,
-} from './data'
-import {
-  taskResourceHref,
+  taskResourceTarget,
   taskStatusLabels,
   taskStatuses,
   taskStatusTones,
   taskTitle,
   taskTypes,
 } from './task-display'
-import type { Task, TaskHistory } from './types'
+import { TaskHistoryPanel } from './task-history-panel'
+import type { Task } from './types'
 
 type TaskSheetTab = 'detail' | 'history'
 
 /** Task detail opened from `/tasks?task=&resource_id=&version=`. Subscribes to
  * the task's detail stream while open; execution history is a one-shot
- * snapshot read when its tab is shown. */
+ * snapshot read when its tab is shown. The tab is component state: switching
+ * it never changes the URL. */
 export function TaskDetailSheet({
   selection,
   version,
-  tab,
-  onTabChange,
   onVersionResolved,
   onClose,
 }: {
   selection: Pick<Task, 'id' | 'resource_id'>
   version: number | undefined
-  tab: TaskSheetTab
-  onTabChange: (tab: TaskSheetTab) => void
   onVersionResolved: (version: number) => void
   onClose: () => void
 }) {
+  const [tab, setTab] = useState<TaskSheetTab>('detail')
   // Errors render inside the sheet (not-found state or QueryNotice).
   const latest = useQuery({
     ...latestTaskVersionQuery(version ? null : selection),
@@ -62,19 +56,13 @@ export function TaskDetailSheet({
     meta: { inlineError: true },
   })
   const task = detail.data
-  const showsHistory = !!task && task.resource_type !== 'node'
-  const history = useQuery({
-    ...taskHistoryQuery(task ?? null),
-    enabled: showsHistory && tab === 'history',
-    meta: { inlineError: true },
-  })
   const missing =
     latest.data === null || detail.error instanceof ApiBusinessError
   return (
     <FormSheet
       isOpen
       onClose={onClose}
-      size='md'
+      size='lg'
       title={task ? `${taskTitle(task)} · ${task.name}` : '任务详情'}
       description={
         task && (
@@ -92,7 +80,7 @@ export function TaskDetailSheet({
             关闭
           </Button>
           {task && (
-            <LinkButton href={taskResourceHref(task)}>前往关联资源</LinkButton>
+            <LinkButton {...taskResourceTarget(task)}>前往关联资源</LinkButton>
           )}
         </>
       }
@@ -126,8 +114,8 @@ export function TaskDetailSheet({
             )
           ) : (
             <Tabs
-              selectedKey={showsHistory ? tab : 'detail'}
-              onSelectionChange={(key) => onTabChange(key as TaskSheetTab)}
+              selectedKey={tab}
+              onSelectionChange={(key) => setTab(key as TaskSheetTab)}
             >
               <Tabs.ListContainer>
                 <Tabs.List aria-label='任务详情'>
@@ -135,37 +123,18 @@ export function TaskDetailSheet({
                     状态
                     <Tabs.Indicator />
                   </Tabs.Tab>
-                  {showsHistory && (
-                    <Tabs.Tab id='history'>
-                      执行记录
-                      <Tabs.Indicator />
-                    </Tabs.Tab>
-                  )}
+                  <Tabs.Tab id='history'>
+                    执行记录
+                    <Tabs.Indicator />
+                  </Tabs.Tab>
                 </Tabs.List>
               </Tabs.ListContainer>
               <Tabs.Panel id='detail' className='flex flex-col gap-4 pt-4'>
                 <TaskStatus task={task} />
               </Tabs.Panel>
-              {showsHistory && (
-                <Tabs.Panel id='history' className='flex flex-col gap-3 pt-4'>
-                  <QueryNotice
-                    query={history}
-                    onRetry={() => history.refetch()}
-                  />
-                  <TaskAttempts history={history.data} />
-                  <div className='flex justify-end'>
-                    <Button
-                      size='sm'
-                      variant='tertiary'
-                      isPending={history.isFetching}
-                      onPress={() => void history.refetch()}
-                    >
-                      <ArrowRotateLeft className='size-4' />
-                      刷新记录
-                    </Button>
-                  </div>
-                </Tabs.Panel>
-              )}
+              <Tabs.Panel id='history' className='flex flex-col gap-4 pt-4'>
+                <TaskHistoryPanel task={task} />
+              </Tabs.Panel>
             </Tabs>
           )}
         </>
@@ -175,6 +144,7 @@ export function TaskDetailSheet({
 }
 
 function TaskStatus({ task }: { task: Task }) {
+  const target = taskResourceTarget(task)
   return (
     <>
       {task.error && (
@@ -183,7 +153,7 @@ function TaskStatus({ task }: { task: Task }) {
           <Alert.Content>
             <Alert.Title>最近一次错误</Alert.Title>
             <Alert.Description className='break-words whitespace-pre-wrap'>
-              {task.error}
+              <RedactedText value={task.error} />
             </Alert.Description>
           </Alert.Content>
         </Alert>
@@ -192,7 +162,14 @@ function TaskStatus({ task }: { task: Task }) {
         items={[
           {
             label: '关联资源',
-            value: <Link href={taskResourceHref(task)}>{task.name}</Link>,
+            value: (
+              <Link
+                href={target.href}
+                routerOptions={target.state && { state: target.state }}
+              >
+                {task.name}
+              </Link>
+            ),
           },
           { label: '任务类型', value: taskTypes[task.resource_type] },
           {
@@ -238,64 +215,6 @@ function TaskStatus({ task }: { task: Task }) {
         <p className='text-[13px] text-muted'>
           服务端按任务规则自动重试；可前往关联资源检查配置并重新提交操作。
         </p>
-      )}
-    </>
-  )
-}
-
-function TaskAttempts({ history }: { history: TaskHistory | undefined }) {
-  if (!history)
-    return (
-      <div
-        role='status'
-        aria-label='正在加载执行记录'
-        className='flex flex-col gap-3'
-      >
-        {Array.from({ length: 3 }, (_, index) => (
-          <Skeleton key={index} className='h-12 w-full rounded-lg' />
-        ))}
-      </div>
-    )
-  if (!history.list.length)
-    return (
-      <EmptyState
-        size='sm'
-        title='暂无执行记录'
-        description='任务开始执行后，每次尝试的结果会记录在这里。'
-      />
-    )
-  return (
-    <>
-      <Timeline density='compact' size='sm'>
-        {history.list.map((attempt, index) => (
-          <Timeline.Item
-            key={`${attempt.emitted_at}-${index}`}
-            status={attempt.outcome === 'completed' ? 'success' : 'danger'}
-          >
-            <Timeline.Marker />
-            <Timeline.Content className='gap-1'>
-              <div className='flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1'>
-                <h3 className='m-0 text-sm font-medium text-foreground'>
-                  {attempt.outcome === 'completed' ? '执行成功' : '尝试失败'}
-                </h3>
-                <time
-                  dateTime={attempt.emitted_at}
-                  className='text-xs text-muted'
-                >
-                  {formatDate(attempt.emitted_at)}
-                </time>
-              </div>
-              {attempt.error && (
-                <p className='m-0 text-xs leading-5 break-words whitespace-pre-wrap text-muted'>
-                  {attempt.error}
-                </p>
-              )}
-            </Timeline.Content>
-          </Timeline.Item>
-        ))}
-      </Timeline>
-      {history.truncated && (
-        <p className='text-xs text-muted'>仅展示最近 100 次尝试。</p>
       )}
     </>
   )

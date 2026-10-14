@@ -1,4 +1,4 @@
-import { Outlet, useRouter } from '@tanstack/react-router'
+import { Outlet, useRouter, type HistoryState } from '@tanstack/react-router'
 import {
   Spinner,
   Toast,
@@ -10,16 +10,28 @@ import {
   I18nProvider,
 } from 'react-aria-components'
 
+declare module 'react-aria-components' {
+  interface RouterConfig {
+    /** `routerOptions` on HeroUI links: the arrival request (`state`). */
+    routerOptions: { state?: HistoryState }
+  }
+}
+
 /** Root frame: HeroUI links (`href` on Sidebar, Breadcrumbs, Tabs, Dropdown and
- * Link items) navigate through TanStack Router instead of reloading the page.
- * The console is Chinese-only, so React Aria's built-in accessible names
- * (overlay dismiss buttons, toast region, date formats) follow `zh-CN` rather
- * than the browser language. */
+ * Link items) navigate through TanStack Router instead of reloading the page,
+ * carrying `routerOptions.state` as history state. The console is
+ * Chinese-only, so React Aria's built-in accessible names (overlay dismiss
+ * buttons, toast region, date formats) follow `zh-CN` rather than the browser
+ * language. */
 export function RootLayout() {
   const router = useRouter()
   return (
     <I18nProvider locale='zh-CN'>
-      <AriaRouterProvider navigate={(href) => void router.navigate({ href })}>
+      <AriaRouterProvider
+        navigate={(href, options) =>
+          void router.navigate({ href, state: options?.state })
+        }
+      >
         <Outlet />
         <Toast.Provider placement='top end' width={340} gap={8}>
           {({ toast }) => <ConsoleToast toast={toast} />}

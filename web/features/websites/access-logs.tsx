@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { getRouteApi, Link } from '@tanstack/react-router'
+import { Link } from '@tanstack/react-router'
 import { ArrowRotateLeft, Pause, Play } from '@gravity-ui/icons'
 import { Segment, type DataGridColumn } from '@heroui-pro/react'
 import { Button, Tooltip } from '@heroui/react'
 import { formatBytes, formatDate } from '@/lib/format'
-import { pageLocally, useListSearch } from '@/lib/list-search'
+import { pageLocally, useListState } from '@/lib/list-search'
 import { CopyButton } from '@/components/copy-button'
 import { DataTable } from '@/components/data-table'
 import { FormSheet } from '@/components/form-sheet'
@@ -25,19 +25,19 @@ import {
 } from './access-log-search'
 import { websiteAccessLogHistoryQuery } from './data'
 import { useWebsite } from './website-context'
-import type { WebsiteDetailSearch } from './website-detail-search'
 
-const route = getRouteApi('/_authenticated/websites/$websiteId')
 const filterKeys = ['method', 'status_class'] as const
 const liveStateReserve = ['已暂停', '实时连接', '正在连接']
 
-/** `/websites/$websiteId?tab=logs`. Live mode tails `access-logs/stream` only
- * while this tab is mounted and not paused; history mode takes one snapshot per
- * query (the `/history/stream` connection closes after the first frame). */
+/** Website detail “访问日志” tab. Mode, filters, page and the open request
+ * are component state, so leaving the tab resets them and the URL never
+ * changes. Live mode tails `access-logs/stream` only while this tab is
+ * mounted and not paused; history mode takes one snapshot per query (the
+ * `/history/stream` connection closes after the first frame). */
 export function AccessLogs() {
   const website = useWebsite()
-  const list = useListSearch(route)
-  const navigate = route.useNavigate()
+  const list = useListState<AccessLogsSearch>()
+  const [openLogId, setOpenLogId] = useState<string>()
   const { search } = list
   const history = search.mode === 'history'
   const [paused, setPaused] = useState(false)
@@ -68,16 +68,11 @@ export function AccessLogs() {
   const total = view?.total ?? 0
   const filtered =
     !!list.keyword || filterKeys.some((key) => search[key] !== undefined)
-  const selected = search.log
+  const selected = openLogId
     ? (history ? historyQuery.data?.list : live.logs)?.find(
-        (log) => log.id === search.log
+        (log) => log.id === openLogId
       )
     : undefined
-  const openLog = (id: string | undefined) =>
-    void navigate({
-      search: (previous: WebsiteDetailSearch) => ({ ...previous, log: id }),
-      replace: !id,
-    })
 
   const columns: DataGridColumn<AccessLog>[] = [
     {
@@ -101,7 +96,7 @@ export function AccessLogs() {
           variant='ghost'
           className='h-auto max-w-full min-w-0 justify-start gap-2 px-1 py-0.5 text-left'
           aria-label={`查看请求 ${log.method} ${log.host}${log.target}`}
-          onPress={() => openLog(log.id)}
+          onPress={() => setOpenLogId(log.id)}
         >
           <span className='shrink-0 text-xs font-semibold'>{log.method}</span>
           <Mono truncate className='min-w-0 text-accent'>
@@ -183,12 +178,12 @@ export function AccessLogs() {
           size='sm'
           aria-label='日志模式'
           selectedKey={history ? 'history' : 'live'}
-          onSelectionChange={(key) =>
+          onSelectionChange={(key) => {
+            setOpenLogId(undefined)
             void list.setSearch({
               mode: key === 'history' ? 'history' : undefined,
-              log: undefined,
             })
-          }
+          }}
         >
           <Segment.Item id='live'>实时</Segment.Item>
           <Segment.Item id='history'>历史</Segment.Item>
@@ -333,15 +328,15 @@ export function AccessLogs() {
         />
       </div>
       <FormSheet
-        isOpen={!!search.log}
-        onClose={() => openLog(undefined)}
+        isOpen={!!openLogId}
+        onClose={() => setOpenLogId(undefined)}
         title='请求详情'
         size='lg'
         footer={
           <Button
             size='sm'
             variant='tertiary'
-            onPress={() => openLog(undefined)}
+            onPress={() => setOpenLogId(undefined)}
           >
             关闭
           </Button>

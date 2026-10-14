@@ -127,20 +127,34 @@ load_zone_sync_state(service::background::worker_context& context, const dns_tas
 }
 
 inline ruvia::task<remote_zone_data>
-load_remote_zone_data(service::background::worker_context& context,
+load_remote_zone_data(service::background::worker_context& context, service::attempt_trace::recorder& trace,
     const service::sync_runtime::running_marker_lease& lease,
     const service::dns::dns_provider_driver& driver, std::string_view account_id,
     std::string_view secret, std::string_view domain) {
-    const auto remote_zone = co_await driver.find_zone(context, account_id, secret, domain);
+    using service::attempt_trace::step_code;
+    auto find_step = trace.begin_step(step_code::find_zone, domain);
+    const auto remote_zone = co_await driver.find_zone(context, trace, account_id, secret, domain);
     auto db = context.db();
     if (!co_await service::sync_runtime::renew_running_lease(db, lease)) {
         throw std::runtime_error("DNS 同步标记 lease 已失效");
     }
-    auto records = co_await driver.list_records(context, account_id, secret, remote_zone.id_, domain);
+    trace.log(service::attempt_trace::log_level::info, "找到托管域 " + remote_zone.name_);
+    find_step.complete();
+    auto records_step = trace.begin_step(step_code::list_records, domain);
+    auto records = co_await driver.list_records(context, trace, account_id, secret, remote_zone.id_, domain);
     if (!co_await service::sync_runtime::renew_running_lease(db, lease)) {
         throw std::runtime_error("DNS 同步标记 lease 已失效");
     }
-    auto lines = co_await driver.list_lines(context, account_id, secret, domain);
+    trace.log(service::attempt_trace::log_level::info, "服务商现有 " + std::to_string(records.size()) + " 条记录");
+    records_step.complete();
+    auto lines_step = trace.begin_step(step_code::list_lines, domain);
+    auto lines = co_await driver.list_lines(context, trace, account_id, secret, domain);
+    if (driver.supports_routing_lines()) {
+        trace.log(service::attempt_trace::log_level::info, "可用解析线路 " + std::to_string(lines.size()) + " 条");
+        lines_step.complete();
+    } else {
+        lines_step.skip("该服务商只有默认线路，无需查询");
+    }
     co_return remote_zone_data{
         .id_ = remote_zone.id_,
         .records_ = std::move(records),

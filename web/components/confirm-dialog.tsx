@@ -82,7 +82,8 @@ function ConfirmDialogContent({
         <AlertDialog.Icon status={tone} />
         <AlertDialog.Heading>{title}</AlertDialog.Heading>
       </AlertDialog.Header>
-      <AlertDialog.Body className='flex flex-col gap-3 text-sm leading-6 text-muted'>
+      {/* Contains absolutely positioned descendants (see FormSheet). */}
+      <AlertDialog.Body className='relative flex flex-col gap-3 text-sm leading-6 text-muted'>
         <div>{description}</div>
         {error && (
           <Alert status='danger'>

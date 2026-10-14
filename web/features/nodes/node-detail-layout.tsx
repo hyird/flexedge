@@ -1,7 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import { ChartLine, FileText, Gear, Server } from '@gravity-ui/icons'
+import { Button } from '@heroui/react'
 import { ApiBusinessError } from '@/lib/api-response'
+import { useArrivalState } from '@/lib/history-state'
+import { useTabSwitchGuard } from '@/lib/unsaved-changes'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
 import { DetailHeader, DetailHeaderSkeleton } from '@/components/detail-header'
 import { LinkButton } from '@/components/link-button'
@@ -12,31 +15,33 @@ import { StatusChip } from '@/components/status-chip'
 import { nodeQuery, nodeSnapshotQuery } from './data'
 import { NodeActionMenu } from './node-action-menu'
 import { NodeConfig } from './node-config'
+import { NodeConnectionChip } from './node-connection-chip'
 import { NodeLogs } from './node-logs'
 import { NodeOverview } from './node-overview'
-import type { NodeDetailTab } from './node-search'
-import { connectionLabels, nodeStatusLabels } from './node-status'
-import { RegistrationChip } from './registration-chip'
+import { nodeStatusLabels } from './node-status'
 
 const route = getRouteApi('/_authenticated/nodes/$nodeId')
 // service/domains/node/node_error.h NOT_FOUND
 const nodeNotFoundCode = 16501
 
-type Tab = 'overview' | NodeDetailTab
 const tabs = [
   { id: 'overview', label: '概览', icon: <ChartLine /> },
   { id: 'logs', label: '日志', icon: <FileText /> },
   { id: 'config', label: '配置', icon: <Gear /> },
 ] as const
+type Tab = (typeof tabs)[number]['id']
 
-/** `/nodes/$nodeId` with in-page tabs (`?tab=logs|config`, overview default).
- * One live stream per page: the overview and config tabs share
- * `/api/nodes/:id/stream` with this header, while the logs tab owns the log
- * stream and the header reads the node once (re-read after writes). */
+/** `/nodes/$nodeId` with in-page tabs held in component state (the URL never
+ * changes); links open a tab with history state `{ node: { tab } }`,
+ * overview by default. One live stream per page: the overview and config tabs
+ * share `/api/nodes/:id/stream` with this header, while the logs tab owns the
+ * log stream and the header reads the node once (re-read after writes). */
 export function NodeDetailLayout() {
   const { nodeId } = route.useParams()
-  const { tab = 'overview' } = route.useSearch()
-  const navigate = route.useNavigate()
+  const [tab, setTab, arrivalKey] = useArrivalState<Tab>(
+    (state) => state.node?.tab ?? 'overview'
+  )
+  const tabGuard = useTabSwitchGuard()
   const onLogs = tab === 'logs'
   const live = useQuery({ ...nodeQuery(nodeId), enabled: !onLogs })
   const snapshot = useQuery({ ...nodeSnapshotQuery(nodeId), enabled: onLogs })
@@ -62,32 +67,14 @@ export function NodeDetailLayout() {
         />
       </Page>
     )
-  const selectTab = (next: Tab) =>
-    void navigate({
-      to: '.',
-      search: (previous) => ({
-        ...previous,
-        tab: next === 'overview' ? undefined : next,
-      }),
-      replace: true,
-    })
   return (
     <Page>
       {node ? (
         <DetailHeader
           icon={<Server />}
           title={node.name}
-          status={
-            <StatusChip
-              status={node.runtime.connection_status}
-              reserve={connectionLabels}
-            />
-          }
+          status={<NodeConnectionChip runtime={node.runtime} />}
           meta={[
-            <RegistrationChip
-              key='registration'
-              status={node.runtime.registration_status}
-            />,
             <span key='cluster'>
               集群{' '}
               <Link
@@ -108,10 +95,14 @@ export function NodeDetailLayout() {
             />,
           ]}
           actions={
-            <LinkButton href={`/nodes/${nodeId}?tab=config`} variant='tertiary'>
-              <Gear />
+            <Button
+              size='sm'
+              variant='tertiary'
+              onPress={() => tabGuard.request(() => setTab('config'))}
+            >
+              <Gear className='size-4' />
               编辑配置
-            </LinkButton>
+            </Button>
           }
           menu={<NodeActionMenu node={node} context='detail' />}
         />
@@ -123,14 +114,15 @@ export function NodeDetailLayout() {
         label='节点详情'
         items={tabs}
         selected={tab}
-        onSelectionChange={selectTab}
+        onSelectionChange={setTab}
+        guard={tabGuard}
       >
         {tab === 'overview' ? (
-          <NodeOverview />
+          <NodeOverview key={arrivalKey} />
         ) : tab === 'logs' ? (
-          <NodeLogs />
+          <NodeLogs key={arrivalKey} />
         ) : (
-          <NodeConfig />
+          <NodeConfig key={arrivalKey} />
         )}
       </PageTabs>
     </Page>

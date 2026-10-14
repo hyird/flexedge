@@ -54,7 +54,10 @@ inline bool valid_heartbeat(const flexedge::node::v2::Heartbeat& value) {
            flexedge::crypto::is_sha256_digest(value.active_manifest_digest()) &&
            value.agent_version().size() <= 64 && value.cpu_usage() >= 0 && value.cpu_usage() <= 1 &&
            value.memory_usage() >= 0 && value.memory_usage() <= 1 && value.traffic_out_bps() >= 0 &&
-           value.connection_count() >= 0 && std::isfinite(value.load_1m()) && value.load_1m() >= 0 &&
+           value.connection_count() >= 0 &&
+           // Sampled apart from connection_count, so it is not bounded by it.
+           (!value.has_connected_ip_count() || value.connected_ip_count() >= 0) &&
+           std::isfinite(value.load_1m()) && value.load_1m() >= 0 &&
            value.queued_log_events() <=
                static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) &&
            value.dropped_log_events() <=

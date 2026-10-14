@@ -73,6 +73,20 @@ inline std::string fingerprint(X509* certificate) {
     return output.str();
 }
 
+inline std::string issuer_name(X509* certificate) {
+    certificate_bio_ptr output(BIO_new(BIO_s_mem()), BIO_free);
+    if (!output ||
+        X509_NAME_print_ex(output.get(), X509_get_issuer_name(certificate), 0, XN_FLAG_RFC2253) < 0) {
+        throw acme_error("证书签发者读取失败", true);
+    }
+    char* data = nullptr;
+    const auto length = BIO_get_mem_data(output.get(), &data);
+    if (length < 0 || (length > 0 && data == nullptr)) {
+        throw acme_error("证书签发者读取失败", true);
+    }
+    return std::string(data == nullptr ? "" : data, static_cast<std::size_t>(length));
+}
+
 inline void validate_certificate_domains(X509* certificate,
     const std::vector<std::string>& expected_domains) {
     auto* names = static_cast<GENERAL_NAMES*>(
@@ -126,6 +140,7 @@ inline issued_certificate inspect_certificate(service::utils::sensitive_string p
         format_asn1_time(X509_get0_notAfter(certificate.get())),
         serial_number(certificate.get()),
         fingerprint(certificate.get()),
+        issuer_name(certificate.get()),
     };
 }
 

@@ -46,21 +46,23 @@ export function NodeActionMenu({
   const detail = `/nodes/${node.id}`
   const items: ActionMenuItem[] = [
     ...(context === 'list'
-      ? [
+      ? ([
           { id: 'view', label: '查看详情', icon: <Eye />, href: detail },
           {
             id: 'logs',
             label: '实时日志',
             icon: <FileText />,
-            href: `${detail}?tab=logs`,
+            href: detail,
+            state: { node: { tab: 'logs' } },
           },
           {
             id: 'config',
             label: '编辑配置',
             icon: <Gear />,
-            href: `${detail}?tab=config`,
+            href: detail,
+            state: { node: { tab: 'config' } },
           },
-        ]
+        ] satisfies ActionMenuItem[])
       : []),
     {
       id: 'credentials',

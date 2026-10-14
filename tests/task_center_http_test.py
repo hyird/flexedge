@@ -78,12 +78,36 @@ task_id = "00000000-0000-4000-8000-000000000304"
 resource_id = "00000000-0000-4000-8000-000000000204"
 detail = snapshot(f"/api/tasks/{task_id}/stream?resource_id={resource_id}&version=2")
 assert detail["status"] == "recovered" and detail["error"] == ""
-history = snapshot(f"/api/tasks/{task_id}/history/stream?version=2")
+history = snapshot(f"/api/tasks/{task_id}/history/stream?version=2&resource_id={resource_id}")
 assert [event["outcome"] for event in history["list"]] == ["completed", "failed"]
+assert [event["attempt"] for event in history["list"]] == [2, 1]
 assert history["list"][1]["error"] == "retained error after recovery"
+assert all(event["detail"] == {"kind": "none", "truncated": False} and event["started_at"] == ""
+           and event["duration_ms"] == 0 for event in history["list"])
+assert history["summary"]["attempt_count"] == 2 and history["summary"]["failure_count"] == 1
+assert history["summary"]["last_success_at"] == history["list"][0]["emitted_at"]
+assert snapshot(f"/api/tasks/{task_id}/history/stream?version=2")["summary"]["attempt_count"] == 2
 other = snapshot("/api/tasks/00000000-0000-4000-8000-000000000303/history/stream?version=2")
 assert len(other["list"]) == 1 and other["list"][0]["outcome"] == "failed"
 snapshot(f"/api/tasks/{task_id}/history/stream?version=0", expected_code=10001)
+# Attempt traces: the fixture's attempts predate traces, so every summary and
+# trace reads as "none" while still naming the attempt.
+for event in history["list"]:
+    trace = event["trace"]
+    assert trace["state"] == "none" and trace["steps"] == [] and trace["step_count"] == 0, trace
+    assert trace["attempt_id"].isdigit() and trace["failed_step"] is None, trace
+attempt_id = history["list"][1]["trace"]["attempt_id"]
+full = snapshot(f"/api/tasks/{task_id}/attempts/{attempt_id}/trace/stream")
+assert (full["attempt_id"], full["task_id"], full["resource_id"]) == (attempt_id, task_id, resource_id), full
+assert (full["state"], full["kind"], full["attempt"], full["outcome"]) == ("none", "none", 1, "failed"), full
+assert full["steps"] == [] and full["capture"]["bytes"] == 0 and full["worker_type"], full
+assert full["error"] == "retained error after recovery"
+snapshot(f"/api/tasks/{task_id}/attempts/0/trace/stream", expected_code=10001)
+snapshot(f"/api/tasks/{task_id}/attempts/not-a-number/trace/stream", expected_code=10001)
+snapshot(f"/api/tasks/00000000-0000-4000-8000-000000000303/attempts/{attempt_id}/trace/stream", expected_code=10003)
+snapshot(f"/api/tasks/{task_id}/attempts/999999999/trace/stream", expected_code=10003)
+snapshot(f"/api/tasks/{task_id}/history/stream?version=2&resource_id=invalid", expected_code=10001)
 snapshot(f"/api/tasks/{task_id}/stream?resource_id={resource_id}&version=999", expected_code=10003)
 snapshot(f"/api/tasks/{task_id}/stream?resource_id=invalid&version=2", expected_code=10001)
-print("Task SSE integration passed: authentication, pagination, filters, validation, detail, retained errors, tenant isolation.")
+print("Task SSE integration passed: authentication, pagination, filters, validation, detail, retained errors, "
+      "attempt traces, tenant isolation.")

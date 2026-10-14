@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,8 @@ struct heartbeat_report final {
     std::string active_release_id_, active_manifest_digest_, agent_version_;
     double cpu_usage_{}, memory_usage_{};
     std::int64_t traffic_out_bps_{}, connection_count_{};
+    // Absent from nodes before 0.4.1 and when the node could not count.
+    std::optional<std::int64_t> connected_ip_count_{};
     double load1m_{};
     std::int64_t queued_log_events_{}, dropped_log_events_{};
     std::string health_, last_error_;

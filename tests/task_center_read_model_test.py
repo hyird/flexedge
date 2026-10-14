@@ -40,14 +40,14 @@ SELECT ('00000000-0000-4000-8000-00000000030'||i)::uuid, :'qa_tenant','dns_zone'
     NOW()+INTERVAL '1 day', CASE WHEN i=2 THEN 'qa-lease' END,
     CASE WHEN i=2 THEN NOW()+INTERVAL '1 day' END
 FROM generate_series(1,4) i;
-INSERT INTO sys_sync_event(tenant_id,task_id,resource_type,resource_id,operation,version,outcome,error,emitted_at)
+INSERT INTO sys_sync_event(tenant_id,task_id,resource_type,resource_id,operation,version,outcome,error,emitted_at,attempt)
 VALUES
-(:'qa_tenant','00000000-0000-4000-8000-000000000303','dns_zone','00000000-0000-4000-8000-000000000203','sync',1,'failed','old version failure',NOW()-INTERVAL '2 days'),
-(:'qa_tenant','00000000-0000-4000-8000-000000000303','dns_zone','00000000-0000-4000-8000-000000000203','sync',2,'failed','QA: API read failed',NOW()),
-(:'qa_tenant','00000000-0000-4000-8000-000000000304','dns_zone','00000000-0000-4000-8000-000000000204','sync',2,'failed','retained error after recovery',NOW()-INTERVAL '16 seconds'),
-(:'qa_tenant','00000000-0000-4000-8000-000000000304','dns_zone','00000000-0000-4000-8000-000000000204','sync',2,'completed','',NOW());
-INSERT INTO sys_sync_event(tenant_id,task_id,resource_type,resource_id,operation,version,outcome,emitted_at)
-SELECT :'qa_tenant', gen_random_uuid(),'dns_zone','00000000-0000-4000-8000-000000000204','sync',i,'completed',NOW()-INTERVAL '5 days'
+(:'qa_tenant','00000000-0000-4000-8000-000000000303','dns_zone','00000000-0000-4000-8000-000000000203','sync',1,'failed','old version failure',NOW()-INTERVAL '2 days',1),
+(:'qa_tenant','00000000-0000-4000-8000-000000000303','dns_zone','00000000-0000-4000-8000-000000000203','sync',2,'failed','QA: API read failed',NOW(),1),
+(:'qa_tenant','00000000-0000-4000-8000-000000000304','dns_zone','00000000-0000-4000-8000-000000000204','sync',2,'failed','retained error after recovery',NOW()-INTERVAL '16 seconds',1),
+(:'qa_tenant','00000000-0000-4000-8000-000000000304','dns_zone','00000000-0000-4000-8000-000000000204','sync',2,'completed','',NOW(),2);
+INSERT INTO sys_sync_event(tenant_id,task_id,resource_type,resource_id,operation,version,outcome,emitted_at,attempt)
+SELECT :'qa_tenant', gen_random_uuid(),'dns_zone','00000000-0000-4000-8000-000000000204','sync',i,'completed',NOW()-INTERVAL '5 days',1
 FROM generate_series(10,21) i;
 INSERT INTO sys_cluster(id,tenant_id,dns_zone_id,name,hostname_prefix,deleted_at)
 VALUES ('00000000-0000-4000-8000-000000000401', :'qa_tenant','00000000-0000-4000-8000-000000000201','QA cluster','qa',NOW());
@@ -65,8 +65,8 @@ FROM generate_series(1,3) i;
 INSERT INTO sys_node_release_target(tenant_id,release_id,node_id,status,retryable,last_error)
 VALUES (:'qa_tenant','00000000-0000-4000-8000-000000000602','00000000-0000-4000-8000-000000000501','failed',false,'old release');
 INSERT INTO sys_tenant(id,name,slug) VALUES ('00000000-0000-4000-8000-000000000701','Other tenant','qa-other');
-INSERT INTO sys_sync_event(tenant_id,task_id,resource_type,resource_id,operation,version,outcome,error)
-VALUES ('00000000-0000-4000-8000-000000000701','00000000-0000-4000-8000-000000000303','dns_zone','00000000-0000-4000-8000-000000000203','sync',2,'completed','must not leak');
+INSERT INTO sys_sync_event(tenant_id,task_id,resource_type,resource_id,operation,version,outcome,error,attempt)
+VALUES ('00000000-0000-4000-8000-000000000701','00000000-0000-4000-8000-000000000303','dns_zone','00000000-0000-4000-8000-000000000203','sync',2,'completed','must not leak',1);
 """
 assertions = r"""
 DO $check$

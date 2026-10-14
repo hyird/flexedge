@@ -7,14 +7,13 @@ import { Button, toast } from '@heroui/react'
 import { formatBytes, formatDate, ratioOf } from '@/lib/format'
 import { statusLabels } from '@/lib/status'
 import { DataTable, TruncatedText } from '@/components/data-table'
-import { LinkButton } from '@/components/link-button'
 import { Mono } from '@/components/mono'
 import { RelativeTime } from '@/components/relative-time'
 import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { probeWebsiteDns } from './data'
 import type { Website, WebsiteDomain } from './types'
-import { useWebsite } from './website-context'
+import { useOpenWebsiteTab, useWebsite } from './website-context'
 import {
   defaultOrigin,
   deployStatusReserve,
@@ -43,6 +42,7 @@ function kpiStatus(part: number, total: number) {
 /** `/websites/$websiteId` overview: deployment, domains, origin health, certificates. */
 export function WebsiteOverview() {
   const website = useWebsite()
+  const openTab = useOpenWebsiteTab()
   const probe = useMutation({
     mutationFn: () => probeWebsiteDns(website.id),
     onSuccess: () => toast.success('DNS 探测已提交，结果会自动更新'),
@@ -51,7 +51,6 @@ export function WebsiteOverview() {
   const health = originHealth(website)
   const groups = originGroups(website)
   const origin = defaultOrigin(website)
-  const settings = `/websites/${website.id}?tab=settings`
   const domainState = (domain: WebsiteDomain) =>
     runtime.domain_states.find((state) => state.id === domain.id)
   const resolved = config.domains.filter(
@@ -277,9 +276,12 @@ export function WebsiteOverview() {
             title: '还没有绑定域名',
             description: '在配置的“域名”分组中添加域名。',
             action: (
-              <LinkButton href={`${settings}?section=domains`}>
+              <Button
+                size='sm'
+                onPress={() => openTab('settings', { section: 'domains' })}
+              >
                 添加域名
-              </LinkButton>
+              </Button>
             ),
           }}
         />
@@ -309,9 +311,13 @@ export function WebsiteOverview() {
         <Section
           title='绑定证书'
           actions={
-            <LinkButton variant='tertiary' href={`${settings}?section=https`}>
+            <Button
+              size='sm'
+              variant='tertiary'
+              onPress={() => openTab('settings', { section: 'https' })}
+            >
               管理 HTTPS
-            </LinkButton>
+            </Button>
           }
         >
           {!config.https_enabled ? (

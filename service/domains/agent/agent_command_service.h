@@ -5,6 +5,7 @@
 #include <ruvia/web/model_json.h>
 
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -19,8 +20,11 @@
 #include "service/domains/agent/desired_state_store.h"
 #include "service/domains/agent/heartbeat_store.h"
 #include "service/domains/agent/release_manifest.h"
+#include "service/features/attempt_trace/recorder.h"
+#include "service/features/attempt_trace/trace_store.h"
 #include "service/features/cluster_dns/projection.h"
 #include "service/features/live_resource/node_runtime.h"
+#include "service/features/node_dispatch/apply_history.h"
 #include "service/features/node_dispatch/notifications.h"
 #include "service/features/node_dispatch/protocol.h"
 #include "service/features/node_dispatch/queue.h"
@@ -143,6 +147,20 @@ public:
             service::common::throw_app_error(revision_invalid);
         }
         const auto target_changed = co_await service::node_dispatch::mark_node_target_applied(transaction, principal.tenant_id_, report.active_release_id_, report.node_id_);
+        if (target_changed) {
+            (void)co_await service::node_dispatch::record_node_apply_attempt(transaction,
+                {.tenant_id_ = principal.tenant_id_,
+                    .release_id_ = report.active_release_id_,
+                    .node_id_ = report.node_id_,
+                    .source_ = "heartbeat",
+                    .applied_ = true,
+                    .phase_ = {},
+                    .error_code_ = {},
+                    .error_ = {},
+                    .retryable_ = false,
+                    .elapsed_milliseconds_ = std::nullopt},
+                c.pool());
+        }
         co_await transaction.commit();
         service::live_resource::get_node_deadlines().touch(principal.tenant_id_, principal.node_id_);
         service::live_resource::get_hub().publish_runtime(principal.tenant_id_, principal.node_id_,
@@ -161,17 +179,36 @@ public:
         co_return;
     }
 
+    // `elapsed_milliseconds`: time since this control connection sent the
+    // desired state the result answers, when known. `trace` is the attempt
+    // trace of this apply; it is stored after the result commits.
     ruvia::task<void> record_apply_result(ruvia::context& c, const agent_principal& principal,
-        const flexedge::node::v2::ApplyResult& result) {
+        const flexedge::node::v2::ApplyResult& result,
+        std::optional<std::int64_t> elapsed_milliseconds, service::attempt_trace::recorder& trace) {
         const auto& node_id = principal.node_id_;
+        std::optional<service::node_dispatch::recorded_node_attempt> recorded;
         if (result.applied()) {
             auto transaction = co_await c.db().begin_transaction();
             if (!(co_await record_applied_deployment(transaction, principal, result.node_spec_revision(),
                     result.release_id(), result.manifest_digest()))) {
                 service::common::throw_app_error(revision_invalid);
             }
-            co_await service::node_dispatch::mark_node_target_applied(transaction, principal.tenant_id_, result.release_id(), node_id);
+            if (co_await service::node_dispatch::mark_node_target_applied(transaction, principal.tenant_id_, result.release_id(), node_id)) {
+                recorded = co_await service::node_dispatch::record_node_apply_attempt(transaction,
+                    {.tenant_id_ = principal.tenant_id_,
+                        .release_id_ = result.release_id(),
+                        .node_id_ = node_id,
+                        .source_ = "apply_result",
+                        .applied_ = true,
+                        .phase_ = {},
+                        .error_code_ = {},
+                        .error_ = {},
+                        .retryable_ = false,
+                        .elapsed_milliseconds_ = elapsed_milliseconds},
+                    c.pool());
+            }
             co_await transaction.commit();
+            co_await store_apply_trace(c, principal, result.release_id(), recorded, trace);
             publish_apply_change(principal);
             co_return;
         }
@@ -188,17 +225,61 @@ public:
         if (outcome == apply_failure_outcome::rejected) {
             service::common::throw_app_error(revision_invalid);
         }
-        if (outcome == apply_failure_outcome::recorded) {
+        if (outcome == apply_failure_outcome::recorded &&
             co_await service::node_dispatch::mark_node_target_failed(transaction,
                 principal.tenant_id_, failure.release_id_, node_id, principal.cluster_id_,
-                {.phase_ = failure.phase_, .error_code_ = failure.error_code_, .error_ = failure.error_, .retryable_ = failure.retryable_});
+                {.phase_ = failure.phase_, .error_code_ = failure.error_code_, .error_ = failure.error_, .retryable_ = failure.retryable_})) {
+            recorded = co_await service::node_dispatch::record_node_apply_attempt(transaction,
+                {.tenant_id_ = principal.tenant_id_,
+                    .release_id_ = failure.release_id_,
+                    .node_id_ = node_id,
+                    .source_ = "apply_result",
+                    .applied_ = false,
+                    .phase_ = apply_phase_name(result.failed_phase()),
+                    .error_code_ = failure.error_code_,
+                    .error_ = failure.error_,
+                    .retryable_ = failure.retryable_,
+                    .elapsed_milliseconds_ = elapsed_milliseconds},
+                c.pool());
         }
         co_await transaction.commit();
+        co_await store_apply_trace(c, principal, failure.release_id_, recorded, trace);
         publish_apply_change(principal);
         co_return;
     }
 
 private:
+    // The trace is stored on its own after the apply result committed; a
+    // trace that cannot be stored is logged and leaves the result unchanged.
+    static ruvia::task<void> store_apply_trace(ruvia::context& c, const agent_principal& principal,
+        std::string_view release_id, const std::optional<service::node_dispatch::recorded_node_attempt>& recorded,
+        service::attempt_trace::recorder& trace) {
+        if (!recorded) {
+            co_return;
+        }
+        auto db = c.db();
+        co_await service::attempt_trace::store_attempt_trace(db,
+            {.tenant_id_ = principal.tenant_id_,
+                .task_id_ = release_id,
+                .resource_id_ = principal.node_id_,
+                .version_ = recorded->version_},
+            recorded->event_id_, trace);
+    }
+
+    // Task history wording of the node's failure phase.
+    static std::string_view apply_phase_name(flexedge::node::v2::ApplyPhase phase) noexcept {
+        switch (phase) {
+            case flexedge::node::v2::APPLY_PHASE_STAGE:
+                return "stage";
+            case flexedge::node::v2::APPLY_PHASE_VALIDATE:
+                return "validate";
+            case flexedge::node::v2::APPLY_PHASE_ACTIVATE:
+                return "activate";
+            default:
+                return "";
+        }
+    }
+
     static void publish_apply_change(const agent_principal& principal) {
         using service::live_resource::resource;
         auto& hub = service::live_resource::get_hub();

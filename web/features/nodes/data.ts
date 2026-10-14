@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { queryOptions } from '@tanstack/react-query'
+import { queryOptions, type QueryClient } from '@tanstack/react-query'
 import { sendData, streamPath, type PageData } from '@/lib/api'
 import { ApiProtocolError } from '@/lib/api-response'
 import { readLiveQuery, snapshotQueryOptions } from '@/lib/live-query'
@@ -156,6 +156,65 @@ export function nodesQuery(params: NodesQueryParams) {
         applyNodeRuntimePagePatch
       ),
   })
+}
+
+/** Which nodes a list snapshot shows and their online state. Runtime patches
+ * never change it (they keep `connection_status`), so it only moves when a
+ * snapshot reports an online/offline transition or nodes were added or
+ * removed. */
+function nodeConnectionSignature(page: PageData<Node>) {
+  return [
+    page.total,
+    ...page.list.map((node) => `${node.id}:${node.runtime.connection_status}`),
+  ].join('|')
+}
+
+/** Calls `onTransition` once per burst (coalesced over `delayMs`) when a
+ * cached node list of the given cluster changes which nodes it holds or their
+ * online state. Driven by the list's own stream; it reads nothing itself, so
+ * a page with this list live can refresh one-shot counters (the cluster
+ * header) without a second stream. Returns the unsubscribe function. */
+export function watchClusterNodeTransitions(
+  client: QueryClient,
+  clusterId: string,
+  onTransition: () => void,
+  delayMs = 300
+) {
+  const signatures = new Map<string, string>()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const unsubscribe = client.getQueryCache().subscribe((event) => {
+    const [scope, kind, params] = event.query.queryKey as [
+      unknown,
+      unknown,
+      NodesQueryParams | undefined,
+    ]
+    if (
+      scope !== queryKeys.nodes[0] ||
+      kind !== 'list' ||
+      params?.cluster_id !== clusterId
+    )
+      return
+    if (event.type === 'removed') {
+      signatures.delete(event.query.queryHash)
+      return
+    }
+    if (event.type !== 'updated' || event.action.type !== 'success') return
+    const data = event.query.state.data as PageData<Node> | undefined
+    if (!data) return
+    const next = nodeConnectionSignature(data)
+    const previous = signatures.get(event.query.queryHash)
+    signatures.set(event.query.queryHash, next)
+    if (previous === undefined || previous === next || timer !== undefined)
+      return
+    timer = setTimeout(() => {
+      timer = undefined
+      onTransition()
+    }, delayMs)
+  })
+  return () => {
+    clearTimeout(timer)
+    unsubscribe()
+  }
 }
 
 /** Single node stream (`/api/nodes/:id/stream`): the same DTO as list items,

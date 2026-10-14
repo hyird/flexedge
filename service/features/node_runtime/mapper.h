@@ -29,6 +29,9 @@ namespace service::node_runtime {
     if (const auto& value = input.get<"connection_count">()) {
         result.connection_count_ = value->value_;
     }
+    if (const auto& value = input.get<"connected_ip_count">()) {
+        result.connected_ip_count_ = value->value_;
+    }
     if (const auto& value = input.get<"load1m">()) {
         result.load1m_ = value->value_;
     }

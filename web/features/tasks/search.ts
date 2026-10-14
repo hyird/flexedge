@@ -5,8 +5,8 @@ import { taskSchema } from './types'
 // The router parses numeric-looking values as numbers, so ids are coerced.
 const idValue = z.coerce.string().trim().min(1).max(200)
 
-/** `/tasks` URL state: list filters plus the open detail sheet
- * (`task` + `resource_id`, optional `version`, and its `tab`). */
+/** `/tasks` URL state: list filters plus the open detail sheet (`task` +
+ * `resource_id`, optional `version`). The sheet's own tab is component state. */
 export const tasksSearchSchema = listSearchSchema.extend({
   type: optionalSearchValue(taskSchema.shape.resource_type),
   status: optionalSearchValue(taskSchema.shape.status),
@@ -14,7 +14,6 @@ export const tasksSearchSchema = listSearchSchema.extend({
   task: optionalSearchValue(idValue),
   resource_id: optionalSearchValue(idValue),
   version: optionalSearchValue(z.coerce.number().int().min(1)),
-  tab: optionalSearchValue(z.literal('history')),
 })
 export type TasksSearch = z.infer<typeof tasksSearchSchema>
 

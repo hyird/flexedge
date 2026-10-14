@@ -2,6 +2,7 @@
 
 #include <ruvia/core/task.h>
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -28,6 +29,7 @@ inline ruvia::task<std::optional<dns_task>> claim(service::background::worker_co
     if (rows.empty()) {
         co_return std::nullopt;
     }
+    const auto claimed_at = std::chrono::steady_clock::now();
     const auto& row = rows.front();
     service::live_resource::get_hub().publish(row[1].value().value_or(""),
         service::live_resource::resource::tasks,
@@ -42,6 +44,7 @@ inline ruvia::task<std::optional<dns_task>> claim(service::background::worker_co
         .operation_ = service::sync_runtime::require_marker_operation(row[3].value().value_or("")),
         .version_ = row[4].as<std::int64_t>().value_or(1),
         .failures_ = row[5].as<std::int64_t>().value_or(0),
+        .claimed_at_ = claimed_at,
     };
 }
 

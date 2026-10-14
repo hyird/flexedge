@@ -45,10 +45,10 @@ struct target_failure {
     bool retryable_{};
 };
 
-inline ruvia::task<void> mark_node_target_failed(ruvia::db_transaction& transaction,
+inline ruvia::task<bool> mark_node_target_failed(ruvia::db_transaction& transaction,
     std::string_view tenant_id, std::string_view release_id, std::string_view node_id,
     std::string_view cluster_id, const target_failure& failure) {
-    (void)co_await transaction.execute(
+    const auto updated = co_await transaction.execute(
         "UPDATE sys_node_release_target target SET status = 'failed', failed_phase = $4, "
         "error_code = $5, last_error = $6, retryable = $7, updated_at = NOW() FROM "
         "sys_cluster_release release WHERE target.tenant_id = $1 AND target.release_id = $2 "
@@ -57,5 +57,6 @@ inline ruvia::task<void> mark_node_target_failed(ruvia::db_transaction& transact
         "release.cluster_id = $8",
         tenant_id, release_id, node_id, failure.phase_, failure.error_code_, failure.error_,
         failure.retryable_, cluster_id);
+    co_return updated.affected_rows() != 0;
 }
 }  // namespace service::node_dispatch

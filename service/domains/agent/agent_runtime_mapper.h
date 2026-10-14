@@ -17,6 +17,9 @@ inline std::string heartbeat_runtime_json(ruvia::context& c, const heartbeat_rep
     runtime.set<"memory_usage">(report.memory_usage_);
     runtime.set<"traffic_out_bps">(report.traffic_out_bps_);
     runtime.set<"connection_count">(report.connection_count_);
+    if (report.connected_ip_count_) {
+        runtime.set<"connected_ip_count">(*report.connected_ip_count_);
+    }
     runtime.set<"load1m">(report.load1m_);
     runtime.set<"queued_log_events">(report.queued_log_events_);
     runtime.set<"dropped_log_events">(report.dropped_log_events_);

@@ -1102,12 +1102,140 @@ inline std::vector<ruvia::db_migration> remove_website_http2_migration() {
     return {compiled.begin(), compiled.end()};
 }
 
+// Task history attempts gain their metadata and a structured detail, and node
+// publish attempts are recorded in the same table (resource_type 'node',
+// task_id = release id, resource_id = node id, version = generation). Rows
+// retained before this migration are numbered per task, resource and version
+// in id order; their start, duration, retry time and detail were never
+// captured, so they keep NULL, 0, NULL and the 'none' detail. History reads
+// filter by resource as well, so the lookup index gains resource_id.
+inline std::vector<ruvia::db_migration> task_attempt_details_migration() {
+    constexpr std::string_view events = "sys_sync_event";
+    ruvia::db_schema schema({.driver_ = ruvia::db_driver::postgresql});
+    ruvia::db_query expressions;
+    schema.add_column(events, {.name_ = "attempt",
+                                  .type_ = {.data_type_ = ruvia::db_data_type::integer},
+                                  .nullable_ = true});
+    schema.add_column(events, {.name_ = "started_at",
+                                  .type_ = {.data_type_ = ruvia::db_data_type::timestamp_tz},
+                                  .nullable_ = true});
+    schema.add_column(events, {.name_ = "duration_ms",
+                                  .type_ = {.data_type_ = ruvia::db_data_type::big_int},
+                                  .default_value_ = expressions.value(std::int64_t{0})});
+    schema.add_column(events, {.name_ = "next_attempt_at",
+                                  .type_ = {.data_type_ = ruvia::db_data_type::timestamp_tz},
+                                  .nullable_ = true});
+    schema.add_column(events,
+        {.name_ = "detail",
+            .type_ = {.data_type_ = ruvia::db_data_type::jsonb},
+            .default_value_ = expressions.cast(
+                expressions.value(std::string_view{R"({"kind":"none","truncated":false})"}),
+                ruvia::db_data_type::jsonb)});
+
+    ruvia::db_query numbered;
+    numbered
+        .select({numbered.column("id"),
+            numbered.alias(numbered.over(numbered.call("row_number"),
+                               {.partition_by_ = {numbered.column("tenant_id"), numbered.column("task_id"),
+                                    numbered.column("resource_id"), numbered.column("version")},
+                                   .order_by_ = {{.expression_ = numbered.column("id")}}}),
+                "attempt")})
+        .from(events);
+    ruvia::db_query backfill;
+    backfill.update(events, "event")
+        .set("attempt", backfill.column("attempt", "numbered"))
+        .update_from(numbered, "numbered")
+        .where(backfill.binary(backfill.column("id", "event"), ruvia::db_binary_operator::equal,
+            backfill.column("id", "numbered")));
+    schema.execute(backfill);
+    schema.set_column_nullable(events, "attempt", false);
+
+    const auto check = [&](std::string_view name, ruvia::db_expression predicate) {
+        schema.add_constraint(events,
+            {.name_ = std::string(name), .kind_ = ruvia::db_constraint_kind::check, .check_ = predicate});
+    };
+    check("ck_sync_event_attempt", expressions.binary(expressions.column("attempt"),
+                                       ruvia::db_binary_operator::greater, expressions.value(std::int64_t{0})));
+    check("ck_sync_event_duration",
+        expressions.binary(expressions.column("duration_ms"), ruvia::db_binary_operator::greater_equal,
+            expressions.value(std::int64_t{0})));
+    check("ck_sync_event_detail",
+        expressions.binary(expressions.call("jsonb_typeof", {expressions.column("detail")}),
+            ruvia::db_binary_operator::equal, expressions.value(std::string_view{"object"})));
+    schema.drop_constraint(events, "ck_sync_event_resource_type");
+    check("ck_sync_event_resource_type",
+        expressions.binary(expressions.column("resource_type"), ruvia::db_binary_operator::in,
+            expressions.list({expressions.value(std::string_view{"provider"}),
+                expressions.value(std::string_view{"dns_zone"}),
+                expressions.value(std::string_view{"certificate"}),
+                expressions.value(std::string_view{"website"}), expressions.value(std::string_view{"node"})})));
+    schema.drop_index("idx_sync_event_task_version");
+    schema.create_index({.name_ = "idx_sync_event_task_resource_version",
+        .table_ = std::string(events),
+        .keys_ = {{.column_ = "tenant_id"}, {.column_ = "task_id"}, {.column_ = "resource_id"},
+            {.column_ = "version"}, {.column_ = "id"}}});
+    const auto compiled = schema.compile("0023_task_attempt_details");
+    return {compiled.begin(), compiled.end()};
+}
+
+// Attempt traces (docs/task-center.md "执行跟踪"): one row per recorded
+// attempt that has a trace, keyed by the attempt row and deleted with it, so
+// the 7-day attempt retention also bounds traces. `summary` is what the
+// history list reads; `trace` is read only for one expanded attempt.
+inline std::vector<ruvia::db_migration> task_attempt_traces_migration() {
+    constexpr std::string_view traces = "sys_sync_event_trace";
+    ruvia::db_schema schema({.driver_ = ruvia::db_driver::postgresql});
+    ruvia::db_query expressions;
+    const auto json_object = [&](std::string_view column) {
+        return expressions.binary(expressions.call("jsonb_typeof", {expressions.column(column)}),
+            ruvia::db_binary_operator::equal, expressions.value(std::string_view{"object"}));
+    };
+    schema.create_table({.name_ = std::string(traces),
+        .columns_ = {{.name_ = "event_id", .type_ = {.data_type_ = ruvia::db_data_type::big_int}, .primary_key_ = true},
+            {.name_ = "tenant_id", .type_ = {.data_type_ = ruvia::db_data_type::uuid}},
+            {.name_ = "summary", .type_ = {.data_type_ = ruvia::db_data_type::jsonb}},
+            {.name_ = "trace", .type_ = {.data_type_ = ruvia::db_data_type::jsonb}},
+            {.name_ = "trace_bytes", .type_ = {.data_type_ = ruvia::db_data_type::integer}},
+            {.name_ = "created_at",
+                .type_ = {.data_type_ = ruvia::db_data_type::timestamp_tz},
+                .default_value_ = expressions.call("now")}},
+        .constraints_ = {{.name_ = "fk_sync_event_trace_event",
+                             .kind_ = ruvia::db_constraint_kind::foreign_key,
+                             .columns_ = {"event_id"},
+                             .referenced_table_ = "sys_sync_event",
+                             .referenced_columns_ = {"id"},
+                             .on_delete_ = ruvia::db_referential_action::cascade},
+            {.name_ = "fk_sync_event_trace_tenant",
+                .kind_ = ruvia::db_constraint_kind::foreign_key,
+                .columns_ = {"tenant_id"},
+                .referenced_table_ = "sys_tenant",
+                .referenced_columns_ = {"id"}},
+            {.name_ = "ck_sync_event_trace_bytes",
+                .kind_ = ruvia::db_constraint_kind::check,
+                .check_ = expressions.between(expressions.column("trace_bytes"), expressions.value(std::int64_t{0}),
+                    expressions.value(std::int64_t{262144}))},
+            {.name_ = "ck_sync_event_trace_summary",
+                .kind_ = ruvia::db_constraint_kind::check,
+                .check_ = json_object("summary")},
+            {.name_ = "ck_sync_event_trace_document",
+                .kind_ = ruvia::db_constraint_kind::check,
+                .check_ = json_object("trace")}}});
+    const auto compiled = schema.compile("0024_task_attempt_traces");
+    return {compiled.begin(), compiled.end()};
+}
+
 inline std::vector<ruvia::db_migration> schema_migrations() {
     std::vector<ruvia::db_migration> migrations(released_migrations.begin(),
         released_migrations.end());
     auto remove_http2 = remove_website_http2_migration();
     migrations.insert(migrations.end(), std::make_move_iterator(remove_http2.begin()),
         std::make_move_iterator(remove_http2.end()));
+    auto attempt_details = task_attempt_details_migration();
+    migrations.insert(migrations.end(), std::make_move_iterator(attempt_details.begin()),
+        std::make_move_iterator(attempt_details.end()));
+    auto attempt_traces = task_attempt_traces_migration();
+    migrations.insert(migrations.end(), std::make_move_iterator(attempt_traces.begin()),
+        std::make_move_iterator(attempt_traces.end()));
     return migrations;
 }
 

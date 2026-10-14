@@ -1,4 +1,5 @@
 import { type ReactNode } from 'react'
+import type { HistoryState } from '@tanstack/react-router'
 import { Ellipsis } from '@gravity-ui/icons'
 import { Button, Dropdown, Label, Separator, Tooltip } from '@heroui/react'
 
@@ -8,6 +9,8 @@ export type ActionMenuItem = {
   icon?: ReactNode
   /** In-app navigation target; preferred over `onAction` for pure links. */
   href?: string
+  /** Arrival request for `href` (e.g. the tab to open); never in the URL. */
+  state?: HistoryState
   onAction?: () => void
   danger?: boolean
   disabled?: boolean
@@ -47,6 +50,7 @@ export function ActionMenu({
               key={item.id}
               id={item.id}
               href={item.href}
+              routerOptions={item.state && { state: item.state }}
               textValue={item.label}
               variant={item.danger ? 'danger' : 'default'}
               isDisabled={item.disabled}

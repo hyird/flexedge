@@ -1,10 +1,9 @@
 import { useState } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { getRouteApi } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button, Link, Tooltip } from '@heroui/react'
-import { hasListFilters, useListSearch } from '@/lib/list-search'
+import { hasListFilters, useListState } from '@/lib/list-search'
 import { ActionMenu } from '@/components/action-menu'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTable } from '@/components/data-table'
@@ -19,11 +18,11 @@ import { useProviderActions } from './provider-actions'
 import { providerLabel, providerStatusLabels } from './provider-display'
 import type { DnsProvider } from './types'
 
-const route = getRouteApi('/_authenticated/providers/')
-
-export function DnsProvidersPage() {
-  const list = useListSearch(route)
-  const navigate = route.useNavigate()
+/** `/providers` DNS 账号 tab. Search, pagination and the add/edit sheets are
+ * component state; `initialQuery` is the arrival keyword. */
+export function DnsProvidersPage({ initialQuery }: { initialQuery?: string }) {
+  const list = useListState<{ q?: string }>({ q: initialQuery })
+  const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<DnsProvider | null>(null)
   const [removing, setRemoving] = useState<DnsProvider | null>(null)
   const actions = useProviderActions()
@@ -36,11 +35,6 @@ export function DnsProvidersPage() {
     placeholderData: keepPreviousData,
   })
   const filtered = hasListFilters(list.search, [])
-  const setCreating = (create: boolean) =>
-    navigate({
-      search: (previous) => ({ ...previous, create: create ? 1 : undefined }),
-      replace: !create,
-    })
   const columns: DataGridColumn<DnsProvider>[] = [
     {
       id: 'name',
@@ -150,7 +144,7 @@ export function DnsProvidersPage() {
     },
   ]
   const createButton = (
-    <Button size='sm' onPress={() => void setCreating(true)}>
+    <Button size='sm' onPress={() => setCreating(true)}>
       <Plus className='size-4' />
       添加账号
     </Button>
@@ -200,9 +194,7 @@ export function DnsProvidersPage() {
           />
         }
       />
-      {list.search.create === 1 && (
-        <DnsProviderSheet onClose={() => void setCreating(false)} />
-      )}
+      {creating && <DnsProviderSheet onClose={() => setCreating(false)} />}
       {editing && (
         <DnsProviderSheet
           key={editing.id}

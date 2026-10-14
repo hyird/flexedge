@@ -32,26 +32,35 @@ inline ruvia::task<void> recover_stale_markers(service::background::worker_conte
 }
 
 inline ruvia::task<void> execute(service::background::worker_context& context,
-    const website_marker& marker) {
+    service::attempt_trace::recorder& trace, const website_marker& marker,
+    service::website_dns::website_domain_attempt& attempt) {
     const auto lease = service::sync_runtime::make_running_lease(
-        marker.tenant_id_, marker.id_, marker.version_, context.lease_owner(),
+        marker.tenant_id_, marker.id_, marker.version_, context.lease_owner(), marker.claimed_at_,
         service::sync_runtime::marker_resource_type::website, marker.resource_id_);
-    co_await service::website_dns::probe_website(context, marker.resource_id_, lease, marker.version_);
+    co_await service::website_dns::probe_website(context, trace, marker.resource_id_, lease, marker.version_,
+        attempt);
     co_return;
 }
 
 inline ruvia::task<void> process_marker(service::background::worker_context& context,
     const website_marker& marker) {
+    service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::website_domains, "website-dispatch",
+        marker.claimed_at_);
+    service::website_dns::website_domain_attempt attempt;
     std::string marker_error;
     try {
-        co_await execute(context, marker);
+        co_await execute(context, trace, marker, attempt);
     } catch (const std::exception& error) {
-        marker_error = service::sync_runtime::bounded_error(error.what());
+        marker_error = error.what();
     } catch (...) {
         marker_error = "网站同步发生未知错误";
     }
     if (!context.get_stop_token().stop_requested() && !marker_error.empty()) {
-        co_await fail_website_marker(context, marker, marker_error);
+        trace.mark_failure(marker_error);
+        auto step = trace.begin_step(service::attempt_trace::step_code::record_failure);
+        trace.log(service::attempt_trace::log_level::warning, "将在 15 秒后自动重试");
+        co_await fail_website_marker(context, trace, marker, marker_error, attempt.to_json(context.pool()));
+        step.complete();
     }
     co_return;
 }
@@ -91,7 +100,7 @@ inline ruvia::task<void> run_maintenance(service::background::worker_context& co
 inline ruvia::task<void> run(service::background::worker_context& context) {
     co_await service::background::run_marker_worker_loop(
         context, idle_poll_interval, "Website sync worker failure: ", "网站同步发生未知错误",
-        run_maintenance, process_markers, service::sync_runtime::bounded_error);
+        run_maintenance, process_markers, service::sync_runtime::worker_error);
     co_return;
 }
 

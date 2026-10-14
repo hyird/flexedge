@@ -28,6 +28,9 @@
   --surface: oklch(0.19 0.005 285.89);
   --surface-secondary: oklch(0.225 0.004 286.14);
   --border: oklch(0.29 0.006 286.03);
+  /* `:root` above also matches in dark mode, so the separator needs its own
+     dark value (between surface and border, as in HeroUI's dark theme). */
+  --separator: oklch(0.26 0.006 286.03);
   --surface-shadow: 0 0 0 1px var(--border);
   --sidebar-edge-outline: var(--border);
 }

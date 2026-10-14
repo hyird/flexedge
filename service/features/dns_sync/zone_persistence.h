@@ -18,7 +18,6 @@
 #include "service/features/dns_sync/queue.h"
 #include "service/features/dns_sync/reconciliation.h"
 #include "service/features/dns_sync/task.h"
-#include "service/features/logging/logger.h"
 #include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
 
@@ -135,10 +134,11 @@ import_initial_remote_records(service::background::worker_context& context, cons
 }
 
 inline ruvia::task<void>
-store_conflicts(service::background::worker_context& context, const dns_task& task,
+store_conflicts(service::background::worker_context& context, service::attempt_trace::recorder& trace,
+    const dns_task& task,
     const service::sync_runtime::running_marker_lease& lease, std::int64_t desired_revision,
     const zone_runtime_data& runtime, const std::vector<service::dns::provider_line>& lines,
-    const std::vector<record_conflict>& conflicts) {
+    const std::vector<record_conflict>& conflicts, std::string_view detail) {
     zone_runtime_dto next_runtime({.resource_ = context.pool()});
     next_runtime.set<"records_imported">(true);
     auto& runtime_lines = next_runtime.ensure<"lines">();
@@ -193,16 +193,16 @@ store_conflicts(service::background::worker_context& context, const dns_task& ta
         if (!co_await service::sync_runtime::renew_running_lease(transaction, lease)) {
             throw std::runtime_error("DNS 同步标记 lease 已失效");
         }
-        result_transition =
-            co_await service::sync_runtime::complete_running_and_record_event(transaction, lease);
+        result_transition = co_await service::sync_runtime::complete_running_and_record_event(
+            transaction, lease, detail);
         if (!result_transition.marker_transitioned_) {
             throw std::runtime_error("DNS 同步标记 lease 已失效");
         }
     } else {
         (void)co_await service::sync_runtime::release_running(transaction, lease);
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, lease,
-        result_transition);
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context.db(), lease,
+        result_transition, trace);
     co_return;
 }
 
@@ -303,9 +303,9 @@ inline ruvia::task<bool> persist_remote_merge(service::background::worker_contex
 }
 
 inline ruvia::task<void> persist_synced_zone(service::background::worker_context& context,
-    const dns_task& task,
+    service::attempt_trace::recorder& trace, const dns_task& task,
     const service::sync_runtime::running_marker_lease& lease,
-    const zone_runtime_dto& runtime, std::int64_t revision) {
+    const zone_runtime_dto& runtime, std::int64_t revision, std::string_view detail) {
     const auto runtime_json = ruvia::to_json(runtime, {.resource_ = context.pool()});
     auto transaction = co_await context.db().begin_transaction();
     const auto updated = co_await transaction.execute(
@@ -326,15 +326,15 @@ inline ruvia::task<void> persist_synced_zone(service::background::worker_context
                 throw std::runtime_error("DNS 删除同步标记 lease 已失效");
             }
         } else {
-            result_transition =
-                co_await service::sync_runtime::complete_running_and_record_event(transaction, lease);
+            result_transition = co_await service::sync_runtime::complete_running_and_record_event(
+                transaction, lease, detail);
             if (!result_transition.marker_transitioned_) {
                 throw std::runtime_error("DNS 同步标记 lease 已失效");
             }
         }
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, lease,
-        result_transition);
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context.db(), lease,
+        result_transition, trace);
     co_return;
 }
 
@@ -359,17 +359,18 @@ finish_deleted_zone_without_remote(service::background::worker_context& context,
 }
 
 inline ruvia::task<void> fail_dns_task(service::background::worker_context& context,
-    const dns_task& task, std::string_view error, bool permanent) {
-    const auto message = service::sync_runtime::bounded_error(error);
+    service::attempt_trace::recorder& trace, const dns_task& task, std::string_view error, bool permanent,
+    std::string_view detail) {
+    const auto message = service::sync_runtime::attempt_error(trace, error);
     const auto lease = service::sync_runtime::make_running_lease(
-        task.tenant_id_, task.id_, task.version_, context.lease_owner(),
+        task.tenant_id_, task.id_, task.version_, context.lease_owner(), task.claimed_at_,
         service::sync_runtime::marker_resource_type::dns_zone, task.resource_id_);
     auto transaction = co_await context.db().begin_transaction();
     (void)co_await transaction.query(
         "SELECT id FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 LIMIT 1 FOR UPDATE",
         task.tenant_id_, task.resource_id_);
-    const auto result_transition =
-        co_await service::sync_runtime::fail_running_and_record_event(transaction, lease, message);
+    const auto result_transition = co_await service::sync_runtime::fail_running_and_record_event(
+        transaction, lease, message, detail);
     if (result_transition.marker_transitioned_) {
         (void)co_await transaction.execute(
             "UPDATE sys_dns_zone SET sync_status = $2, last_error = $3, updated_at = NOW() WHERE "
@@ -377,10 +378,10 @@ inline ruvia::task<void> fail_dns_task(service::background::worker_context& cont
             task.resource_id_, permanent ? std::string_view{"failed"} : std::string_view{"pending"},
             std::string_view(message), task.version_, task.tenant_id_);
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, lease,
-        result_transition);
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context.db(), lease,
+        result_transition, trace);
     if (result_transition.marker_transitioned_) {
-        service::logging::error("DNS sync task " + task.id_ + " failed: " + message);
+        service::sync_runtime::log_attempt_failure("DNS sync task", task.id_, message);
     }
     co_return;
 }

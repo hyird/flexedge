@@ -2,6 +2,7 @@
 
 #include <ruvia/core/task.h>
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -9,7 +10,6 @@
 
 #include "service/features/background/worker_pool.h"
 #include "service/features/live_resource/fanout.h"
-#include "service/features/logging/logger.h"
 #include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/website_dispatch/task.h"
@@ -65,6 +65,7 @@ claim(service::background::worker_context& context) {
     if (rows.empty()) {
         co_return std::nullopt;
     }
+    const auto claimed_at = std::chrono::steady_clock::now();
     const auto& row = rows.front();
     service::live_resource::get_hub().publish(row[1].value().value_or(""),
         service::live_resource::resource::tasks,
@@ -75,22 +76,24 @@ claim(service::background::worker_context& context) {
         .resource_id_ = std::string(row[2].value().value_or("")),
         .version_ = row[3].as<std::int64_t>().value_or(1),
         .failures_ = row[4].as<std::int64_t>().value_or(0),
+        .claimed_at_ = claimed_at,
     };
 }
 
 inline ruvia::task<void> fail_website_marker(service::background::worker_context& context,
-    const website_marker& marker, std::string_view error) {
-    const auto message = service::sync_runtime::bounded_error(error);
+    service::attempt_trace::recorder& trace, const website_marker& marker, std::string_view error,
+    std::string_view detail) {
+    const auto message = service::sync_runtime::attempt_error(trace, error);
     const auto lease = service::sync_runtime::make_running_lease(
-        marker.tenant_id_, marker.id_, marker.version_, context.lease_owner(),
+        marker.tenant_id_, marker.id_, marker.version_, context.lease_owner(), marker.claimed_at_,
         service::sync_runtime::marker_resource_type::website, marker.resource_id_);
     auto transaction = co_await context.db().begin_transaction();
-    const auto result_transition =
-        co_await service::sync_runtime::fail_running_and_record_event(transaction, lease, message);
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, lease,
-        result_transition);
+    const auto result_transition = co_await service::sync_runtime::fail_running_and_record_event(
+        transaction, lease, message, detail);
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context.db(), lease,
+        result_transition, trace);
     if (result_transition.marker_transitioned_) {
-        service::logging::error("Website sync marker " + marker.id_ + " failed: " + message);
+        service::sync_runtime::log_attempt_failure("Website sync marker", marker.id_, message);
     }
     co_return;
 }

@@ -2,18 +2,21 @@ import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Alert, Skeleton } from '@heroui/react'
-import { formatBitsPerSecond, formatDate, formatNumber } from '@/lib/format'
+import { formatBitsPerSecond, formatNumber } from '@/lib/format'
 import { TruncatedText } from '@/components/data-table'
 import { Mono } from '@/components/mono'
-import { RelativeTime } from '@/components/relative-time'
 import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { clusterOptionsQuery } from '@/features/clusters/data'
 import { dnsZoneLinesQuery } from '@/features/dns-zones/data'
 import { dnsLinePath } from '@/features/dns-zones/dns-lines'
 import { nodeQuery } from './data'
-import { connectionLabels } from './node-status'
-import { RegistrationChip } from './registration-chip'
+import { NodeConnectionChip } from './node-connection-chip'
+import {
+  liveMetrics,
+  nodeHealthLabels,
+  nodeHealthStatuses,
+} from './node-status'
 import type { Node } from './types'
 
 const route = getRouteApi('/_authenticated/nodes/$nodeId')
@@ -111,8 +114,8 @@ export function NodeOverview() {
   if (!node)
     return (
       <div role='status' aria-label='正在加载节点概览' className='grid gap-4'>
-        <div className='grid grid-cols-2 gap-3 lg:grid-cols-5'>
-          {Array.from({ length: 5 }, (_, index) => (
+        <div className='grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6'>
+          {Array.from({ length: 6 }, (_, index) => (
             <Skeleton key={index} className='h-28 rounded-2xl' />
           ))}
         </div>
@@ -120,6 +123,7 @@ export function NodeOverview() {
       </div>
     )
   const runtime = node.runtime
+  const metrics = liveMetrics(runtime)
   const pending = runtime.applied_node_spec_revision < node.node_spec_revision
   return (
     <div className='flex flex-col gap-6'>
@@ -134,23 +138,28 @@ export function NodeOverview() {
           </Alert.Content>
         </Alert>
       )}
-      <div className='grid grid-cols-2 gap-3 lg:grid-cols-5'>
-        <LoadKpi label='CPU' value={runtime.cpu_usage} />
-        <LoadKpi label='内存' value={runtime.memory_usage} />
+      <div className='grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6'>
+        <LoadKpi label='CPU' value={metrics.cpu_usage} />
+        <LoadKpi label='内存' value={metrics.memory_usage} />
         <TextKpi
-          label='出口带宽'
-          value={formatBitsPerSecond(runtime.traffic_out_bps)}
+          label='带宽'
+          value={formatBitsPerSecond(metrics.traffic_out_bps)}
           hint='实时'
         />
         <TextKpi
           label='连接数'
-          value={formatNumber(runtime.connection_count)}
+          value={formatNumber(metrics.connection_count)}
           hint='当前活动连接'
+        />
+        <TextKpi
+          label='连接 IP'
+          value={formatNumber(metrics.connected_ip_count)}
+          hint='当前连接的客户端 IP'
         />
         <TextKpi
           label='系统负载'
           value={
-            runtime.load_1m === undefined ? '—' : runtime.load_1m.toFixed(2)
+            metrics.load_1m === undefined ? '—' : metrics.load_1m.toFixed(2)
           }
           hint='1 分钟平均'
         />
@@ -161,30 +170,8 @@ export function NodeOverview() {
             columns={3}
             items={[
               {
-                label: '连接',
-                value: (
-                  <StatusChip
-                    status={runtime.connection_status}
-                    reserve={connectionLabels}
-                  />
-                ),
-              },
-              {
-                label: '注册',
-                value: (
-                  <RegistrationChip status={runtime.registration_status} />
-                ),
-              },
-              {
-                label: '最近心跳',
-                value: (
-                  <span className='flex flex-col'>
-                    <RelativeTime value={runtime.last_heartbeat_at} />
-                    <span className='text-xs text-muted'>
-                      {formatDate(runtime.last_heartbeat_at)}
-                    </span>
-                  </span>
-                ),
+                label: '在线状态',
+                value: <NodeConnectionChip runtime={runtime} />,
               },
               {
                 label: 'Agent 版本',
@@ -206,34 +193,27 @@ export function NodeOverview() {
               },
               {
                 label: '健康',
-                value: (
-                  <TruncatedText text={runtime.health} className='max-w-full' />
-                ),
+                value:
+                  metrics.health &&
+                  nodeHealthStatuses.includes(metrics.health) ? (
+                    <StatusChip
+                      status={metrics.health}
+                      reserve={nodeHealthLabels}
+                    />
+                  ) : (
+                    <TruncatedText
+                      text={metrics.health}
+                      className='max-w-full text-muted'
+                    />
+                  ),
               },
               {
                 label: '排队日志',
-                value: formatNumber(runtime.queued_log_events),
+                value: formatNumber(metrics.queued_log_events),
               },
               {
                 label: '丢弃日志',
-                value: formatNumber(runtime.dropped_log_events),
-              },
-              {
-                label: '活动发布',
-                value: runtime.active_release_id ? (
-                  <Mono truncate>{runtime.active_release_id}</Mono>
-                ) : (
-                  '—'
-                ),
-              },
-              {
-                label: '清单摘要',
-                wide: true,
-                value: runtime.active_manifest_digest ? (
-                  <Mono truncate>{runtime.active_manifest_digest}</Mono>
-                ) : (
-                  '—'
-                ),
+                value: formatNumber(metrics.dropped_log_events),
               },
               {
                 label: '最近错误',

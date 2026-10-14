@@ -24,6 +24,15 @@
 
 namespace service::dns {
 
+// Outcome of reconciling one desired record: the provider record id it now
+// lives under and, when an existing provider record was reused or updated,
+// that record as it was before the call.
+struct reconciled_record final {
+    record_reconciliation_action action_;
+    std::string remote_id_;
+    std::optional<provider_record> previous_;
+};
+
 class dns_provider_driver final {
 public:
     explicit dns_provider_driver(std::string_view provider)
@@ -42,17 +51,17 @@ public:
     }
 
     template <typename runtime_type>
-    ruvia::task<std::vector<provider_zone>> verify(runtime_type& c, std::string_view account_id,
-        std::string_view secret) const {
+    ruvia::task<std::vector<provider_zone>> verify(runtime_type& c, service::attempt_trace::recorder& trace,
+        std::string_view account_id, std::string_view secret) const {
         std::vector<provider_zone> result;
         if (kind_ == dns_provider_kind::cloudflare) {
-            const auto zones = co_await get_cloudflare_client().verify_token(c, secret, account_id);
+            const auto zones = co_await get_cloudflare_client().verify_token(c, trace, secret, account_id);
             result.reserve(zones.size());
             for (const auto& zone : zones) {
                 result.push_back({zone.id_, zone.name_, zone.status_});
             }
         } else {
-            const auto zones = co_await get_aliyun_client().verify_access_key(c, account_id, secret);
+            const auto zones = co_await get_aliyun_client().verify_access_key(c, trace, account_id, secret);
             result.reserve(zones.size());
             for (const auto& zone : zones) {
                 result.push_back({zone.id_, zone.name_, zone.status_});
@@ -62,13 +71,13 @@ public:
     }
 
     template <typename runtime_type>
-    ruvia::task<provider_zone> find_zone(runtime_type& c, std::string_view account_id,
-        std::string_view secret, std::string_view domain) const {
+    ruvia::task<provider_zone> find_zone(runtime_type& c, service::attempt_trace::recorder& trace,
+        std::string_view account_id, std::string_view secret, std::string_view domain) const {
         if (kind_ == dns_provider_kind::cloudflare) {
-            const auto zone = co_await get_cloudflare_client().find_zone(c, secret, account_id, domain);
+            const auto zone = co_await get_cloudflare_client().find_zone(c, trace, secret, account_id, domain);
             co_return provider_zone{zone.id_, zone.name_, zone.status_};
         }
-        const auto zones = co_await get_aliyun_client().list_domains(c, account_id, secret);
+        const auto zones = co_await get_aliyun_client().list_domains(c, trace, account_id, secret);
         const auto found = std::find_if(zones.begin(), zones.end(), [domain](const auto& zone) {
             return record_name_policy::dns_name_equals(zone.name_, domain);
         });
@@ -80,11 +89,11 @@ public:
 
     template <typename runtime_type>
     ruvia::task<std::vector<provider_record>>
-    list_records(runtime_type& c, std::string_view account_id, std::string_view secret,
-        std::string_view zone_id, std::string_view domain) const {
+    list_records(runtime_type& c, service::attempt_trace::recorder& trace, std::string_view account_id,
+        std::string_view secret, std::string_view zone_id, std::string_view domain) const {
         std::vector<provider_record> result;
         if (kind_ == dns_provider_kind::cloudflare) {
-            const auto records = co_await get_cloudflare_client().list_all_records(c, secret, zone_id);
+            const auto records = co_await get_cloudflare_client().list_all_records(c, trace, secret, zone_id);
             result.reserve(records.size());
             for (const auto& record : records) {
                 result.push_back({record.id_, record.type_, record.name_, record.content_, record.ttl_,
@@ -92,7 +101,7 @@ public:
             }
         } else {
             const auto records =
-                co_await get_aliyun_client().list_all_records(c, account_id, secret, domain);
+                co_await get_aliyun_client().list_all_records(c, trace, account_id, secret, domain);
             result.reserve(records.size());
             for (const auto& record : records) {
                 result.push_back({record.id_, record.type_, record.rr_, record.value_, record.ttl_,
@@ -103,13 +112,12 @@ public:
     }
 
     template <typename runtime_type>
-    ruvia::task<std::vector<provider_line>> list_lines(runtime_type& c, std::string_view account_id,
-        std::string_view secret,
-        std::string_view domain) const {
+    ruvia::task<std::vector<provider_line>> list_lines(runtime_type& c, service::attempt_trace::recorder& trace,
+        std::string_view account_id, std::string_view secret, std::string_view domain) const {
         if (kind_ == dns_provider_kind::cloudflare) {
             co_return std::vector<provider_line>{{"default", "默认", "默认"}};
         }
-        const auto lines = co_await get_aliyun_client().list_support_lines(c, account_id, secret, domain);
+        const auto lines = co_await get_aliyun_client().list_support_lines(c, trace, account_id, secret, domain);
         std::vector<provider_line> result;
         result.reserve(lines.size());
         for (const auto& line : lines) {
@@ -119,8 +127,9 @@ public:
     }
 
     template <typename runtime_type>
-    ruvia::task<std::string>
-    reconcile_record(runtime_type& c, std::string_view account_id, std::string_view secret,
+    ruvia::task<reconciled_record>
+    reconcile_record(runtime_type& c, service::attempt_trace::recorder& trace, std::string_view account_id,
+        std::string_view secret,
         std::string_view zone_id, std::string_view domain,
         std::string_view remote_record_id, std::string_view type,
         std::string_view local_name, std::string_view content, std::int64_t ttl,
@@ -145,34 +154,44 @@ public:
                 throw aliyun_error(aliyun_error_code::record_conflict,
                     "阿里云 DNS 中存在多条相同线路解析记录，无法安全接管");
             });
+        reconciled_record result{.action_ = plan.action_, .remote_id_ = {}, .previous_ = {}};
+        if (plan.record_ != nullptr) {
+            result.previous_ = *plan.record_;
+        }
         if (plan.action_ == record_reconciliation_action::reuse) {
-            co_return plan.record_->id_;
+            result.remote_id_ = plan.record_->id_;
+            co_return result;
         }
         if (kind_ == dns_provider_kind::cloudflare) {
             if (plan.action_ == record_reconciliation_action::update) {
-                co_return co_await get_cloudflare_client().update_record(c, secret, zone_id,
+                result.remote_id_ = co_await get_cloudflare_client().update_record(c, trace, secret, zone_id,
                     plan.record_->id_, type, name,
                     content, ttl, priority, proxied);
+                co_return result;
             }
-            co_return co_await get_cloudflare_client().create_or_adopt_record(
-                c, secret, zone_id, type, name, content, ttl, priority, proxied);
+            result.remote_id_ = co_await get_cloudflare_client().create_or_adopt_record(
+                c, trace, secret, zone_id, type, name, content, ttl, priority, proxied);
+            co_return result;
         }
         if (plan.action_ == record_reconciliation_action::update) {
-            co_return co_await get_aliyun_client().update_record(c, account_id, secret, plan.record_->id_,
-                domain, type, name, content, ttl,
+            result.remote_id_ = co_await get_aliyun_client().update_record(c, trace, account_id, secret,
+                plan.record_->id_, domain, type, name, content, ttl,
                 priority, line_code);
+            co_return result;
         }
-        co_return co_await get_aliyun_client().create_record(c, account_id, secret, domain, type, name,
-            content, ttl, priority, line_code);
+        result.remote_id_ = co_await get_aliyun_client().create_record(c, trace, account_id, secret, domain,
+            type, name, content, ttl, priority, line_code);
+        co_return result;
     }
 
     template <typename runtime_type>
-    ruvia::task<void> delete_record(runtime_type& c, std::string_view account_id, std::string_view secret,
-        std::string_view zone_id, std::string_view record_id) const {
+    ruvia::task<void> delete_record(runtime_type& c, service::attempt_trace::recorder& trace,
+        std::string_view account_id, std::string_view secret, std::string_view zone_id, std::string_view record_id,
+        std::string_view subject) const {
         if (kind_ == dns_provider_kind::cloudflare) {
-            co_await get_cloudflare_client().delete_record(c, secret, zone_id, record_id);
+            co_await get_cloudflare_client().delete_record(c, trace, secret, zone_id, record_id, subject);
         } else {
-            co_await get_aliyun_client().delete_record(c, account_id, secret, record_id);
+            co_await get_aliyun_client().delete_record(c, trace, account_id, secret, record_id, subject);
         }
         co_return;
     }

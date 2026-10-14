@@ -1,3 +1,4 @@
+import type { NavigationTarget } from '@/lib/history-state'
 import type { StatusTone } from '@/lib/status'
 import type { Task } from './types'
 
@@ -77,32 +78,35 @@ const certificateProviderCodes: Record<string, true> = {
   zerossl: true,
 }
 
-/** Detail route of the task's resource. Providers have no detail page, so the
- * provider list is opened filtered to the account. */
-export function taskResourceHref(task: {
+/** Detail page of the task's resource. Providers have no detail page, so the
+ * provider list opens on the matching tab filtered to the account; the tab and
+ * keyword travel as history state, never in the URL. */
+export function taskResourceTarget(task: {
   resource_type: Task['resource_type'] | (string & {})
   resource_id: string
   name: string
-}) {
+}): NavigationTarget {
   const id = encodeURIComponent(task.resource_id)
   switch (task.resource_type) {
     case 'dns_zone':
-      return `/dns-zones/${id}`
+      return { href: `/dns-zones/${id}` }
     case 'certificate':
-      return `/certificates/${id}`
+      return { href: `/certificates/${id}` }
     case 'website':
-      return `/websites/${id}`
+      return { href: `/websites/${id}` }
     case 'node':
-      return `/nodes/${id}`
-    case 'provider': {
-      const search = new URLSearchParams(
-        certificateProviderCodes[task.name]
-          ? { tab: 'certificate', q: task.name }
-          : { q: task.name }
-      )
-      return `/providers?${search}`
-    }
+      return { href: `/nodes/${id}` }
+    case 'provider':
+      return {
+        href: '/providers',
+        state: {
+          providers: {
+            tab: certificateProviderCodes[task.name] ? 'certificate' : 'dns',
+            q: task.name,
+          },
+        },
+      }
     default:
-      return '/tasks'
+      return { href: '/tasks' }
   }
 }

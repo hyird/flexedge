@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from 'react'
+import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import {
@@ -10,8 +10,10 @@ import {
   Pencil,
   TrashBin,
 } from '@gravity-ui/icons'
-import { Skeleton, toast } from '@heroui/react'
+import { Button, Skeleton, toast } from '@heroui/react'
+import { useArrivalState } from '@/lib/history-state'
 import { queryKeys } from '@/lib/query-keys'
+import { useTabSwitchGuard } from '@/lib/unsaved-changes'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
 import { ActionMenu } from '@/components/action-menu'
 import { ConfirmDialog } from '@/components/confirm-dialog'
@@ -28,12 +30,11 @@ import {
   websiteDetailQuery,
   websiteSnapshotQuery,
 } from './data'
-import { WebsiteContext } from './website-context'
 import {
-  websiteTabSearchKeys,
-  type WebsiteDetailSearch,
+  WebsiteContext,
+  type WebsiteArrival,
   type WebsiteDetailTab,
-} from './website-detail-search'
+} from './website-context'
 import {
   deployStatusReserve,
   websiteName,
@@ -52,14 +53,9 @@ const tabItems = [
   { id: 'settings', label: '配置', icon: <Gear /> },
 ] as const
 
-const tabContent: Record<WebsiteDetailTab, ReactNode> = {
-  overview: <WebsiteOverview />,
-  traffic: <WebsiteTraffic />,
-  logs: <AccessLogs />,
-  settings: <WebsiteSettingsPage />,
-}
-
-/** `/websites/$websiteId`: header, in-page tabs (`?tab=`) and the active tab.
+/** `/websites/$websiteId`: header, in-page tabs and the active tab. The tab is
+ * component state and never touches the URL; an arrival may request a tab and
+ * its starting values via `state.website`, which only that first tab receives.
  * One live stream per page: the overview and settings tabs subscribe to the
  * website detail stream and the header reuses it; traffic and logs keep
  * their own stream, so the header reads the detail once (or reuses the last
@@ -67,12 +63,22 @@ const tabContent: Record<WebsiteDetailTab, ReactNode> = {
  * selected tab is mounted, so leaving a tab closes its stream. */
 export function WebsiteDetailLayout() {
   const { websiteId } = route.useParams()
-  const tab: WebsiteDetailTab = route.useSearch({
-    select: (search) => search.tab ?? 'overview',
-  })
+  const [view, setView, arrivalKey] = useArrivalState((state) => ({
+    // History may hold a stale value after a reload; fall back to overview.
+    tab:
+      tabItems.find((item) => item.id === state.website?.tab)?.id ?? 'overview',
+    initial: state.website,
+  }))
+  const { tab } = view
   const client = useQueryClient()
   const navigate = route.useNavigate()
-  const base = `/websites/${websiteId}`
+  const tabGuard = useTabSwitchGuard()
+  // Same-page shortcuts (header, menu, links inside tabs) ask before leaving a
+  // dirty settings draft, like clicking another tab.
+  const openTab = (next: WebsiteDetailTab, initial?: WebsiteArrival) => {
+    if (next !== tab || initial)
+      tabGuard.request(() => setView({ tab: next, initial }))
+  }
   const liveTab = tab === 'overview' || tab === 'settings'
   const live = useQuery({ ...websiteDetailQuery(websiteId), enabled: liveTab })
   const snapshot = useQuery({
@@ -92,21 +98,6 @@ export function WebsiteDetailLayout() {
   useBreadcrumbLabel(website ? websiteName(website) : undefined)
   const refresh = () => {
     if (!liveTab) void snapshot.refetch()
-  }
-  // Replace the entry and drop the params owned by the tab being left.
-  const selectTab = (next: WebsiteDetailTab) => {
-    if (next === tab) return
-    const cleared: Partial<WebsiteDetailSearch> = Object.fromEntries(
-      websiteTabSearchKeys[tab].map((key) => [key, undefined])
-    )
-    void navigate({
-      search: (previous) => ({
-        ...previous,
-        ...cleared,
-        tab: next === 'overview' ? undefined : next,
-      }),
-      replace: true,
-    })
   }
 
   if (!deleted && query.isError && isWebsiteNotFound(query.error))
@@ -137,7 +128,17 @@ export function WebsiteDetailLayout() {
     )
 
   const name = websiteName(website)
-  const content = tabContent[tab]
+  const tabKey = `${arrivalKey}:${tab}`
+  const content =
+    tab === 'overview' ? (
+      <WebsiteOverview key={tabKey} />
+    ) : tab === 'traffic' ? (
+      <WebsiteTraffic key={tabKey} />
+    ) : tab === 'logs' ? (
+      <AccessLogs key={tabKey} />
+    ) : (
+      <WebsiteSettingsPage key={tabKey} initial={view.initial} />
+    )
   return (
     <Page>
       <DetailHeader
@@ -168,10 +169,10 @@ export function WebsiteDetailLayout() {
           </span>,
         ]}
         actions={
-          <LinkButton href={`${base}?tab=settings`}>
+          <Button size='sm' onPress={() => openTab('settings')}>
             <Pencil />
             编辑配置
-          </LinkButton>
+          </Button>
         }
         menu={
           <ActionMenu
@@ -181,7 +182,7 @@ export function WebsiteDetailLayout() {
                 id: 'logs',
                 label: '访问日志',
                 icon: <FileText />,
-                href: `${base}?tab=logs`,
+                onAction: () => openTab('logs'),
               },
               {
                 id: 'delete',
@@ -206,9 +207,12 @@ export function WebsiteDetailLayout() {
         label='网站详情'
         items={tabItems}
         selected={tab}
-        onSelectionChange={selectTab}
+        guard={tabGuard}
+        onSelectionChange={(next) => setView({ tab: next, initial: undefined })}
       >
-        <WebsiteContext value={{ website, refresh }}>{content}</WebsiteContext>
+        <WebsiteContext value={{ website, refresh, openTab }}>
+          {content}
+        </WebsiteContext>
       </PageTabs>
       <ConfirmDialog
         isOpen={removing}

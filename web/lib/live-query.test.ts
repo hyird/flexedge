@@ -5,6 +5,7 @@ import {
 } from '@tanstack/react-query'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { ApiBusinessError, ApiProtocolError } from './api-response'
+import { reconnectingEventSource } from './event-stream'
 import { LiveQueryManager } from './live-query'
 
 class Source extends EventTarget {
@@ -534,4 +535,125 @@ test('session expiry recovery is shared and late auth completion cannot revive a
   expect(sources.every((source) => source.closed)).toBe(true)
   sources[0].snapshot(['stale'])
   expect(client.getQueryData(['nodes'])).toBeUndefined()
+})
+
+const pageTransition = (type: 'pagehide' | 'pageshow', persisted: boolean) =>
+  Object.assign(new Event(type), { persisted })
+
+/** Manager over the real reconnecting transport with a fake page. */
+function setupPage() {
+  const page = new EventTarget()
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  })
+  const connections: Array<{ url: string; source: Source }> = []
+  const manager = new LiveQueryManager(
+    client,
+    (url) =>
+      reconnectingEventSource(url, {
+        idleTimeoutMs: null,
+        pageLifecycle: page,
+        createSource: (path) => {
+          const source = new Source()
+          connections.push({ url: path, source })
+          return source as unknown as EventSource
+        },
+      }),
+    vi.fn(async () => ({})),
+    vi.fn(),
+    page
+  )
+  const observe = (
+    key: QueryKey,
+    read: (signal: AbortSignal) => Promise<unknown>
+  ) => {
+    const observer = new QueryObserver(client, {
+      queryKey: key,
+      queryFn: ({ signal }) => read(signal),
+    })
+    const unsubscribe = observer.subscribe(() => undefined)
+    cleanups.push(() => {
+      unsubscribe()
+      observer.destroy()
+    })
+    return observer
+  }
+  cleanups.push(() => {
+    manager.dispose()
+    client.clear()
+  })
+  const open = () => connections.filter(({ source }) => !source.closed)
+  return { page, client, manager, connections, open, observe }
+}
+
+test('the back/forward cache closes every stream and a restore reopens each mounted one once', async () => {
+  const { page, client, manager, connections, open, observe } = setupPage()
+  const overview = '/api/overview/stream'
+  observe(['overview'], (signal) =>
+    manager.readEvent(overview, 'snapshot', ['overview'], signal)
+  )
+  observe(['overview', 'nodes'], (signal) =>
+    manager.readEvent(overview, 'nodes', ['overview', 'nodes'], signal)
+  )
+  observe(['node'], (signal) =>
+    manager.read('/api/nodes/a/stream', ['node'], signal)
+  )
+  await settled(() => expect(connections).toHaveLength(2))
+  connections[0].source.snapshot({ value: 1 })
+  connections[0].source.frame('nodes', { code: 0, message: 'ok', data: [1] })
+  connections[1].source.snapshot({ id: 'a' })
+  await settled(() =>
+    expect(client.getQueryData(['overview'])).toEqual({ value: 1 })
+  )
+
+  page.dispatchEvent(pageTransition('pagehide', true))
+  expect(open()).toHaveLength(0)
+  page.dispatchEvent(pageTransition('pageshow', true))
+  await settled(() => {
+    expect(connections).toHaveLength(4)
+    expect(open().map(({ url }) => url)).toEqual([
+      overview,
+      '/api/nodes/a/stream',
+    ])
+  })
+  // The recovery snapshot updates the cache without another connection.
+  connections[2].source.snapshot({ value: 2 })
+  connections[2].source.frame('nodes', { code: 0, message: 'ok', data: [2] })
+  connections[3].source.snapshot({ id: 'a', name: 'restored' })
+  await settled(() => {
+    expect(client.getQueryData(['overview'])).toEqual({ value: 2 })
+    expect(client.getQueryData(['overview', 'nodes'])).toEqual([2])
+    expect(client.getQueryData(['node'])).toEqual({ id: 'a', name: 'restored' })
+    expect(connections).toHaveLength(4)
+  })
+})
+
+test('a one-shot read in flight is cancelled on pagehide and read once more on restore', async () => {
+  const { page, client, manager, connections, open, observe } = setupPage()
+  const url = '/api/clusters/options/stream'
+  const options = observe(['clusters', 'options'], (signal) =>
+    manager.read(url, ['clusters', 'options'], signal)
+  )
+  await settled(() => expect(connections).toHaveLength(1))
+
+  page.dispatchEvent(pageTransition('pagehide', true))
+  expect(open()).toHaveLength(0)
+  await settled(() => {
+    // Reverted instead of failed: no error is shown for the cancelled read.
+    const result = options.getCurrentResult()
+    expect(result.isError).toBe(false)
+    expect(result.fetchStatus).toBe('idle')
+  })
+  page.dispatchEvent(pageTransition('pageshow', true))
+  await settled(() => expect(connections).toHaveLength(2))
+  connections[1].source.snapshot([{ id: 'cluster-a' }])
+  await settled(() => {
+    expect(client.getQueryData(['clusters', 'options'])).toEqual([
+      { id: 'cluster-a' },
+    ])
+    expect(open()).toHaveLength(0)
+  })
+  page.dispatchEvent(pageTransition('pagehide', true))
+  page.dispatchEvent(pageTransition('pageshow', true))
+  await settled(() => expect(connections).toHaveLength(2))
 })

@@ -1,8 +1,10 @@
 #pragma once
 
 #include <ruvia/core/task.h>
+#include <ruvia/web/db/db_query.h>
 #include <ruvia/web/db/db_transaction.h>
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -10,7 +12,10 @@
 #include <string_view>
 #include <utility>
 
+#include "service/features/attempt_trace/recorder.h"
+#include "service/features/attempt_trace/trace_store.h"
 #include "service/features/live_resource/fanout.h"
+#include "service/features/sync_runtime/attempt_record.h"
 
 namespace service::sync_runtime {
 
@@ -132,33 +137,38 @@ struct marker_reference final {
     std::string_view resource_id_;
 };
 
+// `started_` is the monotonic instant the claim acquired the lease; it times
+// the attempt for the task history.
 struct running_marker_lease final {
     marker_reference marker_;
     std::string_view owner_;
+    std::chrono::steady_clock::time_point started_{};
 };
 
+// `event_id_` identifies the recorded attempt row when one was written.
 struct running_result_transition final {
     bool marker_transitioned_{};
     bool event_recorded_{};
+    std::optional<std::int64_t> event_id_;
 };
 
 inline constexpr std::int64_t retry_delay_seconds{15};
 inline constexpr std::int64_t lease_timeout_seconds{60};
 inline constexpr std::string_view lease_recovery_retry_error{"同步租约超时，已回收重试"};
-inline constexpr std::string_view event_outcome_completed{"completed"};
-inline constexpr std::string_view event_outcome_failed{"failed"};
 
 [[nodiscard]] inline running_marker_lease make_running_lease(std::string_view tenant_id,
     std::string_view marker_id,
     std::int64_t version,
     std::string_view owner,
+    std::chrono::steady_clock::time_point started,
     marker_resource_type resource_type = marker_resource_type::website,
     std::string_view resource_id = {}) {
     if (tenant_id.empty() || marker_id.empty() || owner.empty() || version <= 0) {
         throw std::invalid_argument("invalid running marker lease");
     }
     return {.marker_ = {.tenant_id_ = tenant_id, .marker_id_ = marker_id, .version_ = version, .resource_type_ = resource_type, .resource_id_ = resource_id},
-        .owner_ = owner};
+        .owner_ = owner,
+        .started_ = started};
 }
 
 namespace detail {
@@ -189,11 +199,22 @@ inline void publish_recorded_result_event(const running_marker_lease& lease) {
 
 }  // namespace detail
 
-template <typename transaction_type>
-inline ruvia::task<void> commit_and_publish_result_event(transaction_type& transaction,
-    const running_marker_lease& lease,
-    const running_result_transition& transition) {
+// Commits the result, then stores the attempt trace with the worker's
+// autocommit handle (a trace failure is logged and never undoes or delays the
+// committed result), then publishes the change.
+template <typename transaction_type, typename database_type>
+inline ruvia::task<void> commit_and_publish_result_event(transaction_type& transaction, database_type&& database,
+    const running_marker_lease& lease, const running_result_transition& transition,
+    service::attempt_trace::recorder& trace) {
     co_await transaction.commit();
+    if (transition.event_id_) {
+        co_await service::attempt_trace::store_attempt_trace(database,
+            {.tenant_id_ = lease.marker_.tenant_id_,
+                .task_id_ = lease.marker_.marker_id_,
+                .resource_id_ = lease.marker_.resource_id_,
+                .version_ = lease.marker_.version_},
+            *transition.event_id_, trace);
+    }
     if (transition.event_recorded_) {
         detail::publish_recorded_result_event(lease);
     }
@@ -311,23 +332,54 @@ inline ruvia::task<bool> complete_running(database_type& database, const running
     co_return result.affected_rows() != 0;
 }
 
+// Records the attempt that just transitioned the marker. Must run in the same
+// transaction right after complete_running/fail_running: the row is copied
+// from the marker only while the marker is in the matching state, and that
+// UPDATE holds the marker row lock that serializes attempt numbering. `detail`
+// is validated before binding (accepted_detail), so an unusable detail is
+// replaced by the dropped marker instead of failing the result transaction.
 template <typename database_type>
-inline ruvia::task<bool> record_running_result_event(database_type& database,
+inline ruvia::task<std::optional<std::int64_t>> record_running_result_event(database_type& database,
     const running_marker_lease& lease,
-    std::string_view outcome) {
+    std::string_view outcome, std::string_view detail) {
     if (outcome != event_outcome_completed && outcome != event_outcome_failed) {
         throw std::invalid_argument("invalid sync marker event outcome");
     }
-    const auto result = co_await database.execute(
-        "INSERT INTO sys_sync_event (tenant_id, task_id, resource_type, resource_id, operation, "
-        "version, outcome, error) SELECT tenant_id, id, resource_type, resource_id, operation, version, "
-        "$4::varchar(16), LEFT(error, 1000) FROM sys_sync_task WHERE tenant_id = $1 AND id = $2 "
-        "AND version = $3 AND "
-        "(($4::varchar(16) = 'completed'::varchar(16) AND is_done AND is_ok) OR "
-        "($4::varchar(16) = 'failed'::varchar(16) AND NOT is_done AND NOT is_ok AND "
-        "count_fails > 0))",
-        lease.marker_.tenant_id_, lease.marker_.marker_id_, lease.marker_.version_, outcome);
-    co_return result.affected_rows() != 0;
+    const bool failed = outcome == event_outcome_failed;
+    const auto elapsed = elapsed_milliseconds(lease.started_);
+    ruvia::db_query source;
+    const auto marker = [&](std::string_view column) { return source.column(column, "marker"); };
+    const auto equals = [&](ruvia::db_expression left, ruvia::db_expression right) {
+        return source.binary(left, ruvia::db_binary_operator::equal, right);
+    };
+    source.from("sys_sync_task", "marker");
+    const auto emitted_at = join_attempt_clock(source);
+    source.select({marker("tenant_id"), marker("id"), marker("resource_type"), marker("resource_id"),
+        marker("operation"), marker("version"), source.cast(source.value(outcome), ruvia::db_data_type::text),
+        source.call("left", {marker("error"), source.value(std::int64_t{1000})}),
+        next_attempt_number(source, {.tenant_id_ = {"tenant_id", "marker"}, .task_id_ = {"id", "marker"}, .resource_id_ = {"resource_id", "marker"}, .version_ = {"version", "marker"}}),
+        attempt_started_at(source, emitted_at, elapsed),
+        source.cast(source.value(elapsed.value_or(0)), ruvia::db_data_type::big_int),
+        failed ? marker("next_attempt_at") : source.cast(source.null_value(), ruvia::db_data_type::timestamp_tz),
+        source.cast(source.value(accepted_detail(detail)), ruvia::db_data_type::jsonb), emitted_at});
+    source.where(equals(marker("tenant_id"), source.value(lease.marker_.tenant_id_)))
+        .and_where(equals(marker("id"), source.value(lease.marker_.marker_id_)))
+        .and_where(equals(marker("version"), source.value(lease.marker_.version_)));
+    if (failed) {
+        source.and_where(source.unary(ruvia::db_unary_operator::not_value, marker("is_done")))
+            .and_where(source.unary(ruvia::db_unary_operator::not_value, marker("is_ok")))
+            .and_where(source.binary(marker("count_fails"), ruvia::db_binary_operator::greater,
+                source.value(std::int64_t{0})));
+    } else {
+        source.and_where(marker("is_done")).and_where(marker("is_ok"));
+    }
+    ruvia::db_query insert;
+    insert.insert_into("sys_sync_event", attempt_event_columns).insert_from(source).returning({insert.column("id")});
+    const auto rows = co_await database.query(insert);
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return rows.front()[0].template as<std::int64_t>();
 }
 
 template <typename database_type>
@@ -347,13 +399,16 @@ inline ruvia::task<void> prune_result_events(database_type& database) {
 
 template <typename database_type>
 inline ruvia::task<running_result_transition>
-complete_running_and_record_event(database_type& database, const running_marker_lease& lease) {
+complete_running_and_record_event(database_type& database, const running_marker_lease& lease,
+    std::string_view detail) {
     if (!co_await complete_running(database, lease)) {
         co_return running_result_transition{};
     }
+    const auto event_id = co_await record_running_result_event(database, lease, event_outcome_completed, detail);
     co_return running_result_transition{
         .marker_transitioned_ = true,
-        .event_recorded_ = co_await record_running_result_event(database, lease, event_outcome_completed),
+        .event_recorded_ = event_id.has_value(),
+        .event_id_ = event_id,
     };
 }
 
@@ -392,13 +447,15 @@ inline ruvia::task<bool> fail_running(database_type& database, const running_mar
 template <typename database_type>
 inline ruvia::task<running_result_transition>
 fail_running_and_record_event(database_type& database, const running_marker_lease& lease,
-    std::string_view error) {
+    std::string_view error, std::string_view detail) {
     if (!co_await fail_running(database, lease, error)) {
         co_return running_result_transition{};
     }
+    const auto event_id = co_await record_running_result_event(database, lease, event_outcome_failed, detail);
     co_return running_result_transition{
         .marker_transitioned_ = true,
-        .event_recorded_ = co_await record_running_result_event(database, lease, event_outcome_failed),
+        .event_recorded_ = event_id.has_value(),
+        .event_id_ = event_id,
     };
 }
 

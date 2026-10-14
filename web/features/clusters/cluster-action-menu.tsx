@@ -8,7 +8,8 @@ import { removeCluster } from './data'
 import type { Cluster } from './types'
 
 /** Cluster overflow menu with the delete confirmation. Editing is delegated
- * to the page (`?edit=` on the list, a local sheet on the detail). */
+ * to the page (`?edit=` on the list, a local sheet on the detail); the list's
+ * “添加节点” opens the detail with the add-node sheet (history state). */
 export function ClusterActionMenu({
   cluster,
   context,
@@ -32,7 +33,8 @@ export function ClusterActionMenu({
             id: 'add-node',
             label: '添加节点',
             icon: <Plus />,
-            href: `${detail}?create=1`,
+            href: detail,
+            state: { cluster: { createNode: true } },
           },
         ]
       : []),

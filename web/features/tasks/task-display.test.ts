@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
 import { tasksSearchSchema } from './search'
-import { taskHref, taskResourceHref, taskTitle } from './task-display'
+import { taskHref, taskResourceTarget, taskTitle } from './task-display'
 
 test('task links open the detail sheet and resource detail routes', () => {
   expect(taskHref({ id: 'a:b', resource_id: 'r1', version: 3 })).toBe(
@@ -10,18 +10,24 @@ test('task links open the detail sheet and resource detail routes', () => {
     '/tasks?task=t&resource_id=r1'
   )
   const base = { resource_id: 'id-1', name: 'n' }
-  expect(taskResourceHref({ ...base, resource_type: 'website' })).toBe(
-    '/websites/id-1'
-  )
-  expect(taskResourceHref({ ...base, resource_type: 'dns_zone' })).toBe(
-    '/dns-zones/id-1'
-  )
-  expect(
-    taskResourceHref({ ...base, resource_type: 'provider', name: 'zerossl' })
-  ).toBe('/providers?tab=certificate&q=zerossl')
-  expect(
-    taskResourceHref({ ...base, resource_type: 'provider', name: 'CF 账号' })
-  ).toBe('/providers?q=CF+%E8%B4%A6%E5%8F%B7')
+  expect(taskResourceTarget({ ...base, resource_type: 'website' })).toEqual({
+    href: '/websites/id-1',
+  })
+  expect(taskResourceTarget({ ...base, resource_type: 'dns_zone' })).toEqual({
+    href: '/dns-zones/id-1',
+  })
+})
+
+test('provider tasks open the provider tab through history state, not the URL', () => {
+  const base = { resource_id: 'id-1', resource_type: 'provider' }
+  expect(taskResourceTarget({ ...base, name: 'zerossl' })).toEqual({
+    href: '/providers',
+    state: { providers: { tab: 'certificate', q: 'zerossl' } },
+  })
+  expect(taskResourceTarget({ ...base, name: 'CF 账号' })).toEqual({
+    href: '/providers',
+    state: { providers: { tab: 'dns', q: 'CF 账号' } },
+  })
   expect(taskTitle({ resource_type: 'certificate', operation: 'renew' })).toBe(
     '证书续期'
   )
@@ -40,5 +46,5 @@ test('search schema keeps valid sheet state and drops invalid filters', () => {
       days: 3,
       tab: 'history',
     })
-  ).toEqual({ task: '123', resource_id: 'r', version: 4, tab: 'history' })
+  ).toEqual({ task: '123', resource_id: 'r', version: 4 })
 })

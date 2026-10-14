@@ -132,18 +132,56 @@ struct cloudflare_record_page {
     std::int64_t total_pages_;
 };
 
+namespace detail {
+
+inline constexpr std::int64_t cloudflare_record_already_exists_code{81057};
+
+// The error of a failed Cloudflare reply: the first error's message (code
+// 81057 as the duplicate-record message), else the fallback; codes 10000 and
+// 81057 refine the error code. The text passes the attempt's redaction, so a
+// token the API echoes (e.g. in an `Authorization: Bearer …` string) or any
+// other credential of the attempt never reaches the task error or the log.
+template <typename envelope_type>
+[[nodiscard]] cloudflare_error cloudflare_reply_error(service::attempt_trace::recorder& trace,
+    const std::optional<envelope_type>& envelope, cloudflare_error_code code, std::string_view fallback) {
+    auto resolved_code = code;
+    std::string message(fallback);
+    if (envelope) {
+        const auto& errors = envelope->template get<"errors">();
+        if (errors && !errors->empty()) {
+            const auto& first = errors->front();
+            const auto& api_code = first.template get<"code">();
+            const auto value = api_code ? static_cast<std::int64_t>(*api_code) : std::int64_t{0};
+            const auto& text = first.template get<"message">();
+            if (value == 10000) {
+                resolved_code = cloudflare_error_code::authorization_failed;
+            } else if (value == cloudflare_record_already_exists_code) {
+                resolved_code = cloudflare_error_code::record_conflict;
+            }
+            if (value == cloudflare_record_already_exists_code) {
+                message = "Cloudflare 中已存在相同 DNS 记录";
+            } else if (text && !text->view().empty()) {
+                message = std::string(text->view());
+            }
+        }
+    }
+    return cloudflare_error(resolved_code, trace.redact_error(message));
+}
+
+}  // namespace detail
+
 class cloudflare_client final {
 public:
     template <typename runtime_type>
-    ruvia::task<std::vector<cloudflare_zone>> verify_token(runtime_type& c, std::string_view token,
-        std::string_view account_id) const {
-        const auto response = co_await send(
-            c, ruvia::http_known_method::get,
-            "/client/v4/accounts/" + std::string(account_id) + "/tokens/verify", token);
+    ruvia::task<std::vector<cloudflare_zone>> verify_token(runtime_type& c, service::attempt_trace::recorder& trace,
+        std::string_view token, std::string_view account_id) const {
+        trace.register_secret(account_id);
+        const auto response = co_await send(c, trace, service::attempt_trace::outbound_operation::cloudflare_verify_token,
+            ruvia::http_known_method::get, "/client/v4/accounts/" + std::string(account_id) + "/tokens/verify", token);
         const std::optional<cloudflare_token_envelope> parsed =
             ruvia::from_json<cloudflare_token_envelope>(response.body(), {.resource_ = c.pool()});
         if (!response.status().is_successful() || !parsed || !success(*parsed)) {
-            fail(parsed, cloudflare_error_code::credential_invalid,
+            fail(trace, parsed, cloudflare_error_code::credential_invalid,
                 "Cloudflare API Token 无效或未激活");
         }
         const auto& result = parsed->get<"result">();
@@ -157,12 +195,13 @@ public:
                 "Cloudflare API Token 无效或未激活");
         }
 
-        co_return co_await list_zones(c, token, account_id);
+        co_return co_await list_zones(c, trace, token, account_id);
     }
 
     template <typename runtime_type>
-    ruvia::task<std::vector<cloudflare_zone>> list_zones(runtime_type& c, std::string_view token,
-        std::string_view account_id) const {
+    ruvia::task<std::vector<cloudflare_zone>> list_zones(runtime_type& c, service::attempt_trace::recorder& trace,
+        std::string_view token, std::string_view account_id) const {
+        trace.register_secret(account_id);
         std::vector<cloudflare_zone> result;
         std::int64_t page = 1;
         std::int64_t total_pages = 1;
@@ -170,12 +209,13 @@ public:
             const auto target =
                 "/client/v4/zones?account.id=" + percent_encode(account_id) +
                 "&status=active&order=name&direction=asc&per_page=50&page=" + std::to_string(page);
-            const auto response = co_await send(c, ruvia::http_known_method::get, target, token);
+            const auto response = co_await send(c, trace, service::attempt_trace::outbound_operation::cloudflare_list_zones,
+                ruvia::http_known_method::get, target, token);
             const std::optional<cloudflare_zone_envelope> parsed =
                 ruvia::from_json<cloudflare_zone_envelope>(response.body(),
                     {.resource_ = c.pool()});
             if (!response.status().is_successful() || !parsed || !success(*parsed)) {
-                fail(parsed, cloudflare_error_code::credential_invalid,
+                fail(trace, parsed, cloudflare_error_code::credential_invalid,
                     "Cloudflare API Token 缺少 Zone Read 权限");
             }
             const auto& zones = parsed->get<"result">();
@@ -200,14 +240,18 @@ public:
                 }
             }
             ++page;
+            if (page <= total_pages) {
+                trace.log(service::attempt_trace::log_level::info,
+                    "已读取第 " + std::to_string(page - 1) + " 页，共 " + std::to_string(total_pages) + " 页托管域");
+            }
         } while (page <= total_pages);
         co_return result;
     }
 
     template <typename runtime_type>
-    ruvia::task<cloudflare_zone> find_zone(runtime_type& c, std::string_view token,
-        std::string_view account_id,
-        std::string_view domain) const {
+    ruvia::task<cloudflare_zone> find_zone(runtime_type& c, service::attempt_trace::recorder& trace,
+        std::string_view token, std::string_view account_id, std::string_view domain) const {
+        trace.register_secret(account_id);
         std::string candidate = normalize_domain(domain);
         if (candidate.starts_with("*.")) {
             candidate.erase(0, 2);
@@ -216,12 +260,13 @@ public:
         while (candidate.find('.') != std::string::npos) {
             const auto target = "/client/v4/zones?account.id=" + percent_encode(account_id) +
                                 "&name=" + percent_encode(candidate) + "&status=active&per_page=5";
-            const auto response = co_await send(c, ruvia::http_known_method::get, target, token);
+            const auto response = co_await send(c, trace, service::attempt_trace::outbound_operation::cloudflare_find_zone,
+                ruvia::http_known_method::get, target, token, std::nullopt, candidate);
             const std::optional<cloudflare_zone_envelope> parsed =
                 ruvia::from_json<cloudflare_zone_envelope>(response.body(),
                     {.resource_ = c.pool()});
             if (!response.status().is_successful() || !parsed || !success(*parsed)) {
-                fail(parsed, cloudflare_error_code::upstream_failed, "Cloudflare Zone 查询失败");
+                fail(trace, parsed, cloudflare_error_code::upstream_failed, "Cloudflare Zone 查询失败");
             }
 
             const auto& zones = parsed->get<"result">();
@@ -245,20 +290,22 @@ public:
 
     template <typename runtime_type>
     ruvia::task<cloudflare_record_page>
-    list_records(runtime_type& c, std::string_view token, std::string_view zone_id, std::int64_t page,
-        std::int64_t page_size, const std::optional<std::string>& keyword) const {
+    list_records(runtime_type& c, service::attempt_trace::recorder& trace, std::string_view token,
+        std::string_view zone_id, std::int64_t page, std::int64_t page_size,
+        const std::optional<std::string>& keyword) const {
         auto target = "/client/v4/zones/" + std::string(zone_id) +
                       "/dns_records?order=name&direction=asc&page=" + std::to_string(page) +
                       "&per_page=" + std::to_string(page_size);
         if (keyword && !keyword->empty()) {
             target += "&search=" + percent_encode(*keyword);
         }
-        const auto response = co_await send(c, ruvia::http_known_method::get, target, token);
+        const auto response = co_await send(c, trace, service::attempt_trace::outbound_operation::cloudflare_list_records,
+            ruvia::http_known_method::get, target, token);
         const std::optional<cloudflare_record_list_envelope> parsed =
             ruvia::from_json<cloudflare_record_list_envelope>(response.body(),
                 {.resource_ = c.pool()});
         if (!response.status().is_successful() || !parsed || !success(*parsed)) {
-            fail(parsed, cloudflare_error_code::dns_failed, "Cloudflare DNS 记录查询失败");
+            fail(trace, parsed, cloudflare_error_code::dns_failed, "Cloudflare DNS 记录查询失败");
         }
 
         cloudflare_record_page result;
@@ -314,13 +361,13 @@ public:
     }
 
     template <typename runtime_type>
-    ruvia::task<std::vector<cloudflare_record>> list_all_records(runtime_type& c, std::string_view token,
-        std::string_view zone_id) const {
+    ruvia::task<std::vector<cloudflare_record>> list_all_records(runtime_type& c,
+        service::attempt_trace::recorder& trace, std::string_view token, std::string_view zone_id) const {
         std::vector<cloudflare_record> result;
         std::int64_t page = 1;
         std::int64_t total_pages = 1;
         do {
-            auto current = co_await list_records(c, token, zone_id, page, 100, std::nullopt);
+            auto current = co_await list_records(c, trace, token, zone_id, page, 100, std::nullopt);
             result.insert(result.end(), std::make_move_iterator(current.list_.begin()),
                 std::make_move_iterator(current.list_.end()));
             total_pages = current.total_pages_;
@@ -331,19 +378,20 @@ public:
 
     template <typename runtime_type>
     ruvia::task<std::string>
-    create_or_adopt_record(runtime_type& c, std::string_view token, std::string_view zone_id,
-        std::string_view type, std::string_view name, std::string_view content,
-        std::int64_t ttl, std::optional<std::int64_t> priority,
-        bool proxied) const {
-        auto existing_id = co_await find_exact_record_id(c, token, zone_id, type, name, content);
+    create_or_adopt_record(runtime_type& c, service::attempt_trace::recorder& trace, std::string_view token,
+        std::string_view zone_id, std::string_view type, std::string_view name, std::string_view content,
+        std::int64_t ttl, std::optional<std::int64_t> priority, bool proxied) const {
+        auto existing_id = co_await find_exact_record_id(c, trace, token, zone_id, type, name, content);
         if (existing_id) {
-            co_return co_await update_record(c, token, zone_id, *existing_id, type, name, content, ttl,
+            trace.log(service::attempt_trace::log_level::info, "服务商已有相同记录，改为更新该记录");
+            co_return co_await update_record(c, trace, token, zone_id, *existing_id, type, name, content, ttl,
                 priority, proxied);
         }
 
         bool duplicate = false;
         try {
-            co_return co_await save_record(c, ruvia::http_known_method::post,
+            co_return co_await save_record(c, trace, service::attempt_trace::outbound_operation::cloudflare_create_record,
+                ruvia::http_known_method::post,
                 "/client/v4/zones/" + std::string(zone_id) +
                     "/dns_records",
                 token, type, name, content, ttl, priority, proxied);
@@ -355,9 +403,10 @@ public:
         }
 
         if (duplicate) {
-            existing_id = co_await find_exact_record_id(c, token, zone_id, type, name, content);
+            trace.log(service::attempt_trace::log_level::warning, "服务商报告记录已存在（81057），查找后接管该记录");
+            existing_id = co_await find_exact_record_id(c, trace, token, zone_id, type, name, content);
             if (existing_id) {
-                co_return co_await update_record(c, token, zone_id, *existing_id, type, name, content,
+                co_return co_await update_record(c, trace, token, zone_id, *existing_id, type, name, content,
                     ttl, priority, proxied);
             }
         }
@@ -367,40 +416,45 @@ public:
 
     template <typename runtime_type>
     ruvia::task<std::string>
-    update_record(runtime_type& c, std::string_view token, std::string_view zone_id,
-        std::string_view record_id, std::string_view type, std::string_view name,
+    update_record(runtime_type& c, service::attempt_trace::recorder& trace, std::string_view token,
+        std::string_view zone_id, std::string_view record_id, std::string_view type, std::string_view name,
         std::string_view content, std::int64_t ttl, std::optional<std::int64_t> priority,
         bool proxied) const {
-        co_return co_await save_record(c, ruvia::http_known_method::put,
+        co_return co_await save_record(c, trace, service::attempt_trace::outbound_operation::cloudflare_update_record,
+            ruvia::http_known_method::put,
             "/client/v4/zones/" + std::string(zone_id) + "/dns_records/" +
                 std::string(record_id),
             token, type, name, content, ttl, priority, proxied);
     }
 
     template <typename runtime_type>
-    ruvia::task<void> delete_record(runtime_type& c, std::string_view token, std::string_view zone_id,
-        std::string_view record_id) const {
+    ruvia::task<void> delete_record(runtime_type& c, service::attempt_trace::recorder& trace, std::string_view token,
+        std::string_view zone_id, std::string_view record_id, std::string_view subject) const {
         const auto target =
             "/client/v4/zones/" + std::string(zone_id) + "/dns_records/" + std::string(record_id);
-        const auto response = co_await send(c, ruvia::http_known_method::delete_value, target, token);
+        const auto response = co_await send(c, trace, service::attempt_trace::outbound_operation::cloudflare_delete_record,
+            ruvia::http_known_method::delete_value, target, token, std::nullopt, subject);
         if (response.status() == ruvia::http_status::not_found) {
+            trace.log(service::attempt_trace::log_level::warning, "服务商记录已不存在（404），视为已删除");
             co_return;
         }
         const std::optional<cloudflare_delete_envelope> parsed =
             ruvia::from_json<cloudflare_delete_envelope>(response.body(), {.resource_ = c.pool()});
         if (!response.status().is_successful() || !parsed || !success(*parsed)) {
-            fail(parsed, cloudflare_error_code::dns_failed, "Cloudflare DNS 记录删除失败");
+            fail(trace, parsed, cloudflare_error_code::dns_failed, "Cloudflare DNS 记录删除失败");
         }
         co_return;
     }
 
 private:
-    static constexpr std::int64_t record_already_exists_code{81057};
-
     template <typename runtime_type>
     ruvia::task<service::outbound_http::buffered_response>
-    send(runtime_type& c, ruvia::http_known_method method, std::string_view target, std::string_view token,
-        std::optional<std::string_view> body = std::nullopt) const {
+    send(runtime_type& c, service::attempt_trace::recorder& trace, service::attempt_trace::outbound_operation operation,
+        ruvia::http_known_method method, std::string_view target, std::string_view token,
+        std::optional<std::string_view> body = std::nullopt, std::string_view subject = {}) const {
+        // The token of every request is the attempt's credential: whatever the
+        // reply or an error echoes of it is redacted.
+        trace.register_secret(token);
         auto&& client = c.get_http_client(service::config::cloudflare_origin_alias);
         service::utils::sensitive_string authorization("Bearer " + std::string(token));
         std::array<ruvia::http_header_view, 3> headers{
@@ -411,7 +465,8 @@ private:
         const auto header_count = body ? headers.size() : headers.size() - 1;
         try {
             co_return co_await service::outbound_http::send_buffered(
-                client,
+                client, {.origin_alias_ = service::config::cloudflare_origin_alias, .operation_ = operation, .subject_ = subject},
+                trace,
                 {
                     .method_ = ruvia::known_http_method_token(method),
                     .target_ = target,
@@ -446,11 +501,10 @@ private:
     }
 
     template <typename runtime_type>
-    ruvia::task<std::string> save_record(runtime_type& c, ruvia::http_known_method method,
-        std::string target, std::string_view token,
-        std::string_view type, std::string_view name,
-        std::string_view content, std::int64_t ttl,
-        std::optional<std::int64_t> priority, bool proxied) const {
+    ruvia::task<std::string> save_record(runtime_type& c, service::attempt_trace::recorder& trace,
+        service::attempt_trace::outbound_operation operation, ruvia::http_known_method method, std::string target,
+        std::string_view token, std::string_view type, std::string_view name, std::string_view content,
+        std::int64_t ttl, std::optional<std::int64_t> priority, bool proxied) const {
         cloudflare_save_record_payload payload({.resource_ = c.pool()});
         payload.set<"type">(type);
         payload.set<"name">(name);
@@ -463,7 +517,8 @@ private:
             payload.set<"proxied">(proxied);
         }
         const auto json = ruvia::to_json(payload, {.resource_ = c.pool()});
-        const auto response = co_await send(c, method, target, token, json);
+        const auto subject = std::string(name) + " " + std::string(type);
+        const auto response = co_await send(c, trace, operation, method, target, token, json, subject);
         if (response.status() == ruvia::http_status::not_found) {
             throw cloudflare_error(cloudflare_error_code::record_not_found, "Cloudflare DNS 记录不存在");
         }
@@ -471,12 +526,12 @@ private:
             ruvia::from_json<cloudflare_record_envelope>(response.body(), {.resource_ = c.pool()});
         if (!response.status().is_successful() || !parsed || !success(*parsed)) {
             if (parsed) {
-                fail(parsed, cloudflare_error_code::dns_failed, "Cloudflare DNS 记录保存失败");
+                fail(trace, parsed, cloudflare_error_code::dns_failed, "Cloudflare DNS 记录保存失败");
             }
             const std::optional<cloudflare_error_envelope> error_envelope =
                 ruvia::from_json<cloudflare_error_envelope>(response.body(),
                     {.resource_ = c.pool()});
-            fail(error_envelope, cloudflare_error_code::dns_failed, "Cloudflare DNS 记录保存失败");
+            fail(trace, error_envelope, cloudflare_error_code::dns_failed, "Cloudflare DNS 记录保存失败");
         }
         const auto& result = parsed->get<"result">();
         if (!result) {
@@ -493,19 +548,21 @@ private:
 
     template <typename runtime_type>
     ruvia::task<std::optional<std::string>>
-    find_exact_record_id(runtime_type& c, std::string_view token, std::string_view zone_id,
-        std::string_view type, std::string_view name,
+    find_exact_record_id(runtime_type& c, service::attempt_trace::recorder& trace, std::string_view token,
+        std::string_view zone_id, std::string_view type, std::string_view name,
         std::string_view content) const {
         const auto target = "/client/v4/zones/" + std::string(zone_id) +
                             "/dns_records?match=all&type=" + percent_encode(type) +
                             "&name.exact=" + percent_encode(name) +
                             "&content.exact=" + percent_encode(content) + "&per_page=100";
-        const auto response = co_await send(c, ruvia::http_known_method::get, target, token);
+        const auto subject = std::string(name) + " " + std::string(type);
+        const auto response = co_await send(c, trace, service::attempt_trace::outbound_operation::cloudflare_find_record,
+            ruvia::http_known_method::get, target, token, std::nullopt, subject);
         const std::optional<cloudflare_record_list_envelope> parsed =
             ruvia::from_json<cloudflare_record_list_envelope>(response.body(),
                 {.resource_ = c.pool()});
         if (!response.status().is_successful() || !parsed || !success(*parsed)) {
-            fail(parsed, cloudflare_error_code::dns_failed, "Cloudflare DNS 相同记录查询失败");
+            fail(trace, parsed, cloudflare_error_code::dns_failed, "Cloudflare DNS 相同记录查询失败");
         }
 
         std::optional<std::string> result;
@@ -539,41 +596,9 @@ private:
     }
 
     template <typename envelope_type>
-    [[nodiscard]] static std::string message(const envelope_type& envelope, std::string_view fallback) {
-        const auto& errors = envelope.template get<"errors">();
-        if (errors && !errors->empty()) {
-            const auto& code = errors->front().template get<"code">();
-            if (code && static_cast<std::int64_t>(*code) == record_already_exists_code) {
-                return "Cloudflare 中已存在相同 DNS 记录";
-            }
-            const auto& value = errors->front().template get<"message">();
-            if (value && !value->view().empty()) {
-                return std::string(value->view());
-            }
-        }
-        return std::string(fallback);
-    }
-
-    template <typename envelope_type>
-    [[noreturn]] static void fail(const std::optional<envelope_type>& envelope, cloudflare_error_code code,
-        std::string_view fallback) {
-        auto resolved_code = code;
-        if (envelope) {
-            const auto& errors = envelope->template get<"errors">();
-            if (errors && !errors->empty()) {
-                const auto& api_code = errors->front().template get<"code">();
-                if (api_code) {
-                    const auto value = static_cast<std::int64_t>(*api_code);
-                    if (value == 10000) {
-                        resolved_code = cloudflare_error_code::authorization_failed;
-                    } else if (value == record_already_exists_code) {
-                        resolved_code = cloudflare_error_code::record_conflict;
-                    }
-                }
-            }
-        }
-        throw cloudflare_error(resolved_code,
-            envelope ? message(*envelope, fallback) : std::string(fallback));
+    [[noreturn]] static void fail(service::attempt_trace::recorder& trace, const std::optional<envelope_type>& envelope,
+        cloudflare_error_code code, std::string_view fallback) {
+        throw detail::cloudflare_reply_error(trace, envelope, code, fallback);
     }
 
     [[nodiscard]] static std::string normalize_domain(std::string_view input) {

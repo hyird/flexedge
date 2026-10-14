@@ -60,6 +60,11 @@ function isSnapshotOnly(url: string, key: QueryKey) {
 /** One stream per URL, owned by active Query observers. Query functions await
  * the first frame; subsequent frames write the same cache without refetching.
  * Definitions survive an unmount so a cached query can reopen on remount.
+ *
+ * Back/forward cache: each stream closes itself on `pagehide` and reconnects
+ * once on restore (`reconnectingEventSource`). One-shot reads still waiting
+ * for their snapshot are cancelled on `pagehide` (their query reverts) and
+ * read again on restore if still observed.
  */
 export class LiveQueryManager {
   private entries = new Map<string, Entry>()
@@ -70,6 +75,12 @@ export class LiveQueryManager {
   /** Bindings whose observers left; released in a microtask (StrictMode may
    * reattach in the same turn) or right before a new stream opens. */
   private pendingRelease = new Set<Binding>()
+  /** One-shot reads cancelled by `pagehide`, re-read when the page returns. */
+  private cancelledSnapshots: Binding[] = []
+  private onPageHide = () => this.cancelSnapshots()
+  private onPageShow = (event: Event) => {
+    if ((event as PageTransitionEvent).persisted) this.rereadSnapshots()
+  }
 
   constructor(
     private client: QueryClient,
@@ -78,8 +89,13 @@ export class LiveQueryManager {
     private createSource: (url: string) => Source = (url) =>
       reconnectingEventSource(url, { idleTimeoutMs: null }),
     private recoverSession: () => Promise<unknown> = () => getData('/auth/me'),
-    private onSessionError: (error: unknown) => void = () => undefined
+    private onSessionError: (error: unknown) => void = () => undefined,
+    private pageLifecycle: EventTarget | null = typeof window === 'undefined'
+      ? null
+      : window
   ) {
+    pageLifecycle?.addEventListener('pagehide', this.onPageHide)
+    pageLifecycle?.addEventListener('pageshow', this.onPageShow)
     this.unsubscribe = client.getQueryCache().subscribe((event) => {
       const binding = this.definitions.get(event.query.queryHash)
       if (!binding) return
@@ -453,11 +469,40 @@ export class LiveQueryManager {
     }
     this.entries.clear()
     this.definitions.clear()
+    this.cancelledSnapshots = []
+  }
+
+  /** Cancels in-flight one-shot reads so no snapshot request outlives the
+   * page; the query reverts to its previous state instead of failing. */
+  private cancelSnapshots() {
+    for (const entry of [...this.entries.values()])
+      for (const binding of [...entry.bindings.values()]) {
+        if (!binding.snapshotOnly) continue
+        this.cancelledSnapshots.push(binding)
+        void this.client
+          .getQueryCache()
+          .find({ queryKey: binding.key, exact: true })
+          ?.cancel({ revert: true })
+        this.detach(binding)
+      }
+  }
+
+  private rereadSnapshots() {
+    const bindings = this.cancelledSnapshots.splice(0)
+    for (const binding of bindings) {
+      if (this.definitions.get(binding.hash) !== binding) continue
+      const query = this.client
+        .getQueryCache()
+        .find({ queryKey: binding.key, exact: true })
+      if (query?.isActive()) void query.fetch().catch(() => undefined)
+    }
   }
 
   dispose() {
     this.close()
     this.unsubscribe()
+    this.pageLifecycle?.removeEventListener('pagehide', this.onPageHide)
+    this.pageLifecycle?.removeEventListener('pageshow', this.onPageShow)
   }
 }
 

@@ -13,7 +13,7 @@ export function NodesPage() {
   return (
     <Page
       title='节点'
-      description='边缘节点的接入状态与实时负载。CPU、内存为占用比例，出口带宽按 bit/s 计。'
+      description='边缘节点的接入状态与实时负载。CPU、内存为占用比例，带宽按 bit/s 计。'
       actions={
         <Button
           size='sm'
@@ -32,7 +32,20 @@ export function NodesPage() {
         </Button>
       }
     >
-      <NodesTable list={list} />
+      <NodesTable
+        list={list}
+        isCreating={list.search.create === 1}
+        onCreatingChange={(creating) =>
+          void navigate({
+            to: '.',
+            search: (previous: Record<string, unknown>) => ({
+              ...previous,
+              create: creating ? (1 as const) : undefined,
+            }),
+            replace: !creating,
+          })
+        }
+      />
     </Page>
   )
 }

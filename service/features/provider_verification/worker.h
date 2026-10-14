@@ -35,33 +35,48 @@ inline ruvia::task<void> recover_stale_markers(service::background::worker_conte
 }
 
 inline ruvia::task<void> execute(service::background::worker_context& context,
-    const verification_task& task) {
+    service::attempt_trace::recorder& trace, const verification_task& task, provider_attempt& attempt) {
+    auto load_step = trace.begin_step(service::attempt_trace::step_code::load_provider, task.name_);
     const auto current_runtime = co_await load_current_runtime(context, task);
     if (!current_runtime) {
+        load_step.skip("供应商配置已更新，本次让位于新的检测");
         co_return;
     }
+    load_step.complete();
     verification_result result;
     if (task.kind_ == "dns") {
-        result = co_await verify_dns(context, task);
+        result = co_await verify_dns(context, trace, task, attempt);
     } else if (task.kind_ == "certificate") {
-        result = co_await verify_certificate(context, task, *current_runtime);
+        result = co_await verify_certificate(context, trace, task, *current_runtime, attempt);
     } else {
         throw verification_error("供应商类型无效", true);
     }
-    co_await complete_verification(context, task, std::move(result));
+    auto save_step = trace.begin_step(service::attempt_trace::step_code::save_result);
+    co_await complete_verification(context, trace, task, std::move(result), attempt.to_json(context.pool()));
+    save_step.complete();
 }
 
 inline ruvia::task<void> process_marker(service::background::worker_context& context,
     const verification_task& task) {
+    service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::provider, "provider-verification",
+        task.claimed_at_);
+    provider_attempt attempt(task.provider_, task.kind_);
     std::exception_ptr exception;
     try {
-        co_await execute(context, task);
+        co_await execute(context, trace, task, attempt);
     } catch (...) {
         exception = std::current_exception();
     }
     if (!context.get_stop_token().stop_requested() && exception) {
         const auto failure = classify_task_failure(exception);
-        co_await fail_verification(context, task, failure.message_, failure.permanent_);
+        trace.mark_failure(failure.message_);
+        auto step = trace.begin_step(service::attempt_trace::step_code::record_failure);
+        trace.log(failure.permanent_ ? service::attempt_trace::log_level::error
+                                     : service::attempt_trace::log_level::warning,
+            failure.permanent_ ? "永久失败，供应商标记为无效，不再自动重试" : "将在 15 秒后自动重试");
+        co_await fail_verification(context, trace, task, failure.message_, failure.permanent_,
+            attempt.to_json(context.pool()));
+        step.complete();
     }
     co_return;
 }
@@ -101,7 +116,7 @@ inline ruvia::task<void> run_maintenance(service::background::worker_context& co
 inline ruvia::task<void> run(service::background::worker_context& context) {
     co_await service::background::run_marker_worker_loop(
         context, idle_poll_interval, "Provider verification worker failure: ", "未知供应商检测错误",
-        run_maintenance, process_markers, service::sync_runtime::bounded_error);
+        run_maintenance, process_markers, service::sync_runtime::worker_error);
     co_return;
 }
 

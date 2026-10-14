@@ -223,7 +223,12 @@ export function CertificateDetailPage() {
                 label: '证书供应商',
                 value: (
                   <Link
-                    href={`/providers?tab=certificate&q=${encodeURIComponent(providerName)}`}
+                    href='/providers'
+                    routerOptions={{
+                      state: {
+                        providers: { tab: 'certificate', q: providerName },
+                      },
+                    }}
                   >
                     {providerName}
                   </Link>

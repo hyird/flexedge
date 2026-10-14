@@ -1,6 +1,8 @@
 const placeholder = '—'
 
-function toDate(value?: string) {
+/** Parses a backend timestamp (also zone-less or short `+08` offsets);
+ * undefined when empty or invalid. */
+export function parseDate(value?: string): Date | undefined {
   if (!value) return undefined
   // Older payloads omit the zone (implicit +08:00) or use a short "+08" offset.
   const normalizedValue =
@@ -31,7 +33,7 @@ function dateParts(date: Date, timeZone: string) {
 /** Local console time (Asia/Shanghai), e.g. `2026-09-05 00:25:10`. */
 export function formatDate(value?: string) {
   if (!value) return placeholder
-  const date = toDate(value)
+  const date = parseDate(value)
   if (!date) return value
   const parts = dateParts(date, 'Asia/Shanghai')
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`
@@ -40,7 +42,7 @@ export function formatDate(value?: string) {
 /** Absolute UTC time for tooltips and audit context, e.g. `2026-09-04 16:25:10 UTC`. */
 export function formatUtcDate(value?: string) {
   if (!value) return placeholder
-  const date = toDate(value)
+  const date = parseDate(value)
   if (!date) return value
   const parts = dateParts(date, 'UTC')
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} UTC`
@@ -57,7 +59,7 @@ const relativeUnits: Array<[Intl.RelativeTimeFormatUnit, number]> = [
 /** Relative time against `now`, e.g. `3 分钟前`, `2 天后`; under 45 s is `刚刚`. */
 export function formatRelative(value?: string, now: number = Date.now()) {
   if (!value) return placeholder
-  const date = toDate(value)
+  const date = parseDate(value)
   if (!date) return value
   const seconds = Math.round((date.getTime() - now) / 1000)
   if (Math.abs(seconds) < 45) return '刚刚'

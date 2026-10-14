@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { Link, useNavigate } from '@tanstack/react-router'
+import { Link } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button } from '@heroui/react'
@@ -9,15 +9,15 @@ import { DataTable } from '@/components/data-table'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
 import { MetricMeter } from '@/components/metric-meter'
 import { Mono } from '@/components/mono'
-import { RelativeTime } from '@/components/relative-time'
 import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { clusterOptionsQuery } from '@/features/clusters/data'
 import { nodesQuery } from './data'
 import { NodeActionMenu } from './node-action-menu'
+import { NodeConnectionChip } from './node-connection-chip'
 import { NodeCreateSheet } from './node-create-sheet'
-import { nodeFilterKeys, type NodesSearch } from './node-search'
-import { connectionLabels, nodeStatusLabels } from './node-status'
+import { nodeFilterKeys, type NodeListSearch } from './node-search'
+import { liveMetrics, nodeStatusLabels } from './node-status'
 import type { Node } from './types'
 
 const connectionOptions = [
@@ -30,17 +30,21 @@ const statusOptions = [
   { id: 'disabled', label: '已停用' },
 ]
 
-/** Node list with toolbar, pagination and the add-node flow (`?create=1`).
- * With `clusterId` the list is fixed to that cluster: no cluster filter or
- * column, and new nodes are created in it. */
+/** Node list with toolbar, pagination and the add-node sheet, whose open
+ * state belongs to the page (`/nodes?create=1`, or component state on the
+ * cluster detail). With `clusterId` the list is fixed to that cluster: no
+ * cluster filter or column, and new nodes are created in it. */
 export function NodesTable({
   list,
   clusterId,
+  isCreating,
+  onCreatingChange,
 }: {
-  list: ListSearchState<NodesSearch>
+  list: ListSearchState<NodeListSearch>
   clusterId?: string
+  isCreating: boolean
+  onCreatingChange: (creating: boolean) => void
 }) {
-  const navigate = useNavigate()
   const { search } = list
   const clusters = useQuery({
     ...clusterOptionsQuery,
@@ -66,7 +70,7 @@ export function NodesTable({
       id: 'name',
       header: '节点',
       isRowHeader: true,
-      minWidth: 200,
+      minWidth: 180,
       cell: (node) => (
         <div className='flex min-w-0 flex-col gap-0.5'>
           <Link
@@ -98,7 +102,7 @@ export function NodesTable({
           {
             id: 'cluster',
             header: '集群',
-            minWidth: 140,
+            minWidth: 120,
             cell: (node: Node) => (
               <Link
                 to='/clusters/$clusterId'
@@ -113,68 +117,65 @@ export function NodesTable({
       : []),
     {
       id: 'connection',
-      header: '连接',
-      minWidth: 110,
-      cell: (node) => (
-        <StatusChip
-          status={node.runtime.connection_status}
-          reserve={connectionLabels}
-        />
-      ),
+      header: '在线状态',
+      minWidth: 100,
+      cell: (node) => <NodeConnectionChip runtime={node.runtime} />,
     },
     {
       id: 'cpu',
       header: 'CPU',
-      minWidth: 140,
+      minWidth: 128,
       cell: (node) => (
         <MetricMeter
           label={`${node.name} CPU`}
-          value={node.runtime.cpu_usage}
+          value={liveMetrics(node.runtime).cpu_usage}
+          className='w-24'
         />
       ),
     },
     {
       id: 'memory',
       header: '内存',
-      minWidth: 140,
+      minWidth: 128,
       cell: (node) => (
         <MetricMeter
           label={`${node.name} 内存`}
-          value={node.runtime.memory_usage}
+          value={liveMetrics(node.runtime).memory_usage}
+          className='w-24'
         />
       ),
     },
     {
       id: 'traffic',
-      header: '出口带宽',
-      minWidth: 110,
+      header: '带宽',
+      minWidth: 100,
       align: 'end',
       cell: (node) => (
         <span className='text-sm tabular-nums'>
-          {formatBitsPerSecond(node.runtime.traffic_out_bps)}
+          {formatBitsPerSecond(liveMetrics(node.runtime).traffic_out_bps)}
         </span>
       ),
     },
     {
       id: 'connections',
       header: '连接数',
-      minWidth: 90,
+      minWidth: 80,
       align: 'end',
       cell: (node) => (
         <span className='text-sm tabular-nums'>
-          {formatNumber(node.runtime.connection_count)}
+          {formatNumber(liveMetrics(node.runtime).connection_count)}
         </span>
       ),
     },
     {
-      id: 'heartbeat',
-      header: '最近心跳',
-      minWidth: 110,
+      id: 'connected-ips',
+      header: '连接 IP',
+      minWidth: 80,
+      align: 'end',
       cell: (node) => (
-        <RelativeTime
-          value={node.runtime.last_heartbeat_at}
-          className='text-[13px] text-muted'
-        />
+        <span className='text-sm tabular-nums'>
+          {formatNumber(liveMetrics(node.runtime).connected_ip_count)}
+        </span>
       ),
     },
     {
@@ -193,14 +194,8 @@ export function NodesTable({
       cell: (node) => <NodeActionMenu node={node} context='list' />,
     },
   ]
-  const setCreate = (create: 1 | undefined) =>
-    navigate({
-      to: '.',
-      search: (previous: Record<string, unknown>) => ({ ...previous, create }),
-      replace: create === undefined,
-    })
   const createButton = (
-    <Button size='sm' onPress={() => void setCreate(1)}>
+    <Button size='sm' onPress={() => onCreatingChange(true)}>
       <Plus className='size-4' />
       添加节点
     </Button>
@@ -229,12 +224,12 @@ export function NodesTable({
               />
             )}
             <FilterSelect
-              label='连接'
+              label='在线状态'
               value={search.connection_status ?? ''}
               onChange={(value) =>
                 void list.setSearch({
                   connection_status: (value ||
-                    undefined) as NodesSearch['connection_status'],
+                    undefined) as NodeListSearch['connection_status'],
                 })
               }
               options={connectionOptions}
@@ -244,7 +239,7 @@ export function NodesTable({
               value={search.status ?? ''}
               onChange={(value) =>
                 void list.setSearch({
-                  status: (value || undefined) as NodesSearch['status'],
+                  status: (value || undefined) as NodeListSearch['status'],
                 })
               }
               options={statusOptions}
@@ -263,7 +258,7 @@ export function NodesTable({
         isLoading={query.isPending}
         error={query.isError ? query.error : undefined}
         onRetry={() => void query.refetch()}
-        minWidth={clusterId === undefined ? 1180 : 1040}
+        minWidth={clusterId === undefined ? 1080 : 960}
         empty={
           filtered
             ? {
@@ -287,8 +282,8 @@ export function NodesTable({
         }
       />
       <NodeCreateSheet
-        isOpen={search.create === 1}
-        onClose={() => void setCreate(undefined)}
+        isOpen={isCreating}
+        onClose={() => onCreatingChange(false)}
         clusterId={clusterId}
       />
     </div>

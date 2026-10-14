@@ -53,6 +53,7 @@
 #include "node/data/origin_tls.h"
 #include "node/data/origin_transport.h"
 #include "node/data/response_compression.h"
+#include "node/runtime/connected_clients.h"
 #include "node/runtime/http_redirect.h"
 #include "node/runtime/log_buffer.h"
 #include "node/runtime/runtime_metrics.h"
@@ -78,7 +79,7 @@ template <typename client_stream_type>
 class basic_http_session final : public std::enable_shared_from_this<basic_http_session<client_stream_type>> {
 public:
     basic_http_session(client_stream_type stream, runtime_state& runtime, origin_health_registry& health,
-        runtime_metrics& metrics, node_log_buffer::producer& logs,
+        runtime_metrics& metrics, connected_clients& clients, node_log_buffer::producer& logs,
         origin_connection_pool& origin_connections, buffered_bytes_budget& request_buffers,
         buffered_bytes_budget& response_buffers, std::uint64_t sequence,
         std::shared_ptr<const void> transport_state = nullptr, bool secure = false,
@@ -89,6 +90,7 @@ public:
           runtime_(runtime),
           health_(health),
           metrics_(metrics),
+          clients_(clients),
           logs_(logs),
           response_buffers_(response_buffers),
           request_reservation_(request_buffers.lease()),
@@ -98,10 +100,14 @@ public:
           secure_(secure),
           on_retired_(std::move(on_retired)) {
         request_bytes_.reserve(8192);
+        capture_client_address();
         metrics_.connection_opened();
     }
 
     ~basic_http_session() {
+        if (client_key_) {
+            clients_.closed(*client_key_);
+        }
         metrics_.connection_closed();
         if (on_retired_) {
             on_retired_();
@@ -109,7 +115,6 @@ public:
     }
 
     void start() {
-        capture_client_address();
         read();
     }
 
@@ -343,23 +348,23 @@ private:
         return range >= 1 && range <= 5 && access_log_status_code_ranges_[range - 1];
     }
 
-    bool capture_client_address() noexcept {
-        if (!client_address_.empty()) {
-            return client_address_ != "unknown";
-        }
+    // Reads the peer once per connection: its text serves access logs and forwarding headers,
+    // its key the worker's per-IP connection accounting until the session is destroyed.
+    void capture_client_address() {
         std::error_code endpoint_error;
         const auto endpoint = client_socket().remote_endpoint(endpoint_error);
         if (endpoint_error) {
             client_address_ = "unknown";
-            return false;
+            return;
         }
         std::error_code address_error;
         client_address_ = endpoint.address().to_string(address_error);
         if (address_error) {
             client_address_ = "unknown";
-            return false;
         }
-        return true;
+        const auto key = connected_clients::get_key(endpoint.address());
+        clients_.opened(key);
+        client_key_ = key;
     }
 
     std::string client_ip() const noexcept {
@@ -595,7 +600,7 @@ private:
 
     bool prepare_origin_request(const http1_request_reader& parsed, const v2::Website& website,
         std::string_view incoming_host, bool force_identity_encoding) {
-        if (!capture_client_address()) {
+        if (client_address_ == "unknown") {
             return false;
         }
         auto prepared = flexedge::node::prepare_origin_request(
@@ -1143,6 +1148,7 @@ private:
     runtime_state& runtime_;
     origin_health_registry& health_;
     runtime_metrics& metrics_;
+    connected_clients& clients_;
     node_log_buffer::producer& logs_;
     buffered_bytes_budget& response_buffers_;
     http1_request_reader request_reader_{max_request_bytes};
@@ -1156,6 +1162,7 @@ private:
     std::string request_host_;
     origin_health_registry::target current_health_;
     std::string client_address_;
+    std::optional<connected_clients::address_key> client_key_;
     std::string request_method_;
     std::string request_target_;
     std::uint64_t request_body_bytes_{};
@@ -1230,7 +1237,7 @@ public:
 
 private:
     http_listener(ruvia::event_loop owner, runtime_state& runtime, origin_health_registry& health,
-        runtime_metrics& metrics, node_log_buffer::producer& logs,
+        runtime_metrics& metrics, connected_clients& clients, node_log_buffer::producer& logs,
         origin_connection_pool& origin_connections, buffered_bytes_budget& request_buffers,
         buffered_bytes_budget& response_buffers, const asio::ip::tcp::endpoint& endpoint)
         : owner_(std::move(owner)),
@@ -1238,6 +1245,7 @@ private:
           runtime_(runtime),
           health_(health),
           metrics_(metrics),
+          clients_(clients),
           logs_(logs),
           origin_connections_(origin_connections),
           request_buffers_(request_buffers),
@@ -1427,9 +1435,9 @@ private:
                         try {
                             auto session = std::make_shared<basic_http_session<asio::ip::tcp::socket>>(
                                 std::move(*socket), self->runtime_, self->health_, self->metrics_,
-                                self->logs_, self->origin_connections_, self->request_buffers_,
-                                self->response_buffers_, ++self->sequence_, nullptr, false,
-                                std::string{}, [weak = self->weak_from_this()] {
+                                self->clients_, self->logs_, self->origin_connections_,
+                                self->request_buffers_, self->response_buffers_, ++self->sequence_,
+                                nullptr, false, std::string{}, [weak = self->weak_from_this()] {
                                     if (const auto listener = weak.lock()) {
                                         listener->session_retired();
                                     }
@@ -1466,6 +1474,7 @@ private:
     runtime_state& runtime_;
     origin_health_registry& health_;
     runtime_metrics& metrics_;
+    connected_clients& clients_;
     node_log_buffer::producer& logs_;
     origin_connection_pool& origin_connections_;
     buffered_bytes_budget& request_buffers_;

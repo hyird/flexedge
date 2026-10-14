@@ -18,7 +18,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VCPKG_ROOT})
     unset(_vcpkg_root)
 endif()
 
-project(flexedge_service VERSION 0.4.0 LANGUAGES CXX)
+project(flexedge_service VERSION 0.4.1 LANGUAGES CXX)
 
 include(CTest)
 include(FetchContent)
@@ -402,6 +402,28 @@ if(BUILD_TESTING)
     flexedge_add_test(logging
         SOURCES tests/logging.cpp
         LIBRARIES Threads::Threads ruvia::web
+    )
+    flexedge_add_test(task_history
+        SOURCES tests/task_history.cpp
+        LIBRARIES ruvia::web
+    )
+    set_tests_properties(flexedge_task_history PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    flexedge_add_test(attempt_trace_redaction
+        SOURCES tests/attempt_trace_redaction.cpp
+        LIBRARIES ruvia::web OpenSSL::Crypto
+    )
+    flexedge_add_test(attempt_trace_recorder
+        SOURCES tests/attempt_trace_recorder.cpp
+        LIBRARIES ruvia::web OpenSSL::Crypto
+    )
+    flexedge_add_test(attempt_trace_store
+        SOURCES tests/attempt_trace_store.cpp
+        LIBRARIES ruvia::web OpenSSL::Crypto
+    )
+    set_tests_properties(flexedge_attempt_trace_store PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    flexedge_add_test(provider_error_redaction
+        SOURCES tests/provider_error_redaction.cpp
+        LIBRARIES ruvia::web asio::asio OpenSSL::Crypto
     )
 endif()
 

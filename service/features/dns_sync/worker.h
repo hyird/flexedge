@@ -35,15 +35,25 @@ inline ruvia::task<void> recover_stale_tasks(service::background::worker_context
 
 inline ruvia::task<void> process_task(service::background::worker_context& context,
     const dns_task& task) {
+    service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::dns_sync, "dns-sync",
+        task.claimed_at_);
+    zone_sync_attempt attempt;
     std::exception_ptr exception;
     try {
-        (void)co_await sync_zone(context, task);
+        (void)co_await sync_zone(context, trace, task, attempt);
     } catch (...) {
         exception = std::current_exception();
     }
     if (exception) {
         const auto failure = classify_task_failure(exception);
-        co_await fail_dns_task(context, task, failure.message_, failure.permanent_);
+        trace.mark_failure(failure.message_);
+        auto step = trace.begin_step(service::attempt_trace::step_code::record_failure);
+        trace.log(failure.permanent_ ? service::attempt_trace::log_level::error
+                                     : service::attempt_trace::log_level::warning,
+            failure.permanent_ ? "永久失败，不再自动重试" : "将在 15 秒后自动重试");
+        co_await fail_dns_task(context, trace, task, failure.message_, failure.permanent_,
+            attempt.to_json(context.pool()));
+        step.complete();
     }
     co_return;
 }
@@ -77,7 +87,7 @@ inline ruvia::task<void> run_maintenance(service::background::worker_context& co
 inline ruvia::task<void> run(service::background::worker_context& context) {
     co_await service::background::run_marker_worker_loop(
         context, idle_poll_interval, "DNS sync worker failure: ", "未知 DNS 同步错误",
-        run_maintenance, process_tasks, service::sync_runtime::bounded_error);
+        run_maintenance, process_tasks, service::sync_runtime::worker_error);
     co_return;
 }
 

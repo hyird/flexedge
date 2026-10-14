@@ -7,9 +7,11 @@
 #include <ruvia/web/websocket_client.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -320,6 +322,38 @@ void verify_watch_notifications() {
     loops.join();
 }
 
+void verify_heartbeat_schedule() {
+    using flexedge::node::release_watch_seconds;
+    const auto require = [](bool value) {
+        if (!value) {
+            throw std::runtime_error("heartbeat schedule regression");
+        }
+    };
+    // The watch lasts until the heartbeat is due, rounded up, so a 5 second interval stays
+    // 5 seconds instead of 4.
+    require(release_watch_seconds(std::chrono::milliseconds(4200)) == 5);
+    require(release_watch_seconds(std::chrono::milliseconds(4999)) == 5);
+    require(release_watch_seconds(std::chrono::seconds(5)) == 5);
+    require(release_watch_seconds(std::chrono::milliseconds(1)) == 1);
+    require(release_watch_seconds(std::chrono::steady_clock::duration::zero()) == 0);
+    require(release_watch_seconds(-std::chrono::seconds(1)) == 0);
+    require(release_watch_seconds(std::chrono::milliseconds(29999)) ==
+            flexedge::node::release_watch_maximum_seconds);
+
+    // The connected IP count is optional: absent (older nodes, or not counted) differs from 0.
+    flexedge::node::v2::Heartbeat heartbeat;
+    heartbeat.set_connection_count(3);
+    flexedge::node::v2::Heartbeat decoded;
+    require(decoded.ParseFromString(heartbeat.SerializeAsString()) &&
+            !decoded.has_connected_ip_count() && decoded.connection_count() == 3);
+    heartbeat.set_connected_ip_count(0);
+    require(decoded.ParseFromString(heartbeat.SerializeAsString()) &&
+            decoded.has_connected_ip_count() && decoded.connected_ip_count() == 0);
+    heartbeat.set_connected_ip_count(2);
+    require(decoded.ParseFromString(heartbeat.SerializeAsString()) &&
+            decoded.connected_ip_count() == 2);
+}
+
 int main() {
     flexedge::node::v2::ServerEnvelope delivery_reply;
     delivery_reply.set_request_id("logs-1");
@@ -382,6 +416,7 @@ int main() {
         }
         verify_delivery_protocol();
         verify_watch_notifications();
+        verify_heartbeat_schedule();
         if constexpr (flexedge::node::release_watch_maximum_seconds != 10) {
             return 8;
         }

@@ -8,7 +8,6 @@
 #include "service/features/certificate/provider.h"
 #include "service/features/dns/aliyun.h"
 #include "service/features/dns/cloudflare.h"
-#include "service/features/sync_runtime/error.h"
 
 namespace service::provider_verification::detail {
 
@@ -26,6 +25,7 @@ private:
     bool permanent_;
 };
 
+// The raw error of a failed attempt; fail_verification redacts, then bounds it.
 struct task_failure final {
     std::string message_;
     bool permanent_{};
@@ -37,7 +37,7 @@ inline task_failure classify_task_failure(const std::exception_ptr& exception) {
     } catch (const std::exception& error) {
         if (const auto* cloudflare = dynamic_cast<const service::dns::cloudflare_error*>(&error)) {
             return {
-                .message_ = service::sync_runtime::bounded_error(cloudflare->what()),
+                .message_ = cloudflare->what(),
                 .permanent_ =
                     cloudflare->code() == service::dns::cloudflare_error_code::credential_invalid ||
                     cloudflare->code() == service::dns::cloudflare_error_code::authorization_failed,
@@ -45,7 +45,7 @@ inline task_failure classify_task_failure(const std::exception_ptr& exception) {
         }
         if (const auto* aliyun = dynamic_cast<const service::dns::aliyun_error*>(&error)) {
             return {
-                .message_ = service::sync_runtime::bounded_error(aliyun->what()),
+                .message_ = aliyun->what(),
                 .permanent_ = aliyun->code() == service::dns::aliyun_error_code::credential_invalid ||
                               aliyun->code() == service::dns::aliyun_error_code::authorization_failed,
             };
@@ -54,21 +54,20 @@ inline task_failure classify_task_failure(const std::exception_ptr& exception) {
                 dynamic_cast<const service::certificate_issuance::certificate_provider_client_error*>(
                     &error)) {
             return {
-                .message_ = service::sync_runtime::bounded_error(certificate->what()),
+                .message_ = certificate->what(),
                 .permanent_ = !certificate->retryable(),
             };
         }
         if (const auto* verification = dynamic_cast<const verification_error*>(&error)) {
             return {
-                .message_ = service::sync_runtime::bounded_error(verification->what()),
+                .message_ = verification->what(),
                 .permanent_ = verification->permanent(),
             };
         }
         if (dynamic_cast<const std::invalid_argument*>(&error) != nullptr) {
-            return {.message_ = service::sync_runtime::bounded_error(error.what()),
-                .permanent_ = true};
+            return {.message_ = error.what(), .permanent_ = true};
         }
-        return {.message_ = service::sync_runtime::bounded_error(error.what()), .permanent_ = false};
+        return {.message_ = error.what(), .permanent_ = false};
     } catch (...) {
         return {.message_ = "供应商检测发生未知错误", .permanent_ = false};
     }
