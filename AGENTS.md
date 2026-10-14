@@ -29,9 +29,27 @@
 - 保留准确的行业术语和框架约定。API、协议字段、数据库对象及安装身份不因内部命名
   整理而改变；第三方源码不做风格性改名。
 
+## C++ 命名与格式
+
+后端 C++（`service/ node/ common/ tests/ tools/`）与 Ruvia 保持同一风格：
+
+- 使用 C++20；用仓库根 `.clang-format`（与 Ruvia 相同，clang-format 21）格式化改动的 C++ 文件，不按列宽手工换行。
+- 自有标识符一律小写下划线：命名空间、类型、类模板、别名、枚举类型与枚举值、concept、函数、变量、参数、
+  常量（不加 `k` 前缀、不用全大写）。宏用 `FLEXEDGE_` 前缀的全大写。
+- 非静态数据成员（含 `struct` 公开字段）加尾随 `_`，指派初始化写 `{.name_ = …}`；常量与静态 `constexpr` 成员不加。
+- 类型模板参数用 `<角色>_type`（`t_type`、`runtime_type`）；非类型模板参数用普通小写名。
+- 类型与函数同名时函数加 `get_`（`get_website_read_service()`）；变量会遮蔽同名类型时加 `_value`；新名是关键字时加
+  `_value`。类成员遮蔽外层同名类型时保留成员名，类内对外层类型写限定名。
+- Ruvia 模型字段键用小写下划线；线上 JSON 名与键不同时用 `RUVIA_*_FIELD_NAME("wire", key, …)` 固定线上名，
+  不得因改名改变 JSON 字段。
+- 文件名小写下划线、描述单元本身，不用点分角色后缀（`website_controller.h`、`website_dashboard_service.h`）；
+  C++ 测试文件以被测单元命名、不带 `_test` 后缀（CTest 名与 CMake 目标名不变）。
+- 外部名称（std、Asio、OpenSSL、protobuf 生成代码、Ruvia 等）、语言/库要求的拼写（`begin`、`value_type`、协程接口）
+  以及 HTTP 路径、SSE 事件、JSON 线上名、数据库对象、环境变量、安装身份、CTest/CMake 名称保持原样。
+
 ## 项目结构与职责
 
-后端使用 C++23 + Ruvia，前端使用 React，数据库使用 PostgreSQL/TimescaleDB，
+后端使用 C++20 + Ruvia，前端使用 React，数据库使用 PostgreSQL/TimescaleDB，
 日志投递和通知使用 Redis Streams。
 
 ```text
@@ -127,9 +145,9 @@ tests/                           # 自动化测试与测试夹具
 
 - Ruvia 固定完整提交 SHA，使用对应版本的公开 ORM API。升级同步迁移全部调用，
   不引入过渡宏、包装旧 API 的接口或兼容头。
-- 运行时 SQL 使用 `DbQuery` / ORM；参数通过 `value()` 绑定。行锁、事务、条件 upsert、
+- 运行时 SQL 使用 `db_query` / ORM；参数通过 `value()` 绑定。行锁、事务、条件 upsert、
   子查询和 JSON 操作使用结构化节点，不把 SQL 字符串包装成自制“ORM”。
-- 结构迁移使用 `DbSchema`，数据转换使用 `DbQuery` / `DbProcedure`。核实确有能力缺口时
+- 结构迁移使用 `db_schema`，数据转换使用 `db_query` / `db_procedure`。核实确有能力缺口时
   才保留最小的参数化 SQL，并记录具体缺口与验证结果。
 - 新安装使用当前完整基线，不重放退役结构。已有库切换基线必须先备份、核对结构，
   再原子转换迁移记录；不能为消除校验和错误直接修改记录。已发布基线之后的变更
@@ -148,7 +166,7 @@ tests/                           # 自动化测试与测试夹具
 - 持久化映射归所属领域或组件的实体文件，覆盖只读、联表、投影和事务涉及的对象；
   无数据访问时不创建实体文件，不为集中映射增加平行业务层。
 - 实体须实际参与查询、映射或写入，准确声明类型、主键、空值和默认值；仅把字符串
-  表名、列名放入 `DbQuery`，或声明未使用的实体，不算完成实体迁移。
+  表名、列名放入 `db_query`，或声明未使用的实体，不算完成实体迁移。
 - DTO、实体、请求校验与数据库约束保持一致，区分字段缺省、显式空值、默认值和清空。
   枚举及默认表达式使用对应版本的公开元数据 API，补充映射不得暗改物理列类型或历史迁移。
 - Redis 业务记录和缓存明确键结构、序列化、过期及归属；队列、锁和通知保留各自语义，
@@ -243,8 +261,10 @@ tests/                           # 自动化测试与测试夹具
 
 - 使用 Pro `AppLayout`、`Sidebar` 与 `Navbar`；保留侧栏折叠、移动菜单、
   页面搜索、主题与账户菜单。参考 UltraTerminal 的紧凑控件与中性表面。
-- 页面使用共享 Page、ResourceList 与表单组合，列表使用 Pro DataGrid。
-  `web/components/` 承载通用视觉交互；布局位于 `web/components/layout/`。
+- 页面使用共享 `Page`、`DetailHeader` + `RouteTabs`、`ListToolbar` + `DataTable` + `TablePagination`、
+  `FormSheet`、`SaveBar`、`ConfirmDialog` 组合，列表使用 Pro DataGrid。资源详情使用独立路由与路由 tab，
+  创建与小型编辑用右侧 Sheet，大型编辑在详情页内带保存条与离开拦截，危险操作用居中确认框；
+  筛选、分页、tab 与打开的 Sheet 写入 URL。`web/components/` 承载通用视觉交互；布局位于 `web/components/layout/`。
 - 页面、表单、DTO、校验与数据操作放在所属 `web/features/<domain>/`。
   路由只负责装配和鉴权。共享层不得反向依赖领域页面或路由。
 - API 客户端统一处理 envelope、Cookie 会话、401 刷新、错误与 revision。
@@ -252,7 +272,8 @@ tests/                           # 自动化测试与测试夹具
 - 重做 UI 保持现有后端公开契约。当前资源读取端点仅提供 SSE 快照时，使用实际
   stream 端点；后端 HTTP/SSE 协议调整需作为明确授权的独立变更验证。
 - 配置选项、DNS 线路与历史记录只读取一次快照并关闭连接；需要实时的视图只在
-  可见期间订阅。弹层打开时暂停无关列表，关闭、切换与退出时释放连接。
+  可见期间订阅。每页任何时刻最多一条活跃 SSE：概览使用组合流，详情页只有当前 tab 的主体实时，
+  头部与引用列表读一次快照并在本页写操作后重读；弹层打开时暂停无关列表，关闭、切换与退出时释放连接。
 - 禁止业务轮询或断线后降级轮询。服务端状态归 Query，失效仅限受影响资源。
 
 ### 视觉、交互与验证
