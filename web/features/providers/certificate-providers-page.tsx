@@ -16,10 +16,10 @@ import { TablePagination } from '@/components/table-pagination'
 import { CertificateProviderSheet } from './certificate-provider-sheet'
 import { certificateProvidersListQuery } from './data'
 import { useProviderActions } from './provider-actions'
-import { providerLabel } from './provider-display'
+import { providerLabel, providerStatusLabels } from './provider-display'
 import type { CertificateProvider } from './types'
 
-const route = getRouteApi('/_authenticated/providers/certificate')
+const route = getRouteApi('/_authenticated/providers/')
 
 /** The certificate provider stream returns the whole (small) collection, so
  * search and pagination run on the client while still living in the URL. */
@@ -81,14 +81,14 @@ export function CertificateProvidersPage() {
         item.last_error ? (
           <Tooltip delay={300}>
             <Tooltip.Trigger aria-label={item.last_error}>
-              <StatusChip status={item.status} />
+              <StatusChip status={item.status} reserve={providerStatusLabels} />
             </Tooltip.Trigger>
             <Tooltip.Content className='max-w-80'>
               {item.last_error}
             </Tooltip.Content>
           </Tooltip>
         ) : (
-          <StatusChip status={item.status} />
+          <StatusChip status={item.status} reserve={providerStatusLabels} />
         ),
     },
     {

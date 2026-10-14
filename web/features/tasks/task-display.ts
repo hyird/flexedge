@@ -19,6 +19,9 @@ export const taskStatuses = {
   superseded: '已结束',
 } as const satisfies Record<Task['status'], string>
 
+/** Every task status label, for `StatusChip`'s `reserve`. */
+export const taskStatusLabels = Object.values(taskStatuses)
+
 export const taskStatusTones = {
   queued: 'accent',
   running: 'accent',
@@ -92,8 +95,12 @@ export function taskResourceHref(task: {
     case 'node':
       return `/nodes/${id}`
     case 'provider': {
-      const kind = certificateProviderCodes[task.name] ? 'certificate' : 'dns'
-      return `/providers/${kind}?${new URLSearchParams({ q: task.name })}`
+      const search = new URLSearchParams(
+        certificateProviderCodes[task.name]
+          ? { tab: 'certificate', q: task.name }
+          : { q: task.name }
+      )
+      return `/providers?${search}`
     }
     default:
       return '/tasks'

@@ -1,30 +1,47 @@
-import { Outlet, useNavigate } from '@tanstack/react-router'
+import { getRouteApi, useNavigate } from '@tanstack/react-router'
 import {
   ArrowsRotateRight,
   Globe,
   PencilToSquare,
   TrashBin,
 } from '@gravity-ui/icons'
-import { Button, Dropdown, Label, Link } from '@heroui/react'
+import { Button, Link } from '@heroui/react'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
-import { ActionMenu } from '@/components/action-menu'
+import { ActionMenu, type ActionMenuItem } from '@/components/action-menu'
 import { DetailHeader, DetailHeaderSkeleton } from '@/components/detail-header'
 import { LinkButton } from '@/components/link-button'
 import { EmptyState, Page, QueryNotice } from '@/components/page'
+import { PageTabs } from '@/components/page-tabs'
 import { RelativeTime } from '@/components/relative-time'
-import { RouteTabs } from '@/components/route-tabs'
 import { StatusChip } from '@/components/status-chip'
 import { providerLabel } from '@/features/providers/provider-display'
 import {
   displaySyncStatus,
   hasMeaningfulConflicts,
   isZoneNotFound,
+  zoneSyncStatusLabels,
 } from './dns-zone-display'
 import { useZoneDetail } from './use-zone-detail'
 import { useZoneCommands } from './zone-commands'
+import { ZoneLines } from './zone-lines'
+import { ZoneOverview } from './zone-overview'
+import { ZoneRecords } from './zone-records'
+
+const route = getRouteApi('/_authenticated/dns-zones/$zoneId')
+type ZoneTab = 'overview' | 'records' | 'lines'
+const tabs = [
+  { id: 'overview', label: '概览' },
+  { id: 'records', label: '记录' },
+  { id: 'lines', label: '解析线路' },
+] as const
 
 export function ZoneDetailLayout() {
   const navigate = useNavigate()
+  const routeNavigate = route.useNavigate()
+  const tab: ZoneTab =
+    route.useSearch({ select: (search) => search.tab }) ?? 'overview'
+  // The layout's query is the zone's live detail stream; every tab reads the
+  // same query key, so the page keeps exactly one connection.
   const query = useZoneDetail()
   const zone = query.data
   useBreadcrumbLabel(zone?.domain)
@@ -53,7 +70,33 @@ export function ZoneDetailLayout() {
       </Page>
     )
   }
-  const base = `/dns-zones/${zone.id}`
+  const selectTab = (next: ZoneTab) =>
+    void routeNavigate({
+      // q/type/source/edit only belong to the records tab.
+      search: (previous) => ({
+        ...previous,
+        tab: next === 'overview' ? undefined : next,
+        q: undefined,
+        type: undefined,
+        source: undefined,
+        edit: undefined,
+      }),
+      replace: true,
+    })
+  const conflictItems: ActionMenuItem[] = hasMeaningfulConflicts(zone)
+    ? [
+        {
+          id: 'local',
+          label: '使用本地记录覆盖服务商',
+          onAction: () => commands.resolve(zone, 'local'),
+        },
+        {
+          id: 'remote',
+          label: '使用服务商记录替换本地',
+          onAction: () => commands.resolve(zone, 'remote'),
+        },
+      ]
+    : []
   return (
     <Page>
       <QueryNotice
@@ -64,48 +107,25 @@ export function ZoneDetailLayout() {
       <DetailHeader
         icon={<Globe />}
         title={zone.domain}
-        status={<StatusChip status={displaySyncStatus(zone)} />}
+        status={
+          <StatusChip
+            status={displaySyncStatus(zone)}
+            reserve={zoneSyncStatusLabels}
+          />
+        }
         meta={[
           <Link
             key='provider'
-            href={`/providers/dns?q=${encodeURIComponent(zone.dns_provider_name)}`}
+            href={`/providers?q=${encodeURIComponent(zone.dns_provider_name)}`}
           >
             {zone.dns_provider_name} · {providerLabel(zone.dns_provider)}
           </Link>,
-          <span key='revision' className='tabular-nums'>
-            同步版本 {zone.synced_revision}/{zone.desired_revision}
-          </span>,
           <span key='synced'>
             最近同步 <RelativeTime value={zone.last_synced_at} />
           </span>,
         ]}
         actions={
           <>
-            {hasMeaningfulConflicts(zone) && (
-              <Dropdown>
-                <Button size='sm' variant='danger-soft'>
-                  处理冲突（{zone.runtime.conflicts.length}）
-                </Button>
-                <Dropdown.Popover placement='bottom end' className='min-w-56'>
-                  <Dropdown.Menu
-                    aria-label='冲突处理方式'
-                    onAction={(key) =>
-                      commands.resolve(
-                        zone,
-                        key === 'remote' ? 'remote' : 'local'
-                      )
-                    }
-                  >
-                    <Dropdown.Item id='local' textValue='使用本地记录'>
-                      <Label>使用本地记录覆盖服务商</Label>
-                    </Dropdown.Item>
-                    <Dropdown.Item id='remote' textValue='使用远端记录'>
-                      <Label>使用服务商记录替换本地</Label>
-                    </Dropdown.Item>
-                  </Dropdown.Menu>
-                </Dropdown.Popover>
-              </Dropdown>
-            )}
             <Button
               size='sm'
               variant='tertiary'
@@ -115,7 +135,7 @@ export function ZoneDetailLayout() {
               <ArrowsRotateRight className='size-4' />
               立即同步
             </Button>
-            <LinkButton href={`${base}/records?edit=1`}>
+            <LinkButton href={`/dns-zones/${zone.id}?tab=records&edit=1`}>
               <PencilToSquare />
               编辑记录
             </LinkButton>
@@ -125,28 +145,35 @@ export function ZoneDetailLayout() {
           <ActionMenu
             label={`DNS 区域 ${zone.domain} 的更多操作`}
             items={[
+              ...conflictItems,
               {
                 id: 'remove',
                 label: '移除区域',
                 icon: <TrashBin />,
                 danger: true,
+                separated: conflictItems.length > 0,
                 onAction: () => commands.remove(zone),
               },
             ]}
           />
         }
       />
-      <RouteTabs
-        label='DNS 区域详情'
-        items={[
-          { href: base, label: '概览' },
-          { href: `${base}/records`, label: '记录' },
-          { href: `${base}/lines`, label: '解析线路' },
-        ]}
-      />
       {commands.dialogs}
-      {/* Last child: the records editor's SaveBar must end the Page. */}
-      <Outlet />
+      <PageTabs
+        label='DNS 区域详情'
+        items={tabs}
+        selected={tab}
+        onSelectionChange={selectTab}
+      >
+        {/* The records editor's SaveBar is the tab content's last child. */}
+        {tab === 'records' ? (
+          <ZoneRecords />
+        ) : tab === 'lines' ? (
+          <ZoneLines />
+        ) : (
+          <ZoneOverview />
+        )}
+      </PageTabs>
     </Page>
   )
 }

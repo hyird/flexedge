@@ -16,7 +16,7 @@ import {
 } from './node-form'
 import type { Node } from './types'
 
-const route = getRouteApi('/_authenticated/nodes/$nodeId/config')
+const route = getRouteApi('/_authenticated/nodes/$nodeId')
 
 function NodeConfigEditor({
   node,
@@ -71,14 +71,14 @@ function NodeConfigEditor({
   const stale = isDirty && server.revision !== baseRevision
   const hasErrors = Object.keys(form.formState.errors).length > 0
   return (
-    <div className='flex flex-col gap-6'>
+    <div className='flex flex-1 flex-col gap-6'>
       {(conflict || stale) && (
         <Alert status='warning'>
           <Alert.Indicator />
           <Alert.Content>
-            <Alert.Title>数据已被其他人更新</Alert.Title>
+            <Alert.Title>配置已更新</Alert.Title>
             <Alert.Description>
-              节点配置在你编辑期间发生了变化。重新加载会放弃当前修改并载入最新配置。
+              此配置已被其他人更新，重新加载会载入最新配置并丢弃本页未保存的更改。
             </Alert.Description>
           </Alert.Content>
           <Button

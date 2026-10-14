@@ -1,5 +1,5 @@
 import { ApiBusinessError } from '@/lib/api-response'
-import type { StatusTone } from '@/lib/status'
+import { statusLabels, type StatusTone } from '@/lib/status'
 import type { Certificate } from './types'
 
 export const certificateStatuses = [
@@ -14,6 +14,19 @@ export const certificateStatusIds = certificateStatuses.map(({ id }) => id) as [
   (typeof certificateStatuses)[number]['id'],
   ...(typeof certificateStatuses)[number]['id'][],
 ]
+
+/** Every label a certificate's `status` chip can show, for `reserve`. */
+export const certificateStatusLabels = statusLabels(certificateStatusIds)
+
+/** Labels of the node distribution `sync_status`, for `reserve`. */
+export const certificateSyncStatusLabels = statusLabels([
+  'pending',
+  'queued',
+  'running',
+  'retrying',
+  'completed',
+  'failed',
+])
 
 /** Days before expiry at which a valid certificate counts as "即将到期",
  * matching the overview's `certificate_expiring_count`. */

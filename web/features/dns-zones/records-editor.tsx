@@ -103,7 +103,7 @@ export function RecordsEditor({
           <Alert.Content>
             <Alert.Title>区域已在其他地方更新</Alert.Title>
             <Alert.Description>
-              当前草稿基于旧版本，保存会被拒绝。重新加载会放弃本页的修改。
+              此配置已被其他人更新，重新加载会载入最新记录并丢弃本页未保存的更改。
             </Alert.Description>
           </Alert.Content>
           <Button

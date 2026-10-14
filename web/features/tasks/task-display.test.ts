@@ -18,10 +18,10 @@ test('task links open the detail sheet and resource detail routes', () => {
   )
   expect(
     taskResourceHref({ ...base, resource_type: 'provider', name: 'zerossl' })
-  ).toBe('/providers/certificate?q=zerossl')
+  ).toBe('/providers?tab=certificate&q=zerossl')
   expect(
     taskResourceHref({ ...base, resource_type: 'provider', name: 'CF 账号' })
-  ).toBe('/providers/dns?q=CF+%E8%B4%A6%E5%8F%B7')
+  ).toBe('/providers?q=CF+%E8%B4%A6%E5%8F%B7')
   expect(taskTitle({ resource_type: 'certificate', operation: 'renew' })).toBe(
     '证书续期'
   )

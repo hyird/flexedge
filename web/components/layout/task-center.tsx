@@ -12,6 +12,7 @@ import { StatusChip } from '@/components/status-chip'
 import {
   activeTaskStatuses,
   taskHref,
+  taskStatusLabels,
   taskStatuses,
   taskStatusTones,
   taskTitle,
@@ -159,6 +160,7 @@ function RecentTasks({ onNavigate }: { onNavigate: () => void }) {
                     status={task.status}
                     label={taskStatuses[task.status]}
                     tone={taskStatusTones[task.status]}
+                    reserve={taskStatusLabels}
                   />
                   <time
                     dateTime={task.updated_at}

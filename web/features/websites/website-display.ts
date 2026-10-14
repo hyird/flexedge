@@ -1,4 +1,14 @@
+import { statusLabels } from '@/lib/status'
 import type { Website, WebsiteOrigin } from './types'
+
+/** `StatusChip` reserves: every label the website/deploy status can show. */
+export const websiteStatusReserve = statusLabels(['enabled', 'disabled'])
+export const deployStatusReserve = statusLabels([
+  'applied',
+  'pending',
+  'partial',
+  'no_nodes',
+])
 
 /** Display name used in titles, menus and confirmations. */
 export function websiteName(

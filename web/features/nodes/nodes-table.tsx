@@ -17,6 +17,7 @@ import { nodesQuery } from './data'
 import { NodeActionMenu } from './node-action-menu'
 import { NodeCreateSheet } from './node-create-sheet'
 import { nodeFilterKeys, type NodesSearch } from './node-search'
+import { connectionLabels, nodeStatusLabels } from './node-status'
 import type { Node } from './types'
 
 const connectionOptions = [
@@ -76,13 +77,17 @@ export function NodesTable({
             {node.name}
           </Link>
           <span className='flex min-w-0 items-center gap-1.5 text-xs text-muted'>
-            {node.config.endpoints[0] && (
-              <Mono className='text-xs'>
+            {node.config.endpoints[0] ? (
+              <Mono truncate className='min-w-0 text-xs'>
                 {node.config.endpoints[0].ip_address}
               </Mono>
+            ) : (
+              <span>—</span>
             )}
             {node.config.endpoints.length > 1 && (
-              <span>+{node.config.endpoints.length - 1}</span>
+              <span className='shrink-0'>
+                +{node.config.endpoints.length - 1}
+              </span>
             )}
           </span>
         </div>
@@ -110,7 +115,12 @@ export function NodesTable({
       id: 'connection',
       header: '连接',
       minWidth: 110,
-      cell: (node) => <StatusChip status={node.runtime.connection_status} />,
+      cell: (node) => (
+        <StatusChip
+          status={node.runtime.connection_status}
+          reserve={connectionLabels}
+        />
+      ),
     },
     {
       id: 'cpu',
@@ -171,7 +181,9 @@ export function NodesTable({
       id: 'status',
       header: '状态',
       minWidth: 90,
-      cell: (node) => <StatusChip status={node.status} />,
+      cell: (node) => (
+        <StatusChip status={node.status} reserve={nodeStatusLabels} />
+      ),
     },
     {
       id: 'actions',

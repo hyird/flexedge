@@ -2,6 +2,7 @@ import { KPIGroup, type DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Alert, Button, Link } from '@heroui/react'
 import { formatDate } from '@/lib/format'
+import { cn } from '@/lib/utils'
 import { DataTable } from '@/components/data-table'
 import { Mono } from '@/components/mono'
 import { RelativeTime } from '@/components/relative-time'
@@ -9,7 +10,7 @@ import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { providerLabel } from '@/features/providers/provider-display'
 import { dnsLinePath } from './dns-lines'
-import { displaySyncStatus } from './dns-zone-display'
+import { displaySyncStatus, zoneSyncStatusLabels } from './dns-zone-display'
 import type { DnsZone } from './types'
 import { useZoneDetail } from './use-zone-detail'
 import { useZoneCommands } from './zone-commands'
@@ -42,13 +43,21 @@ export function ZoneOverview() {
       id: 'local',
       header: '本地值',
       minWidth: 180,
-      cell: (item) => <Mono className='break-all'>{item.local_content}</Mono>,
+      cell: (item) => (
+        <Mono truncate className='max-w-80'>
+          {item.local_content}
+        </Mono>
+      ),
     },
     {
       id: 'remote',
       header: '服务商值',
       minWidth: 180,
-      cell: (item) => <Mono className='break-all'>{item.remote_content}</Mono>,
+      cell: (item) => (
+        <Mono truncate className='max-w-80'>
+          {item.remote_content}
+        </Mono>
+      ),
     },
   ]
   return (
@@ -134,13 +143,18 @@ export function ZoneOverview() {
           items={[
             {
               label: '同步状态',
-              value: <StatusChip status={displaySyncStatus(zone)} />,
+              value: (
+                <StatusChip
+                  status={displaySyncStatus(zone)}
+                  reserve={zoneSyncStatusLabels}
+                />
+              ),
             },
             {
               label: 'DNS 账号',
               value: (
                 <Link
-                  href={`/providers/dns?q=${encodeURIComponent(zone.dns_provider_name)}`}
+                  href={`/providers?q=${encodeURIComponent(zone.dns_provider_name)}`}
                 >
                   {zone.dns_provider_name}
                 </Link>
@@ -148,24 +162,18 @@ export function ZoneOverview() {
             },
             { label: '平台', value: providerLabel(zone.dns_provider) },
             {
-              label: '目标版本 / 已同步版本',
-              value: (
-                <span className='tabular-nums'>
-                  {zone.desired_revision} / {zone.synced_revision}
-                </span>
-              ),
-            },
-            {
               label: '最近同步',
               value: (
-                <span className='flex flex-wrap gap-x-2'>
+                // Date and relative time always occupy the same slots.
+                <span className='flex gap-x-2 whitespace-nowrap'>
                   {formatDate(zone.last_synced_at)}
-                  {zone.last_synced_at && (
-                    <RelativeTime
-                      value={zone.last_synced_at}
-                      className='text-muted'
-                    />
-                  )}
+                  <RelativeTime
+                    value={zone.last_synced_at}
+                    className={cn(
+                      'text-muted',
+                      !zone.last_synced_at && 'invisible'
+                    )}
+                  />
                 </span>
               ),
             },

@@ -1,4 +1,5 @@
 import { ApiBusinessError } from '@/lib/api-response'
+import { statusLabels } from '@/lib/status'
 import type { DnsRecord, DnsZone } from '@/features/dns-zones/types'
 
 export function hasMeaningfulConflicts(zone: DnsZone) {
@@ -12,6 +13,30 @@ export function displaySyncStatus(zone: DnsZone) {
 
   return zone.sync_status
 }
+
+/** Every label `displaySyncStatus` can show (wire: pending/synced/failed/
+ * conflict; mock and transient states: queued/syncing), for `reserve`. */
+export const zoneSyncStatusLabels = statusLabels([
+  'synced',
+  'pending',
+  'queued',
+  'syncing',
+  'failed',
+  'out_of_sync',
+  'consistent',
+])
+
+/** Labels of a custom record's `record_states[].sync_status`. */
+export const recordSyncStatusLabels = statusLabels([
+  'synced',
+  'pending',
+  'syncing',
+  'failed',
+  'conflict',
+])
+
+/** Labels of a provider line's `status`. */
+export const lineStatusLabels = statusLabels(['enabled', 'disabled'])
 
 /** `sync_status` list filter values, sent to `/api/dns-zones/stream`.
  * `issue` (failed or conflict) matches the overview's "DNS 同步异常" count. */

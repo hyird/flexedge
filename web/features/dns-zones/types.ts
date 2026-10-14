@@ -24,8 +24,6 @@ export type DnsZone = Revisioned & {
   dns_provider_name: string
   domain: string
   sync_status: string
-  desired_revision: number
-  synced_revision: number
   website_count: number
   config: { records: DnsRecord[] }
   runtime: {
@@ -36,7 +34,6 @@ export type DnsZone = Revisioned & {
     record_states: Array<{
       id: string
       sync_status: string
-      synced_revision: number
       last_error?: string
     }>
     conflicts: Array<{

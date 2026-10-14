@@ -52,13 +52,13 @@ export function NodeActionMenu({
             id: 'logs',
             label: '实时日志',
             icon: <FileText />,
-            href: `${detail}/logs`,
+            href: `${detail}?tab=logs`,
           },
           {
             id: 'config',
             label: '编辑配置',
             icon: <Gear />,
-            href: `${detail}/config`,
+            href: `${detail}?tab=config`,
           },
         ]
       : []),

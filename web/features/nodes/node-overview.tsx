@@ -3,6 +3,7 @@ import { getRouteApi } from '@tanstack/react-router'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Alert, Skeleton } from '@heroui/react'
 import { formatBitsPerSecond, formatDate, formatNumber } from '@/lib/format'
+import { TruncatedText } from '@/components/data-table'
 import { Mono } from '@/components/mono'
 import { RelativeTime } from '@/components/relative-time'
 import { DescriptionList, Section } from '@/components/section'
@@ -11,10 +12,17 @@ import { clusterOptionsQuery } from '@/features/clusters/data'
 import { dnsZoneLinesQuery } from '@/features/dns-zones/data'
 import { dnsLinePath } from '@/features/dns-zones/dns-lines'
 import { nodeQuery } from './data'
+import { connectionLabels } from './node-status'
+import { RegistrationChip } from './registration-chip'
 import type { Node } from './types'
 
 const route = getRouteApi('/_authenticated/nodes/$nodeId')
+// The configuration row shows whether the node runs its target spec, never
+// the revision numbers themselves.
+const specStateLabels = ['已生效', '待生效']
 
+/** Load ratio KPI. The progress bar is always rendered (hidden without a
+ * value) so the card keeps its height when a node goes offline. */
 function LoadKpi({ label, value }: { label: string; value?: number }) {
   const ratio =
     value === undefined ? undefined : Math.min(Math.max(value, 0), 1)
@@ -27,20 +35,20 @@ function LoadKpi({ label, value }: { label: string; value?: number }) {
         {ratio === undefined ? (
           <KPI.Value value={0}>{() => '—'}</KPI.Value>
         ) : (
-          <>
-            <KPI.Value
-              maximumFractionDigits={1}
-              style='percent'
-              value={ratio}
-            />
-            <KPI.Progress
-              value={ratio * 100}
-              status={
-                ratio >= 0.9 ? 'danger' : ratio >= 0.75 ? 'warning' : 'success'
-              }
-            />
-          </>
+          <KPI.Value maximumFractionDigits={1} style='percent' value={ratio} />
         )}
+        <KPI.Progress
+          aria-hidden={ratio === undefined || undefined}
+          className={ratio === undefined ? 'invisible' : undefined}
+          value={(ratio ?? 0) * 100}
+          status={
+            ratio === undefined || ratio < 0.75
+              ? 'success'
+              : ratio >= 0.9
+                ? 'danger'
+                : 'warning'
+          }
+        />
       </KPI.Content>
     </KPI>
   )
@@ -53,7 +61,7 @@ function TextKpi({
 }: {
   label: string
   value: string
-  hint?: string
+  hint: string
 }) {
   return (
     <KPI>
@@ -63,7 +71,7 @@ function TextKpi({
       <KPI.Content>
         <KPI.Value value={0}>{() => value}</KPI.Value>
       </KPI.Content>
-      {hint && <KPI.Footer className='text-xs text-muted'>{hint}</KPI.Footer>}
+      <KPI.Footer className='truncate text-xs text-muted'>{hint}</KPI.Footer>
     </KPI>
   )
 }
@@ -79,10 +87,10 @@ function Endpoints({ node }: { node: Node }) {
       {node.config.endpoints.map((endpoint) => (
         <li
           key={endpoint.id}
-          className='flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2.5 first:pt-0 last:pb-0'
+          className='grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] items-center gap-x-4 py-2.5 first:pt-0 last:pb-0'
         >
-          <Mono>{endpoint.ip_address}</Mono>
-          <span className='text-[13px] text-muted'>
+          <Mono truncate>{endpoint.ip_address}</Mono>
+          <span className='truncate text-right text-[13px] text-muted'>
             {lines.data
               ? dnsLinePath(lines.data, endpoint.line_code)
               : endpoint.line_code === 'default'
@@ -112,7 +120,7 @@ export function NodeOverview() {
       </div>
     )
   const runtime = node.runtime
-  const behind = runtime.applied_node_spec_revision < node.node_spec_revision
+  const pending = runtime.applied_node_spec_revision < node.node_spec_revision
   return (
     <div className='flex flex-col gap-6'>
       {runtime.registration_status === 'pending' && (
@@ -132,10 +140,12 @@ export function NodeOverview() {
         <TextKpi
           label='出口带宽'
           value={formatBitsPerSecond(runtime.traffic_out_bps)}
+          hint='实时'
         />
         <TextKpi
           label='连接数'
           value={formatNumber(runtime.connection_count)}
+          hint='当前活动连接'
         />
         <TextKpi
           label='系统负载'
@@ -145,17 +155,6 @@ export function NodeOverview() {
           hint='1 分钟平均'
         />
       </div>
-      {runtime.last_error && (
-        <Alert status='danger'>
-          <Alert.Indicator />
-          <Alert.Content>
-            <Alert.Title>节点最近错误</Alert.Title>
-            <Alert.Description className='break-words'>
-              {runtime.last_error}
-            </Alert.Description>
-          </Alert.Content>
-        </Alert>
-      )}
       <div className='grid gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]'>
         <Section title='运行状态' description='来自节点心跳，实时更新。'>
           <DescriptionList
@@ -163,19 +162,17 @@ export function NodeOverview() {
             items={[
               {
                 label: '连接',
-                value: <StatusChip status={runtime.connection_status} />,
+                value: (
+                  <StatusChip
+                    status={runtime.connection_status}
+                    reserve={connectionLabels}
+                  />
+                ),
               },
               {
                 label: '注册',
                 value: (
-                  <StatusChip
-                    status={runtime.registration_status}
-                    label={
-                      runtime.registration_status === 'pending'
-                        ? '等待接入'
-                        : undefined
-                    }
-                  />
+                  <RegistrationChip status={runtime.registration_status} />
                 ),
               },
               {
@@ -198,16 +195,21 @@ export function NodeOverview() {
                 ),
               },
               {
-                label: '配置修订（已生效 / 目标）',
+                label: '配置',
                 value: (
-                  <span className='flex flex-wrap items-center gap-2 tabular-nums'>
-                    {runtime.applied_node_spec_revision} /{' '}
-                    {node.node_spec_revision}
-                    {behind && <StatusChip status='pending' label='待生效' />}
-                  </span>
+                  <StatusChip
+                    status={pending ? 'pending' : 'applied'}
+                    label={pending ? '待生效' : '已生效'}
+                    reserve={specStateLabels}
+                  />
                 ),
               },
-              { label: '健康', value: runtime.health || '—' },
+              {
+                label: '健康',
+                value: (
+                  <TruncatedText text={runtime.health} className='max-w-full' />
+                ),
+              },
               {
                 label: '排队日志',
                 value: formatNumber(runtime.queued_log_events),
@@ -228,11 +230,19 @@ export function NodeOverview() {
                 label: '清单摘要',
                 wide: true,
                 value: runtime.active_manifest_digest ? (
-                  <Mono className='break-all'>
-                    {runtime.active_manifest_digest}
-                  </Mono>
+                  <Mono truncate>{runtime.active_manifest_digest}</Mono>
                 ) : (
                   '—'
+                ),
+              },
+              {
+                label: '最近错误',
+                wide: true,
+                value: (
+                  <TruncatedText
+                    text={runtime.last_error}
+                    className='max-w-full text-danger'
+                  />
                 ),
               },
             ]}

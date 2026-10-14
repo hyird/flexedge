@@ -4,12 +4,11 @@ import { getRouteApi, Link } from '@tanstack/react-router'
 import { CircleCheck, CircleXmark, ListCheck } from '@gravity-ui/icons'
 import { KPIGroup, type DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
-import { Link as HeroLink, Skeleton } from '@heroui/react'
+import { Link as HeroLink, Skeleton, Tooltip } from '@heroui/react'
 import { hasListFilters, useListSearch } from '@/lib/list-search'
 import { ActionMenu } from '@/components/action-menu'
 import { DataTable } from '@/components/data-table'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
-import { Mono } from '@/components/mono'
 import { Page } from '@/components/page'
 import { RelativeTime } from '@/components/relative-time'
 import { StatusChip } from '@/components/status-chip'
@@ -20,6 +19,7 @@ import { TaskDetailSheet } from './task-detail-sheet'
 import {
   taskKey,
   taskResourceHref,
+  taskStatusLabels,
   taskStatuses,
   taskStatusTones,
   taskTitle,
@@ -122,27 +122,45 @@ export function TasksPage() {
     {
       id: 'status',
       header: '状态',
-      minWidth: 150,
-      cell: (task) => (
-        <div className='flex flex-col items-start gap-1'>
+      minWidth: 110,
+      cell: (task) => {
+        const chip = (
           <StatusChip
             status={task.status}
             label={taskStatuses[task.status]}
             tone={taskStatusTones[task.status]}
+            reserve={taskStatusLabels}
           />
-          {task.status === 'retrying' && task.next_attempt_at && (
-            <span className='text-xs text-muted'>
-              下次尝试 <RelativeTime value={task.next_attempt_at} />
-            </span>
-          )}
-        </div>
-      ),
+        )
+        return task.error ? (
+          <Tooltip delay={300}>
+            <Tooltip.Trigger
+              aria-label={`${taskStatuses[task.status]}：${task.error}`}
+            >
+              {chip}
+            </Tooltip.Trigger>
+            <Tooltip.Content className='max-w-80 whitespace-normal'>
+              {task.error}
+            </Tooltip.Content>
+          </Tooltip>
+        ) : (
+          chip
+        )
+      },
     },
     {
-      id: 'version',
-      header: '版本',
-      minWidth: 80,
-      cell: (task) => <Mono>v{task.version}</Mono>,
+      id: 'next_attempt',
+      header: '下次尝试',
+      minWidth: 110,
+      cell: (task) =>
+        task.status === 'retrying' && task.next_attempt_at ? (
+          <RelativeTime
+            value={task.next_attempt_at}
+            className='text-sm text-muted'
+          />
+        ) : (
+          <span className='text-muted'>—</span>
+        ),
     },
     {
       id: 'failures',

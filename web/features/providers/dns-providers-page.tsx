@@ -16,10 +16,10 @@ import { TablePagination } from '@/components/table-pagination'
 import { dnsProvidersQuery } from './data'
 import { DnsProviderSheet } from './dns-provider-sheet'
 import { useProviderActions } from './provider-actions'
-import { providerLabel } from './provider-display'
+import { providerLabel, providerStatusLabels } from './provider-display'
 import type { DnsProvider } from './types'
 
-const route = getRouteApi('/_authenticated/providers/dns')
+const route = getRouteApi('/_authenticated/providers/')
 
 export function DnsProvidersPage() {
   const list = useListSearch(route)
@@ -95,14 +95,14 @@ export function DnsProvidersPage() {
         item.last_error ? (
           <Tooltip delay={300}>
             <Tooltip.Trigger aria-label={item.last_error}>
-              <StatusChip status={item.status} />
+              <StatusChip status={item.status} reserve={providerStatusLabels} />
             </Tooltip.Trigger>
             <Tooltip.Content className='max-w-80'>
               {item.last_error}
             </Tooltip.Content>
           </Tooltip>
         ) : (
-          <StatusChip status={item.status} />
+          <StatusChip status={item.status} reserve={providerStatusLabels} />
         ),
     },
     {

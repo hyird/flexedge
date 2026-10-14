@@ -26,13 +26,20 @@ import {
   type WebsitesListParams,
 } from './data'
 import type { Website } from './types'
-import { defaultOrigin, originAddress, websiteName } from './website-display'
+import {
+  defaultOrigin,
+  deployStatusReserve,
+  originAddress,
+  websiteName,
+  websiteStatusReserve,
+} from './website-display'
 import { websiteFilterKeys, type WebsitesSearch } from './websites-search'
 
 const statusOptions = [
   { id: 'enabled', label: '已启用' },
   { id: 'disabled', label: '已停用' },
 ]
+const httpsReserve = ['TLS 1.2+', 'TLS 1.3+', '未启用']
 
 /** Websites list body (toolbar, table, pagination). With `clusterId` the list
  * is fixed to that cluster and the cluster filter and column are hidden; with
@@ -133,7 +140,7 @@ export function WebsitesTable({
                   {website.cluster_name || '未知集群'}
                 </Link>
                 <Mono truncate className='text-xs text-muted'>
-                  {website.access_domain}
+                  {website.access_domain || '—'}
                 </Mono>
               </div>
             ),
@@ -145,27 +152,30 @@ export function WebsitesTable({
       minWidth: 190,
       cell: (website) => {
         const origin = defaultOrigin(website)
-        return origin ? (
+        return (
           <div className='flex min-w-0 flex-col gap-0.5'>
-            <span className='truncate'>{origin.group}</span>
+            <span className={origin ? 'truncate' : 'truncate text-muted'}>
+              {origin ? origin.group : '未配置'}
+            </span>
             <Mono truncate className='text-xs text-muted'>
-              {originAddress(origin)}
+              {origin ? originAddress(origin) : '—'}
             </Mono>
           </div>
-        ) : (
-          <span className='text-muted'>未配置</span>
         )
       },
     },
     {
       id: 'deployment',
       header: '发布状态',
-      minWidth: 140,
+      minWidth: 180,
       cell: (website) => (
-        <div className='flex flex-col items-start gap-1'>
-          <StatusChip status={website.runtime.deploy_status} />
+        <div className='flex items-center gap-2'>
+          <StatusChip
+            status={website.runtime.deploy_status}
+            reserve={deployStatusReserve}
+          />
           <span className='text-xs text-muted tabular-nums'>
-            {website.runtime.synced_node_count} /{' '}
+            {website.runtime.synced_node_count}/
             {website.runtime.target_node_count} 节点
           </span>
         </div>
@@ -180,41 +190,53 @@ export function WebsitesTable({
           <StatusChip
             label={`TLS ${website.config.minimum_tls_version}+`}
             tone='accent'
+            reserve={httpsReserve}
           />
         ) : (
-          <StatusChip label='未启用' tone='default' />
+          <StatusChip label='未启用' tone='default' reserve={httpsReserve} />
         ),
     },
     {
       id: 'status',
       header: '状态',
       minWidth: 100,
-      cell: (website) => <StatusChip status={website.status} />,
+      cell: (website) => (
+        <StatusChip status={website.status} reserve={websiteStatusReserve} />
+      ),
     },
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
       width: 56,
-      cell: (website) => {
-        const base = `/websites/${website.id}`
-        return (
-          <ActionMenu
-            label={`网站 ${websiteName(website)} 的操作`}
-            items={[
-              { id: 'detail', label: '查看详情', href: base },
-              { id: 'settings', label: '编辑配置', href: `${base}/settings` },
-              { id: 'logs', label: '访问日志', href: `${base}/logs` },
-              {
-                id: 'delete',
-                label: '删除网站',
-                danger: true,
-                separated: true,
-                onAction: () => setRemoving(website),
-              },
-            ]}
-          />
-        )
-      },
+      cell: (website) => (
+        <ActionMenu
+          label={`网站 ${websiteName(website)} 的操作`}
+          items={[
+            {
+              id: 'detail',
+              label: '查看详情',
+              href: `/websites/${website.id}`,
+            },
+            {
+              id: 'settings',
+              label: '编辑配置',
+              href: `/websites/${website.id}?tab=settings`,
+            },
+            {
+              id: 'logs',
+              label: '访问日志',
+              href: `/websites/${website.id}?tab=logs`,
+            },
+            {
+              id: 'delete',
+              label: '删除网站',
+              danger: true,
+              separated: true,
+              onAction: () => setRemoving(website),
+            },
+          ]}
+        />
+      ),
     },
   ]
   return (

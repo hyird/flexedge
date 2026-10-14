@@ -86,7 +86,7 @@ export const navigation: NavigationItem[] = [
   },
 ]
 
-/** The navigation item owning `pathname`; child routes (`/websites/x/settings`)
+/** The navigation item owning `pathname`; detail routes (`/websites/x`)
  * resolve to their section (`/websites`). */
 export function navigationItemFor(pathname: string) {
   const path = pathname.replace(/\/+$/, '') || '/'

@@ -11,7 +11,8 @@ import { useLiveLogs } from '@/features/logs/use-live-logs'
 import { nodeSnapshotQuery } from './data'
 import { parseNodeLogs } from './node-log-schema'
 
-const route = getRouteApi('/_authenticated/nodes/$nodeId/logs')
+const route = getRouteApi('/_authenticated/nodes/$nodeId')
+const streamStateLabels = ['已暂停', '实时', '连接中断', '正在连接']
 
 /** Live node log tail. The stream opens once the header's one-shot node
  * snapshot has been read (so the page never holds two connections), closes
@@ -41,7 +42,11 @@ export function NodeLogs() {
       contentClassName='flex flex-col gap-3'
       actions={
         <>
-          <StatusChip label={state.label} tone={state.tone} />
+          <StatusChip
+            label={state.label}
+            tone={state.tone}
+            reserve={streamStateLabels}
+          />
           <Button
             size='sm'
             variant='tertiary'

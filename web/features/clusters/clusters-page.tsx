@@ -5,6 +5,7 @@ import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button } from '@heroui/react'
 import { hasListFilters, useListSearch } from '@/lib/list-search'
+import { statusLabels } from '@/lib/status'
 import { DataTable } from '@/components/data-table'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
 import { Mono } from '@/components/mono'
@@ -20,6 +21,7 @@ import { clusterOptionsQuery, clustersQuery } from './data'
 import type { Cluster } from './types'
 
 const route = getRouteApi('/_authenticated/clusters/')
+const clusterStatusLabels = statusLabels(['enabled', 'disabled'])
 
 export function ClustersPage() {
   const list = useListSearch(route)
@@ -105,7 +107,7 @@ export function ClustersPage() {
         <Link
           to='/clusters/$clusterId'
           params={{ clusterId: cluster.id }}
-          className='link text-sm tabular-nums'
+          className='link text-sm whitespace-nowrap tabular-nums'
         >
           {cluster.online_node_count} / {cluster.node_count}
         </Link>
@@ -115,7 +117,9 @@ export function ClustersPage() {
       id: 'status',
       header: '状态',
       minWidth: 100,
-      cell: (cluster) => <StatusChip status={cluster.status} />,
+      cell: (cluster) => (
+        <StatusChip status={cluster.status} reserve={clusterStatusLabels} />
+      ),
     },
     {
       id: 'actions',

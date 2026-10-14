@@ -1,28 +1,39 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { getRouteApi, Link, Outlet } from '@tanstack/react-router'
+import { getRouteApi, Link } from '@tanstack/react-router'
 import { Cubes3, Globe, Pencil, Plus, Server } from '@gravity-ui/icons'
 import { Button, Meter, Skeleton } from '@heroui/react'
 import { ApiBusinessError } from '@/lib/api-response'
 import { formatPercent, ratioOf } from '@/lib/format'
+import { statusLabels } from '@/lib/status'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
 import { CopyButton } from '@/components/copy-button'
 import { DetailHeader, DetailHeaderSkeleton } from '@/components/detail-header'
 import { LinkButton } from '@/components/link-button'
 import { Mono } from '@/components/mono'
 import { EmptyState, Page, QueryNotice } from '@/components/page'
-import { RouteTabs } from '@/components/route-tabs'
+import { PageTabs } from '@/components/page-tabs'
 import { Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { providerLabel } from '@/features/providers/provider-display'
 import { ClusterActionMenu } from './cluster-action-menu'
+import { ClusterNodes } from './cluster-nodes'
+import type { ClusterDetailTab } from './cluster-search'
 import { ClusterSheet } from './cluster-sheet'
+import { ClusterWebsites } from './cluster-websites'
 import { clusterSnapshotKey, clusterSnapshotQuery } from './data'
 import type { Cluster } from './types'
 
 const route = getRouteApi('/_authenticated/clusters/$clusterId')
 // service/domains/cluster/cluster_error.h NOT_FOUND
 const clusterNotFoundCode = 16401
+
+type Tab = 'nodes' | ClusterDetailTab
+const tabs = [
+  { id: 'nodes', label: '节点', icon: <Server /> },
+  { id: 'websites', label: '网站', icon: <Globe /> },
+] as const
+const clusterStatusLabels = statusLabels(['enabled', 'disabled'])
 
 function ClusterSummary({ cluster }: { cluster: Cluster }) {
   const online = ratioOf(cluster.online_node_count, cluster.node_count)
@@ -84,11 +95,14 @@ function ClusterSummary({ cluster }: { cluster: Cluster }) {
   )
 }
 
-/** `/clusters/$clusterId`: header and summary from one snapshot of
- * `/api/clusters/:id/stream`; the active tab's list owns the page's only live
- * stream. Writes on this page re-read the snapshot. */
+/** `/clusters/$clusterId` with in-page tabs (`?tab=websites`, nodes default):
+ * header and summary from one snapshot of `/api/clusters/:id/stream`; the
+ * active tab's list owns the page's only live stream. Writes on this page
+ * re-read the snapshot. */
 export function ClusterDetailLayout() {
   const { clusterId } = route.useParams()
+  const { tab = 'nodes' } = route.useSearch()
+  const navigate = route.useNavigate()
   const client = useQueryClient()
   const query = useQuery(clusterSnapshotQuery(clusterId))
   const cluster = query.data
@@ -112,17 +126,35 @@ export function ClusterDetailLayout() {
         />
       </Page>
     )
-  const base = `/clusters/${clusterId}`
+  const selectTab = (next: Tab) =>
+    void navigate({
+      to: '.',
+      search: (previous) => ({
+        ...previous,
+        // Every list param belongs to the tab being left.
+        q: undefined,
+        page: undefined,
+        page_size: undefined,
+        cluster_id: undefined,
+        status: undefined,
+        connection_status: undefined,
+        create: undefined,
+        tab: next === 'nodes' ? undefined : next,
+      }),
+      replace: true,
+    })
   return (
     <Page>
       {cluster ? (
         <DetailHeader
           icon={<Cubes3 />}
           title={cluster.name}
-          status={<StatusChip status={cluster.status} />}
+          status={
+            <StatusChip status={cluster.status} reserve={clusterStatusLabels} />
+          }
           meta={[
             <Mono key='domain'>{cluster.access_domain}</Mono>,
-            <span key='nodes' className='tabular-nums'>
+            <span key='nodes' className='whitespace-nowrap tabular-nums'>
               {cluster.node_count} 个节点
             </span>,
           ]}
@@ -136,7 +168,7 @@ export function ClusterDetailLayout() {
                 <Pencil className='size-4' />
                 编辑集群
               </Button>
-              <LinkButton href={`${base}?create=1`}>
+              <LinkButton href={`/clusters/${clusterId}?create=1`}>
                 <Plus />
                 添加节点
               </LinkButton>
@@ -163,16 +195,17 @@ export function ClusterDetailLayout() {
           ))}
         </div>
       )}
-      <RouteTabs
+      <PageTabs
         label='集群详情'
-        items={[
-          { href: base, label: '节点', icon: <Server /> },
-          { href: `${base}/websites`, label: '网站', icon: <Globe /> },
-        ]}
-      />
-      {/* The tab's live list opens after the header's one-shot read, so the
-          page never holds two connections at once. */}
-      {query.isFetchedAfterMount && <Outlet />}
+        items={tabs}
+        selected={tab}
+        onSelectionChange={selectTab}
+      >
+        {/* The tab's live list opens after the header's one-shot read, so
+            the page never holds two connections at once. */}
+        {query.isFetchedAfterMount &&
+          (tab === 'nodes' ? <ClusterNodes /> : <ClusterWebsites />)}
+      </PageTabs>
       {cluster && (
         <ClusterSheet
           isOpen={editing}

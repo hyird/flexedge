@@ -9,6 +9,7 @@ import {
   flattenDnsLineTree,
   type DnsLineTreeOption,
 } from './dns-lines'
+import { lineStatusLabels } from './dns-zone-display'
 import { useZoneDetail } from './use-zone-detail'
 
 const columns: DataGridColumn<DnsLineTreeOption>[] = [
@@ -38,7 +39,9 @@ const columns: DataGridColumn<DnsLineTreeOption>[] = [
     id: 'status',
     header: '状态',
     minWidth: 110,
-    cell: ({ line }) => <StatusChip status={line.status} />,
+    cell: ({ line }) => (
+      <StatusChip status={line.status} reserve={lineStatusLabels} />
+    ),
   },
 ]
 

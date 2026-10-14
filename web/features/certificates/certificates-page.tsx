@@ -22,7 +22,11 @@ import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { providerLabel } from '@/features/providers/provider-display'
 import { useCertificateCommands } from './certificate-commands'
-import { certificateStatuses, isExpiring } from './certificate-display'
+import {
+  certificateStatusLabels,
+  certificateStatuses,
+  isExpiring,
+} from './certificate-display'
 import { certificatesQuery } from './data'
 import { RequestCertificateSheet } from './request-certificate-sheet'
 import type { Certificate } from './types'
@@ -68,17 +72,20 @@ export function CertificatesPage() {
       isRowHeader: true,
       minWidth: 240,
       cell: (item) => (
-        <div className='flex min-w-0 flex-col'>
+        <div className='flex min-w-0 items-center gap-2'>
           <Link
             to='/certificates/$certificateId'
             params={{ certificateId: item.id }}
-            className='link font-medium'
+            className='link min-w-0 font-medium'
           >
             <Mono truncate>{item.domains[0] ?? item.id}</Mono>
           </Link>
           {item.domains.length > 1 && (
-            <span className='text-xs text-muted'>
-              另含 {item.domains.length - 1} 个域名
+            <span
+              className='shrink-0 text-xs text-muted tabular-nums'
+              title={item.domains.slice(1).join('\n')}
+            >
+              +{item.domains.length - 1}
             </span>
           )}
         </div>
@@ -94,33 +101,44 @@ export function CertificatesPage() {
       id: 'status',
       header: '状态',
       minWidth: 110,
-      cell: (item) => <StatusChip status={item.status} />,
+      cell: (item) => (
+        <StatusChip status={item.status} reserve={certificateStatusLabels} />
+      ),
     },
     {
       id: 'expires',
       header: '有效期至',
-      minWidth: 170,
-      cell: (item) =>
-        item.expires_at ? (
-          <div className='flex flex-col'>
-            <span className='tabular-nums'>
-              {formatDate(item.expires_at).slice(0, 10)}
+      minWidth: 190,
+      // One line: a date slot as wide as `0000-00-00` (or `—`), then the
+      // remaining days at a fixed position.
+      cell: (item) => (
+        <span className='flex items-center gap-2 tabular-nums'>
+          <span className='inline-grid'>
+            <span aria-hidden className='invisible col-start-1 row-start-1'>
+              0000-00-00
             </span>
-            {item.remaining_days !== undefined && (
-              <span
-                className={cn(
-                  'text-xs tabular-nums',
-                  isExpiring(item) ? 'text-warning' : 'text-muted',
-                  item.remaining_days <= 7 && 'text-danger'
-                )}
-              >
-                剩余 {item.remaining_days} 天
-              </span>
-            )}
-          </div>
-        ) : (
-          <span className='text-muted'>—</span>
-        ),
+            <span
+              className={cn(
+                'col-start-1 row-start-1',
+                !item.expires_at && 'text-muted'
+              )}
+            >
+              {item.expires_at ? formatDate(item.expires_at).slice(0, 10) : '—'}
+            </span>
+          </span>
+          {item.expires_at && item.remaining_days !== undefined && (
+            <span
+              className={cn(
+                'text-xs',
+                isExpiring(item) ? 'text-warning' : 'text-muted',
+                item.remaining_days <= 7 && 'text-danger'
+              )}
+            >
+              剩余 {item.remaining_days} 天
+            </span>
+          )}
+        </span>
+      ),
     },
     {
       id: 'renewal',

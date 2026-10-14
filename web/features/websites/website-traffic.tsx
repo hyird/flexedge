@@ -33,7 +33,7 @@ const statusClassColors: Record<string, string> = {
   '5': 'var(--danger)',
 }
 
-/** `/websites/$websiteId/traffic`: access-log based statistics. Subscribes to
+/** `/websites/$websiteId?tab=traffic`: access-log based statistics. Subscribes to
  * the dashboard stream only while this tab is mounted. */
 export function WebsiteTraffic() {
   const website = useWebsite()
@@ -54,7 +54,7 @@ export function WebsiteTraffic() {
           </Alert.Content>
           <LinkButton
             variant='tertiary'
-            href={`/websites/${website.id}/settings?section=logs`}
+            href={`/websites/${website.id}?tab=settings&section=logs`}
             className='shrink-0 self-center'
           >
             启用访问日志

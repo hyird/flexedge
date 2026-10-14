@@ -16,7 +16,13 @@ export function DetailHeaderSkeleton() {
 
 /** Resource detail header: icon tile, visible title (20px/600), status chip,
  * a meta line of short facts or cross-resource links, actions and an overflow
- * menu (`ActionMenu`). Followed by `RouteTabs` when the detail has tabs. */
+ * menu (`ActionMenu`). Followed by `PageTabs` when the detail has tabs.
+ *
+ * The layout never depends on the current state: title and status share one
+ * line (the title truncates), the meta line never wraps (it scrolls
+ * sideways when it does not fit) and actions sit in their own grid column,
+ * below the title on narrow screens. Give state chips a `reserve` and keep
+ * the action set fixed so switching states moves nothing. */
 export function DetailHeader({
   icon,
   title,
@@ -26,7 +32,7 @@ export function DetailHeader({
   menu,
 }: {
   icon: ReactNode
-  title: ReactNode
+  title: string
   status?: ReactNode
   /** Rendered in order, separated by a dot; falsy entries are skipped. */
   meta?: ReactNode[]
@@ -35,7 +41,7 @@ export function DetailHeader({
 }) {
   const facts = meta.filter(Boolean)
   return (
-    <header className='flex flex-wrap items-start justify-between gap-x-6 gap-y-4'>
+    <header className='grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start sm:gap-x-6'>
       <div className='flex min-w-0 items-start gap-3'>
         <span
           aria-hidden
@@ -43,19 +49,24 @@ export function DetailHeader({
         >
           {icon}
         </span>
-        <div className='flex min-w-0 flex-col gap-1'>
-          <div className='flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1'>
-            <h1 className='truncate text-xl font-semibold tracking-tight text-foreground'>
+        <div className='flex min-w-0 flex-1 flex-col gap-1'>
+          <div className='flex min-w-0 items-center gap-3'>
+            <h1
+              title={title}
+              className='min-w-0 truncate text-xl font-semibold tracking-tight text-foreground'
+            >
               {title}
             </h1>
-            {status}
+            {status && <span className='flex shrink-0'>{status}</span>}
           </div>
           {facts.length > 0 && (
-            <div className='flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted'>
+            <div className='flex min-w-0 [scrollbar-width:none] items-center gap-x-2 overflow-x-auto text-[13px] whitespace-nowrap text-muted'>
               {facts.map((fact, index) => (
                 <Fragment key={index}>
                   {index > 0 && <span aria-hidden>·</span>}
-                  <span className='min-w-0'>{fact}</span>
+                  <span className='flex shrink-0 items-center gap-1.5'>
+                    {fact}
+                  </span>
                 </Fragment>
               ))}
             </div>

@@ -2,9 +2,9 @@ import { getRouteApi } from '@tanstack/react-router'
 import { useListSearch } from '@/lib/list-search'
 import { WebsitesTable } from '@/features/websites/websites-table'
 
-const route = getRouteApi('/_authenticated/clusters/$clusterId/websites')
+const route = getRouteApi('/_authenticated/clusters/$clusterId')
 
-/** Cluster detail websites tab: the website list fixed to this cluster. */
+/** Cluster detail `?tab=websites`: the website list fixed to this cluster. */
 export function ClusterWebsites() {
   const { clusterId } = route.useParams()
   const list = useListSearch(route)

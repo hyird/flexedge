@@ -61,3 +61,8 @@ export function describeStatus(status?: string): {
   const [label, tone] = statuses[value] ?? [value, 'default']
   return { label, tone }
 }
+
+/** Labels of the given wire statuses, for `StatusChip`'s `reserve`. */
+export function statusLabels(statuses: readonly string[]) {
+  return statuses.map((status) => describeStatus(status).label)
+}

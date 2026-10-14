@@ -44,9 +44,7 @@ import {
   type WebsiteSectionProps,
 } from './website-settings-sections'
 
-const settingsRoute = getRouteApi(
-  '/_authenticated/websites/$websiteId/settings'
-)
+const settingsRoute = getRouteApi('/_authenticated/websites/$websiteId')
 const createRoute = getRouteApi('/_authenticated/websites/new')
 
 const sectionComponents: Record<
@@ -210,8 +208,9 @@ function SectionNav({
 type SaveInput = { data: WebsiteFormValues; draft: WebsiteFormValues }
 
 /** Draft editor shared by `/websites/new` (no `website`) and
- * `/websites/$id/settings`. The draft survives group switches; the save bar
- * guards navigation while it differs from the loaded configuration. */
+ * `/websites/$id?tab=settings`. The draft survives group switches; the save
+ * bar guards navigation (other pages and other `?tab=`) while it differs from
+ * the loaded configuration. */
 function WebsiteEditor({
   website,
   section,
@@ -396,11 +395,7 @@ function WebsiteEditor({
               {conflict ? '数据已被其他人更新' : '此网站已在其他地方更新'}
             </Alert.Title>
             <Alert.Description>
-              当前编辑基于修订 {base?.revision}
-              {website && website.revision !== base?.revision
-                ? `，最新修订为 ${website.revision}`
-                : ''}
-              。重新加载会载入最新配置并丢弃本页未保存的更改。
+              此配置已被其他人更新，重新加载会载入最新配置并丢弃本页未保存的更改。
             </Alert.Description>
           </Alert.Content>
           <Button

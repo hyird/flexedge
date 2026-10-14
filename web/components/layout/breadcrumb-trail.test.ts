@@ -19,7 +19,7 @@ describe('breadcrumb trail', () => {
     ).toEqual([{ key: '/websites', label: '网站' }])
   })
 
-  it('uses runtime resource labels and links every crumb but the current page', () => {
+  it('shows the section and the resource name, whatever in-page tab is open', () => {
     const matches = [
       { id: '/_authenticated', pathname: '/' },
       {
@@ -27,27 +27,16 @@ describe('breadcrumb trail', () => {
         pathname: '/websites/w1',
         breadcrumb: '网站详情',
       },
-      { id: '/_authenticated/websites/$websiteId/', pathname: '/websites/w1/' },
-      {
-        id: '/_authenticated/websites/$websiteId/settings',
-        pathname: '/websites/w1/settings',
-        breadcrumb: '配置',
-      },
     ]
     expect(
       buildBreadcrumbTrail(
-        '/websites/w1/settings',
+        '/websites/w1',
         matches,
         new Map([['/_authenticated/websites/$websiteId', 'QA 网站']])
       )
     ).toEqual([
       { key: '/websites', label: '网站', href: '/websites' },
-      {
-        key: '/_authenticated/websites/$websiteId',
-        label: 'QA 网站',
-        href: '/websites/w1',
-      },
-      { key: '/_authenticated/websites/$websiteId/settings', label: '配置' },
+      { key: '/_authenticated/websites/$websiteId', label: 'QA 网站' },
     ])
   })
 

@@ -1,6 +1,7 @@
 import { type CSSProperties, type ReactNode } from 'react'
 import { DataGrid, type DataGridColumn } from '@heroui-pro/react'
 import { Skeleton } from '@heroui/react'
+import { cn } from '@/lib/utils'
 import { EmptyState, QueryNotice } from './page'
 
 type DataTableEmpty = {
@@ -18,10 +19,51 @@ function defaultRowId(item: object) {
   throw new Error('DataTable 行缺少 id，请提供 getRowId')
 }
 
+/** Free text in a cell (errors, notes): one line, truncated at `className`'s
+ * max width (default 20rem), full text in the native tooltip. */
+export function TruncatedText({
+  text,
+  className,
+}: {
+  text?: string
+  className?: string
+}) {
+  return text ? (
+    <span title={text} className={cn('block max-w-80 truncate', className)}>
+      {text}
+    </span>
+  ) : (
+    <span className='text-muted'>—</span>
+  )
+}
+
+/** The grid lays columns out by content (auto table layout), so a column's
+ * `width`/`minWidth` is enforced by a sized header block: the column never
+ * narrows below it, whatever its cells currently show. */
+function withEnforcedWidth<T>(column: DataGridColumn<T>): DataGridColumn<T> {
+  const minWidth =
+    typeof column.width === 'number' ? column.width : column.minWidth
+  if (minWidth === undefined || typeof column.header === 'function')
+    return column
+  return {
+    ...column,
+    header: (
+      <span
+        className='block'
+        style={{ minWidth: `calc(${minWidth}px - 2rem)` }}
+      >
+        {column.header}
+      </span>
+    ),
+  }
+}
+
 /** Pro DataGrid with the console's list states: layout-shaped skeleton while
  * the first snapshot loads, an Alert + retry on error (stale rows stay
  * visible), an empty state inside the grid, a sticky header and an internal
- * scroll viewport that scrolls horizontally on narrow screens. */
+ * scroll viewport that scrolls horizontally on narrow screens. Rows keep one
+ * height across state changes: cells never wrap, column `width`/`minWidth`
+ * are enforced, status cells use `StatusChip`'s `reserve`. */
 export function DataTable<T extends object>({
   label,
   columns,
@@ -93,7 +135,7 @@ export function DataTable<T extends object>({
         <DataGrid
           aria-label={label}
           data={data}
-          columns={columns}
+          columns={columns.map(withEnforcedWidth)}
           getRowId={getRowId}
           className='min-w-0'
           contentClassName='min-w-(--data-table-min-width)'

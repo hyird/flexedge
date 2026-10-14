@@ -17,3 +17,12 @@ export const nodeFilterKeys = [
   'status',
   'connection_status',
 ] as const
+
+/** `/nodes/$nodeId` search params: the in-page tab (`?tab=`, overview is the
+ * default and never written). */
+export const nodeDetailSearchSchema = z.object({
+  tab: optionalSearchValue(z.enum(['logs', 'config'])),
+})
+export type NodeDetailTab = NonNullable<
+  z.infer<typeof nodeDetailSearchSchema>['tab']
+>

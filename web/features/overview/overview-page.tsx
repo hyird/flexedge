@@ -15,8 +15,9 @@ import {
   formatPercent,
   ratioOf,
 } from '@/lib/format'
+import { statusLabels } from '@/lib/status'
 import { cn } from '@/lib/utils'
-import { DataTable } from '@/components/data-table'
+import { DataTable, TruncatedText } from '@/components/data-table'
 import { LinkButton } from '@/components/link-button'
 import { MetricMeter } from '@/components/metric-meter'
 import { EmptyState, Page, QueryNotice } from '@/components/page'
@@ -27,6 +28,7 @@ import type { Node } from '@/features/nodes/types'
 import {
   taskHref,
   taskResourceHref,
+  taskStatusLabels,
   taskStatuses,
   taskStatusTones,
   taskTitle,
@@ -248,7 +250,9 @@ function AttentionPanel({
                   )}
                 />
                 <span className='flex min-w-0 flex-1 flex-col'>
-                  <span className='text-sm font-medium'>{item.label}</span>
+                  <span className='truncate text-sm font-medium'>
+                    {item.label}
+                  </span>
                   <span className='truncate text-xs text-muted'>
                     {item.description}
                   </span>
@@ -312,7 +316,7 @@ function NodeHealthPanel({
           action={<LinkButton href='/nodes?create=1'>添加节点</LinkButton>}
         />
       ) : (
-        <ul className='flex flex-col divide-y divide-separator'>
+        <ul className='@container flex flex-col divide-y divide-separator'>
           {shown.map((node) => (
             <NodeHealthRow key={node.id} node={node} />
           ))}
@@ -322,46 +326,59 @@ function NodeHealthPanel({
   )
 }
 
+const connectionLabels = statusLabels(['online', 'offline', 'unregistered'])
+
+/** Fixed structure whatever the node's state: name + cluster (two lines),
+ * connection chip with a reserved width, then one detail slot of fixed size
+ * (meters when online, last heartbeat otherwise). Narrow cards put the
+ * detail slot on its own line in every row. */
 function NodeHealthRow({ node }: { node: Node }) {
   const online = node.runtime.connection_status === 'online'
   return (
-    <li className='flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5'>
-      <div className='flex min-w-0 flex-1 basis-40 flex-col'>
+    <li className='grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5 py-2.5 @lg:grid-cols-[minmax(0,1fr)_auto_16rem]'>
+      <div className='flex min-w-0 flex-col'>
         <Link
           href={`/nodes/${node.id}`}
           className='truncate text-sm font-medium'
         >
           {node.name}
         </Link>
-        <span className='truncate text-xs text-muted'>{node.cluster_name}</span>
-      </div>
-      <StatusChip status={node.runtime.connection_status} />
-      {online ? (
-        <div className='flex items-center gap-3 text-xs text-muted'>
-          <span className='flex items-center gap-1.5'>
-            CPU
-            <MetricMeter
-              label={`${node.name} CPU`}
-              value={node.runtime.cpu_usage}
-              className='w-24'
-            />
-          </span>
-          <span className='flex items-center gap-1.5'>
-            内存
-            <MetricMeter
-              label={`${node.name} 内存`}
-              value={node.runtime.memory_usage}
-              className='w-24'
-            />
-          </span>
-        </div>
-      ) : node.runtime.last_heartbeat_at ? (
-        <span className='text-xs text-muted'>
-          最后心跳 <RelativeTime value={node.runtime.last_heartbeat_at} />
+        <span className='truncate text-xs text-muted'>
+          {node.cluster_name || '—'}
         </span>
-      ) : (
-        <span className='text-xs text-muted'>尚未接入</span>
-      )}
+      </div>
+      <StatusChip
+        status={node.runtime.connection_status}
+        reserve={connectionLabels}
+      />
+      <div className='col-span-2 flex h-5 min-w-0 items-center gap-3 text-xs whitespace-nowrap text-muted @lg:col-span-1'>
+        {online ? (
+          <>
+            <span className='flex min-w-0 flex-1 items-center gap-1.5'>
+              CPU
+              <MetricMeter
+                label={`${node.name} CPU`}
+                value={node.runtime.cpu_usage}
+                className='min-w-0 flex-1'
+              />
+            </span>
+            <span className='flex min-w-0 flex-1 items-center gap-1.5'>
+              内存
+              <MetricMeter
+                label={`${node.name} 内存`}
+                value={node.runtime.memory_usage}
+                className='min-w-0 flex-1'
+              />
+            </span>
+          </>
+        ) : node.runtime.last_heartbeat_at ? (
+          <span className='truncate'>
+            最后心跳 <RelativeTime value={node.runtime.last_heartbeat_at} />
+          </span>
+        ) : (
+          <span className='truncate'>尚未接入</span>
+        )}
+      </div>
     </li>
   )
 }
@@ -398,11 +415,13 @@ const markerColumns: DataGridColumn<OverviewMarker>[] = [
   {
     id: 'status',
     header: '状态',
+    minWidth: 100,
     cell: (marker) => (
       <StatusChip
         status={marker.status}
         label={taskStatuses[marker.status as keyof typeof taskStatuses]}
         tone={taskStatusTones[marker.status as keyof typeof taskStatusTones]}
+        reserve={taskStatusLabels}
       />
     ),
   },
@@ -411,12 +430,10 @@ const markerColumns: DataGridColumn<OverviewMarker>[] = [
     header: '最近错误',
     minWidth: 200,
     cell: (marker) => (
-      <span
-        className='line-clamp-1 text-xs text-muted'
-        title={marker.last_error}
-      >
-        {marker.last_error || '—'}
-      </span>
+      <TruncatedText
+        text={marker.last_error}
+        className='max-w-72 text-xs text-muted'
+      />
     ),
   },
   {

@@ -26,6 +26,7 @@ import {
   displaySyncStatus,
   hasMeaningfulConflicts,
   zoneSyncFilters,
+  zoneSyncStatusLabels,
 } from './dns-zone-display'
 import type { DnsZone } from './types'
 import { useZoneCommands } from './zone-commands'
@@ -75,7 +76,7 @@ export function DnsZonesPage() {
       id: 'records',
       label: '编辑记录',
       icon: <PencilToSquare />,
-      href: `/dns-zones/${zone.id}/records?edit=1`,
+      href: `/dns-zones/${zone.id}?tab=records&edit=1`,
     },
     {
       id: 'sync',
@@ -162,14 +163,10 @@ export function DnsZonesPage() {
       header: '同步状态',
       minWidth: 130,
       cell: (zone) => (
-        <div className='flex flex-col items-start gap-0.5'>
-          <StatusChip status={displaySyncStatus(zone)} />
-          {zone.synced_revision < zone.desired_revision && (
-            <span className='text-xs text-muted tabular-nums'>
-              版本 {zone.synced_revision}/{zone.desired_revision}
-            </span>
-          )}
-        </div>
+        <StatusChip
+          status={displaySyncStatus(zone)}
+          reserve={zoneSyncStatusLabels}
+        />
       ),
     },
     {

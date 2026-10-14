@@ -18,8 +18,8 @@ export const accessLogStatusClasses = [
   '5xx',
 ] as const
 
-/** `…/logs` search: live mode is the default and is never written to the URL;
- * `log` is the request whose detail sheet is open. */
+/** Access-log tab search (`?tab=logs`): live mode is the default and is never
+ * written to the URL; `log` is the request whose detail sheet is open. */
 export const accessLogsSearchSchema = listSearchSchema.extend({
   mode: optionalSearchValue(z.literal('history')),
   method: optionalSearchValue(z.enum(accessLogMethods)),

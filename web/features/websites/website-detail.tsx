@@ -1,12 +1,6 @@
-import { useState } from 'react'
+import { type ReactNode, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import {
-  getRouteApi,
-  Link,
-  Outlet,
-  useLocation,
-  useNavigate,
-} from '@tanstack/react-router'
+import { getRouteApi, Link } from '@tanstack/react-router'
 import {
   ChartLine,
   FileText,
@@ -25,8 +19,9 @@ import { DetailHeader, DetailHeaderSkeleton } from '@/components/detail-header'
 import { LinkButton } from '@/components/link-button'
 import { Mono } from '@/components/mono'
 import { EmptyState, Page, QueryNotice } from '@/components/page'
-import { RouteTabs } from '@/components/route-tabs'
+import { PageTabs } from '@/components/page-tabs'
 import { StatusChip } from '@/components/status-chip'
+import { AccessLogs } from './access-logs'
 import {
   isWebsiteNotFound,
   removeWebsite,
@@ -34,24 +29,51 @@ import {
   websiteSnapshotQuery,
 } from './data'
 import { WebsiteContext } from './website-context'
-import { websiteName } from './website-display'
+import {
+  websiteTabSearchKeys,
+  type WebsiteDetailSearch,
+  type WebsiteDetailTab,
+} from './website-detail-search'
+import {
+  deployStatusReserve,
+  websiteName,
+  websiteStatusReserve,
+} from './website-display'
+import { WebsiteOverview } from './website-overview'
+import { WebsiteSettingsPage } from './website-settings'
+import { WebsiteTraffic } from './website-traffic'
 
 const route = getRouteApi('/_authenticated/websites/$websiteId')
 
-/** `/websites/$websiteId` layout: header, route tabs and the active tab.
+const tabItems = [
+  { id: 'overview', label: '概览', icon: <LayoutHeaderCells /> },
+  { id: 'traffic', label: '流量分析', icon: <ChartLine /> },
+  { id: 'logs', label: '访问日志', icon: <FileText /> },
+  { id: 'settings', label: '配置', icon: <Gear /> },
+] as const
+
+const tabContent: Record<WebsiteDetailTab, ReactNode> = {
+  overview: <WebsiteOverview />,
+  traffic: <WebsiteTraffic />,
+  logs: <AccessLogs />,
+  settings: <WebsiteSettingsPage />,
+}
+
+/** `/websites/$websiteId`: header, in-page tabs (`?tab=`) and the active tab.
  * One live stream per page: the overview and settings tabs subscribe to the
  * website detail stream and the header reuses it; traffic and logs keep
  * their own stream, so the header reads the detail once (or reuses the last
- * live frame) and re-reads it after writes via `useRefreshWebsite`. */
+ * live frame) and re-reads it after writes via `useRefreshWebsite`. Only the
+ * selected tab is mounted, so leaving a tab closes its stream. */
 export function WebsiteDetailLayout() {
   const { websiteId } = route.useParams()
-  const client = useQueryClient()
-  const navigate = useNavigate()
-  const base = `/websites/${websiteId}`
-  const pathname = useLocation({
-    select: (location) => location.pathname.replace(/\/+$/, ''),
+  const tab: WebsiteDetailTab = route.useSearch({
+    select: (search) => search.tab ?? 'overview',
   })
-  const liveTab = pathname === base || pathname === `${base}/settings`
+  const client = useQueryClient()
+  const navigate = route.useNavigate()
+  const base = `/websites/${websiteId}`
+  const liveTab = tab === 'overview' || tab === 'settings'
   const live = useQuery({ ...websiteDetailQuery(websiteId), enabled: liveTab })
   const snapshot = useQuery({
     ...websiteSnapshotQuery(websiteId),
@@ -70,6 +92,21 @@ export function WebsiteDetailLayout() {
   useBreadcrumbLabel(website ? websiteName(website) : undefined)
   const refresh = () => {
     if (!liveTab) void snapshot.refetch()
+  }
+  // Replace the entry and drop the params owned by the tab being left.
+  const selectTab = (next: WebsiteDetailTab) => {
+    if (next === tab) return
+    const cleared: Partial<WebsiteDetailSearch> = Object.fromEntries(
+      websiteTabSearchKeys[tab].map((key) => [key, undefined])
+    )
+    void navigate({
+      search: (previous) => ({
+        ...previous,
+        ...cleared,
+        tab: next === 'overview' ? undefined : next,
+      }),
+      replace: true,
+    })
   }
 
   if (!deleted && query.isError && isWebsiteNotFound(query.error))
@@ -100,12 +137,15 @@ export function WebsiteDetailLayout() {
     )
 
   const name = websiteName(website)
+  const content = tabContent[tab]
   return (
     <Page>
       <DetailHeader
         icon={<Globe />}
         title={name}
-        status={<StatusChip status={website.status} />}
+        status={
+          <StatusChip status={website.status} reserve={websiteStatusReserve} />
+        }
         meta={[
           <Link
             key='cluster'
@@ -117,7 +157,10 @@ export function WebsiteDetailLayout() {
           </Link>,
           <Mono key='access'>{website.access_domain}</Mono>,
           <span key='deploy' className='inline-flex items-center gap-1.5'>
-            <StatusChip status={website.runtime.deploy_status} />
+            <StatusChip
+              status={website.runtime.deploy_status}
+              reserve={deployStatusReserve}
+            />
             <span className='tabular-nums'>
               {website.runtime.synced_node_count}/
               {website.runtime.target_node_count} 节点
@@ -125,7 +168,7 @@ export function WebsiteDetailLayout() {
           </span>,
         ]}
         actions={
-          <LinkButton href={`${base}/settings`}>
+          <LinkButton href={`${base}?tab=settings`}>
             <Pencil />
             编辑配置
           </LinkButton>
@@ -138,7 +181,7 @@ export function WebsiteDetailLayout() {
                 id: 'logs',
                 label: '访问日志',
                 icon: <FileText />,
-                href: `${base}/logs`,
+                href: `${base}?tab=logs`,
               },
               {
                 id: 'delete',
@@ -159,18 +202,14 @@ export function WebsiteDetailLayout() {
           title={liveTab ? '实时状态已中断' : '网站信息刷新失败'}
         />
       )}
-      <RouteTabs
+      <PageTabs
         label='网站详情'
-        items={[
-          { href: base, label: '概览', icon: <LayoutHeaderCells /> },
-          { href: `${base}/traffic`, label: '流量分析', icon: <ChartLine /> },
-          { href: `${base}/logs`, label: '访问日志', icon: <FileText /> },
-          { href: `${base}/settings`, label: '配置', icon: <Gear /> },
-        ]}
-      />
-      <WebsiteContext value={{ website, refresh }}>
-        <Outlet />
-      </WebsiteContext>
+        items={tabItems}
+        selected={tab}
+        onSelectionChange={selectTab}
+      >
+        <WebsiteContext value={{ website, refresh }}>{content}</WebsiteContext>
+      </PageTabs>
       <ConfirmDialog
         isOpen={removing}
         onClose={() => setRemoving(false)}
@@ -197,7 +236,7 @@ function DetailSkeleton() {
     <div className='flex flex-col gap-6'>
       <DetailHeaderSkeleton />
       <div className='flex gap-4'>
-        {Array.from({ length: 5 }, (_, index) => (
+        {Array.from({ length: 4 }, (_, index) => (
           <Skeleton key={index} className='h-8 w-20 rounded-md' />
         ))}
       </div>

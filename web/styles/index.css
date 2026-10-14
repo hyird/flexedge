@@ -115,9 +115,13 @@
   .data-grid .table__column[data-pinned] {
     z-index: 4;
   }
+  /* Rows stay one height whatever their state: cells never wrap. Columns
+     that are two lines by design (name + domain) stack separate lines and
+     show both lines in every row; long free text truncates with a title. */
   .data-grid .table__cell {
     height: 2.75rem;
     padding-block: 0.5rem;
+    white-space: nowrap;
   }
 
   .command__item {

@@ -27,8 +27,6 @@ const zone = (patch: Partial<DnsZone> = {}): DnsZone => ({
   dns_provider_name: 'Aliyun',
   domain: 'example.com',
   sync_status: 'synced',
-  desired_revision: 1,
-  synced_revision: 1,
   website_count: 0,
   config: { records: [record('custom')] },
   runtime: {
@@ -39,7 +37,6 @@ const zone = (patch: Partial<DnsZone> = {}): DnsZone => ({
       {
         id: 'custom',
         sync_status: 'failed',
-        synced_revision: 0,
         last_error: 'x',
       },
     ],

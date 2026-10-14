@@ -20,6 +20,7 @@ import {
 } from './data'
 import {
   taskResourceHref,
+  taskStatusLabels,
   taskStatuses,
   taskStatusTones,
   taskTitle,
@@ -77,14 +78,12 @@ export function TaskDetailSheet({
       title={task ? `${taskTitle(task)} · ${task.name}` : '任务详情'}
       description={
         task && (
-          <span className='flex flex-wrap items-center gap-2'>
-            <StatusChip
-              status={task.status}
-              label={taskStatuses[task.status]}
-              tone={taskStatusTones[task.status]}
-            />
-            <Mono className='text-muted'>v{task.version}</Mono>
-          </span>
+          <StatusChip
+            status={task.status}
+            label={taskStatuses[task.status]}
+            tone={taskStatusTones[task.status]}
+            reserve={taskStatusLabels}
+          />
         )
       }
       footer={
@@ -206,7 +205,6 @@ function TaskStatus({ task }: { task: Task }) {
               </span>
             ),
           },
-          { label: '目标版本', value: <Mono>v{task.version}</Mono> },
           {
             label: '失败次数',
             value: <span className='tabular-nums'>{task.failures}</span>,
@@ -214,23 +212,20 @@ function TaskStatus({ task }: { task: Task }) {
           {
             label: '最近更新',
             value: (
-              <span className='flex flex-col'>
+              <span className='flex flex-wrap gap-x-2'>
                 {formatDate(task.updated_at)}
-                <RelativeTime
-                  value={task.updated_at}
-                  className='text-xs text-muted'
-                />
+                <RelativeTime value={task.updated_at} className='text-muted' />
               </span>
             ),
           },
           {
             label: '下次尝试',
             value: task.next_attempt_at ? (
-              <span className='flex flex-col'>
+              <span className='flex flex-wrap gap-x-2'>
                 {formatDate(task.next_attempt_at)}
                 <RelativeTime
                   value={task.next_attempt_at}
-                  className='text-xs text-muted'
+                  className='text-muted'
                 />
               </span>
             ) : (

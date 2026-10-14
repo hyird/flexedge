@@ -25,12 +25,14 @@ import {
 } from './access-log-search'
 import { websiteAccessLogHistoryQuery } from './data'
 import { useWebsite } from './website-context'
+import type { WebsiteDetailSearch } from './website-detail-search'
 
-const route = getRouteApi('/_authenticated/websites/$websiteId/logs')
+const route = getRouteApi('/_authenticated/websites/$websiteId')
 const filterKeys = ['method', 'status_class'] as const
+const liveStateReserve = ['已暂停', '实时连接', '正在连接']
 
-/** `/websites/$websiteId/logs`. Live mode tails `access-logs/stream` only while
- * this tab is mounted and not paused; history mode takes one snapshot per
+/** `/websites/$websiteId?tab=logs`. Live mode tails `access-logs/stream` only
+ * while this tab is mounted and not paused; history mode takes one snapshot per
  * query (the `/history/stream` connection closes after the first frame). */
 export function AccessLogs() {
   const website = useWebsite()
@@ -73,7 +75,7 @@ export function AccessLogs() {
     : undefined
   const openLog = (id: string | undefined) =>
     void navigate({
-      search: (previous: AccessLogsSearch) => ({ ...previous, log: id }),
+      search: (previous: WebsiteDetailSearch) => ({ ...previous, log: id }),
       replace: !id,
     })
 
@@ -126,11 +128,9 @@ export function AccessLogs() {
       cell: (log) => (
         <div className='flex min-w-0 flex-col gap-0.5'>
           <Mono>{log.client_ip || '—'}</Mono>
-          {log.client_ip_location && (
-            <span className='truncate text-xs text-muted'>
-              {log.client_ip_location}
-            </span>
-          )}
+          <span className='truncate text-xs text-muted'>
+            {log.client_ip_location || '—'}
+          </span>
         </div>
       ),
     },
@@ -245,7 +245,11 @@ export function AccessLogs() {
           actions={
             history ? undefined : (
               <>
-                <StatusChip label={liveState.label} tone={liveState.tone} />
+                <StatusChip
+                  label={liveState.label}
+                  tone={liveState.tone}
+                  reserve={liveStateReserve}
+                />
                 <Tooltip delay={300}>
                   <Button
                     size='sm'

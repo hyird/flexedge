@@ -24,6 +24,8 @@ import { providerLabel } from '@/features/providers/provider-display'
 import { WebsitesTable } from '@/features/websites/websites-table'
 import { useCertificateCommands } from './certificate-commands'
 import {
+  certificateStatusLabels,
+  certificateSyncStatusLabels,
   formatFingerprint,
   isCertificateNotFound,
   validityProgress,
@@ -88,15 +90,20 @@ export function CertificateDetailPage() {
       <DetailHeader
         icon={<ShieldCheck />}
         title={certificate.domains[0] ?? certificate.id}
-        status={<StatusChip status={certificate.status} />}
+        status={
+          <StatusChip
+            status={certificate.status}
+            reserve={certificateStatusLabels}
+          />
+        }
         meta={[
           certificate.issuer || providerName,
           certificate.config.auto_renew ? '自动续期' : '手动续期',
-          certificate.expires_at && (
-            <span key='expires'>
-              到期 <RelativeTime value={certificate.expires_at} />
-            </span>
-          ),
+          // Always shown (`—` before issuance) so the meta line keeps its
+          // shape while the certificate is issued or renewed.
+          <span key='expires'>
+            到期 <RelativeTime value={certificate.expires_at} />
+          </span>,
         ]}
         actions={
           <>
@@ -124,7 +131,7 @@ export function CertificateDetailPage() {
               onPress={() => commands.renew(certificate)}
             >
               <ArrowsRotateRight className='size-4' />
-              {busy ? '签发进行中' : '立即续期'}
+              立即续期
             </Button>
           </>
         }
@@ -161,7 +168,10 @@ export function CertificateDetailPage() {
               {
                 label: '节点分发',
                 value: certificate.sync_status ? (
-                  <StatusChip status={certificate.sync_status} />
+                  <StatusChip
+                    status={certificate.sync_status}
+                    reserve={certificateSyncStatusLabels}
+                  />
                 ) : (
                   '—'
                 ),
@@ -213,7 +223,7 @@ export function CertificateDetailPage() {
                 label: '证书供应商',
                 value: (
                   <Link
-                    href={`/providers/certificate?q=${encodeURIComponent(providerName)}`}
+                    href={`/providers?tab=certificate&q=${encodeURIComponent(providerName)}`}
                   >
                     {providerName}
                   </Link>
@@ -285,26 +295,30 @@ function ValiditySection({ certificate }: { certificate: Certificate }) {
   return (
     <Section title='有效期' className='lg:col-span-2'>
       <div className='flex flex-col gap-5'>
-        {progress ? (
-          <ProgressBar
-            aria-label='剩余有效期'
-            value={progress.percent}
-            color={progress.tone}
-            valueLabel={`${progress.remainingDays} / ${progress.totalDays} 天`}
-          >
-            <Label>剩余 {progress.remainingDays} 天</Label>
-            <ProgressBar.Output className='text-[13px] text-muted tabular-nums' />
-            <ProgressBar.Track>
-              <ProgressBar.Fill />
-            </ProgressBar.Track>
-          </ProgressBar>
-        ) : (
-          <p className='text-sm text-muted'>
-            {certificate.status === 'expired'
-              ? '证书已过期。'
-              : '证书签发完成后显示有效期。'}
-          </p>
-        )}
+        {/* Always rendered so the card keeps its height while the
+         * certificate is issued, renewed or expires. */}
+        <ProgressBar
+          aria-label='剩余有效期'
+          value={progress?.percent ?? 0}
+          color={progress?.tone ?? 'default'}
+          valueLabel={
+            progress
+              ? `${progress.remainingDays} / ${progress.totalDays} 天`
+              : '—'
+          }
+        >
+          <Label>
+            {progress
+              ? `剩余 ${progress.remainingDays} 天`
+              : certificate.status === 'expired'
+                ? '证书已过期'
+                : '证书签发完成后显示有效期'}
+          </Label>
+          <ProgressBar.Output className='text-[13px] text-muted tabular-nums' />
+          <ProgressBar.Track>
+            <ProgressBar.Fill />
+          </ProgressBar.Track>
+        </ProgressBar>
         <DescriptionList
           columns={3}
           items={[

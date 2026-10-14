@@ -24,7 +24,20 @@ export function useLiveLogs<T extends LogEntry>(
     useCallback(
       (listener: () => void) => {
         if (!enabled) return pausedSubscription()
-        return registerSessionCleanup(client, store.subscribe(listener))
+        // Subscribe after the commit's effects: a detail layout that disables
+        // its live query in the same commit marks it departed only in its own
+        // (later) effect, and the store releases departed queries before it
+        // opens the log stream.
+        let release: (() => void) | undefined
+        let cancelled = false
+        queueMicrotask(() => {
+          if (!cancelled)
+            release = registerSessionCleanup(client, store.subscribe(listener))
+        })
+        return () => {
+          cancelled = true
+          release?.()
+        }
       },
       [client, enabled, store]
     ),

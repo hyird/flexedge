@@ -62,7 +62,11 @@ export function useWebsiteDashboard(websiteId: string) {
         })
       })
     }
-    connect()
+    // Connect after the commit's effects: the detail layout disables its live
+    // query in its own (later) effect, which marks it departed for `connect`.
+    queueMicrotask(() => {
+      if (active) connect()
+    })
     const cleanup = registerSessionCleanup(client, () => stream?.close())
     return () => {
       active = false

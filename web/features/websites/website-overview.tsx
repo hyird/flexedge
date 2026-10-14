@@ -5,7 +5,8 @@ import type { DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Button, toast } from '@heroui/react'
 import { formatBytes, formatDate, ratioOf } from '@/lib/format'
-import { DataTable } from '@/components/data-table'
+import { statusLabels } from '@/lib/status'
+import { DataTable, TruncatedText } from '@/components/data-table'
 import { LinkButton } from '@/components/link-button'
 import { Mono } from '@/components/mono'
 import { RelativeTime } from '@/components/relative-time'
@@ -16,12 +17,23 @@ import type { Website, WebsiteDomain } from './types'
 import { useWebsite } from './website-context'
 import {
   defaultOrigin,
+  deployStatusReserve,
   originAddress,
   originGroups,
   originHealth,
 } from './website-display'
 
 type OriginState = Website['runtime']['origin_states'][number]
+
+const resolutionReserve = statusLabels([
+  'verified',
+  'unverified',
+  'invalid',
+  'pending',
+  'resolved',
+])
+const originStatusReserve = statusLabels(['healthy', 'unhealthy', 'unknown'])
+const certificateReserve = ['可用', '不可用']
 
 function kpiStatus(part: number, total: number) {
   if (total === 0 || part === total) return 'success' as const
@@ -39,7 +51,7 @@ export function WebsiteOverview() {
   const health = originHealth(website)
   const groups = originGroups(website)
   const origin = defaultOrigin(website)
-  const settings = `/websites/${website.id}/settings`
+  const settings = `/websites/${website.id}?tab=settings`
   const domainState = (domain: WebsiteDomain) =>
     runtime.domain_states.find((state) => state.id === domain.id)
   const resolved = config.domains.filter(
@@ -77,6 +89,7 @@ export function WebsiteOverview() {
       cell: (domain) => (
         <StatusChip
           status={domainState(domain)?.resolution_status ?? 'pending'}
+          reserve={resolutionReserve}
         />
       ),
     },
@@ -93,9 +106,7 @@ export function WebsiteOverview() {
       header: '备注',
       minWidth: 200,
       cell: (domain) => (
-        <span className='text-muted'>
-          {domainState(domain)?.last_error || '—'}
-        </span>
+        <TruncatedText text={domainState(domain)?.last_error} />
       ),
     },
   ]
@@ -123,15 +134,15 @@ export function WebsiteOverview() {
         const item = config.origins.find(
           (value) => value.id === state.origin_id
         )
-        return item ? (
+        return (
           <div className='flex min-w-0 flex-col gap-0.5'>
-            <span>{item.group}</span>
+            <span className={item ? 'truncate' : 'truncate text-muted'}>
+              {item ? item.group : '已删除的源站'}
+            </span>
             <Mono truncate className='text-xs text-muted'>
-              {originAddress(item)}
+              {item ? originAddress(item) : state.origin_id}
             </Mono>
           </div>
-        ) : (
-          <Mono className='text-muted'>{state.origin_id}</Mono>
         )
       },
     },
@@ -139,7 +150,9 @@ export function WebsiteOverview() {
       id: 'status',
       header: '状态',
       minWidth: 100,
-      cell: (state) => <StatusChip status={state.status} />,
+      cell: (state) => (
+        <StatusChip status={state.status} reserve={originStatusReserve} />
+      ),
     },
     {
       id: 'latency',
@@ -160,9 +173,7 @@ export function WebsiteOverview() {
       id: 'error',
       header: '最近错误',
       minWidth: 180,
-      cell: (state) => (
-        <span className='text-muted'>{state.last_error || '—'}</span>
-      ),
+      cell: (state) => <TruncatedText text={state.last_error} />,
     },
   ]
 
@@ -174,7 +185,10 @@ export function WebsiteOverview() {
             <KPI.Title>已同步节点</KPI.Title>
           </KPI.Header>
           <KPI.Content>
-            <KPI.Value value={runtime.synced_node_count}>
+            <KPI.Value
+              value={runtime.synced_node_count}
+              className='whitespace-nowrap'
+            >
               {(formatted) => `${formatted} / ${runtime.target_node_count}`}
             </KPI.Value>
           </KPI.Content>
@@ -189,7 +203,10 @@ export function WebsiteOverview() {
             )}
           />
           <KPI.Footer className='text-xs text-muted'>
-            <StatusChip status={runtime.deploy_status} />
+            <StatusChip
+              status={runtime.deploy_status}
+              reserve={deployStatusReserve}
+            />
           </KPI.Footer>
         </KPI>
         <KPI>
@@ -197,9 +214,12 @@ export function WebsiteOverview() {
             <KPI.Title>域名</KPI.Title>
           </KPI.Header>
           <KPI.Content>
-            <KPI.Value value={config.domains.length} />
+            <KPI.Value
+              value={config.domains.length}
+              className='whitespace-nowrap'
+            />
           </KPI.Content>
-          <KPI.Footer className='text-xs text-muted'>
+          <KPI.Footer className='text-xs whitespace-nowrap text-muted'>
             已解析 {resolved} 个 ·{' '}
             {config.https_enabled
               ? `HTTPS · TLS ${config.minimum_tls_version}+`
@@ -211,7 +231,7 @@ export function WebsiteOverview() {
             <KPI.Title>源站组 / 健康</KPI.Title>
           </KPI.Header>
           <KPI.Content>
-            <KPI.Value value={groups.length}>
+            <KPI.Value value={groups.length} className='whitespace-nowrap'>
               {(formatted) =>
                 health.total
                   ? `${formatted} 组 · ${health.healthy}/${health.total} 健康`
@@ -219,13 +239,12 @@ export function WebsiteOverview() {
               }
             </KPI.Value>
           </KPI.Content>
-          {health.total > 0 && (
-            <KPI.Progress
-              value={ratioOf(health.healthy, health.total) * 100}
-              status={kpiStatus(health.healthy, health.total)}
-            />
-          )}
-          <KPI.Footer className='text-xs text-muted'>
+          <KPI.Progress
+            value={ratioOf(health.healthy, health.total) * 100}
+            status={kpiStatus(health.healthy, health.total)}
+            className={health.total > 0 ? undefined : 'invisible'}
+          />
+          <KPI.Footer className='text-xs whitespace-nowrap text-muted'>
             {health.total
               ? `${config.origins.length} 个源站`
               : '等待节点上报健康状态'}
@@ -304,18 +323,20 @@ export function WebsiteOverview() {
               {website.certificates.map((certificate) => (
                 <li
                   key={certificate.id}
-                  className='flex flex-wrap items-center justify-between gap-2 py-2.5 first:pt-0 last:pb-0'
+                  className='grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 py-2.5 first:pt-0 last:pb-0'
                 >
                   <Link
                     to='/certificates/$certificateId'
                     params={{ certificateId: certificate.id }}
-                    className='link min-w-0 font-mono text-[13px] break-all'
+                    title={certificate.domains.join('、')}
+                    className='link min-w-0 truncate font-mono text-[13px]'
                   >
                     {certificate.domains.join('、')}
                   </Link>
                   <StatusChip
                     label={certificate.usable ? '可用' : '不可用'}
                     tone={certificate.usable ? 'success' : 'warning'}
+                    reserve={certificateReserve}
                   />
                 </li>
               ))}

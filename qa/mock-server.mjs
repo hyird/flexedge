@@ -1689,6 +1689,39 @@ function control(query) {
     broadcast([resource])
     return { id: item.id, revision: item.revision }
   }
+  if (event === 'patch') {
+    // Runtime/state patch without a revision bump, e.g. to cycle status
+    // values: resource=websites&path=runtime.deploy_status&value=partial.
+    // `value` is parsed as JSON when possible, else used as a string.
+    const resource = query.get('resource') ?? 'nodes'
+    const collections = {
+      nodes: db.nodes,
+      clusters: db.clusters,
+      websites: db.websites,
+      'dns-zones': db.zones,
+      certificates: db.certificates,
+      tasks: db.tasks,
+    }
+    const collection = collections[resource]
+    if (!collection) fail('QA resource 不支持 patch')
+    const item = find(collection, query.get('id') ?? collection[0]?.id),
+      keys = (query.get('path') ?? '').split('.').filter(Boolean)
+    if (keys.length === 0) fail('QA patch 需要 path')
+    const raw = query.get('value') ?? ''
+    let value = raw
+    try {
+      value = JSON.parse(raw)
+    } catch {
+      // Plain strings such as status names.
+    }
+    let target = item
+    for (const key of keys.slice(0, -1)) target = target[key] ??= {}
+    if (query.get('delete') === '1') delete target[keys.at(-1)]
+    else target[keys.at(-1)] = value
+    refreshRelations()
+    broadcast([resource])
+    return { id: item.id, path: keys.join('.'), value }
+  }
   fail('QA event 不支持')
 }
 function rejectDelete(resource, id) {

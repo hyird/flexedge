@@ -8,11 +8,15 @@ import { Mono } from '@/components/mono'
 import { Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { dnsLinePath } from './dns-lines'
-import { zoneRecordRows, type ZoneRecordRow } from './dns-zone-display'
+import {
+  recordSyncStatusLabels,
+  zoneRecordRows,
+  type ZoneRecordRow,
+} from './dns-zone-display'
 import { RecordsEditor } from './records-editor'
 import { useZoneDetail } from './use-zone-detail'
 
-const route = getRouteApi('/_authenticated/dns-zones/$zoneId/records')
+const route = getRouteApi('/_authenticated/dns-zones/$zoneId')
 const filterKeys = ['type', 'source'] as const
 
 export function ZoneRecords() {
@@ -58,12 +62,14 @@ export function ZoneRecords() {
       header: '记录值',
       minWidth: 220,
       cell: (record) => (
-        <Mono className='break-all'>
-          {record.type === 'MX' && record.priority !== undefined && (
-            <span className='text-muted'>{record.priority} </span>
-          )}
-          {record.content}
-        </Mono>
+        <span title={record.content} className='block max-w-80 truncate'>
+          <Mono>
+            {record.type === 'MX' && record.priority !== undefined && (
+              <span className='text-muted'>{record.priority} </span>
+            )}
+            {record.content}
+          </Mono>
+        </span>
       ),
     },
     {
@@ -119,14 +125,20 @@ export function ZoneRecords() {
         record.state?.last_error ? (
           <Tooltip delay={200}>
             <Tooltip.Trigger aria-label={record.state.last_error}>
-              <StatusChip status={record.state.sync_status} />
+              <StatusChip
+                status={record.state.sync_status}
+                reserve={recordSyncStatusLabels}
+              />
             </Tooltip.Trigger>
             <Tooltip.Content className='max-w-xs'>
               {record.state.last_error}
             </Tooltip.Content>
           </Tooltip>
         ) : record.state ? (
-          <StatusChip status={record.state.sync_status} />
+          <StatusChip
+            status={record.state.sync_status}
+            reserve={recordSyncStatusLabels}
+          />
         ) : (
           <span className='text-muted'>—</span>
         ),

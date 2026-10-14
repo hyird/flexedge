@@ -261,10 +261,11 @@ tests/                           # 自动化测试与测试夹具
 
 - 使用 Pro `AppLayout`、`Sidebar` 与 `Navbar`；保留侧栏折叠、移动菜单、
   页面搜索、主题与账户菜单。参考 UltraTerminal 的紧凑控件与中性表面。
-- 页面使用共享 `Page`、`DetailHeader` + `RouteTabs`、`ListToolbar` + `DataTable` + `TablePagination`、
-  `FormSheet`、`SaveBar`、`ConfirmDialog` 组合，列表使用 Pro DataGrid。资源详情使用独立路由与路由 tab，
+- 页面使用共享 `Page`、`DetailHeader`、`ListToolbar` + `DataTable` + `TablePagination`、
+  `FormSheet`、`SaveBar`、`ConfirmDialog` 组合，列表使用 Pro DataGrid。每个资源详情是一个独立路由；同一页面内的
+  tab 使用页内 Tabs，切换时不改变路由和面包屑，当前 tab 以 `?tab=` 替换式写入 URL（不新增历史记录）。
   创建与小型编辑用右侧 Sheet，大型编辑在详情页内带保存条与离开拦截，危险操作用居中确认框；
-  筛选、分页、tab 与打开的 Sheet 写入 URL。`web/components/` 承载通用视觉交互；布局位于 `web/components/layout/`。
+  筛选、分页与打开的 Sheet 写入 URL。`web/components/` 承载通用视觉交互；布局位于 `web/components/layout/`。
 - 页面、表单、DTO、校验与数据操作放在所属 `web/features/<domain>/`。
   路由只负责装配和鉴权。共享层不得反向依赖领域页面或路由。
 - API 客户端统一处理 envelope、Cookie 会话、401 刷新、错误与 revision。
@@ -282,6 +283,10 @@ tests/                           # 自动化测试与测试夹具
 - 复杂交互使用 HeroUI 组件，不手写弹层、菜单、选择器或焦点管理。
 - 表单有标签、校验错误、取消与提交状态；删除等危险操作明确对象并二次确认。
 - 图标按钮具可访问名称与 Tooltip，状态用文字和图形共同表达。
+- 状态切换不得改变布局：列表行、详情头部与卡片中的状态固定单行、不换行，不按状态追加第二行；
+  附加信息放在同一行固定位置、Tooltip、单独列或详情页。
+- 界面不展示配置版本号（revision、目标/已同步版本、配置修订、任务版本等）；revision 只在内部用于
+  If-Match、过期检测与查询键，冲突和过期提示使用不带数字的文字。软件版本（如节点 Agent 版本）不在此列。
 - 资源页覆盖加载、空状态、错误、搜索、筛选、分页与手动刷新。
 - 桌面与窄屏、浅色与深色均可操作，表格可横向滚动，弹层可滚动且不截断控件。
 - 完成 `bun run lint`、`bun run typecheck`、`bun run test` 与 `bun run build`。

@@ -1,7 +1,9 @@
-import { createFileRoute, redirect } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
+import { ProvidersLayout } from '@/features/providers/providers-layout'
+import { providersSearchSchema } from '@/features/providers/search'
 
 export const Route = createFileRoute('/_authenticated/providers/')({
-  beforeLoad: () => {
-    throw redirect({ to: '/providers/dns', replace: true })
-  },
+  validateSearch: providersSearchSchema,
+  staticData: { breadcrumb: '供应商账号' },
+  component: ProvidersLayout,
 })
