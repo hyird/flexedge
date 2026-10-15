@@ -33,9 +33,8 @@ inline constexpr std::chrono::minutes reconciliation_interval{15};
 inline constexpr std::size_t max_jobs_per_tick{4};
 
 inline ruvia::task<void> recover_stale_markers(service::background::worker_context& context) {
-    auto db = context.db();
     co_await service::sync_runtime::recover_stale_running(
-        db, service::sync_runtime::marker_resource_type::certificate);
+        context, service::sync_runtime::marker_resource_type::certificate);
     co_return;
 }
 
@@ -80,7 +79,8 @@ inline ruvia::task<void> execute(service::background::worker_context& context,
     const dns_challenge_config_view dns_config{.dns_zone_id_ = work.dns_zone_id_,
         .zone_domain_ = work.zone_domain_,
         .certificate_id_ = task.certificate_id_,
-        .minimum_record_ttl_ = work.dns_minimum_record_ttl_};
+        .minimum_record_ttl_ = work.dns_minimum_record_ttl_,
+        .owner_ = task.owner_};
     auto issued = co_await client.issue(context, account.private_key_pem_.view(), account.account_url_,
         work.domains_, dns_config, lease, attempt.stage_);
     attempt.stage_ = certificate_stage::persist;

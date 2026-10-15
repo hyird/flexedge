@@ -68,7 +68,7 @@ private:
         auto status = require_status(c);
         auto usable = require_usable(c);
         auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(
+        auto sub = service::live_resource::get_hub(c).subscribe(
             c.worker(), tenant, service::live_resource::resource::certificates, {},
             service::live_resource::query_key("options", keyword.value_or(""), status, usable));
         co_await service::live_resource::stream_snapshot(
@@ -101,7 +101,7 @@ private:
         const auto expiring = parse_attention_filter(c.req().query("expiring"), "expiring");
         const auto abnormal = parse_attention_filter(c.req().query("abnormal"), "abnormal");
         auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(
+        auto sub = service::live_resource::get_hub(c).subscribe(
             c.worker(), tenant, service::live_resource::resource::certificates, {},
             service::live_resource::query_key("list", page, size, keyword.value_or(""), status,
                 usable, expiring, abnormal));
@@ -120,7 +120,7 @@ private:
     ruvia::task<void> get(ruvia::context& c) {
         auto id = require_id(c);
         auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(
+        auto sub = service::live_resource::get_hub(c).subscribe(
             c.worker(), tenant, service::live_resource::resource::certificates, id,
             service::live_resource::query_key("detail"));
         co_await service::live_resource::stream_snapshot(
@@ -133,10 +133,10 @@ private:
             });
     }
     ruvia::task<ruvia::http_response> create(ruvia::context& c) {
-        co_await get_certificate_command_service().create(c, tenant_id(c),
+        const auto operation_id = co_await get_certificate_command_service().create(c, tenant_id(c),
             c.req().validated<create_certificate_body>());
         service::common::set_revision_etag(c, 1);
-        co_return c.json(service::common::operation(c, "证书申请已提交"));
+        co_return c.json(service::common::operation(c, "证书申请已提交", operation_id));
     }
     ruvia::task<ruvia::http_response> update(ruvia::context& c) {
         auto v = expected_revision(c);
@@ -148,9 +148,9 @@ private:
     }
     ruvia::task<ruvia::http_response> renew(ruvia::context& c) {
         auto v = expected_revision(c);
-        co_await get_certificate_command_service().renew(c, tenant_id(c), require_id(c), v);
+        const auto operation_id = co_await get_certificate_command_service().renew(c, tenant_id(c), require_id(c), v);
         service::common::set_revision_etag(c, v);
-        co_return c.json(service::common::operation(c, "重新签发已提交"));
+        co_return c.json(service::common::operation(c, "重新签发已提交", operation_id));
     }
     ruvia::task<ruvia::http_response> download(ruvia::context& c) {
         auto d = co_await get_certificate_read_service().download(c, tenant_id(c), require_id(c));
@@ -162,9 +162,10 @@ private:
     }
     ruvia::task<ruvia::http_response> remove(ruvia::context& c) {
         auto v = expected_revision(c);
-        co_await get_certificate_command_service().remove(c, tenant_id(c), require_id(c), v);
+        const auto operation_id =
+            co_await get_certificate_command_service().remove(c, tenant_id(c), require_id(c), v);
         service::common::set_revision_etag(c, v + 1);
-        co_return c.json(service::common::operation(c, "证书已删除"));
+        co_return c.json(service::common::operation(c, "证书已删除", operation_id));
     }
 };
 }  // namespace service::certificate

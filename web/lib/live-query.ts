@@ -18,7 +18,7 @@ import { type LoadingEpoch, MinimumLoading } from './minimum-loading'
 
 type Source = ReturnType<typeof reconnectingEventSource>
 type Parse = (value: unknown) => unknown
-type Patch = (current: unknown, value: unknown) => unknown
+type Patch = (current: unknown, value: unknown, event: string) => unknown
 type Waiter = {
   resolve: (value: unknown) => void
   reject: (error: unknown) => void
@@ -48,8 +48,10 @@ type Entry = {
   sessionProbed?: boolean
 }
 
-/** Runtime patch events; each applies to the frames of bindings with `patch`. */
-const patchEvents = ['node-runtime', 'origin-runtime']
+/** Plain-JSON patch events; each applies to the frames of bindings with
+ * `patch` (`node-runtime`/`origin-runtime` runtime patches, and `attempt`:
+ * a new execution record of the expanded subtask on a task detail stream). */
+const patchEvents = ['node-runtime', 'origin-runtime', 'attempt']
 
 /** One-shot reads close after the first frame. Configuration pickers use the
  * existing snapshot endpoints once; they have no realtime requirement. */
@@ -171,7 +173,11 @@ export class LiveQueryManager {
     key: QueryKey,
     signal?: AbortSignal,
     parse: (value: unknown) => T = (value) => value as T,
-    patch?: (current: T | undefined, value: unknown) => T | undefined
+    patch?: (
+      current: T | undefined,
+      value: unknown,
+      event: string
+    ) => T | undefined
   ): Promise<T> {
     return this.bind(url, 'snapshot', key, signal, parse, patch, false)
   }
@@ -196,7 +202,11 @@ export class LiveQueryManager {
     key: QueryKey,
     signal?: AbortSignal,
     parse: (value: unknown) => T = (value) => value as T,
-    patch?: (current: T | undefined, value: unknown) => T | undefined
+    patch?: (
+      current: T | undefined,
+      value: unknown,
+      event: string
+    ) => T | undefined
   ): Promise<T> {
     return this.bind(url, event, key, signal, parse, patch, false)
   }
@@ -208,7 +218,12 @@ export class LiveQueryManager {
     signal: AbortSignal | undefined,
     parse: (value: unknown) => T,
     patch:
-      ((current: T | undefined, value: unknown) => T | undefined) | undefined,
+      | ((
+          current: T | undefined,
+          value: unknown,
+          event: string
+        ) => T | undefined)
+      | undefined,
     explicitSnapshot: boolean
   ): Promise<T> {
     if (signal?.aborted) return Promise.reject(signal.reason)
@@ -439,7 +454,7 @@ export class LiveQueryManager {
               continue
             patched.add(binding.event)
             const current = entry.frames.get(binding.event)
-            const next = binding.patch(current, value)
+            const next = binding.patch(current, value, name)
             if (next === undefined || next === current) continue
             entry.frames.set(binding.event, next)
             for (const target of entry.bindings.values())
@@ -605,7 +620,11 @@ export function readLiveQuery<T>(
   key: QueryKey,
   signal?: AbortSignal,
   parse?: (value: unknown) => T,
-  patch?: (current: T | undefined, value: unknown) => T | undefined
+  patch?: (
+    current: T | undefined,
+    value: unknown,
+    event: string
+  ) => T | undefined
 ) {
   if (!manager) throw new Error('实时查询客户端尚未初始化')
   return manager.read(url, key, signal, parse, patch)
@@ -647,15 +666,20 @@ export function snapshotQueryOptions<T>(
 /** Reads one named event of a combined stream (e.g. `/api/overview/stream`
  * events `snapshot`, `traffic`, `nodes`) into its own query. All queries on the
  * same URL share one EventSource, opened while any of them is observed and
- * released after the last unmounts. `patch` receives `node-runtime` /
- * `origin-runtime` frames for this event's data. */
+ * released after the last unmounts. `patch` receives the plain-JSON patch
+ * events (`node-runtime`, `origin-runtime`, `attempt`) with their name and
+ * returns the new frame, or `undefined` to leave it unchanged. */
 export function readLiveEvent<T>(
   url: string,
   event: string,
   key: QueryKey,
   signal?: AbortSignal,
   parse?: (value: unknown) => T,
-  patch?: (current: T | undefined, value: unknown) => T | undefined
+  patch?: (
+    current: T | undefined,
+    value: unknown,
+    event: string
+  ) => T | undefined
 ) {
   if (!manager) throw new Error('实时查询客户端尚未初始化')
   return manager.readEvent(url, event, key, signal, parse, patch)

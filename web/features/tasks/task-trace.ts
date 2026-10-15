@@ -6,9 +6,9 @@ import type { TraceCall } from './types'
  * "已隐藏" badge, never as raw text. */
 export const redactedMarker = '[REDACTED]'
 
-/** `task_error::not_found`: the task or attempt does not exist (or the
- * record expired). */
-export const taskNotFoundCode = 16701
+/** Contract §7, 16706: the attempt does not exist or no longer belongs to the
+ * task (its record expired). */
+export const traceNotFoundCode = 16706
 
 /** Splits text around redaction markers: strings are literal text, `null`
  * marks one hidden value. */
@@ -48,15 +48,6 @@ export const transportErrors = {
   queue_full: '请求队列已满',
   cancelled: '已取消',
   other: '其他错误',
-} as const
-
-/** Why a body excerpt was not stored. */
-export const omittedReasons = {
-  secret_material: '含密钥材料未保存',
-  binary: '二进制内容未保存',
-  too_large: '正文过大未解析',
-  budget: '本次正文预算已用尽',
-  policy: '按策略不保存',
 } as const
 
 export const logLevels = {

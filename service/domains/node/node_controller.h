@@ -86,7 +86,7 @@ private:
         const auto connection_status =
             enum_query(c, "connection_status", {"unregistered", "online", "offline"});
         const auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(c.worker(), tenant,
+        auto sub = service::live_resource::get_hub(c).subscribe(c.worker(), tenant,
             service::live_resource::resource::nodes, {},
             node_list_query_key(page, page_size, keyword.value_or(""), cluster_id, status,
                 registration_status, connection_status));
@@ -104,7 +104,7 @@ private:
     ruvia::task<void> detail(ruvia::context& c) {
         const auto id = require_id(c);
         const auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(c.worker(), tenant,
+        auto sub = service::live_resource::get_hub(c).subscribe(c.worker(), tenant,
             service::live_resource::resource::nodes, id,
             service::live_resource::query_key("detail"));
         co_await service::live_resource::stream_snapshot(c, std::move(sub),
@@ -133,16 +133,18 @@ private:
         ruvia::validator validator({.resource_ = c.arena()});
         validate_node_save_input(body.value(), validator);
         validator.throw_if_invalid();
-        co_await get_node_command_service().update(c, tenant_id(c), require_id(c), revision, body);
+        const auto operation_id =
+            co_await get_node_command_service().update(c, tenant_id(c), require_id(c), revision, body);
         service::common::set_revision_etag(c, revision + 1);
-        co_return c.json(service::common::operation(c, "节点配置已更新"));
+        co_return c.json(service::common::operation(c, "节点配置已更新", operation_id));
     }
 
     ruvia::task<ruvia::http_response> remove(ruvia::context& c) {
         const auto revision = expected_revision(c);
-        co_await get_node_command_service().remove(c, tenant_id(c), require_id(c), revision);
+        const auto operation_id =
+            co_await get_node_command_service().remove(c, tenant_id(c), require_id(c), revision);
         service::common::set_revision_etag(c, revision + 1);
-        co_return c.json(service::common::operation(c, "节点已删除"));
+        co_return c.json(service::common::operation(c, "节点已删除", operation_id));
     }
 
     ruvia::task<ruvia::http_response> credentials(ruvia::context& c) {
@@ -167,7 +169,7 @@ private:
         const auto limit = service::log_ingest::require_tail_limit(c);
         co_await service::log_ingest::stream_sse_tail(
             c,
-            service::log_ingest::fanout::get_hub().subscribe(
+            service::log_ingest::fanout::get_hub(c).subscribe(
                 c.worker(), service::log_ingest::notifications::log_resource_type::node, tenant, id),
             service::log_ingest::optional_sse_tail_cursor(c),
             [tenant, id, limit](auto& read, const std::optional<service::log_ingest::tail_cursor>& after)

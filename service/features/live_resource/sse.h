@@ -31,15 +31,27 @@ namespace service::live_resource {
 // One projection carried by a snapshot stream. Parts are paired by index with
 // the parts of the stream's hub subscription: each has its own event source,
 // cache key and single-flight read, and is re-read only when it changes.
+//
+// An incremental part (with `update_`, subscribed with `task_attempts_`)
+// writes its snapshot once per connection and afterwards only the events
+// `update_` builds from the task attempt notices of its mailbox; other
+// changes of its resource never re-read it. It resends its snapshot (the
+// recovery snapshot) after a history reset, a notice overflow, a missed
+// notification, or when `update_` fails.
 struct snapshot_part final {
     std::string_view event_;
     ruvia::move_only_function<ruvia::task<std::string>(snapshot_read_scope&)> fetch_;
+    std::string_view update_event_{};
+    ruvia::move_only_function<ruvia::task<std::vector<std::string>>(snapshot_read_scope&,
+        std::vector<task_attempt_notice>)>
+        update_{};
 };
 
 // Streams one or more projections over one SSE connection. Each part writes
-// its initial snapshot once, then only snapshots whose bytes changed. Read
-// failures are `resource-error` frames; runtime patches follow the part's
-// baseline. Coalesced parts are re-read when their deferral elapses.
+// its initial snapshot once, then only snapshots whose bytes changed (or, for
+// incremental parts, its update events). Read failures are `resource-error`
+// frames; runtime patches follow the part's baseline. Coalesced parts are
+// re-read when their deferral elapses.
 inline ruvia::task<void> stream_snapshots(ruvia::context& c, hub::subscription subscription,
     std::vector<snapshot_part> parts) {
     using clock = std::chrono::steady_clock;
@@ -53,10 +65,17 @@ inline ruvia::task<void> stream_snapshots(ruvia::context& c, hub::subscription s
         service::auth::read_session_cookie(c));
     auto checked_at = clock::now();
     struct part_state final {
-        // Duplicate suppression must not pin snapshots evicted by the byte budget.
-        std::weak_ptr<const snapshot> last_snapshot_;
+        // What this connection last wrote for the part; the cache may drop
+        // and re-read the snapshot any number of times in between.
+        written_snapshot written_;
         bool initial_ = true;
-        pending_changes pending_{.snapshot_ = true, .runtime_ = {}, .origins_ = {}, .refresh_at_ = {}};
+        pending_changes pending_{.snapshot_ = true,
+            .runtime_ = {},
+            .origins_ = {},
+            .task_attempts_ = {},
+            .history_reset_ = false,
+            .recovery_ = false,
+            .refresh_at_ = {}};
         std::optional<clock::time_point> refresh_at_;
     };
     std::vector<part_state> states(parts.size());
@@ -90,7 +109,30 @@ inline ruvia::task<void> stream_snapshots(ruvia::context& c, hub::subscription s
             for (std::size_t index = 0; index < parts.size(); ++index) {
                 auto& part = parts[index];
                 auto& state = states[index];
-                if (state.pending_.snapshot_) {
+                const bool incremental = static_cast<bool>(part.update_);
+                bool resend = incremental ? state.initial_ || state.pending_.history_reset_
+                                          : state.pending_.snapshot_;
+                if (incremental && !resend && !state.pending_.task_attempts_.empty()) {
+                    std::optional<std::vector<std::string>> frames;
+                    try {
+                        frames = co_await read_once<std::vector<std::string>>(c,
+                            [&part, notices = std::move(state.pending_.task_attempts_)](
+                                snapshot_read_scope& read) mutable { return part.update_(read, std::move(notices)); });
+                    } catch (const std::exception& error) {
+                        if (events.aborted() || c.get_stop_token().stop_requested()) {
+                            co_return;
+                        }
+                        service::logging::error("Live resource update failure: " + std::string(error.what()));
+                    }
+                    if (frames) {
+                        for (const auto& frame : *frames) {
+                            co_await events.write({.data_ = frame, .event_ = part.update_event_});
+                        }
+                    } else {
+                        resend = true;
+                    }
+                }
+                if (resend) {
                     std::shared_ptr<const snapshot> snapshot_value;
                     try {
                         snapshot_value = co_await read_snapshot(
@@ -101,12 +143,18 @@ inline ruvia::task<void> stream_snapshots(ruvia::context& c, hub::subscription s
                     }
                     if (snapshot_value->failure_) {
                         co_await events.write({.data_ = snapshot_value->data_, .event_ = "resource-error"});
+                        state.written_.forget();
                     } else {
-                        const auto previous = state.last_snapshot_.lock();
-                        if (state.initial_ || !previous || snapshot_value->data_ != previous->data_) {
+                        // Only changed bytes are written. The initial and the
+                        // recovery snapshot are always written: the client may
+                        // have lost state. Increments moved the client away from
+                        // the previous snapshot, so an incremental part resends.
+                        if (state.initial_ || incremental || state.pending_.recovery_) {
+                            state.written_.forget();
+                        }
+                        if (state.written_.replace(snapshot_value->data_)) {
                             co_await events.write({.data_ = snapshot_value->data_, .event_ = part.event_});
                         }
-                        state.last_snapshot_ = snapshot_value;
                     }
                     // A shared read may predate patches in this mailbox. Replay
                     // them after the baseline; revision/time guards in the client

@@ -6,14 +6,11 @@
 #include <ruvia/core/timer.h>
 #include <ruvia/core/worker_handle.h>
 #include <ruvia/core/worker_wait_result.h>
-#include <ruvia/web/web_worker.h>
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
-#include <mutex>
 #include <optional>
 #include <ranges>
 #include <stdexcept>
@@ -33,6 +30,8 @@ inline constexpr auto sse_heartbeat_interval = std::chrono::seconds(15);
 inline constexpr auto reader_retry_delay = std::chrono::seconds(1);
 inline constexpr std::size_t subscriber_signal_capacity{1};
 
+// Worker-local log tail wakeups: every Web Worker owns one (Ruvia worker
+// state) and its log notification reader wakes only the tails it holds.
 class hub final {
 private:
     struct topic final {
@@ -105,66 +104,35 @@ public:
                                            .resource_id_ = std::string(resource_id)});
     }
 
-    void publish(const notifications::notification& notification, ruvia::worker_id_type worker) {
-        if (notification.resource_type_ == notifications::log_resource_type::access) {
-            service::live_resource::get_hub().publish_for_worker(worker, notification.tenant_id_,
-                service::live_resource::resource::access_history, notification.resource_id_);
-            // Every web worker reads every notification; the process-wide
-            // gate delivers the tenant traffic aggregate at most once per
-            // interval regardless of which worker observed it first.
-            service::live_resource::get_hub().publish_coalesced(
-                notification.tenant_id_, service::live_resource::resource::overview_traffic,
-                service::live_resource::traffic_refresh_interval);
-        }
+    void publish(const notifications::notification& notification) {
         const auto topic = topic_for(notification);
         if (!topic) {
             return;
         }
-
-        std::vector<subscriber> subscribers;
-        {
-            const std::lock_guard lock(mutex_);
-            const auto found = subscribers_.find(*topic);
-            if (found == subscribers_.end()) {
-                return;
-            }
-            for (const auto& subscriber : found->second) {
-                if (subscriber.worker_ == worker) {
-                    subscribers.push_back(subscriber);
-                }
-            }
+        const auto found = subscribers_.find(*topic);
+        if (found == subscribers_.end()) {
+            return;
         }
-
-        const auto signal = next_signal_.fetch_add(1, std::memory_order_relaxed);
-        std::vector<std::uint64_t> closed;
-        for (const auto& subscriber : subscribers) {
+        const auto signal = next_signal_++;
+        std::erase_if(found->second, [signal](const subscriber& subscriber) {
             const auto result = subscriber.sender_.send(signal);
-            if (result.status() == ruvia::channel_send_status::closed ||
-                result.status() == ruvia::channel_send_status::worker_stopping) {
-                closed.push_back(subscriber.id_);
-            }
-        }
-        if (!closed.empty()) {
-            remove_closed(*topic, closed);
+            return result.status() == ruvia::channel_send_status::closed ||
+                   result.status() == ruvia::channel_send_status::worker_stopping;
+        });
+        if (found->second.empty()) {
+            subscribers_.erase(found);
         }
     }
 
     void mark_ready() {
-        if (ready_.exchange(true, std::memory_order_release)) {
+        if (std::exchange(ready_, true)) {
             return;
         }
-        std::vector<ruvia::channel_sender<std::uint64_t>> senders;
-        {
-            const std::lock_guard lock(mutex_);
-            for (const auto& [_, subscribers] : subscribers_) {
-                for (const auto& subscriber : subscribers) {
-                    senders.push_back(subscriber.sender_);
-                }
+        const auto signal = next_signal_++;
+        for (const auto& [_, subscribers] : subscribers_) {
+            for (const auto& subscriber : subscribers) {
+                (void)subscriber.sender_.send(signal);
             }
-        }
-        const auto signal = next_signal_.fetch_add(1, std::memory_order_relaxed);
-        for (const auto& sender : senders) {
-            (void)sender.send(signal);
         }
     }
 
@@ -180,7 +148,6 @@ private:
 
     struct subscriber final {
         std::uint64_t id_;
-        ruvia::worker_id_type worker_;
         ruvia::channel_sender<std::uint64_t> sender_;
     };
 
@@ -200,14 +167,12 @@ private:
         }
         auto [sender, receiver] =
             ruvia::make_channel<std::uint64_t>(worker, {.capacity_ = subscriber_signal_capacity});
-        const std::lock_guard lock(mutex_);
         const auto id = next_subscription_id_++;
-        subscribers_[topic].push_back({.id_ = id, .worker_ = worker.id(), .sender_ = std::move(sender)});
+        subscribers_[topic].push_back({.id_ = id, .sender_ = std::move(sender)});
         return subscription(*this, std::move(topic), id, std::move(receiver));
     }
 
     void unsubscribe(const topic& topic, std::uint64_t id) noexcept {
-        const std::lock_guard lock(mutex_);
         const auto found = subscribers_.find(topic);
         if (found == subscribers_.end()) {
             return;
@@ -219,31 +184,31 @@ private:
         }
     }
 
-    void remove_closed(const topic& topic, const std::vector<std::uint64_t>& closed) noexcept {
-        const std::lock_guard lock(mutex_);
-        const auto found = subscribers_.find(topic);
-        if (found == subscribers_.end()) {
-            return;
-        }
-        auto& values = found->second;
-        std::erase_if(values, [&closed](const subscriber& subscriber) {
-            return std::ranges::find(closed, subscriber.id_) != closed.end();
-        });
-        if (values.empty()) {
-            subscribers_.erase(found);
-        }
-    }
-
-    std::mutex mutex_;
     std::unordered_map<topic, std::vector<subscriber>, topic_hash> subscribers_;
-    std::atomic_bool ready_{};
-    std::atomic<std::uint64_t> next_signal_{1};
+    bool ready_{};
+    std::uint64_t next_signal_{1};
     std::uint64_t next_subscription_id_{1};
 };
 
-inline hub& get_hub() {
-    static hub value;
-    return value;
+// The calling worker's log tail hub (registered with use_worker_state).
+template <typename context_type>
+hub& get_hub(context_type& context) {
+    return context.template worker_state<hub>();
+}
+
+// Delivers one log notification to the calling worker's own subscriptions.
+template <typename context_type>
+void deliver(context_type& context, const notifications::notification& notification) {
+    if (notification.resource_type_ == notifications::log_resource_type::access) {
+        auto& resources = service::live_resource::get_hub(context);
+        resources.publish(notification.tenant_id_, service::live_resource::resource::access_history,
+            notification.resource_id_);
+        // The worker's gate recomputes the tenant traffic aggregate at most
+        // once per interval, however many log batches arrive.
+        resources.publish_coalesced(notification.tenant_id_, service::live_resource::resource::overview_traffic,
+            service::live_resource::traffic_refresh_interval);
+    }
+    get_hub(context).publish(notification);
 }
 
 template <typename context_t_type>
@@ -255,7 +220,7 @@ inline ruvia::task<void> run(context_t_type& context) {
         try {
             if (!initialized) {
                 cursor = co_await notifications::current_cursor(context.redis());
-                get_hub().mark_ready();
+                get_hub(context).mark_ready();
                 initialized = true;
             }
             auto batch = co_await notifications::read(context.redis(), cursor);
@@ -263,7 +228,7 @@ inline ruvia::task<void> run(context_t_type& context) {
                 cursor = *batch.cursor_;
             }
             for (const auto& notification : batch.notifications_) {
-                get_hub().publish(notification, context.worker().id());
+                deliver(context, notification);
             }
         } catch (const std::exception& error) {
             if (!context.get_stop_token().stop_requested()) {

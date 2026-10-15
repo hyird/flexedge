@@ -47,7 +47,7 @@ private:
             service::node::node_list_query_key(node_page, node_page_size, "",
                 std::nullopt, std::nullopt,
                 std::nullopt, std::nullopt)});
-        auto sub = live::get_hub().subscribe(c.worker(), tenant, std::move(parts));
+        auto sub = live::get_hub(c).subscribe(c.worker(), tenant, std::move(parts));
 
         std::vector<live::snapshot_part> snapshots;
         snapshots.push_back({"snapshot", [tenant](auto& read) -> ruvia::task<std::string> {

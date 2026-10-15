@@ -11,7 +11,6 @@
 #include "service/features/certificate/attempt_detail.h"
 #include "service/features/certificate/task.h"
 #include "service/features/certificate_material/model.h"
-#include "service/features/node_dispatch/notifications.h"
 #include "service/features/node_dispatch/queue.h"
 #include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
@@ -74,12 +73,14 @@ persist_issued_certificate(service::background::worker_context& context, service
         std::string_view(material_json), std::string_view(issued.expires_at_), task.version_,
         task.certificate_id_, task.tenant_id_);
     service::sync_runtime::running_result_transition result_transition;
+    // The consumer releases are children of the issuance subtask.
+    auto origin = service::operation::work_origin::caused_by(task.owner_);
     if (updated.affected_rows() != 0) {
         if (!co_await service::sync_runtime::renew_running_lease(transaction, lease)) {
             throw std::runtime_error("证书同步标记 lease 已失效");
         }
         co_await service::node_dispatch::enqueue_certificate_consumers(transaction, task.tenant_id_,
-            task.certificate_id_);
+            task.certificate_id_, origin);
         result_transition = co_await service::sync_runtime::complete_running_and_record_event(
             transaction, lease, detail);
         if (!result_transition.marker_transitioned_) {
@@ -88,9 +89,8 @@ persist_issued_certificate(service::background::worker_context& context, service
     } else {
         (void)co_await service::sync_runtime::release_running(transaction, lease);
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context.db(), lease,
-        result_transition, trace);
-    service::node_dispatch::notifications::published(task.tenant_id_);
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease,
+        result_transition, trace, true, &origin);
     co_return;
 }
 
@@ -107,6 +107,9 @@ inline ruvia::task<void> fail_certificate_task(service::background::worker_conte
         task.tenant_id_, task.certificate_id_);
     const auto result_transition = co_await service::sync_runtime::fail_running_and_record_event(
         transaction, lease, message, detail);
+    // Expired material leaves the consumers: their releases belong to the
+    // subtask the failed attempt was recorded for.
+    auto origin = service::operation::work_origin::caused_by(result_transition.owner_);
     if (result_transition.marker_transitioned_) {
         const auto updated = co_await transaction.query(
             "UPDATE sys_certificate SET status = CASE WHEN expires_at > NOW() THEN CASE WHEN $3 "
@@ -117,12 +120,11 @@ inline ruvia::task<void> fail_certificate_task(service::background::worker_conte
             task.certificate_id_, task.version_, permanent, std::string_view(message), task.tenant_id_);
         if (!updated.empty() && updated.front()[0].as<bool>().value_or(false)) {
             co_await service::node_dispatch::enqueue_certificate_consumers(transaction, task.tenant_id_,
-                task.certificate_id_);
+                task.certificate_id_, origin);
         }
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context.db(), lease,
-        result_transition, trace);
-    service::node_dispatch::notifications::published(task.tenant_id_);
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease,
+        result_transition, trace, true, &origin);
     if (!result_transition.marker_transitioned_) {
         co_return;
     }

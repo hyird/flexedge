@@ -28,11 +28,13 @@ inline ruvia::task<void> reconcile(service::background::worker_context& context)
         "'provider' AND provider.deleted_at IS NULL AND marker.version <> "
         "provider.verification_generation LIMIT 64");
     for (const auto& row : rows) {
+        const auto tenant_id = std::string(row[0].value().value_or(""));
+        auto origin = service::operation::work_origin::repair();
         auto transaction = co_await context.db().begin_transaction();
         const auto provider_id = std::string(row[2].value().value_or(""));
-        co_await service::provider_verification::mark_current(
-            transaction, row[0].value().value_or(""), provider_id);
+        co_await service::provider_verification::mark_current(transaction, tenant_id, provider_id, origin);
         co_await transaction.commit();
+        co_await service::sync_runtime::notify_origin(context, tenant_id, origin);
     }
     co_return;
 }
@@ -103,12 +105,14 @@ inline ruvia::task<void> complete_verification(service::background::worker_conte
         std::string_view(runtime_json), task.provider_id_, task.tenant_id_, task.provider_revision_,
         task.generation_);
     service::sync_runtime::running_result_transition result_transition;
+    // The zone syncs a verified DNS provider causes are its children.
+    auto origin = service::operation::work_origin::caused_by(task.owner_);
     if (updated.affected_rows() == 0) {
         (void)co_await service::sync_runtime::release_running(transaction, lease);
     } else {
         if (dns) {
             co_await service::dns_sync::mark_provider_zones_dirty(transaction, task.tenant_id_,
-                task.provider_id_);
+                task.provider_id_, origin);
         }
         result_transition = co_await service::sync_runtime::complete_running_and_record_event(
             transaction, lease, detail);
@@ -116,8 +120,8 @@ inline ruvia::task<void> complete_verification(service::background::worker_conte
             throw std::runtime_error("供应商检测标记 lease 已失效");
         }
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context.db(), lease,
-        result_transition, trace);
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease,
+        result_transition, trace, false, &origin);
     co_return;
 }
 
@@ -138,7 +142,7 @@ inline ruvia::task<void> fail_verification(service::background::worker_context& 
             "verification_generation = $5 AND deleted_at IS NULL",
             permanent, std::string_view(message), task.provider_id_, task.tenant_id_, task.generation_);
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context.db(), lease,
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease,
         result_transition, trace);
     if (result_transition.marker_transitioned_) {
         service::sync_runtime::log_attempt_failure("Provider verification marker", task.id_, message);

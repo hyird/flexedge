@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -29,8 +30,8 @@
 #include "node/control/transport_config.h"
 #include "node/proto/control_protocol.h"
 #include "node/proto/control_reply.h"
-#include "service/features/live_resource/fanout.h"
-#include "service/features/node_dispatch/notifications.h"
+#include "service/features/live_resource/notification_reader.h"
+#include "service/features/node_dispatch/fanout.h"
 
 namespace {
 
@@ -294,29 +295,58 @@ ruvia::task<bool> watch_signal(service::node_dispatch::fanout::hub::subscription
     co_return (co_await subscription.receive_for(timeout, {})).has_value();
 }
 
+// One Web Worker's delivery state, as its reader sees it.
+struct worker_states final {
+    service::live_resource::hub live_;
+    service::live_resource::node_deadlines deadlines_;
+    service::node_dispatch::fanout::hub dispatch_;
+
+    template <typename state_type>
+    state_type& worker_state() {
+        if constexpr (std::is_same_v<state_type, service::live_resource::hub>) {
+            return live_;
+        } else if constexpr (std::is_same_v<state_type, service::live_resource::node_deadlines>) {
+            return deadlines_;
+        } else {
+            return dispatch_;
+        }
+    }
+};
+
 void verify_watch_notifications() {
+    using service::live_resource::notifications::resource_notification;
     ruvia::event_loop_pool loops({.loop_count_ = 1});
     const auto loop = loops.loop(0);
-    auto watch =
-        service::node_dispatch::notifications::hub().subscribe(loop.handle(), "delivery-test");
+    worker_states states;
+    auto watch = states.dispatch_.subscribe(loop.handle(), "delivery-test");
     loops.start();
-    service::live_resource::get_hub().publish_runtime("delivery-test", "node-runtime-test", "{}");
+    const auto deliver = [&](resource_notification value) {
+        service::live_resource::deliver_notification(states, value, std::nullopt);
+    };
+    deliver(std::move(resource_notification("delivery-test").node_runtime("node-runtime-test", "{}")));
     if (loop.start(watch_signal(watch, std::chrono::milliseconds(20))).get()) {
         throw std::runtime_error("heartbeats must not wake configuration watches");
     }
-    service::node_dispatch::notifications::published("other-tenant");
+    deliver(std::move(resource_notification("other-tenant").node_config()));
     if (loop.start(watch_signal(watch, std::chrono::milliseconds(20))).get()) {
         throw std::runtime_error("cross-tenant wakeup");
     }
     // Covers commit after subscribe but before awaiting the channel.
-    service::node_dispatch::notifications::published("delivery-test");
+    deliver(std::move(resource_notification("delivery-test").node_config()));
     if (!loop.start(watch_signal(watch, std::chrono::seconds(1))).get()) {
         throw std::runtime_error("queued commit lost");
     }
     auto pending = loop.start(watch_signal(watch, std::chrono::seconds(1)));
-    service::node_dispatch::notifications::published("delivery-test");
+    deliver(std::move(resource_notification("delivery-test").node_config()));
     if (!pending.get()) {
         throw std::runtime_error("waiting watch not woken");
+    }
+    // A missed notification of the tenant re-reads every watch once.
+    resource_notification missed("delivery-test");
+    missed.missed_until_ = 1;
+    deliver(std::move(missed));
+    if (!loop.start(watch_signal(watch, std::chrono::seconds(1))).get()) {
+        throw std::runtime_error("recovery did not wake the watch");
     }
     loops.stop();
     loops.join();

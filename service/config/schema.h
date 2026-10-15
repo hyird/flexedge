@@ -1224,6 +1224,176 @@ inline std::vector<ruvia::db_migration> task_attempt_traces_migration() {
     return {compiled.begin(), compiled.end()};
 }
 
+// Tasks are user operations (docs/task-center.md): sys_operation is one
+// operation or system action, sys_operation_subtask one piece of background
+// work it caused. Markers, release targets and attempts name the subtask
+// they belong to; the columns are nullable so a server without task tracking
+// keeps working on this schema (rollback). Every execution record retained
+// before this migration is deleted together with its trace (the task center
+// starts empty), as are the targets of superseded releases, which only
+// existed to show old tasks. Markers, current targets, releases and resource
+// state are scheduling state and stay: pending work still completes.
+inline std::vector<ruvia::db_migration> operation_tasks_migration() {
+    constexpr std::string_view operations = "sys_operation";
+    constexpr std::string_view subtasks = "sys_operation_subtask";
+    ruvia::db_schema schema({.driver_ = ruvia::db_driver::postgresql});
+    ruvia::db_query expressions;
+    const auto uuid = ruvia::db_type_definition{.data_type_ = ruvia::db_data_type::uuid};
+    const auto varchar = [](std::size_t length) {
+        return ruvia::db_type_definition{.data_type_ = ruvia::db_data_type::varchar, .length_ = length};
+    };
+    const auto timestamp = ruvia::db_type_definition{.data_type_ = ruvia::db_data_type::timestamp_tz};
+    const auto now = expressions.call("now");
+    const auto one_of = [&](std::string_view column, std::initializer_list<std::string_view> values) {
+        std::vector<ruvia::db_expression> items;
+        for (const auto value : values) {
+            items.push_back(expressions.value(value));
+        }
+        return expressions.binary(expressions.column(column), ruvia::db_binary_operator::in,
+            expressions.list(std::span<const ruvia::db_expression>(items.data(), items.size())));
+    };
+    const auto check = [](std::string name, ruvia::db_expression predicate) {
+        return ruvia::db_schema_constraint{
+            .name_ = std::move(name), .kind_ = ruvia::db_constraint_kind::check, .check_ = predicate};
+    };
+    const auto foreign_key = [](std::string name, std::vector<std::string> columns, std::string table,
+                                 std::vector<std::string> referenced, ruvia::db_referential_action on_delete) {
+        return ruvia::db_schema_constraint{.name_ = std::move(name),
+            .kind_ = ruvia::db_constraint_kind::foreign_key,
+            .columns_ = std::move(columns),
+            .referenced_table_ = std::move(table),
+            .referenced_columns_ = std::move(referenced),
+            .on_delete_ = on_delete};
+    };
+    const auto resource_types = {std::string_view{"website"}, std::string_view{"cluster"},
+        std::string_view{"node"}, std::string_view{"dns_zone"}, std::string_view{"certificate"},
+        std::string_view{"provider"}};
+
+    schema.create_table({.name_ = std::string(operations),
+        .columns_ = {{.name_ = "id", .type_ = uuid, .primary_key_ = true, .default_value_ = expressions.call("gen_random_uuid")},
+            {.name_ = "tenant_id", .type_ = uuid},
+            {.name_ = "action", .type_ = varchar(48)},
+            {.name_ = "actor_type", .type_ = varchar(16)},
+            {.name_ = "actor_id", .type_ = uuid, .nullable_ = true},
+            {.name_ = "actor_name", .type_ = varchar(100), .default_value_ = expressions.value(std::string_view{})},
+            {.name_ = "target_type", .type_ = varchar(32)},
+            {.name_ = "target_id", .type_ = uuid},
+            {.name_ = "target_name", .type_ = varchar(253), .default_value_ = expressions.value(std::string_view{})},
+            {.name_ = "summary",
+                .type_ = {.data_type_ = ruvia::db_data_type::jsonb},
+                .default_value_ = expressions.cast(expressions.value(std::string_view{"{}"}), ruvia::db_data_type::jsonb)},
+            {.name_ = "created_at", .type_ = timestamp, .default_value_ = now}},
+        .constraints_ = {foreign_key("fk_operation_tenant", {"tenant_id"}, "sys_tenant", {"id"},
+                             ruvia::db_referential_action::no_action),
+            {.name_ = "uk_operation_tenant_id", .kind_ = ruvia::db_constraint_kind::unique, .columns_ = {"tenant_id", "id"}},
+            check("ck_operation_actor_type", one_of("actor_type", {"user", "system"})),
+            check("ck_operation_target_type", one_of("target_type", resource_types)),
+            check("ck_operation_summary",
+                expressions.binary(
+                    expressions.binary(expressions.call("jsonb_typeof", {expressions.column("summary")}),
+                        ruvia::db_binary_operator::equal, expressions.value(std::string_view{"object"})),
+                    ruvia::db_binary_operator::and_value,
+                    expressions.binary(expressions.call("octet_length",
+                                           {expressions.cast(expressions.column("summary"), ruvia::db_data_type::text)}),
+                        ruvia::db_binary_operator::less_equal, expressions.value(std::int64_t{2048}))))}});
+    schema.create_index({.name_ = "idx_operation_tenant_created",
+        .table_ = std::string(operations),
+        .keys_ = {{.column_ = "tenant_id"}, {.column_ = "created_at", .order_ = ruvia::db_order_direction::desc},
+            {.column_ = "id", .order_ = ruvia::db_order_direction::desc}}});
+    schema.create_index({.name_ = "idx_operation_tenant_target",
+        .table_ = std::string(operations),
+        .keys_ = {{.column_ = "tenant_id"}, {.column_ = "target_type"}, {.column_ = "target_id"}}});
+
+    schema.create_table({.name_ = std::string(subtasks),
+        .columns_ = {{.name_ = "id", .type_ = uuid, .primary_key_ = true, .default_value_ = expressions.call("gen_random_uuid")},
+            {.name_ = "tenant_id", .type_ = uuid},
+            {.name_ = "operation_id", .type_ = uuid},
+            {.name_ = "parent_id", .type_ = uuid, .nullable_ = true},
+            {.name_ = "kind", .type_ = varchar(32)},
+            {.name_ = "resource_type", .type_ = varchar(32)},
+            {.name_ = "resource_id", .type_ = uuid},
+            {.name_ = "resource_name", .type_ = varchar(253), .default_value_ = expressions.value(std::string_view{})},
+            {.name_ = "version", .type_ = {.data_type_ = ruvia::db_data_type::big_int}},
+            {.name_ = "state", .type_ = varchar(16), .default_value_ = expressions.value(std::string_view{"open"})},
+            {.name_ = "merged_into_id", .type_ = uuid, .nullable_ = true},
+            {.name_ = "closed_by_operation_id", .type_ = uuid, .nullable_ = true},
+            {.name_ = "created_at", .type_ = timestamp, .default_value_ = now},
+            {.name_ = "closed_at", .type_ = timestamp, .nullable_ = true}},
+        .constraints_ = {foreign_key("fk_operation_subtask_tenant", {"tenant_id"}, "sys_tenant", {"id"},
+                             ruvia::db_referential_action::no_action),
+            {.name_ = "uk_operation_subtask_tenant_id", .kind_ = ruvia::db_constraint_kind::unique, .columns_ = {"tenant_id", "id"}},
+            foreign_key("fk_operation_subtask_operation", {"tenant_id", "operation_id"}, std::string(operations),
+                {"tenant_id", "id"}, ruvia::db_referential_action::cascade),
+            foreign_key("fk_operation_subtask_parent", {"parent_id"}, std::string(subtasks), {"id"},
+                ruvia::db_referential_action::cascade),
+            foreign_key("fk_operation_subtask_merged_into", {"merged_into_id"}, std::string(subtasks), {"id"},
+                ruvia::db_referential_action::set_null),
+            foreign_key("fk_operation_subtask_closed_by", {"closed_by_operation_id"}, std::string(operations), {"id"},
+                ruvia::db_referential_action::set_null),
+            check("ck_operation_subtask_kind",
+                one_of("kind", {"dns_sync", "dns_challenge", "dns_challenge_cleanup", "dns_delete", "certificate_issue",
+                                   "certificate_renew", "website_check", "provider_verify", "node_publish", "node_config"})),
+            check("ck_operation_subtask_resource_type", one_of("resource_type", resource_types)),
+            check("ck_operation_subtask_state", one_of("state", {"open", "completed", "merged", "cancelled"})),
+            check("ck_operation_subtask_version", expressions.binary(expressions.column("version"),
+                                                      ruvia::db_binary_operator::greater, expressions.value(std::int64_t{0}))),
+            check("ck_operation_subtask_closed",
+                expressions.binary(expressions.binary(expressions.column("state"), ruvia::db_binary_operator::equal,
+                                       expressions.value(std::string_view{"open"})),
+                    ruvia::db_binary_operator::equal,
+                    expressions.unary(ruvia::db_unary_operator::is_null, expressions.column("closed_at"))))}});
+    schema.create_index({.name_ = "idx_operation_subtask_operation",
+        .table_ = std::string(subtasks),
+        .keys_ = {{.column_ = "tenant_id"}, {.column_ = "operation_id"}, {.column_ = "created_at"}}});
+    schema.create_index({.name_ = "idx_operation_subtask_resource_version",
+        .table_ = std::string(subtasks),
+        .keys_ = {{.column_ = "tenant_id"}, {.column_ = "resource_type"}, {.column_ = "resource_id"},
+            {.column_ = "version"}}});
+    schema.create_index({.name_ = "idx_operation_subtask_merged_into",
+        .table_ = std::string(subtasks),
+        .keys_ = {{.column_ = "merged_into_id"}},
+        .where_ = expressions.unary(ruvia::db_unary_operator::is_not_null, expressions.column("merged_into_id"))});
+    schema.create_index({.name_ = "idx_operation_subtask_parent",
+        .table_ = std::string(subtasks),
+        .keys_ = {{.column_ = "parent_id"}},
+        .where_ = expressions.unary(ruvia::db_unary_operator::is_not_null, expressions.column("parent_id"))});
+
+    // Scheduling rows name the subtask doing their work; deleting a task
+    // releases them (the work itself is never cancelled by retention).
+    const auto owned_by_subtask = [&](std::string_view table, std::string constraint, std::string index,
+                                      std::vector<ruvia::db_index_key> keys, bool unique) {
+        schema.add_column(table, {.name_ = "subtask_id", .type_ = uuid, .nullable_ = true});
+        schema.add_constraint(table, foreign_key(std::move(constraint), {"subtask_id"}, std::string(subtasks), {"id"},
+                                         ruvia::db_referential_action::set_null));
+        schema.create_index({.name_ = std::move(index),
+            .table_ = std::string(table),
+            .keys_ = std::move(keys),
+            .unique_ = unique,
+            .where_ = expressions.unary(ruvia::db_unary_operator::is_not_null, expressions.column("subtask_id"))});
+    };
+    owned_by_subtask("sys_sync_task", "fk_sync_task_subtask", "uk_sync_task_subtask", {{.column_ = "subtask_id"}}, true);
+    owned_by_subtask("sys_node_release_target", "fk_node_release_target_subtask", "idx_node_release_target_subtask",
+        {{.column_ = "subtask_id"}}, false);
+    owned_by_subtask("sys_sync_event", "fk_sync_event_subtask", "idx_sync_event_subtask",
+        {{.column_ = "tenant_id"}, {.column_ = "subtask_id"}, {.column_ = "id"}}, false);
+
+    ruvia::db_query history;
+    history.delete_from("sys_sync_event");
+    schema.execute(history);
+    ruvia::db_query superseded_targets;
+    ruvia::db_query superseded;
+    superseded.select(superseded.column("id"))
+        .from("sys_cluster_release")
+        .where(superseded.binary(superseded.column("status"), ruvia::db_binary_operator::equal,
+            superseded.value(std::string_view{"superseded"})));
+    superseded_targets.delete_from("sys_node_release_target")
+        .where(superseded_targets.binary(superseded_targets.column("release_id"), ruvia::db_binary_operator::in,
+            superseded_targets.subquery(superseded)));
+    schema.execute(superseded_targets);
+    const auto compiled = schema.compile("0025_operation_tasks");
+    return {compiled.begin(), compiled.end()};
+}
+
 inline std::vector<ruvia::db_migration> schema_migrations() {
     std::vector<ruvia::db_migration> migrations(released_migrations.begin(),
         released_migrations.end());
@@ -1236,6 +1406,9 @@ inline std::vector<ruvia::db_migration> schema_migrations() {
     auto attempt_traces = task_attempt_traces_migration();
     migrations.insert(migrations.end(), std::make_move_iterator(attempt_traces.begin()),
         std::make_move_iterator(attempt_traces.end()));
+    auto operation_tasks = operation_tasks_migration();
+    migrations.insert(migrations.end(), std::make_move_iterator(operation_tasks.begin()),
+        std::make_move_iterator(operation_tasks.end()));
     return migrations;
 }
 

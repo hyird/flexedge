@@ -34,7 +34,7 @@
 #include "service/domains/node/node_connection.h"
 #include "service/features/attempt_trace/recorder.h"
 #include "service/features/log_ingest/ingest.h"
-#include "service/features/node_dispatch/notifications.h"
+#include "service/features/node_dispatch/fanout.h"
 #include "service/features/node_release/catalog.h"
 #include "service/features/sync_runtime/attempt_record.h"
 #include "service/utils/sensitive_string.h"
@@ -407,7 +407,7 @@ private:
             co_return false;
         }
         // Subscribe before reading: a commit between the query and wait remains queued.
-        auto subscription = service::node_dispatch::notifications::hub().subscribe(
+        auto subscription = service::node_dispatch::fanout::get_hub(c).subscribe(
             c.worker(), session.principal_.tenant_id_);
         auto desired = co_await get_agent_read_service().desired_summary(c, session.principal_);
         const auto known_revision = probe.applied_node_spec_revision() > 0

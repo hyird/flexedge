@@ -217,10 +217,17 @@ inline std::string require_uuid_param(ruvia::context& c, std::string_view name) 
     return std::move(*value);
 }
 
-inline operation_response operation(ruvia::context& c, std::string_view message) {
+// `operation_id`: the task the write started, if it scheduled background work.
+inline operation_response operation(ruvia::context& c, std::string_view message,
+    const std::optional<std::string>& operation_id = std::nullopt) {
     operation_response response({.resource_ = c.pool()});
     response.set<"code">(0);
     response.set<"message">(message);
+    if (operation_id) {
+        operation_reference_dto reference({.resource_ = c.pool()});
+        reference.set<"operation_id">(*operation_id);
+        response.set<"data">(std::move(reference));
+    }
     return response;
 }
 

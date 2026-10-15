@@ -3,10 +3,10 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { FormSheet } from '@/components/form-sheet'
 import { clusterSnapshotKey } from '@/features/clusters/data'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { createNode, type CreatedNode } from './data'
 import { NodeConfigFields } from './node-config-fields'
 import { NodeCredentialsSheet } from './node-credentials-sheet'
@@ -44,7 +44,7 @@ export function NodeCreateSheet({
       createNode(nodeInputFromForm(values)),
     onSuccess: (response, values) => {
       // The credentials response carries the generic envelope message "ok".
-      toast.success(`节点 ${values.name} 已创建`)
+      toastWriteSuccess(`节点 ${values.name} 已创建`, response.data)
       // The cluster detail header counts nodes; it re-reads its snapshot.
       void client.invalidateQueries({ queryKey: clusterSnapshotKey })
       setCreated({ node: response.data, name: values.name })

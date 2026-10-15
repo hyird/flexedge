@@ -14,7 +14,7 @@ enum class resource {
     dns_zones,
     providers,
     certificates,
-    tasks,
+    operations,
     overview,
     access_history,
     overview_traffic

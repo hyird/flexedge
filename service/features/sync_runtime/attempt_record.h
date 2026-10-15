@@ -215,11 +215,13 @@ inline ruvia::db_expression next_attempt_number(ruvia::db_query& source,
         ruvia::db_binary_operator::add, source.value(std::int64_t{1}));
 }
 
-// Columns written by every attempt record, in the order the source selects them.
+// Columns written by every attempt record, in the order the source selects
+// them; `subtask_id` is the subtask (of a task) the attempt belongs to.
 inline constexpr std::array attempt_event_columns{std::string_view{"tenant_id"}, std::string_view{"task_id"},
     std::string_view{"resource_type"}, std::string_view{"resource_id"}, std::string_view{"operation"},
     std::string_view{"version"}, std::string_view{"outcome"}, std::string_view{"error"},
     std::string_view{"attempt"}, std::string_view{"started_at"}, std::string_view{"duration_ms"},
-    std::string_view{"next_attempt_at"}, std::string_view{"detail"}, std::string_view{"emitted_at"}};
+    std::string_view{"next_attempt_at"}, std::string_view{"detail"}, std::string_view{"emitted_at"},
+    std::string_view{"subtask_id"}};
 
 }  // namespace service::sync_runtime

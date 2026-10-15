@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-namespace service::log_ingest {
+namespace service::utils {
 
 inline void require_redis_success(const ruvia::redis_value& value, std::string_view operation) {
     if (value.kind() == ruvia::redis_value::kind_type::error) {
@@ -14,4 +14,4 @@ inline void require_redis_success(const ruvia::redis_value& value, std::string_v
     }
 }
 
-}  // namespace service::log_ingest
+}  // namespace service::utils

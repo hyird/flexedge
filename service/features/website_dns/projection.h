@@ -47,7 +47,7 @@ inline ruvia::task<std::set<std::string>> managed_zone_ids(db_type& db, const st
 inline ruvia::task<void> reconcile_config_change(ruvia::db_transaction& transaction,
     const std::string& tenant_id,
     std::optional<std::string_view> previous_config,
-    std::optional<std::string_view> next_config) {
+    std::optional<std::string_view> next_config, service::operation::work_origin& origin) {
     std::set<std::string> zone_ids;
     if (previous_config) {
         auto previous = co_await managed_zone_ids(transaction, tenant_id, *previous_config);
@@ -58,14 +58,14 @@ inline ruvia::task<void> reconcile_config_change(ruvia::db_transaction& transact
         zone_ids.insert(next.begin(), next.end());
     }
     for (const auto& zone_id : zone_ids) {
-        (void)co_await service::dns_sync::mark_zone_dirty(transaction, tenant_id, zone_id);
+        (void)co_await service::dns_sync::mark_zone_dirty(transaction, tenant_id, zone_id, origin);
     }
     co_return;
 }
 
 inline ruvia::task<void> reconcile_cluster_consumers(ruvia::db_transaction& transaction,
     const std::string& tenant_id,
-    const std::string& cluster_id) {
+    const std::string& cluster_id, service::operation::work_origin& origin) {
     const auto rows = co_await transaction.query(
         "SELECT DISTINCT claim.dns_zone_id FROM sys_website_domain_claim claim INNER JOIN "
         "sys_website website ON website.tenant_id = claim.tenant_id AND website.id = "
@@ -75,7 +75,7 @@ inline ruvia::task<void> reconcile_cluster_consumers(ruvia::db_transaction& tran
         tenant_id, cluster_id);
     for (const auto& row : rows) {
         (void)co_await service::dns_sync::mark_zone_dirty(transaction, tenant_id,
-            std::string(row[0].value().value_or("")));
+            std::string(row[0].value().value_or("")), origin);
     }
     co_return;
 }

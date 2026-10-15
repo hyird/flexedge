@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useState, type ReactNode } from 'react'
+import { Fragment, use, useCallback, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { EyeSlash } from '@gravity-ui/icons'
 import { Button, Chip, Link, Skeleton } from '@heroui/react'
@@ -6,7 +6,7 @@ import { ApiBusinessError } from '@/lib/api-response'
 import { cn } from '@/lib/utils'
 import { CopyButton } from '@/components/copy-button'
 import { taskAttemptTraceQuery } from './data'
-import { taskHref } from './task-display'
+import { SubtaskLinkContext } from './subtask-link-context'
 import {
   callOutcomes,
   formatTraceClock,
@@ -16,10 +16,9 @@ import {
   isConfigVersionField,
   logLevels,
   observeFirstSight,
-  omittedReasons,
   splitRedacted,
   stepOutcomes,
-  taskNotFoundCode,
+  traceNotFoundCode,
   transportErrors,
 } from './task-trace'
 import {
@@ -61,10 +60,10 @@ function useFirstSight() {
  * once the timeline is on screen and fills in under each step. Attempts
  * without a trace render nothing. */
 export function AttemptTimeline({
-  taskId,
+  operationId,
   trace,
 }: {
-  taskId: string
+  operationId: string
   trace: TaskAttemptTraceSummary
 }) {
   if (trace === null) return null
@@ -72,19 +71,19 @@ export function AttemptTimeline({
     return <p className='m-0 text-xs text-muted'>执行详情无法识别</p>
   if (trace.state !== 'available' || !trace.attempt_id || !trace.step_count)
     return null
-  return <TraceTimeline taskId={taskId} summary={trace} />
+  return <TraceTimeline operationId={operationId} summary={trace} />
 }
 
 function TraceTimeline({
-  taskId,
+  operationId,
   summary,
 }: {
-  taskId: string
+  operationId: string
   summary: Summary
 }) {
   const [ref, seen] = useFirstSight()
   const query = useQuery({
-    ...taskAttemptTraceQuery(taskId, summary.attempt_id, seen),
+    ...taskAttemptTraceQuery(operationId, summary.attempt_id, seen),
     meta: { inlineError: true },
   })
   const full =
@@ -93,7 +92,7 @@ function TraceTimeline({
       : null
   const notFound =
     query.error instanceof ApiBusinessError &&
-    query.error.code === taskNotFoundCode
+    query.error.code === traceNotFoundCode
   return (
     <div ref={ref} className='flex min-w-0 flex-col gap-1.5'>
       {full ? (
@@ -120,7 +119,6 @@ function TraceTimeline({
           )}
         </p>
       )}
-      {full && <CaptureNote capture={full.capture} />}
     </div>
   )
 }
@@ -215,9 +213,6 @@ function SummarySteps({
   summary: Summary
   loading: boolean
 }) {
-  const hidden =
-    summary.step_count -
-    summary.steps.reduce((total, step) => total + step.count, 0)
   return (
     <Timeline>
       {summary.steps.map((step, position) => (
@@ -233,13 +228,6 @@ function SummarySteps({
           )}
         </TimelineItem>
       ))}
-      {hidden > 0 && (
-        <TimelineItem outcome=''>
-          <span className='text-xs leading-5 text-muted'>
-            另有 {hidden} 个步骤
-          </span>
-        </TimelineItem>
-      )}
     </Timeline>
   )
 }
@@ -269,7 +257,8 @@ function FullSteps({ steps }: { steps: TaskAttemptTrace['steps'] }) {
 }
 
 function StepBody({ step }: { step: TraceStep }) {
-  const related = step.related_task
+  const subtasks = use(SubtaskLinkContext)
+  const related = step.related_task?.subtask_id
   return (
     <>
       {step.error && (
@@ -277,15 +266,9 @@ function StepBody({ step }: { step: TraceStep }) {
           <RedactedText value={step.error} />
         </p>
       )}
-      {related && (
-        <Link
-          href={taskHref({
-            id: related.task_id,
-            resource_id: related.resource_id,
-          })}
-          className='w-fit text-xs'
-        >
-          关联：{related.label || '任务'}
+      {related && subtasks?.has(related) && (
+        <Link className='w-fit text-xs' onPress={() => subtasks.open(related)}>
+          关联：{step.related_task?.label || '子任务'}
         </Link>
       )}
       {step.calls.length > 0 && (
@@ -300,11 +283,6 @@ function StepBody({ step }: { step: TraceStep }) {
             </li>
           ))}
         </ul>
-      )}
-      {step.omitted_calls > 0 && (
-        <p className='m-0 text-xs text-muted'>
-          另有 {step.omitted_calls} 次调用未记录
-        </p>
       )}
       {step.logs.length > 0 && <LogLines logs={step.logs} />}
     </>
@@ -432,7 +410,6 @@ function TraceCallItem({ call }: { call: TraceCall }) {
               <RedactedText value={answer.data} />
             </li>
           ))}
-          {dns.truncated && <li className='text-muted'>…</li>}
         </ol>
       )}
       {fields.length > 0 && (
@@ -449,25 +426,15 @@ function TraceCallItem({ call }: { call: TraceCall }) {
   )
 }
 
-/** Request/response body excerpt as stored; a body that was not stored shows
- * why in one short line. `label` tells request and response apart. */
+/** Request/response excerpt as stored. Empty bodies have no caption. */
 function BodyExcerpt({ label, body }: { label: string; body: TraceBody }) {
-  const omitted =
-    body.format === 'omitted' || body.omitted_reason !== ''
-      ? (known(omittedReasons, body.omitted_reason) ?? '正文未保存')
-      : null
-  if (!omitted && !body.excerpt) return null
+  if (!body.excerpt) return null
   return (
     <div className='flex min-w-0 flex-col gap-0.5'>
       {label && <span className='text-[11px] text-muted'>{label}</span>}
-      {omitted ? (
-        <span className='text-[11px] text-muted'>{omitted}</span>
-      ) : (
-        <pre className={cn(codeBlock, 'whitespace-pre')}>
-          <RedactedText value={body.excerpt} />
-          {body.truncated && <span className='text-muted'>{'\n…'}</span>}
-        </pre>
-      )}
+      <pre className={cn(codeBlock, 'whitespace-pre')}>
+        <RedactedText value={body.excerpt} />
+      </pre>
     </div>
   )
 }
@@ -508,17 +475,6 @@ function LogLine({ log }: { log: TraceLog }) {
       </span>
     </li>
   )
-}
-
-/** One short muted line when the capture is incomplete or hides values. */
-function CaptureNote({ capture }: { capture: TaskAttemptTrace['capture'] }) {
-  const notes = [
-    capture.degraded && '记录不完整',
-    capture.truncated && '部分内容已截断',
-    capture.redactions > 0 && `已隐藏 ${capture.redactions} 处`,
-  ].filter(Boolean)
-  if (!notes.length) return null
-  return <p className='m-0 text-xs text-muted'>{notes.join(' · ')}</p>
 }
 
 /** Text with every `[REDACTED]` marker shown as an "已隐藏" badge. */

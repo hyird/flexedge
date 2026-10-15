@@ -308,16 +308,17 @@ private:
         }
         stage = certificate_stage::dns_challenge;
         auto challenge_step = trace_.begin_step(step_code::dns_challenge, dns.zone_domain_);
-        const auto dns_task_id =
+        const auto dns_sync =
             co_await persist_dns_challenges(context, certificate_task, dns, plan.challenge_specs_);
         challenges_persisted = true;
-        trace_.link_task({.task_id_ = dns_task_id,
+        trace_.link_task({.task_id_ = dns_sync.marker_id_,
             .resource_type_ = "dns_zone",
             .resource_id_ = dns.dns_zone_id_,
-            .label_ = "DNS 同步"});
+            .label_ = "DNS 同步",
+            .subtask_id_ = dns_sync.subtask_id_});
         trace_.log(log_level::info, "已写入 " + std::to_string(plan.challenge_specs_.size()) +
                                         " 条 _acme-challenge TXT 记录，等待 DNS 同步任务完成");
-        co_await wait_for_dns_marker(context, dns_task_id, certificate_task);
+        co_await wait_for_dns_marker(context, dns_sync.marker_id_, certificate_task);
         trace_.log(log_level::info, "DNS 同步已完成，等待 10 秒让记录生效");
         if (co_await ruvia::sleep_for(context.worker(), std::chrono::seconds(10),
                 context.get_stop_token()) ==
@@ -350,15 +351,15 @@ private:
         }
         std::exception_ptr cleanup_failure;
         try {
-            const auto dns_task_id = co_await retire_dns_challenges(context, dns.dns_zone_id_,
-                dns.certificate_id_, certificate_task);
-            if (!dns_task_id.empty()) {
-                trace_.link_task({.task_id_ = dns_task_id,
+            const auto dns_sync = co_await retire_dns_challenges(context, dns, certificate_task);
+            if (!dns_sync.marker_id_.empty()) {
+                trace_.link_task({.task_id_ = dns_sync.marker_id_,
                     .resource_type_ = "dns_zone",
                     .resource_id_ = dns.dns_zone_id_,
-                    .label_ = "DNS 同步"});
+                    .label_ = "DNS 同步",
+                    .subtask_id_ = dns_sync.subtask_id_});
                 trace_.log(service::attempt_trace::log_level::info, "已移除 DNS 验证记录，等待 DNS 同步任务完成");
-                co_await wait_for_dns_marker(context, dns_task_id, certificate_task);
+                co_await wait_for_dns_marker(context, dns_sync.marker_id_, certificate_task);
             }
         } catch (...) {
             cleanup_failure = std::current_exception();

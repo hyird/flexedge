@@ -524,7 +524,7 @@ test('session expiry recovery is shared and late auth completion cannot revive a
   )
   const { watch, sources, manager, client } = setup(recover)
   watch(['nodes'])
-  watch(['tasks'], '/api/tasks/stream')
+  watch(['operations'], '/api/operations/stream')
   sources[0].frame('session-expired', {})
   sources[1].frame('session-expired', {})
   expect(recover).toHaveBeenCalledTimes(1)
@@ -837,12 +837,12 @@ describe('minimum loading time of first loads', () => {
   test('the hold counts from when the view started loading, across keys it waits on', async () => {
     const { client, sources, manager, watch } = setupHeld()
     const count = (trigger?: string) => ({
-      queryKey: ['tasks', 'count', trigger],
+      queryKey: ['operations', 'count', trigger],
       enabled: trigger !== undefined,
       queryFn: ({ signal }: { signal: AbortSignal }) =>
         manager.read(
-          `/api/tasks/stream?trigger=${trigger}`,
-          ['tasks', 'count', trigger],
+          `/api/operations/stream?trigger=${trigger}`,
+          ['operations', 'count', trigger],
           signal
         ),
     })

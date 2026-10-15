@@ -41,7 +41,7 @@ private:
     ruvia::task<void> collection(ruvia::context& c) {
         const auto keyword = service::common::require_keyword(c.req().query("keyword"));
         const auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(c.worker(), tenant,
+        auto sub = service::live_resource::get_hub(c).subscribe(c.worker(), tenant,
             service::live_resource::resource::dns_zones, {},
             service::live_resource::query_key("collection", keyword.value_or("")));
         co_await service::live_resource::stream_snapshot(
@@ -72,7 +72,7 @@ private:
                 "dns_provider_id 必须是 UUID", 400);
         }
         const auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(c.worker(), tenant,
+        auto sub = service::live_resource::get_hub(c).subscribe(c.worker(), tenant,
             service::live_resource::resource::dns_zones, {},
             service::live_resource::query_key("available", *provider_id));
         co_await service::live_resource::stream_snapshot(
@@ -97,7 +97,7 @@ private:
         }
         const auto sync_status = parse_sync_status_filter(c.req().query("sync_status"));
         const auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(c.worker(), tenant,
+        auto sub = service::live_resource::get_hub(c).subscribe(c.worker(), tenant,
             service::live_resource::resource::dns_zones, {},
             service::live_resource::query_key("list", page, page_size, keyword.value_or(""),
                 provider_id, sync_status));
@@ -129,7 +129,7 @@ private:
             }
         }
         const auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(c.worker(), tenant,
+        auto sub = service::live_resource::get_hub(c).subscribe(c.worker(), tenant,
             service::live_resource::resource::dns_zones, {},
             service::live_resource::query_key("options", keyword.value_or(""), owner_of,
                 available));
@@ -143,16 +143,16 @@ private:
     }
 
     ruvia::task<ruvia::http_response> create(ruvia::context& c) {
-        co_await get_dns_zone_command_service().create(c, tenant_id(c),
-            c.req().validated<create_dns_zone_body>());
+        const auto operation_id =
+            co_await get_dns_zone_command_service().create(c, tenant_id(c), c.req().validated<create_dns_zone_body>());
         service::common::set_revision_etag(c, 1);
-        co_return c.json(service::common::operation(c, "域名已保存，同步任务已提交"));
+        co_return c.json(service::common::operation(c, "域名已保存，同步任务已提交", operation_id));
     }
 
     ruvia::task<void> get(ruvia::context& c) {
         const auto id = require_id(c);
         const auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(c.worker(), tenant,
+        auto sub = service::live_resource::get_hub(c).subscribe(c.worker(), tenant,
             service::live_resource::resource::dns_zones, id,
             service::live_resource::query_key("detail"));
         co_await service::live_resource::stream_snapshot(
@@ -166,11 +166,10 @@ private:
 
     ruvia::task<ruvia::http_response> update(ruvia::context& c) {
         const auto revision = expected_revision(c);
-        co_await get_dns_zone_command_service().update_config(
-            c, tenant_id(c), require_id(c), revision,
-            c.request_state<service::dns_sync::zone_config_input>());
+        const auto operation_id = co_await get_dns_zone_command_service().update_config(c, tenant_id(c),
+            require_id(c), revision, c.request_state<service::dns_sync::zone_config_input>());
         service::common::set_revision_etag(c, revision + 1);
-        co_return c.json(service::common::operation(c, "配置已保存，同步任务已提交"));
+        co_return c.json(service::common::operation(c, "配置已保存，同步任务已提交", operation_id));
     }
 
     ruvia::task<ruvia::http_response> sync(ruvia::context& c) {
@@ -183,15 +182,17 @@ private:
                 conflict_policy = value->view();
             }
         }
-        co_await get_dns_zone_command_service().request_sync(c, tenant_id(c), require_id(c), conflict_policy);
-        co_return c.json(service::common::operation(c, "同步任务已提交"));
+        const auto operation_id =
+            co_await get_dns_zone_command_service().request_sync(c, tenant_id(c), require_id(c), conflict_policy);
+        co_return c.json(service::common::operation(c, "同步任务已提交", operation_id));
     }
 
     ruvia::task<ruvia::http_response> remove(ruvia::context& c) {
         const auto revision = expected_revision(c);
-        co_await get_dns_zone_command_service().remove(c, tenant_id(c), require_id(c), revision);
+        const auto operation_id =
+            co_await get_dns_zone_command_service().remove(c, tenant_id(c), require_id(c), revision);
         service::common::set_revision_etag(c, revision + 1);
-        co_return c.json(service::common::operation(c, "托管域名已移除"));
+        co_return c.json(service::common::operation(c, "托管域名已移除", operation_id));
     }
 };
 

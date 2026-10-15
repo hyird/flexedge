@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { toast } from '@heroui/react'
 import { queryKeys } from '@/lib/query-keys'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Mono } from '@/components/mono'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { websitesSnapshotKey } from '@/features/websites/data'
 import {
   downloadCertificate,
@@ -36,7 +36,7 @@ export function useCertificateCommands({
     meta: { inlineError: true },
     mutationFn: renewCertificate,
     onSuccess: (response) => {
-      toast.success(response.message || '续期任务已提交')
+      toastWriteSuccess(response.message || '续期任务已提交', response.data)
       void markStale()
     },
   })
@@ -44,7 +44,7 @@ export function useCertificateCommands({
     meta: { inlineError: true },
     mutationFn: removeCertificate,
     onSuccess: (response) => {
-      toast.success(response.message || '证书已删除')
+      toastWriteSuccess(response.message || '证书已删除', response.data)
       void markStale()
       onRemoved?.()
     },

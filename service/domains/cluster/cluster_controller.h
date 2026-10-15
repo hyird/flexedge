@@ -40,7 +40,7 @@ private:
     ruvia::task<void> options(ruvia::context& c) {
         const auto keyword = service::common::require_keyword(c.req().query("keyword"));
         const auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(
+        auto sub = service::live_resource::get_hub(c).subscribe(
             c.worker(), tenant, service::live_resource::resource::clusters, {},
             service::live_resource::query_key("options", keyword.value_or("")));
         co_await service::live_resource::stream_snapshot(
@@ -92,7 +92,7 @@ private:
             status.emplace(*value);
         }
         const auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(
+        auto sub = service::live_resource::get_hub(c).subscribe(
             c.worker(), tenant, service::live_resource::resource::clusters, {},
             service::live_resource::query_key("list", page, page_size, keyword.value_or(""),
                 dns_zone_id, status));
@@ -113,7 +113,7 @@ private:
         const auto tenant = tenant_id(c);
         // Node changes and online/offline transitions publish clusters with
         // an empty id, which also wakes detail subscriptions.
-        auto sub = service::live_resource::get_hub().subscribe(
+        auto sub = service::live_resource::get_hub(c).subscribe(
             c.worker(), tenant, service::live_resource::resource::clusters, id,
             service::live_resource::query_key("detail"));
         co_await service::live_resource::stream_snapshot(
@@ -134,17 +134,18 @@ private:
 
     ruvia::task<ruvia::http_response> update(ruvia::context& c) {
         const auto revision = service::common::require_expected_revision(c);
-        co_await get_cluster_command_service().update(c, tenant_id(c), require_id(c), revision,
-            c.req().validated<save_cluster_body>());
+        const auto operation_id = co_await get_cluster_command_service().update(c, tenant_id(c), require_id(c),
+            revision, c.req().validated<save_cluster_body>());
         service::common::set_revision_etag(c, revision + 1);
-        co_return c.json(service::common::operation(c, "集群配置已更新"));
+        co_return c.json(service::common::operation(c, "集群配置已更新", operation_id));
     }
 
     ruvia::task<ruvia::http_response> remove(ruvia::context& c) {
         const auto revision = service::common::require_expected_revision(c);
-        co_await get_cluster_command_service().remove(c, tenant_id(c), require_id(c), revision);
+        const auto operation_id =
+            co_await get_cluster_command_service().remove(c, tenant_id(c), require_id(c), revision);
         service::common::set_revision_etag(c, revision + 1);
-        co_return c.json(service::common::operation(c, "集群已删除"));
+        co_return c.json(service::common::operation(c, "集群已删除", operation_id));
     }
 };
 

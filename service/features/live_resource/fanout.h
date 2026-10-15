@@ -6,14 +6,12 @@
 #include <ruvia/core/worker_handle.h>
 #include <ruvia/http/http_status.h>
 #include <ruvia/web/error.h>
-#include <ruvia/web/web_worker.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -31,10 +29,28 @@ inline constexpr auto heartbeat_interval = std::chrono::seconds(15);
 // aggregate is recomputed at most once per interval, and only after an event.
 inline constexpr auto traffic_refresh_interval = std::chrono::seconds(30);
 
+// One attempt recorded for a subtask of a task (operation). Only identifiers
+// travel; the subscriber reads the attempt itself.
+struct task_attempt_notice final {
+    std::string subtask_id_;
+    std::int64_t event_id_{};
+};
+// Notices a mailbox part keeps before it falls back to one recovery snapshot.
+inline constexpr std::size_t max_pending_task_attempts{32};
+
 struct pending_changes final {
     bool snapshot_{};
     std::unordered_map<std::string, std::string> runtime_;
     std::unordered_map<std::string, std::string> origins_;
+    // Attempts recorded since the last drain, in delivery order; only parts
+    // subscribed with `task_attempts_` receive them.
+    std::vector<task_attempt_notice> task_attempts_;
+    // The retained history changed as a whole (retention, notice overflow,
+    // missed notifications): an incremental part resends its snapshot once.
+    bool history_reset_{};
+    // Notifications may have been missed: the part writes its next snapshot
+    // even when its bytes equal the last one written.
+    bool recovery_{};
     // A coalesced change is waiting; the subscriber releases it at this time.
     std::optional<std::chrono::steady_clock::time_point> refresh_at_;
 };
@@ -45,15 +61,19 @@ struct subscription_part final {
     resource resource_;
     std::string id_;
     std::string query_;
+    // Receives task attempt notices of exactly this task id.
+    bool task_attempts_{};
 };
 
-// Web workers and background workers are threads of the same server process.
-// The mailbox, rather than the channel, owns pending changes: a full wakeup
-// channel cannot lose a committed change or the latest runtime value.
+// Worker-local fan-out: every Web Worker owns one hub (Ruvia worker state)
+// and delivers only to the subscriptions of the connections it holds.
+// Changes reach it from the worker's own resource notification reader, never
+// from another worker. The mailbox, rather than the channel, owns pending
+// changes: a full wakeup channel cannot lose a change or the latest runtime
+// value.
 class hub final {
     using clock = std::chrono::steady_clock;
     struct mailbox final {
-        std::mutex mutex_;
         std::vector<pending_changes> pending_;
         ruvia::channel_sender<std::uint64_t> sender_;
         mailbox(ruvia::channel_sender<std::uint64_t> value, std::size_t parts)
@@ -64,12 +84,12 @@ class hub final {
         std::string tenant_;
         resource resource_;
         std::string id_;
-        ruvia::worker_id_type worker_;
         std::weak_ptr<mailbox> mailbox_;
         std::size_t part_;
+        bool task_attempts_{};
     };
-    // Process-wide gate of one coalesced projection: at most one delivery per
-    // interval; later events inside the interval defer a single delivery.
+    // Gate of one coalesced projection: at most one delivery per interval;
+    // later events inside the interval defer a single delivery.
     struct coalesced_gate final {
         std::string tenant_;
         resource resource_;
@@ -81,7 +101,6 @@ class hub final {
         std::size_t part_;
     };
     struct state final {
-        std::mutex mutex_;
         std::vector<entry> entries_;
         std::vector<coalesced_gate> gates_;
         snapshot_cache snapshots_;
@@ -122,7 +141,6 @@ public:
         ~subscription() {
             if (mailbox_) {
                 receiver_.close();
-                const std::lock_guard lock(state_->mutex_);
                 std::erase_if(state_->entries_, [this](const entry& entry) {
                     const auto mailbox = entry.mailbox_.lock();
                     return !mailbox || mailbox == mailbox_;
@@ -144,7 +162,6 @@ public:
             return snapshots_.size();
         }
         pending_changes drain(std::size_t part = 0) {
-            const std::lock_guard lock(mailbox_->mutex_);
             return std::exchange(mailbox_->pending_.at(part), {});
         }
         const snapshot_cache::lease& snapshots(std::size_t part = 0) const {
@@ -182,7 +199,6 @@ public:
         snapshots.reserve(parts.size());
         resources.reserve(parts.size());
         bool deferred = false;
-        const std::lock_guard lock(state_->mutex_);
         try {
             for (auto& part : parts) {
                 snapshots.push_back(state_->snapshots_.subscribe(
@@ -195,7 +211,7 @@ public:
         }
         for (std::size_t index = 0; index < parts.size(); ++index) {
             state_->entries_.push_back({std::string(tenant), parts[index].resource_,
-                std::move(parts[index].id_), worker.id(), mailbox_value, index});
+                std::move(parts[index].id_), mailbox_value, index, parts[index].task_attempts_});
             resources.push_back(parts[index].resource_);
             // A late subscriber must also release a change deferred before it
             // joined: its first read may reuse the snapshot cached before it.
@@ -222,107 +238,28 @@ public:
         return state_->snapshots_.get_stats();
     }
 
-    void publish(std::string_view tenant, resource resource, std::string_view id = {}) {
-        publish_impl(std::nullopt, tenant, resource, id);
-    }
-    void publish_for_worker(ruvia::worker_id_type worker, std::string_view tenant,
-        resource resource, std::string_view id = {}) {
-        publish_impl(worker, tenant, resource, id);
-    }
-    void publish_runtime(std::string_view tenant, std::string_view id, std::string_view payload) {
-        deliver(*state_, tenant, resource::nodes, id, payload, true);
-    }
-    void publish_origins(std::string_view tenant, std::string_view website_id,
-        std::string_view node_id, std::string_view payload) {
-        deliver(*state_, tenant, resource::websites, website_id, payload, false, node_id);
-    }
-    // High-rate change of a tenant-wide projection. Without subscribers this
-    // is a no-op, so nothing is ever read for an unobserved projection. The
-    // first change after a quiet interval is delivered at once; later changes
-    // inside the interval schedule one deferred delivery, which subscribers
-    // release at the deadline. Every web worker reads every notification;
-    // the process-wide gate turns those duplicates into one delivery.
-    void publish_coalesced(std::string_view tenant, resource resource, clock::duration interval,
-        clock::time_point now = clock::now()) {
-        std::vector<target> deferred;
-        clock::time_point refresh_at;
-        {
-            const std::lock_guard lock(state_->mutex_);
-            auto targets = state_->targets(tenant, resource);
-            auto gate = state_->gate(tenant, resource);
-            if (targets.empty()) {
-                if (gate != state_->gates_.end()) {
-                    state_->gates_.erase(gate);
-                }
-                return;
-            }
-            if (gate == state_->gates_.end()) {
-                gate = state_->gates_.insert(state_->gates_.end(),
-                    {std::string(tenant), resource, std::nullopt, std::nullopt});
-            }
-            if (gate->deferred_until_) {
-                return;
-            }
-            if (gate->delivered_at_ && now < *gate->delivered_at_ + interval) {
-                refresh_at = *gate->delivered_at_ + interval;
-                gate->deferred_until_ = refresh_at;
-                deferred = std::move(targets);
-            } else {
-                gate->delivered_at_ = now;
-            }
-        }
-        if (deferred.empty()) {
-            deliver(*state_, tenant, resource, {}, {}, false);
-            return;
-        }
-        for (const auto& target : deferred) {
-            {
-                const std::lock_guard lock(target.mailbox_->mutex_);
-                auto& pending = target.mailbox_->pending_[target.part_];
-                if (!pending.refresh_at_ || refresh_at < *pending.refresh_at_) {
-                    pending.refresh_at_ = refresh_at;
-                }
-            }
-            (void)target.mailbox_->sender_.send(1);
-        }
-    }
-
-private:
-    static bool release_coalesced(state& state, std::string_view tenant, resource resource,
-        clock::time_point now) {
-        {
-            const std::lock_guard lock(state.mutex_);
-            const auto gate = state.gate(tenant, resource);
-            if (gate == state.gates_.end() || !gate->deferred_until_ || now < *gate->deferred_until_) {
-                return false;
-            }
-            gate->delivered_at_ = now;
-            gate->deferred_until_.reset();
-        }
-        deliver(state, tenant, resource, {}, {}, false);
-        return true;
-    }
-
-    void publish_impl(std::optional<ruvia::worker_id_type> worker, std::string_view tenant,
-        resource resource_value, std::string_view id) {
-        deliver(*state_, tenant, resource_value, id, {}, false, {}, worker);
-        // The overview projects resource totals and task marker state. Runtime
-        // reports bypass publish(), so ordinary heartbeats never reload it.
+    void publish(std::string_view tenant, resource resource_value, std::string_view id = {}) {
+        deliver(*state_, tenant, resource_value, id, {}, false);
+        // The overview projects resource totals. Task (operation) state is not
+        // part of it, and runtime reports bypass publish(), so neither task
+        // changes nor ordinary heartbeats reload it.
         if (resource_value != resource::overview && resource_value != resource::access_history &&
-            resource_value != resource::overview_traffic) {
-            deliver(*state_, tenant, resource::overview, {}, {}, false, {}, worker);
+            resource_value != resource::overview_traffic && resource_value != resource::operations) {
+            deliver(*state_, tenant, resource::overview, {}, {}, false);
         }
         // Read projections join these resources. Dependent projections receive
         // a tenant-scoped wakeup because their IDs differ from the changed row.
         // Deliver directly rather than recursively publishing: reciprocal joins
         // (zone counts, website bindings) must not form notification loops.
         const auto dependent = [&](resource projection) {
-            deliver(*state_, tenant, projection, {}, {}, false, {}, worker);
+            deliver(*state_, tenant, projection, {}, {}, false);
         };
         switch (resource_value) {
             case resource::nodes:
                 dependent(resource::clusters);
                 dependent(resource::websites);
+                // Task views show whether nodes with pending work are online.
+                dependent(resource::operations);
                 break;
             case resource::clusters:
                 dependent(resource::nodes);
@@ -349,52 +286,177 @@ private:
                 // aggregate; it shares the access-log refresh gate.
                 publish_coalesced(tenant, resource::overview_traffic, traffic_refresh_interval);
                 break;
-            case resource::tasks:
+            case resource::operations:
             case resource::overview:
             case resource::access_history:
             case resource::overview_traffic:
                 break;
         }
     }
+    void publish_runtime(std::string_view tenant, std::string_view id, std::string_view payload) {
+        deliver(*state_, tenant, resource::nodes, id, payload, true);
+    }
+    void publish_origins(std::string_view tenant, std::string_view website_id,
+        std::string_view node_id, std::string_view payload) {
+        deliver(*state_, tenant, resource::websites, website_id, payload, false, node_id);
+    }
+    // A recorded attempt of a subtask of task (operation) `task_id`. It wakes
+    // task projections as publish() does; parts subscribed with
+    // `task_attempts_` for exactly this task also receive the notice, so they
+    // read only that attempt instead of re-reading their snapshot.
+    void publish_task_attempt(std::string_view tenant, std::string_view task_id,
+        const task_attempt_notice& notice) {
+        queue_task_history(tenant, task_id, &notice);
+        publish(tenant, resource::operations, task_id);
+    }
+    // The retained attempts of the task's subtasks changed as a whole
+    // (retention): incremental history parts resend one snapshot.
+    void reset_task_history(std::string_view tenant, std::string_view task_id) {
+        queue_task_history(tenant, task_id, nullptr);
+        publish(tenant, resource::operations, task_id);
+    }
+    // Notifications may have been missed (the reader lost its stream, or a
+    // producer could not send): every subscription of the tenant, or of all
+    // tenants without one, reads one recovery snapshot. Byte-identical
+    // snapshot parts still write nothing; incremental parts always resend.
+    void recover(std::optional<std::string_view> tenant = std::nullopt) {
+        std::vector<std::pair<std::string, resource>> invalidated;
+        for (const auto& entry : state_->entries_) {
+            if (tenant && entry.tenant_ != *tenant) {
+                continue;
+            }
+            const auto key = std::make_pair(entry.tenant_, entry.resource_);
+            if (std::find(invalidated.begin(), invalidated.end(), key) == invalidated.end()) {
+                invalidated.push_back(key);
+            }
+        }
+        for (const auto& [tenant_value, resource_value] : invalidated) {
+            state_->snapshots_.invalidate(tenant_value, resource_value);
+        }
+        for (const auto& entry : state_->entries_) {
+            if (tenant && entry.tenant_ != *tenant) {
+                continue;
+            }
+            if (auto mailbox = entry.mailbox_.lock()) {
+                auto& pending = mailbox->pending_[entry.part_];
+                pending.snapshot_ = true;
+                pending.recovery_ = true;
+                if (entry.task_attempts_) {
+                    pending.task_attempts_.clear();
+                    pending.history_reset_ = true;
+                }
+                (void)mailbox->sender_.send(1);
+            }
+        }
+    }
+    // High-rate change of a tenant-wide projection. Without subscribers this
+    // is a no-op, so nothing is ever read for an unobserved projection. The
+    // first change after a quiet interval is delivered at once; later changes
+    // inside the interval schedule one deferred delivery, which subscribers
+    // release at the deadline.
+    void publish_coalesced(std::string_view tenant, resource resource, clock::duration interval,
+        clock::time_point now = clock::now()) {
+        auto targets = state_->targets(tenant, resource);
+        auto gate = state_->gate(tenant, resource);
+        if (targets.empty()) {
+            if (gate != state_->gates_.end()) {
+                state_->gates_.erase(gate);
+            }
+            return;
+        }
+        if (gate == state_->gates_.end()) {
+            gate = state_->gates_.insert(state_->gates_.end(),
+                {std::string(tenant), resource, std::nullopt, std::nullopt});
+        }
+        if (gate->deferred_until_) {
+            return;
+        }
+        if (!gate->delivered_at_ || now >= *gate->delivered_at_ + interval) {
+            gate->delivered_at_ = now;
+            deliver(*state_, tenant, resource, {}, {}, false);
+            return;
+        }
+        const auto refresh_at = *gate->delivered_at_ + interval;
+        gate->deferred_until_ = refresh_at;
+        for (const auto& target : targets) {
+            auto& pending = target.mailbox_->pending_[target.part_];
+            if (!pending.refresh_at_ || refresh_at < *pending.refresh_at_) {
+                pending.refresh_at_ = refresh_at;
+            }
+            (void)target.mailbox_->sender_.send(1);
+        }
+    }
+
+private:
+    static bool release_coalesced(state& state, std::string_view tenant, resource resource,
+        clock::time_point now) {
+        const auto gate = state.gate(tenant, resource);
+        if (gate == state.gates_.end() || !gate->deferred_until_ || now < *gate->deferred_until_) {
+            return false;
+        }
+        gate->delivered_at_ = now;
+        gate->deferred_until_.reset();
+        deliver(state, tenant, resource, {}, {}, false);
+        return true;
+    }
+    // Queues the notice (or, without one, a history reset) for incremental
+    // parts of exactly this task; the caller's publish wakes them. A part
+    // that falls behind by more than max_pending_task_attempts drops its
+    // notices for one recovery snapshot, so no mailbox grows unbounded.
+    void queue_task_history(std::string_view tenant, std::string_view task_id,
+        const task_attempt_notice* notice) {
+        for (const auto& entry : state_->entries_) {
+            if (!entry.task_attempts_ || entry.tenant_ != tenant || entry.resource_ != resource::operations ||
+                entry.id_ != task_id) {
+                continue;
+            }
+            const auto mailbox = entry.mailbox_.lock();
+            if (!mailbox) {
+                continue;
+            }
+            auto& pending = mailbox->pending_[entry.part_];
+            if (pending.history_reset_) {
+                continue;
+            }
+            if (notice == nullptr || pending.task_attempts_.size() >= max_pending_task_attempts) {
+                pending.task_attempts_.clear();
+                pending.history_reset_ = true;
+            } else {
+                pending.task_attempts_.push_back(*notice);
+            }
+        }
+    }
     static void deliver(state& state, std::string_view tenant, resource resource,
         std::string_view id, std::string_view payload, bool runtime,
-        std::string_view origin_node = {},
-        std::optional<ruvia::worker_id_type> worker = std::nullopt) {
+        std::string_view origin_node = {}) {
         // Invalidate once per query group BEFORE waking any subscriber. Runtime
         // patches also invalidate cached rows for future joins, but do not turn
         // ordinary heartbeats into snapshot reads for existing subscribers.
         state.snapshots_.invalidate(tenant, resource, id, !origin_node.empty(),
             runtime || !origin_node.empty());
         std::vector<target> targets;
-        {
-            const std::lock_guard lock(state.mutex_);
-            for (const auto& entry : state.entries_) {
-                if (entry.tenant_ != tenant || entry.resource_ != resource ||
-                    (worker && entry.worker_ != *worker) ||
-                    (!entry.id_.empty() && !id.empty() && entry.id_ != id)) {
-                    continue;
-                }
-                // Origin health is a detail-only projection; list rows do not
-                // contain per-origin diagnostics and must not wake on reports.
-                if (!origin_node.empty() && entry.id_.empty()) {
-                    continue;
-                }
-                if (auto mailbox = entry.mailbox_.lock()) {
-                    targets.push_back({std::move(mailbox), entry.part_});
-                }
+        for (const auto& entry : state.entries_) {
+            if (entry.tenant_ != tenant || entry.resource_ != resource ||
+                (!entry.id_.empty() && !id.empty() && entry.id_ != id)) {
+                continue;
+            }
+            // Origin health is a detail-only projection; list rows do not
+            // contain per-origin diagnostics and must not wake on reports.
+            if (!origin_node.empty() && entry.id_.empty()) {
+                continue;
+            }
+            if (auto mailbox = entry.mailbox_.lock()) {
+                targets.push_back({std::move(mailbox), entry.part_});
             }
         }
         for (const auto& target : targets) {
-            {
-                const std::lock_guard lock(target.mailbox_->mutex_);
-                auto& pending = target.mailbox_->pending_[target.part_];
-                if (!origin_node.empty()) {
-                    pending.origins_[std::string(origin_node)] = std::string(payload);
-                } else if (runtime) {
-                    pending.runtime_[std::string(id)] = std::string(payload);
-                } else {
-                    pending.snapshot_ = true;
-                }
+            auto& pending = target.mailbox_->pending_[target.part_];
+            if (!origin_node.empty()) {
+                pending.origins_[std::string(origin_node)] = std::string(payload);
+            } else if (runtime) {
+                pending.runtime_[std::string(id)] = std::string(payload);
+            } else {
+                pending.snapshot_ = true;
             }
             (void)target.mailbox_->sender_.send(1);
         }
@@ -402,9 +464,11 @@ private:
     std::shared_ptr<state> state_{std::make_shared<state>()};
 };
 
-inline hub& get_hub() {
-    static hub value;
-    return value;
+// The calling worker's hub. Request contexts and posted worker jobs both
+// borrow their own worker's instance (registered with use_worker_state).
+template <typename context_type>
+hub& get_hub(context_type& context) {
+    return context.template worker_state<hub>();
 }
 
 }  // namespace service::live_resource

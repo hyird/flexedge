@@ -6,6 +6,7 @@ import { apiErrorMessage } from '@/lib/api'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Section } from '@/components/section'
 import { clusterSnapshotKey } from '@/features/clusters/data'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import {
   getNodeCredentials,
   nodeSnapshotKey,
@@ -62,7 +63,7 @@ export function NodeCredentialActions({ node }: { node: Node }) {
         onConfirm={async () => {
           const result = await resetNodeCredentials(node)
           // The credentials response carries the generic envelope message "ok".
-          toast.success('接入凭据已重置')
+          toastWriteSuccess('接入凭据已重置', result.data)
           setCredentials(result.data)
           // The node stream pushes the new registration state; header
           // snapshots (logs tab, cluster detail) re-read.

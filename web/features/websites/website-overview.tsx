@@ -3,7 +3,7 @@ import { Link } from '@tanstack/react-router'
 import { Lock, Magnifier } from '@gravity-ui/icons'
 import { ListView, type DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
-import { Alert, Button, toast } from '@heroui/react'
+import { Alert, Button } from '@heroui/react'
 import { formatBytes, formatDate, ratioOf } from '@/lib/format'
 import { statusLabels } from '@/lib/status'
 import { cn } from '@/lib/utils'
@@ -13,6 +13,7 @@ import { EmptyState } from '@/components/page'
 import { RelativeTime } from '@/components/relative-time'
 import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { probeWebsiteDns } from './data'
 import type { Website, WebsiteDomain } from './types'
 import { useOpenWebsiteTab, useWebsite } from './website-context'
@@ -47,7 +48,8 @@ export function WebsiteOverview() {
   const openTab = useOpenWebsiteTab()
   const probe = useMutation({
     mutationFn: () => probeWebsiteDns(website.id),
-    onSuccess: () => toast.success('DNS 探测已提交，结果会自动更新'),
+    onSuccess: (response) =>
+      toastWriteSuccess('DNS 探测已提交，结果会自动更新', response.data),
   })
   const { runtime, config } = website
   const health = originHealth(website)

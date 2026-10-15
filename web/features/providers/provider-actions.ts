@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { toast } from '@heroui/react'
 import { queryKeys } from '@/lib/query-keys'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { removeProvider, verifyProvider } from './data'
 import type { ProviderTarget } from './types'
 
@@ -17,13 +17,13 @@ export function useProviderActions() {
   const verify = useMutation({
     mutationFn: verifyProvider,
     onSuccess: (response, target) => {
-      toast.success(response.message || '验证任务已提交')
+      toastWriteSuccess(response.message || '验证任务已提交', response.data)
       void refresh(target.kind)
     },
   })
   const remove = async (target: ProviderTarget) => {
     const response = await removeProvider(target)
-    toast.success(response.message || '已删除')
+    toastWriteSuccess(response.message || '已删除', response.data)
     void refresh(target.kind)
   }
   return {

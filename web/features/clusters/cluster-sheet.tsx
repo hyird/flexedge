@@ -2,9 +2,9 @@ import { useEffect, useEffectEvent } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation } from '@tanstack/react-query'
-import { toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { FormSheet } from '@/components/form-sheet'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { ClusterAccessFields, ClusterBasicFields } from './cluster-fields'
 import {
   clusterFormSchema,
@@ -35,7 +35,7 @@ export function ClusterSheet({
     meta: { inlineError: true },
     mutationFn: (values: ClusterFormValues) => saveCluster(values),
     onSuccess: (response) => {
-      toast.success(response.message)
+      toastWriteSuccess(response.message, response.data)
       onClose()
     },
   })

@@ -8,8 +8,9 @@
 #include <string>
 
 #include "service/features/background/worker_pool.h"
-#include "service/features/live_resource/fanout.h"
+#include "service/features/live_resource/notifications.h"
 #include "service/features/provider_verification/task.h"
+#include "service/features/sync_runtime/state.h"
 
 namespace service::provider_verification::detail {
 
@@ -29,16 +30,20 @@ claim(service::background::worker_context& context) {
         "RETURNING marker.id, marker.tenant_id, marker.resource_id, marker.version, "
         "marker.count_fails, candidate.kind, candidate.provider, candidate.name, "
         "candidate.account_id, "
-        "candidate.revision, candidate.config, candidate.runtime",
+        "candidate.revision, candidate.config, candidate.runtime, " +
+            service::sync_runtime::claimed_owner_columns("marker"),
         context.lease_owner());
     if (rows.empty()) {
         co_return std::nullopt;
     }
     const auto claimed_at = std::chrono::steady_clock::now();
     const auto& row = rows.front();
-    service::live_resource::get_hub().publish(row[1].value().value_or(""),
-        service::live_resource::resource::tasks,
-        row[0].value().value_or(""));
+    auto owner = service::sync_runtime::claimed_owner(row, 12);
+    service::live_resource::notifications::resource_notification notification(row[1].value().value_or(""));
+    if (!owner.operation_id_.empty()) {
+        notification.changed(service::live_resource::resource::operations, owner.operation_id_);
+    }
+    co_await service::live_resource::notify(context, notification);
     co_return verification_task{
         .id_ = std::string(row[0].value().value_or("")),
         .tenant_id_ = std::string(row[1].value().value_or("")),
@@ -53,6 +58,7 @@ claim(service::background::worker_context& context) {
         .config_json_ = std::string(row[10].value().value_or("{}")),
         .runtime_json_ = std::string(row[11].value().value_or("{}")),
         .claimed_at_ = claimed_at,
+        .owner_ = std::move(owner),
     };
 }
 

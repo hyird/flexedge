@@ -17,6 +17,8 @@ const credentialsSchema = z.object({
     .max(128)
     .regex(/^[!-~]+$/),
   revision: z.number().int().positive(),
+  // Creation and reset start a task (operation-tasks contract §6).
+  operation_id: z.string().optional(),
 })
 
 export type NodeCredentials = z.infer<typeof credentialsSchema>
@@ -76,17 +78,28 @@ export async function resetNodeCredentials(
   return { message: response.message, data: parseCredentials(response.data) }
 }
 
+const updatedNodeSchema = z.object({ operation_id: z.string() })
+
+/** Only the started task (`operation_id`) of the update response is kept;
+ * anything else in `data` is never exposed. */
 export async function updateNode(
   node: Pick<Node, 'id' | 'revision'>,
   input: NodeInput
 ) {
-  const { code, message } = await sendData(
+  const { code, message, data } = await sendData(
     'put',
     `/nodes/${node.id}`,
     input,
     node.revision
   )
-  return { code, message, data: undefined }
+  const operation = updatedNodeSchema.safeParse(data)
+  return {
+    code,
+    message,
+    data: operation.success
+      ? { operation_id: operation.data.operation_id }
+      : undefined,
+  }
 }
 
 export function removeNode(node: Pick<Node, 'id' | 'revision'>) {

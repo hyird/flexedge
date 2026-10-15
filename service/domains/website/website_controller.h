@@ -85,7 +85,7 @@ private:
         }
         const auto certificate_id = parse_certificate_id_filter(c.req().query("certificate_id"));
         const auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(c.worker(), tenant,
+        auto sub = service::live_resource::get_hub(c).subscribe(c.worker(), tenant,
             service::live_resource::resource::websites, {},
             service::live_resource::query_key("list", page, page_size, keyword.value_or(""),
                 cluster_id, status, certificate_id));
@@ -101,7 +101,7 @@ private:
     ruvia::task<void> detail(ruvia::context& c) {
         const auto id = require_id(c);
         const auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(c.worker(), tenant,
+        auto sub = service::live_resource::get_hub(c).subscribe(c.worker(), tenant,
             service::live_resource::resource::websites, id,
             service::live_resource::query_key("detail"));
         co_await service::live_resource::stream_snapshot(
@@ -114,8 +114,9 @@ private:
     }
 
     ruvia::task<ruvia::http_response> request_dns_probe(ruvia::context& c) {
-        co_await get_website_command_service().request_dns_probe(c, tenant_id(c), require_id(c));
-        co_return c.json(service::common::operation(c, "域名解析检测已提交"));
+        const auto operation_id =
+            co_await get_website_command_service().request_dns_probe(c, tenant_id(c), require_id(c));
+        co_return c.json(service::common::operation(c, "域名解析检测已提交", operation_id));
     }
 
     ruvia::task<void> access_log_history(ruvia::context& c) {
@@ -141,7 +142,7 @@ private:
         }
         const auto id = require_id(c);
         const auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(c.worker(), tenant,
+        auto sub = service::live_resource::get_hub(c).subscribe(c.worker(), tenant,
             service::live_resource::resource::access_history, id,
             service::live_resource::query_key("history", page, page_size, keyword.value_or(""),
                 method, status_class));
@@ -160,7 +161,7 @@ private:
         const auto limit = service::log_ingest::require_tail_limit(c);
         co_await service::log_ingest::stream_sse_tail(
             c,
-            service::log_ingest::fanout::get_hub().subscribe(
+            service::log_ingest::fanout::get_hub(c).subscribe(
                 c.worker(), service::log_ingest::notifications::log_resource_type::access, tenant,
                 id),
             service::log_ingest::optional_sse_tail_cursor(c),
@@ -178,7 +179,7 @@ private:
     ruvia::task<void> dashboard_stream(ruvia::context& c) {
         const auto tenant = tenant_id(c);
         const auto id = require_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(
+        auto sub = service::live_resource::get_hub(c).subscribe(
             c.worker(), tenant, service::live_resource::resource::access_history, id,
             service::live_resource::query_key("dashboard"));
         co_await service::live_resource::stream_snapshot(
@@ -205,18 +206,18 @@ private:
 
     ruvia::task<ruvia::http_response> update(ruvia::context& c) {
         const auto revision = expected_revision(c);
-        co_await get_website_command_service().update(c, tenant_id(c), require_id(c), require_cluster_id(c),
-            revision,
-            c.req().validated_json<website_save_input>());
+        const auto operation_id = co_await get_website_command_service().update(c, tenant_id(c), require_id(c),
+            require_cluster_id(c), revision, c.req().validated_json<website_save_input>());
         service::common::set_revision_etag(c, revision + 1);
-        co_return c.json(service::common::operation(c, "网站配置已更新，配置任务已提交"));
+        co_return c.json(service::common::operation(c, "网站配置已更新，配置任务已提交", operation_id));
     }
 
     ruvia::task<ruvia::http_response> remove(ruvia::context& c) {
         const auto revision = expected_revision(c);
-        co_await get_website_command_service().remove(c, tenant_id(c), require_id(c), revision);
+        const auto operation_id =
+            co_await get_website_command_service().remove(c, tenant_id(c), require_id(c), revision);
         service::common::set_revision_etag(c, revision + 1);
-        co_return c.json(service::common::operation(c, "网站已删除，配置任务已提交"));
+        co_return c.json(service::common::operation(c, "网站已删除，配置任务已提交", operation_id));
     }
 };
 

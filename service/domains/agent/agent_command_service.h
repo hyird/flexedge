@@ -24,8 +24,8 @@
 #include "service/features/attempt_trace/trace_store.h"
 #include "service/features/cluster_dns/projection.h"
 #include "service/features/live_resource/node_runtime.h"
+#include "service/features/live_resource/notifications.h"
 #include "service/features/node_dispatch/apply_history.h"
-#include "service/features/node_dispatch/notifications.h"
 #include "service/features/node_dispatch/protocol.h"
 #include "service/features/node_dispatch/queue.h"
 #include "service/features/node_dispatch/target_store.h"
@@ -70,6 +70,14 @@ public:
         if (!current_hash || !service::utils::token_hash_matches(secret, *current_hash)) {
             service::common::throw_app_error(agent_unauthorized);
         }
+        // Work an agent's authentication causes is a system task: the first
+        // registration of a node (「节点接入」) or a release of the current
+        // schema missing on reconnect (「配置格式升级」).
+        auto origin = rows.front()[3].value().value_or("") == "pending"
+                          ? service::operation::work_origin::system(
+                                service::operation::action::system_node_register, "node", std::string(node_id))
+                          : service::operation::work_origin::system(service::operation::action::system_release_upgrade,
+                                "cluster", std::string(cluster_id));
         if (rows.front()[3].value().value_or("") == "pending") {
             const auto updated = co_await transaction.execute(
                 "UPDATE sys_node SET registration_status = 'registered', registered_at = NOW(), "
@@ -84,13 +92,13 @@ public:
             // The target set is created from registered nodes. Publish only after this node has
             // transitioned out of pending so the initial release includes it as a target.
             co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id,
-                cluster_id);
+                cluster_id, origin);
             const std::string tenant_id_value(tenant_id);
             const std::string cluster_id_value(cluster_id);
             co_await service::cluster_dns::reconcile_cluster(transaction, tenant_id_value,
-                cluster_id_value);
+                cluster_id_value, origin);
         } else if (rows.front()[3].value().value_or("") == "registered") {
-            co_await service::node_dispatch::ensure_cluster_release(transaction, tenant_id, cluster_id);
+            co_await service::node_dispatch::ensure_cluster_release(transaction, tenant_id, cluster_id, origin);
         } else {
             service::common::throw_app_error(agent_unauthorized);
         }
@@ -101,11 +109,13 @@ public:
             .agent_id_ = agent_id,
         };
         co_await transaction.commit();
-        service::node_dispatch::notifications::published(result.tenant_id_);
-        service::live_resource::get_hub().publish(result.tenant_id_, service::live_resource::resource::nodes, result.node_id_);
-        service::live_resource::get_hub().publish(result.tenant_id_, service::live_resource::resource::clusters, result.cluster_id_);
-        service::live_resource::get_hub().publish(result.tenant_id_, service::live_resource::resource::tasks);
-        service::live_resource::get_node_deadlines().touch(result.tenant_id_, result.node_id_);
+        service::live_resource::notifications::resource_notification notification(result.tenant_id_);
+        notification.node_config()
+            .node_seen(result.node_id_)
+            .changed(service::live_resource::resource::nodes, result.node_id_)
+            .changed(service::live_resource::resource::clusters, result.cluster_id_);
+        origin.add_changes(notification);
+        co_await service::live_resource::notify(c, notification);
         co_return result;
     }
 
@@ -147,35 +157,46 @@ public:
             service::common::throw_app_error(revision_invalid);
         }
         const auto target_changed = co_await service::node_dispatch::mark_node_target_applied(transaction, principal.tenant_id_, report.active_release_id_, report.node_id_);
+        const service::node_dispatch::node_apply_attempt confirmed{.tenant_id_ = principal.tenant_id_,
+            .release_id_ = report.active_release_id_,
+            .node_id_ = report.node_id_,
+            .source_ = "heartbeat",
+            .applied_ = true,
+            .phase_ = {},
+            .error_code_ = {},
+            .error_ = {},
+            .retryable_ = false,
+            .elapsed_milliseconds_ = std::nullopt};
+        std::vector<service::node_dispatch::recorded_node_attempt> recorded;
         if (target_changed) {
-            (void)co_await service::node_dispatch::record_node_apply_attempt(transaction,
-                {.tenant_id_ = principal.tenant_id_,
-                    .release_id_ = report.active_release_id_,
-                    .node_id_ = report.node_id_,
-                    .source_ = "heartbeat",
-                    .applied_ = true,
-                    .phase_ = {},
-                    .error_code_ = {},
-                    .error_ = {},
-                    .retryable_ = false,
-                    .elapsed_milliseconds_ = std::nullopt},
-                c.pool());
+            if (auto attempt = co_await service::node_dispatch::record_node_apply_attempt(transaction, confirmed,
+                    c.pool())) {
+                recorded.push_back(std::move(*attempt));
+            }
+        }
+        // A heartbeat confirming the applied node spec completes configuration
+        // subtasks whose result report was lost.
+        for (auto& attempt : co_await service::node_dispatch::record_node_config_attempts(transaction, confirmed,
+                 report.applied_node_spec_revision_, c.pool())) {
+            recorded.push_back(std::move(attempt));
         }
         co_await transaction.commit();
-        service::live_resource::get_node_deadlines().touch(principal.tenant_id_, principal.node_id_);
-        service::live_resource::get_hub().publish_runtime(principal.tenant_id_, principal.node_id_,
-            service::live_resource::runtime_patch(c, report, *update));
-        service::live_resource::publish_origin_runtime(c, principal.tenant_id_, report, *update);
+        // One notification per heartbeat: the online window, the runtime and
+        // origin patches, and the transitions this report caused.
+        using service::live_resource::resource;
+        service::live_resource::notifications::resource_notification notification(principal.tenant_id_);
+        notification.node_runtime(principal.node_id_, service::live_resource::runtime_patch(c, report, *update));
+        service::live_resource::add_origin_runtime(c, notification, report, *update);
         if (update->became_online_) {
-            service::live_resource::get_hub().publish(principal.tenant_id_, service::live_resource::resource::nodes, principal.node_id_);
-            service::live_resource::get_hub().publish(principal.tenant_id_, service::live_resource::resource::overview);
-            service::live_resource::get_hub().publish(principal.tenant_id_, service::live_resource::resource::clusters, principal.cluster_id_);
+            notification.changed(resource::nodes, principal.node_id_)
+                .changed(resource::overview)
+                .changed(resource::clusters, principal.cluster_id_);
         }
         if (target_changed) {
-            service::live_resource::get_hub().publish(principal.tenant_id_, service::live_resource::resource::tasks);
-            service::live_resource::get_hub().publish(principal.tenant_id_, service::live_resource::resource::websites);
-            service::live_resource::get_hub().publish(principal.tenant_id_, service::live_resource::resource::clusters, principal.cluster_id_);
+            add_apply_change(notification, principal);
         }
+        add_recorded_attempts(notification, recorded);
+        co_await service::live_resource::notify(c, notification);
         co_return;
     }
 
@@ -186,30 +207,38 @@ public:
         const flexedge::node::v2::ApplyResult& result,
         std::optional<std::int64_t> elapsed_milliseconds, service::attempt_trace::recorder& trace) {
         const auto& node_id = principal.node_id_;
-        std::optional<service::node_dispatch::recorded_node_attempt> recorded;
+        std::vector<service::node_dispatch::recorded_node_attempt> recorded;
         if (result.applied()) {
+            const service::node_dispatch::node_apply_attempt applied{.tenant_id_ = principal.tenant_id_,
+                .release_id_ = result.release_id(),
+                .node_id_ = node_id,
+                .source_ = "apply_result",
+                .applied_ = true,
+                .phase_ = {},
+                .error_code_ = {},
+                .error_ = {},
+                .retryable_ = false,
+                .elapsed_milliseconds_ = elapsed_milliseconds};
             auto transaction = co_await c.db().begin_transaction();
             if (!(co_await record_applied_deployment(transaction, principal, result.node_spec_revision(),
                     result.release_id(), result.manifest_digest()))) {
                 service::common::throw_app_error(revision_invalid);
             }
-            if (co_await service::node_dispatch::mark_node_target_applied(transaction, principal.tenant_id_, result.release_id(), node_id)) {
-                recorded = co_await service::node_dispatch::record_node_apply_attempt(transaction,
-                    {.tenant_id_ = principal.tenant_id_,
-                        .release_id_ = result.release_id(),
-                        .node_id_ = node_id,
-                        .source_ = "apply_result",
-                        .applied_ = true,
-                        .phase_ = {},
-                        .error_code_ = {},
-                        .error_ = {},
-                        .retryable_ = false,
-                        .elapsed_milliseconds_ = elapsed_milliseconds},
-                    c.pool());
+            const bool target_changed = co_await service::node_dispatch::mark_node_target_applied(
+                transaction, principal.tenant_id_, result.release_id(), node_id);
+            if (target_changed) {
+                if (auto attempt = co_await service::node_dispatch::record_node_apply_attempt(transaction, applied,
+                        c.pool())) {
+                    recorded.push_back(std::move(*attempt));
+                }
+            }
+            for (auto& attempt : co_await service::node_dispatch::record_node_config_attempts(transaction,
+                     applied, result.node_spec_revision(), c.pool())) {
+                recorded.push_back(std::move(attempt));
             }
             co_await transaction.commit();
-            co_await store_apply_trace(c, principal, result.release_id(), recorded, trace);
-            publish_apply_change(principal);
+            co_await store_apply_trace(c, principal, recorded, trace);
+            co_await notify_apply_change(c, principal, target_changed, recorded);
             co_return;
         }
         const auto phase = flexedge::node::v2::ApplyPhase_Name(result.failed_phase());
@@ -225,45 +254,57 @@ public:
         if (outcome == apply_failure_outcome::rejected) {
             service::common::throw_app_error(revision_invalid);
         }
-        if (outcome == apply_failure_outcome::recorded &&
-            co_await service::node_dispatch::mark_node_target_failed(transaction,
+        const service::node_dispatch::node_apply_attempt failed{.tenant_id_ = principal.tenant_id_,
+            .release_id_ = failure.release_id_,
+            .node_id_ = node_id,
+            .source_ = "apply_result",
+            .applied_ = false,
+            .phase_ = apply_phase_name(result.failed_phase()),
+            .error_code_ = failure.error_code_,
+            .error_ = failure.error_,
+            .retryable_ = failure.retryable_,
+            .elapsed_milliseconds_ = elapsed_milliseconds};
+        bool target_changed = false;
+        if (outcome == apply_failure_outcome::recorded) {
+            target_changed = co_await service::node_dispatch::mark_node_target_failed(transaction,
                 principal.tenant_id_, failure.release_id_, node_id, principal.cluster_id_,
-                {.phase_ = failure.phase_, .error_code_ = failure.error_code_, .error_ = failure.error_, .retryable_ = failure.retryable_})) {
-            recorded = co_await service::node_dispatch::record_node_apply_attempt(transaction,
-                {.tenant_id_ = principal.tenant_id_,
-                    .release_id_ = failure.release_id_,
-                    .node_id_ = node_id,
-                    .source_ = "apply_result",
-                    .applied_ = false,
-                    .phase_ = apply_phase_name(result.failed_phase()),
-                    .error_code_ = failure.error_code_,
-                    .error_ = failure.error_,
-                    .retryable_ = failure.retryable_,
-                    .elapsed_milliseconds_ = elapsed_milliseconds},
-                c.pool());
+                {.phase_ = failure.phase_, .error_code_ = failure.error_code_, .error_ = failure.error_, .retryable_ = failure.retryable_});
+            if (target_changed) {
+                if (auto attempt = co_await service::node_dispatch::record_node_apply_attempt(transaction, failed,
+                        c.pool())) {
+                    recorded.push_back(std::move(*attempt));
+                }
+            }
+            for (auto& attempt : co_await service::node_dispatch::record_node_config_attempts(transaction, failed,
+                     failure.revision_, c.pool())) {
+                recorded.push_back(std::move(attempt));
+            }
         }
         co_await transaction.commit();
-        co_await store_apply_trace(c, principal, failure.release_id_, recorded, trace);
-        publish_apply_change(principal);
+        co_await store_apply_trace(c, principal, recorded, trace);
+        co_await notify_apply_change(c, principal, target_changed, recorded);
         co_return;
     }
 
 private:
-    // The trace is stored on its own after the apply result committed; a
-    // trace that cannot be stored is logged and leaves the result unchanged.
+    // The trace is stored on its own after the apply result committed, with
+    // the first attempt it recorded (the release target's, else the node
+    // configuration's); a trace that cannot be stored is logged and leaves
+    // the result unchanged.
     static ruvia::task<void> store_apply_trace(ruvia::context& c, const agent_principal& principal,
-        std::string_view release_id, const std::optional<service::node_dispatch::recorded_node_attempt>& recorded,
+        const std::vector<service::node_dispatch::recorded_node_attempt>& recorded,
         service::attempt_trace::recorder& trace) {
-        if (!recorded) {
+        if (recorded.empty()) {
             co_return;
         }
+        const auto& first = recorded.front();
         auto db = c.db();
         co_await service::attempt_trace::store_attempt_trace(db,
             {.tenant_id_ = principal.tenant_id_,
-                .task_id_ = release_id,
+                .task_id_ = first.task_id_,
                 .resource_id_ = principal.node_id_,
-                .version_ = recorded->version_},
-            recorded->event_id_, trace);
+                .version_ = first.version_},
+            first.event_id_, trace);
     }
 
     // Task history wording of the node's failure phase.
@@ -280,13 +321,35 @@ private:
         }
     }
 
-    static void publish_apply_change(const agent_principal& principal) {
+    // What an apply result or an applied heartbeat changed: the node, its
+    // cluster and websites (deployment state).
+    static void add_apply_change(service::live_resource::notifications::resource_notification& notification,
+        const agent_principal& principal) {
         using service::live_resource::resource;
-        auto& hub = service::live_resource::get_hub();
-        hub.publish(principal.tenant_id_, resource::nodes, principal.node_id_);
-        hub.publish(principal.tenant_id_, resource::clusters, principal.cluster_id_);
-        hub.publish(principal.tenant_id_, resource::websites);
-        hub.publish(principal.tenant_id_, resource::tasks);
+        notification.changed(resource::nodes, principal.node_id_)
+            .changed(resource::clusters, principal.cluster_id_)
+            .changed(resource::websites);
+    }
+
+    // The recorded attempts, each for its subtask's task.
+    static void add_recorded_attempts(service::live_resource::notifications::resource_notification& notification,
+        const std::vector<service::node_dispatch::recorded_node_attempt>& recorded) {
+        for (const auto& attempt : recorded) {
+            if (!attempt.owner_.empty()) {
+                notification.task_attempt(attempt.owner_.operation_id_,
+                    {.subtask_id_ = attempt.owner_.subtask_id_, .event_id_ = attempt.event_id_});
+            }
+        }
+    }
+
+    static ruvia::task<void> notify_apply_change(ruvia::context& c, const agent_principal& principal,
+        bool target_changed, const std::vector<service::node_dispatch::recorded_node_attempt>& recorded) {
+        service::live_resource::notifications::resource_notification notification(principal.tenant_id_);
+        if (target_changed || !recorded.empty()) {
+            add_apply_change(notification, principal);
+        }
+        add_recorded_attempts(notification, recorded);
+        co_await service::live_resource::notify(c, notification);
     }
 };
 

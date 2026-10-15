@@ -28,9 +28,8 @@ inline constexpr std::chrono::minutes reconciliation_interval{15};
 inline constexpr std::size_t max_jobs_per_tick{8};
 
 inline ruvia::task<void> recover_stale_markers(service::background::worker_context& context) {
-    auto db = context.db();
     co_await service::sync_runtime::recover_stale_running(
-        db, service::sync_runtime::marker_resource_type::provider);
+        context, service::sync_runtime::marker_resource_type::provider);
     co_return;
 }
 

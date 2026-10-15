@@ -9,7 +9,7 @@
 
 #include "service/features/background/worker_pool.h"
 #include "service/features/certificate/task.h"
-#include "service/features/live_resource/fanout.h"
+#include "service/features/live_resource/notifications.h"
 
 namespace service::certificate_issuance::worker_detail {
 
@@ -28,19 +28,21 @@ claim(service::background::worker_context& context) {
         "seconds', "
         "updated_at = NOW() FROM candidate WHERE marker.id = candidate.id RETURNING marker.id, "
         "marker.tenant_id, marker.resource_id, marker.version, marker.count_fails, "
-        "marker.operation",
+        "marker.operation, " +
+            service::sync_runtime::claimed_owner_columns("marker"),
         context.lease_owner());
     if (rows.empty()) {
         co_return std::nullopt;
     }
     const auto claimed_at = std::chrono::steady_clock::now();
     const auto& row = rows.front();
-    service::live_resource::get_hub().publish(row[1].value().value_or(""),
-        service::live_resource::resource::tasks,
-        row[0].value().value_or(""));
-    service::live_resource::get_hub().publish(row[1].value().value_or(""),
-        service::live_resource::resource::certificates,
-        row[2].value().value_or(""));
+    auto owner = service::sync_runtime::claimed_owner(row, 6);
+    service::live_resource::notifications::resource_notification notification(row[1].value().value_or(""));
+    notification.changed(service::live_resource::resource::certificates, row[2].value().value_or(""));
+    if (!owner.operation_id_.empty()) {
+        notification.changed(service::live_resource::resource::operations, owner.operation_id_);
+    }
+    co_await service::live_resource::notify(context, notification);
     co_return certificate_task{
         .id_ = std::string(row[0].value().value_or("")),
         .tenant_id_ = std::string(row[1].value().value_or("")),
@@ -49,6 +51,7 @@ claim(service::background::worker_context& context) {
         .failures_ = row[4].as<std::int64_t>().value_or(0),
         .operation_ = std::string(row[5].value().value_or("")),
         .claimed_at_ = claimed_at,
+        .owner_ = std::move(owner),
     };
 }
 

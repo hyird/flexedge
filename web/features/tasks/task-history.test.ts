@@ -2,18 +2,17 @@ import { createElement } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'vitest'
-import { taskAttemptTraceQuery, taskHistoryQuery } from './data'
+import { subtaskHistoryQuery, taskAttemptTraceQuery } from './data'
 import { TaskAttemptDetail } from './task-attempt-detail'
 import {
   formatAttemptDuration,
   formatRetryCountdown,
   groupAttempts,
 } from './task-history'
-import { TaskHistoryPanel } from './task-history-panel'
+import { SubtaskHistoryPanel } from './task-history-panel'
 import {
+  subtaskHistorySchema,
   taskAttemptTraceSchema,
-  taskHistorySchema,
-  type Task,
   type TaskAttempt,
 } from './types'
 
@@ -37,6 +36,15 @@ function attempt(
 
 const runs = (list: TaskAttempt[]) =>
   groupAttempts(list).map((group) => group.attempts.map((item) => item.attempt))
+
+const recordsKey = subtaskHistoryQuery('op-1', 'sub-1').queryKey
+const panel = createElement(SubtaskHistoryPanel, {
+  operationId: 'op-1',
+  subtaskId: 'sub-1',
+})
+/** Parsed like the wire `history` event so degraded shapes are the real ones. */
+const parseHistory = (value: object) =>
+  subtaskHistorySchema.parse({ subtask_id: 'sub-1', ...value })
 
 test('consecutive identical failures collapse into one run, newest first', () => {
   const list = [
@@ -88,19 +96,6 @@ test('retry countdown ticks in seconds under a minute and never goes negative', 
 })
 
 test('unknown values and a malformed detail only affect their own attempt', () => {
-  const task: Task = {
-    id: 'task-1',
-    resource_type: 'website',
-    resource_id: 'website-1',
-    name: 'Website',
-    operation: 'apply',
-    version: 3,
-    status: 'failed',
-    error: '',
-    failures: 3,
-    updated_at: '2026-10-14T00:00:00Z',
-    next_attempt_at: '',
-  }
   const base = {
     error: '',
     started_at: '2026-10-14T00:00:00Z',
@@ -109,7 +104,7 @@ test('unknown values and a malformed detail only affect their own attempt', () =
     next_attempt_at: '',
   }
   // Parsed like the wire snapshot so the degraded shapes are the real ones.
-  const history = taskHistorySchema.parse({
+  const history = parseHistory({
     truncated: false,
     summary: {
       attempt_count: 4,
@@ -175,13 +170,9 @@ test('unknown values and a malformed detail only affect their own attempt', () =
     ],
   })
   const client = new QueryClient()
-  client.setQueryData(taskHistoryQuery(task).queryKey, history)
+  client.setQueryData(recordsKey, history)
   const html = renderToStaticMarkup(
-    createElement(
-      QueryClientProvider,
-      { client },
-      createElement(TaskHistoryPanel, { task })
-    )
+    createElement(QueryClientProvider, { client }, panel)
   )
   // Every attempt renders in one list.
   for (const number of [4, 3, 2, 1]) expect(html).toContain(`第 ${number} 次`)
@@ -201,7 +192,6 @@ test('unknown values and a malformed detail only affect their own attempt', () =
 test('failed provider verifications show zones as not obtained, not zero', () => {
   const detail: TaskAttempt['detail'] = {
     kind: 'provider',
-    truncated: false,
     provider: 'cloudflare',
     provider_kind: 'dns',
     zone_count: 0,
@@ -219,23 +209,50 @@ test('failed provider verifications show zones as not obtained, not zero', () =>
     expect(html).not.toContain('0 个')
   }
 })
+test('truncated detail keeps facts and generation errors without omission captions', () => {
+  const detail = parseHistory({
+    summary: {
+      attempt_count: 1,
+      failure_count: 0,
+      first_failure_at: '',
+      last_success_at: '',
+      next_attempt_at: '',
+    },
+    list: [
+      {
+        ...attempt(1, 'completed'),
+        detail: {
+          kind: 'provider',
+          truncated: true,
+          provider: 'cloudflare',
+          provider_kind: 'dns',
+          zone_count: 12,
+          zones: [],
+          directory_url: '',
+          external_account: '',
+        },
+      },
+    ],
+  }).list[0].detail
+  const html = renderToStaticMarkup(
+    createElement(TaskAttemptDetail, { detail, outcome: 'completed' })
+  )
+  expect(html).toContain('12 个')
+  expect(html).not.toContain('省略')
+  expect(detail).not.toHaveProperty('truncated')
+  expect(
+    renderToStaticMarkup(
+      createElement(TaskAttemptDetail, {
+        detail: { kind: 'none', truncated: true },
+        outcome: 'failed',
+      })
+    )
+  ).toContain('明细生成失败')
+})
 
 test('history and timeline show absolute times in the same console time, without captions', () => {
-  const task: Task = {
-    id: 'task-1',
-    resource_type: 'node',
-    resource_id: 'node-1',
-    name: 'edge-1',
-    operation: 'apply',
-    version: 7,
-    status: 'retrying',
-    error: '',
-    failures: 1,
-    updated_at: '2026-10-14T14:16:49+00',
-    next_attempt_at: '',
-  }
   const startedAt = '2026-10-14T14:16:44.123456+00'
-  const history = taskHistorySchema.parse({
+  const history = parseHistory({
     truncated: true,
     summary: {
       attempt_count: 1,
@@ -281,15 +298,11 @@ test('history and timeline show absolute times in the same console time, without
     ],
   })
   const client = new QueryClient()
-  client.setQueryData(taskHistoryQuery(task).queryKey, history)
-  client.setQueryData(taskAttemptTraceQuery(task.id, '48213').queryKey, trace)
+  client.setQueryData(recordsKey, history)
+  client.setQueryData(taskAttemptTraceQuery('op-1', '48213').queryKey, trace)
   // Machine-readable attributes dropped: only formatted times remain.
   const html = renderToStaticMarkup(
-    createElement(
-      QueryClientProvider,
-      { client },
-      createElement(TaskHistoryPanel, { task })
-    )
+    createElement(QueryClientProvider, { client }, panel)
   ).replace(/dateTime="[^"]*"/g, '')
   // 14:16:44 UTC is 22:16:44 console time in the history and the timeline.
   expect(html).toContain('2026-10-14 22:16:44')
@@ -308,27 +321,16 @@ test('history and timeline show absolute times in the same console time, without
     '更早的',
     '执行详情',
     '展开全文',
+    '仅列出',
+    '部分条目已省略',
   ])
     expect(html).not.toContain(caption)
-  expect(html).toContain('仅列出最近 1 次')
+  expect(html).not.toContain('仅列出最近 1 次')
   client.clear()
 })
 
 test('a folded failure run shows only its newest timeline until opened', () => {
-  const task: Task = {
-    id: 'task-1',
-    resource_type: 'dns_zone',
-    resource_id: 'zone-1',
-    name: 'example.test',
-    operation: 'sync',
-    version: 2,
-    status: 'retrying',
-    error: 'timeout',
-    failures: 3,
-    updated_at: '2026-10-14T00:03:01Z',
-    next_attempt_at: '',
-  }
-  const history = taskHistorySchema.parse({
+  const history = parseHistory({
     truncated: false,
     summary: {
       attempt_count: 3,
@@ -348,13 +350,9 @@ test('a folded failure run shows only its newest timeline until opened', () => {
     })),
   })
   const client = new QueryClient()
-  client.setQueryData(taskHistoryQuery(task).queryKey, history)
+  client.setQueryData(recordsKey, history)
   const html = renderToStaticMarkup(
-    createElement(
-      QueryClientProvider,
-      { client },
-      createElement(TaskHistoryPanel, { task })
-    )
+    createElement(QueryClientProvider, { client }, panel)
   )
   expect(html).toContain('第 1–3 次')
   expect(html).toContain('展开 3 次尝试')

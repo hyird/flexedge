@@ -1,11 +1,11 @@
 import { type FormEvent, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { fieldErrors } from '@/lib/form-errors'
 import { queryKeys } from '@/lib/query-keys'
 import { FormSheet } from '@/components/form-sheet'
 import { Choice, Field } from '@/components/forms'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { saveDnsProvider } from './data'
 import {
   dnsProviderFormSchema,
@@ -46,7 +46,7 @@ export function DnsProviderSheet({
     mutationFn: (input: DnsProviderFormValues) =>
       saveDnsProvider(input, provider),
     onSuccess: (response) => {
-      toast.success(response.message || '已保存')
+      toastWriteSuccess(response.message || '已保存', response.data)
       void client.invalidateQueries({
         queryKey: [...queryKeys.providers, 'dns'],
         refetchType: 'none',

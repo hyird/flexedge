@@ -15,6 +15,8 @@ declare module '@tanstack/history' {
     }
     /** `/providers`; `q` filters the opened tab's list. */
     providers?: { tab?: 'dns' | 'certificate'; q?: string }
+    /** `/tasks?task=`: the subtask the detail sheet opens expanded. */
+    tasks?: { subtask?: string }
   }
 }
 

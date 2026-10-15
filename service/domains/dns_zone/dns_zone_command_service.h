@@ -19,13 +19,13 @@
 #include "service/features/dns_sync/line.h"
 #include "service/features/dns_sync/mapper.h"
 #include "service/features/dns_sync/queue.h"
-#include "service/features/live_resource/fanout.h"
+#include "service/features/live_resource/notifications.h"
 
 namespace service::dns_zone {
 
 class dns_zone_command_service final {
 public:
-    ruvia::task<void> create(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<std::optional<std::string>> create(ruvia::context& c, const std::string& tenant_id,
         const create_dns_zone_body& body) {
         const auto& provider_id_input = body.get<"dns_provider_id">();
         const auto& domain_input = body.get<"domain">();
@@ -66,28 +66,31 @@ public:
                     ruvia::db_value{std::string_view(domain)},
                     ruvia::db_value{std::string_view(config_json)},
                     ruvia::db_value{std::string_view(runtime_json)}));
-            co_await service::dns_sync::enqueue_zone_revision(
-                transaction, tenant_id, std::string(inserted.front()[0].value().value_or("")),
-                inserted.front()[1].as<std::int64_t>().value_or(1));
+            const auto zone_id = std::string(inserted.front()[0].value().value_or(""));
+            auto origin = start(c, service::operation::action::dns_zone_create, zone_id);
+            co_await service::dns_sync::enqueue_zone_revision(transaction, tenant_id, zone_id,
+                inserted.front()[1].as<std::int64_t>().value_or(1), origin);
             co_await transaction.commit();
-            service::live_resource::get_hub().publish(tenant_id, service::live_resource::resource::dns_zones,
-                inserted.front()[0].value().value_or(""));
+            service::live_resource::notifications::resource_notification notification(tenant_id);
+            notification.changed(service::live_resource::resource::dns_zones, zone_id);
+            origin.add_changes(notification);
+            co_await service::live_resource::notify(c, notification);
+            co_return origin.operation_id();
         } catch (const ruvia::db_error& error) {
             if (service::common::is_unique_constraint_violation(error, "uk_dns_zone_domain")) {
                 service::common::throw_app_error(dns_zone_error::exists);
             }
             throw;
         }
-        co_return;
     }
 
-    ruvia::task<void>
+    ruvia::task<std::optional<std::string>>
     update_config(ruvia::context& c, const std::string& tenant_id, const std::string& id,
         std::int64_t expected_revision,
         const service::dns_sync::zone_config_input& config) {
         auto transaction = co_await c.db().begin_transaction();
         const auto current = co_await transaction.query(
-            "SELECT zone.revision, zone.runtime::text, provider.provider, zone.domain FROM "
+            "SELECT zone.revision, zone.runtime::text, provider.provider, zone.domain, zone.config::text FROM "
             "sys_dns_zone zone "
             "INNER JOIN sys_provider provider ON provider.tenant_id = zone.tenant_id AND "
             "provider.id = zone.provider_id WHERE zone.id = $1 AND zone.tenant_id = $2 AND "
@@ -110,6 +113,8 @@ public:
             transaction, tenant_id, id, current.front()[3].value().value_or(""),
             current.front()[1].value().value_or("{}"), *normalized_config);
         const auto config_json = serialize_config(c, *normalized_config);
+        auto origin = start(c, service::operation::action::dns_zone_update_records, id,
+            co_await record_counts_summary(transaction, current.front()[4].value().value_or("{}"), config_json));
         const auto rows = co_await transaction.query(
             "UPDATE sys_dns_zone SET config = $1::jsonb, revision = revision + 1, "
             "desired_revision = desired_revision + 1, sync_status = 'pending', last_error = NULL, "
@@ -122,14 +127,22 @@ public:
             service::common::throw_app_error(dns_zone_error::revision_conflict);
         }
         const auto desired_revision = rows.front()[1].as<std::int64_t>().value_or(1);
-        co_await service::dns_sync::enqueue_zone_revision(transaction, tenant_id, id, desired_revision);
+        co_await service::dns_sync::enqueue_zone_revision(transaction, tenant_id, id, desired_revision, origin);
         co_await transaction.commit();
-        service::live_resource::get_hub().publish(tenant_id, service::live_resource::resource::dns_zones, id);
-        co_return;
+        co_await notify(c, tenant_id, id, origin);
+        co_return origin.operation_id();
     }
 
-    ruvia::task<void> request_sync(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<std::optional<std::string>> request_sync(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, std::string_view conflict_policy) {
+        auto origin = start(c,
+            conflict_policy == "remote"  ? service::operation::action::dns_zone_sync_remote
+            : conflict_policy == "local" ? service::operation::action::dns_zone_sync_local
+                                         : service::operation::action::dns_zone_sync,
+            id,
+            conflict_policy == "remote"  ? R"({"conflict_policy":"remote"})"
+            : conflict_policy == "local" ? R"({"conflict_policy":"local"})"
+                                         : "{}");
         auto transaction = co_await c.db().begin_transaction();
         const auto rows = co_await transaction.query(
             "UPDATE sys_dns_zone SET desired_revision = desired_revision + 1, sync_status = "
@@ -139,18 +152,19 @@ public:
         if (rows.empty()) {
             service::common::throw_app_error(dns_zone_error::not_found);
         }
-        co_await service::dns_sync::enqueue_zone_revision(
-            transaction, tenant_id, id, rows.front()[0].as<std::int64_t>().value_or(1),
+        co_await service::dns_sync::enqueue_zone_revision(transaction, tenant_id, id,
+            rows.front()[0].as<std::int64_t>().value_or(1), origin,
             conflict_policy == "remote"  ? service::sync_runtime::marker_operation::sync_remote
             : conflict_policy == "local" ? service::sync_runtime::marker_operation::sync_local
                                          : service::sync_runtime::marker_operation::sync);
         co_await transaction.commit();
-        service::live_resource::get_hub().publish(tenant_id, service::live_resource::resource::dns_zones, id);
-        co_return;
+        co_await notify(c, tenant_id, id, origin);
+        co_return origin.operation_id();
     }
 
-    ruvia::task<void> remove(ruvia::context& c, const std::string& tenant_id, const std::string& id,
-        std::int64_t expected_revision) {
+    ruvia::task<std::optional<std::string>> remove(ruvia::context& c, const std::string& tenant_id,
+        const std::string& id, std::int64_t expected_revision) {
+        auto origin = start(c, service::operation::action::dns_zone_delete, id);
         auto transaction = co_await c.db().begin_transaction();
         const auto zone = co_await transaction.query(
             "SELECT revision, desired_revision FROM sys_dns_zone WHERE id = $1 AND tenant_id = "
@@ -180,14 +194,50 @@ public:
             "deleted_at = NOW(), updated_at = NOW() WHERE id = $3 AND tenant_id = $4 AND "
             "revision = $5",
             revision, desired_revision, id, tenant_id, expected_revision);
-        (void)co_await service::dns_sync::enqueue_zone_deletion(transaction, tenant_id, id,
-            desired_revision);
+        (void)co_await service::dns_sync::enqueue_zone_deletion(transaction, tenant_id, id, desired_revision,
+            origin);
         co_await transaction.commit();
-        service::live_resource::get_hub().publish(tenant_id, service::live_resource::resource::dns_zones, id);
-        co_return;
+        co_await notify(c, tenant_id, id, origin);
+        co_return origin.operation_id();
     }
 
 private:
+    static service::operation::work_origin start(ruvia::context& c, service::operation::action action,
+        const std::string& id, std::string summary = "{}") {
+        return service::operation::work_origin::start({.action_ = action,
+            .actor_id_ = service::middleware::current_principal(c).admin_id_,
+            .target_type_ = "dns_zone",
+            .target_id_ = id,
+            .summary_ = std::move(summary)});
+    }
+
+    static ruvia::task<void> notify(ruvia::context& c, const std::string& tenant_id, const std::string& id,
+        const service::operation::work_origin& origin) {
+        service::live_resource::notifications::resource_notification notification(tenant_id);
+        notification.changed(service::live_resource::resource::dns_zones, id);
+        origin.add_changes(notification);
+        co_await service::live_resource::notify(c, notification);
+    }
+
+    // `{"record_counts":{...}}`: records added, changed and removed by the
+    // saved configuration, matched by record id.
+    static ruvia::task<std::string> record_counts_summary(ruvia::db_transaction& transaction,
+        std::string_view previous_json, std::string_view next_json) {
+        const auto rows = co_await transaction.query(
+            "WITH previous AS (SELECT record->>'id' AS id, record FROM "
+            "jsonb_array_elements(COALESCE($1::jsonb->'records', '[]'::jsonb)) record), next AS (SELECT "
+            "record->>'id' AS id, record FROM jsonb_array_elements(COALESCE($2::jsonb->'records', "
+            "'[]'::jsonb)) record) SELECT count(*) FILTER (WHERE previous.id IS NULL), count(*) FILTER (WHERE "
+            "previous.id IS NOT NULL AND next.id IS NOT NULL AND previous.record <> next.record), count(*) "
+            "FILTER (WHERE next.id IS NULL) FROM previous FULL JOIN next ON previous.id = next.id",
+            previous_json, next_json);
+        const auto count = [&](std::size_t column) {
+            return std::to_string(rows.front()[column].as<std::int64_t>().value_or(0));
+        };
+        co_return "{\"record_counts\":{\"created\":" + count(0) + ",\"updated\":" + count(1) +
+            ",\"deleted\":" + count(2) + "}}";
+    }
+
     static void validate_record_lines(ruvia::context& c,
         const service::dns_sync::zone_config_data& config,
         std::string_view runtime_json) {

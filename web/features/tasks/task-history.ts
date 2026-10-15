@@ -1,8 +1,46 @@
 import { formatRelative } from '@/lib/format'
-import type { TaskAttempt } from './types'
+import { subtaskAttemptEventSchema, type TaskAttempt } from './types'
+
+/** Execution records kept on screen per subtask (contract §3.5). */
+export const historyRecordLimit = 100
+
+/** `trace.attempt_id` of a wire attempt; '' when it has none. */
+function attemptIdOf(item: { trace?: unknown }) {
+  const trace = item.trace
+  if (typeof trace !== 'object' || trace === null || !('attempt_id' in trace))
+    return ''
+  return typeof trace.attempt_id === 'string' ? trace.attempt_id : ''
+}
+
+/** Merges an `attempt` event into the expanded subtask's records (contract
+ * §3.2): the new record goes on top, an older copy of the same attempt
+ * (`trace.attempt_id`) is dropped, the summary is replaced and the list keeps
+ * the newest `historyRecordLimit`. Works on wire frames; returns `undefined`
+ * (no change) for records of another subtask or a malformed event. */
+export function mergeAttemptEvent<
+  H extends {
+    subtask_id: string
+    list: readonly { trace?: unknown }[]
+    summary: unknown
+  },
+>(history: H | undefined, value: unknown): H | undefined {
+  const event = subtaskAttemptEventSchema.safeParse(value)
+  if (!history || !event.success) return undefined
+  if (event.data.subtask_id !== history.subtask_id) return undefined
+  const id = attemptIdOf(event.data.item)
+  return {
+    ...history,
+    list: [
+      event.data.item,
+      ...history.list.filter((item) => !id || attemptIdOf(item) !== id),
+    ].slice(0, historyRecordLimit),
+    summary: event.data.summary,
+  } as H
+}
 
 /** One history entry: a single attempt, or a run of consecutive failed
- * attempts with the same error (`attempts.length > 1`, newest first). */
+ * attempts with the same error (`attempts.length > 1`, newest first). The key
+ * names the oldest attempt, so a new failure joining the run keeps it. */
 export type AttemptGroup = {
   key: string
   attempts: TaskAttempt[]
@@ -13,30 +51,24 @@ export type AttemptGroup = {
 export function groupAttempts(list: readonly TaskAttempt[]): AttemptGroup[] {
   const groups: AttemptGroup[] = []
   for (const attempt of list) {
-    const run = groups.at(-1)?.attempts[0]
+    const group = groups.at(-1)
+    const run = group?.attempts[0]
+    const key = `${attempt.attempt}:${attempt.emitted_at}`
     const repeatsFailure =
       run?.outcome === 'failed' &&
       attempt.outcome === 'failed' &&
       attempt.error !== '' &&
       attempt.error === run.error
-    if (repeatsFailure) groups.at(-1)?.attempts.push(attempt)
-    else
-      groups.push({
-        key: `${attempt.attempt}:${attempt.emitted_at}`,
-        attempts: [attempt],
-      })
+    if (group && repeatsFailure) {
+      group.attempts.push(attempt)
+      group.key = key
+    } else groups.push({ key, attempts: [attempt] })
   }
   return groups
 }
 
-/** Attempt duration: `878 毫秒`, `12.4 秒`, `2 分 5 秒`, `1 小时 3 分`.
- * Records without a start time (written before the upgrade) are unknown. */
-export function formatAttemptDuration(attempt: {
-  started_at: string
-  duration_ms: number
-}) {
-  if (!attempt.started_at) return '—'
-  const ms = attempt.duration_ms
+/** Duration: `878 毫秒`, `12.4 秒`, `2 分 5 秒`, `1 小时 3 分`. */
+export function formatDuration(ms: number) {
   if (ms < 1000) return `${ms} 毫秒`
   if (ms < 60_000) return `${Math.floor(ms / 100) / 10} 秒`
   const totalSeconds = Math.floor(ms / 1000)
@@ -46,6 +78,22 @@ export function formatAttemptDuration(attempt: {
   }
   const minutes = Math.floor(totalSeconds / 60) % 60
   return `${Math.floor(totalSeconds / 3600)} 小时${minutes ? ` ${minutes} 分` : ''}`
+}
+
+/** Live elapsed time of unsettled work in whole seconds (`0 秒`, `42 秒`,
+ * `2 分 5 秒`), so the label ticks once per second. */
+export function formatElapsed(ms: number) {
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  return seconds < 60 ? `${seconds} 秒` : formatDuration(seconds * 1000)
+}
+
+/** Attempt duration; records without a start time are unknown. */
+export function formatAttemptDuration(attempt: {
+  started_at: string
+  duration_ms: number
+}) {
+  if (!attempt.started_at) return '—'
+  return formatDuration(attempt.duration_ms)
 }
 
 /** Label of a scheduled retry against the local clock: whole seconds while

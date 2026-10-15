@@ -5,6 +5,7 @@
 #include <ruvia/core/root_task.h>
 #include <ruvia/web/app.h>
 #include <ruvia/web/db/db_client.h>
+#include <ruvia/web/redis/redis_client.h>
 
 #include <atomic>
 #include <exception>
@@ -22,12 +23,13 @@ struct worker_context::impl final {
         std::unique_ptr<ruvia::http_client> client_;
     };
 
-    impl(ruvia::event_loop event_loop, ruvia::db_config database,
+    impl(ruvia::event_loop event_loop, ruvia::db_config database, const ruvia::redis_config& redis,
         const service::config::outbound_origins& origins, std::string worker_name,
         std::span<const std::string_view> outbound_aliases)
         : loop_(std::move(event_loop)),
           worker_(loop_.handle()),
-          database_(loop_, std::move(database)) {
+          database_(loop_, std::move(database)),
+          redis_(loop_, redis) {
         clients_.reserve(outbound_aliases.size());
         for (const auto alias : outbound_aliases) {
             for (const auto& client : clients_) {
@@ -48,10 +50,12 @@ struct worker_context::impl final {
                 client.client_->close();
             }
             this->database_.close();
+            this->redis_.close();
             for (const auto& client : clients_) {
                 co_await client.client_->shutdown();
             }
             co_await this->database_.shutdown();
+            co_await this->redis_.shutdown();
         });
     }
 
@@ -60,22 +64,32 @@ struct worker_context::impl final {
     ruvia::worker_memory memory_;
     ruvia::stop_source stop_source_;
     ruvia::db_client database_;
+    ruvia::redis_client redis_;
+    service::live_resource::notifications::sender notifications_;
     std::vector<outbound_client> clients_;
     std::string lease_owner_;
     ruvia::event_loop_stop_registration stop_registration_;
 };
 
-worker_context::worker_context(ruvia::event_loop loop, ruvia::db_config database,
+worker_context::worker_context(ruvia::event_loop loop, ruvia::db_config database, const ruvia::redis_config& redis,
     const service::config::outbound_origins& origins,
     std::string worker_name,
     std::span<const std::string_view> outbound_aliases)
-    : impl_(std::make_unique<impl>(std::move(loop), std::move(database), origins,
+    : impl_(std::make_unique<impl>(std::move(loop), std::move(database), redis, origins,
           std::move(worker_name), outbound_aliases)) {}
 
 worker_context::~worker_context() = default;
 
 ruvia::db_handle worker_context::db() const {
     return impl_->database_.handle();
+}
+
+ruvia::redis_handle worker_context::redis() const {
+    return impl_->redis_.handle();
+}
+
+service::live_resource::notifications::sender& worker_context::resource_notifications() const noexcept {
+    return impl_->notifications_;
 }
 
 ruvia::http_client& worker_context::get_http_client(std::string_view alias) const {
@@ -109,11 +123,12 @@ void worker_context::close() noexcept {
         client.client_->close();
     }
     impl_->database_.close();
+    impl_->redis_.close();
 }
 
 struct worker_pool::impl final {
-    impl(const ruvia::db_config& database, const service::config::outbound_origins& origins,
-        std::vector<worker_definition> definitions)
+    impl(const ruvia::db_config& database, const ruvia::redis_config& redis,
+        const service::config::outbound_origins& origins, std::vector<worker_definition> definitions)
         : loops_({.loop_count_ = definitions.size(), .queue_capacity_ = 256}),
           workers_(std::move(definitions)) {
         if (workers_.empty()) {
@@ -122,7 +137,7 @@ struct worker_pool::impl final {
         contexts_.reserve(workers_.size());
         for (std::size_t index = 0; index < workers_.size(); ++index) {
             contexts_.push_back(std::unique_ptr<worker_context>(
-                new worker_context(loops_.loop(index), database, origins, workers_[index].name_,
+                new worker_context(loops_.loop(index), database, redis, origins, workers_[index].name_,
                     workers_[index].outbound_aliases_)));
         }
     }
@@ -156,6 +171,11 @@ struct worker_pool::impl final {
 
     void start_task(std::size_t index) {
         tasks_.push_back(loops_.loop(index).start(run_task(index)));
+        // The worker's own sender re-sends the recoveries it owes after a
+        // failed notification; it waits without a timer while nothing is owed.
+        auto& context = *contexts_[index];
+        retry_tasks_.push_back(
+            loops_.loop(index).start(context.resource_notifications().retry_owed(context, context.get_stop_token())));
     }
 
     void wait_tasks() noexcept {
@@ -173,6 +193,16 @@ struct worker_pool::impl final {
             }
         }
         tasks_.clear();
+        for (auto& retry : retry_tasks_) {
+            try {
+                retry.get();
+            } catch (const std::exception& error) {
+                service::logging::error("Background notification retry failed: " + std::string(error.what()));
+            } catch (...) {
+                service::logging::error("Background notification retry failed");
+            }
+        }
+        retry_tasks_.clear();
     }
 
     void wait_connections() noexcept {
@@ -199,10 +229,10 @@ struct worker_pool::impl final {
 
         try {
             loops_.start();
-            connection_tasks_.reserve(contexts_.size());
+            connection_tasks_.reserve(contexts_.size() * 2);
             for (std::size_t index = 0; index < contexts_.size(); ++index) {
-                connection_tasks_.push_back(
-                    loops_.loop(index).start(contexts_[index]->impl_->database_.connect()));
+                connection_tasks_.push_back(loops_.loop(index).start(contexts_[index]->impl_->database_.connect()));
+                connection_tasks_.push_back(loops_.loop(index).start(contexts_[index]->impl_->redis_.connect()));
             }
             for (auto& connection : connection_tasks_) {
                 connection.get();
@@ -247,14 +277,14 @@ struct worker_pool::impl final {
     std::vector<std::unique_ptr<worker_context>> contexts_;
     std::vector<ruvia::root_task<void>> connection_tasks_;
     std::vector<ruvia::root_task<void>> tasks_;
+    std::vector<ruvia::root_task<void>> retry_tasks_;
     std::atomic_bool started_{false};
     std::atomic_bool stopped_{false};
 };
 
-worker_pool::worker_pool(const ruvia::db_config& database,
-    const service::config::outbound_origins& origins,
-    std::vector<worker_definition> workers)
-    : impl_(std::make_unique<impl>(database, origins, std::move(workers))) {}
+worker_pool::worker_pool(const ruvia::db_config& database, const ruvia::redis_config& redis,
+    const service::config::outbound_origins& origins, std::vector<worker_definition> workers)
+    : impl_(std::make_unique<impl>(database, redis, origins, std::move(workers))) {}
 
 worker_pool::~worker_pool() {
     stop();

@@ -11,7 +11,6 @@ import {
   Label,
   TextArea,
   TextField,
-  toast,
 } from '@heroui/react'
 import { apiErrorMessage, isRevisionConflict } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
@@ -19,6 +18,7 @@ import { useUnsavedChangesGuard } from '@/lib/unsaved-changes'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Choice, Field, Toggle } from '@/components/forms'
 import { UnsavedChangesDialog } from '@/components/save-bar'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { saveDnsRecords } from './data'
 import { DnsLinePicker } from './dns-line-picker'
 import {
@@ -77,11 +77,12 @@ export function RecordForm({
         applyRecordChange(zone.config.records, change)
       ),
     onSuccess: (response, change) => {
-      toast.success(
+      toastWriteSuccess(
         response.message ||
           (change.kind === 'remove'
             ? '记录已删除，正在同步到服务商'
-            : '记录已保存，正在同步到服务商')
+            : '记录已保存，正在同步到服务商'),
+        response.data
       )
       void client.invalidateQueries({
         queryKey: queryKeys.dnsZones,

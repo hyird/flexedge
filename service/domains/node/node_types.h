@@ -127,11 +127,13 @@ RUVIA_MODEL(node_detail_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
     RUVIA_REQUIRED_FIELD(message, ruvia::string),
     RUVIA_REQUIRED_FIELD(data, node_dto));
 
+// `operation_id`: the task a create or credential reset started.
 RUVIA_MODEL(node_credentials_dto,
     RUVIA_REQUIRED_FIELD(id, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("node_id", node_id, ruvia::string),
     RUVIA_REQUIRED_FIELD(secret, ruvia::string),
-    RUVIA_REQUIRED_FIELD(revision, ruvia::int64));
+    RUVIA_REQUIRED_FIELD(revision, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD_NAME("operation_id", operation_id, ruvia::string, RUVIA_OMIT_EMPTY));
 RUVIA_MODEL(node_credentials_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
     RUVIA_REQUIRED_FIELD(message, ruvia::string),
     RUVIA_REQUIRED_FIELD(data, node_credentials_dto));

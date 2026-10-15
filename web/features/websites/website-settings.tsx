@@ -7,7 +7,6 @@ import {
   Chip,
   Skeleton,
   Tabs,
-  toast,
   useMediaQuery,
 } from '@heroui/react'
 import { apiErrorMessage, isRevisionConflict } from '@/lib/api'
@@ -20,6 +19,7 @@ import {
   useTabPanelHold,
 } from '@/components/tab-panel-hold'
 import { usableCertificateOptionsQuery } from '@/features/certificates/data'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import {
   createWebsite,
   hostedZoneOptionsQuery,
@@ -265,13 +265,15 @@ function WebsiteEditor({
         status: data.status,
         config: websiteFormToConfig(data),
       }
-      if (!base) return createWebsite(input)
-      await updateWebsite(input, base)
-      return null
-    },
-    onSuccess: (created, { draft }) => {
       if (!base) {
-        toast.success('网站已创建，配置正在分发到边缘节点')
+        const created = await createWebsite(input)
+        return { created, data: created }
+      }
+      return { created: null, data: (await updateWebsite(input, base)).data }
+    },
+    onSuccess: ({ created, data: response }, { draft }) => {
+      if (!base) {
+        toastWriteSuccess('网站已创建，配置正在分发到边缘节点', response)
         if (created)
           void navigate({
             to: '/websites/$websiteId',
@@ -280,7 +282,7 @@ function WebsiteEditor({
           })
         return
       }
-      toast.success('配置已保存，正在分发到边缘节点')
+      toastWriteSuccess('配置已保存，正在分发到边缘节点', response)
       setInitial(draft)
       setSavedFrom(base.revision)
       setShowErrors(false)

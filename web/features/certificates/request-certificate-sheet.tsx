@@ -1,6 +1,6 @@
 import { type FormEvent, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, toast } from '@heroui/react'
+import { Link } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { fieldErrors } from '@/lib/form-errors'
 import { queryKeys } from '@/lib/query-keys'
@@ -10,6 +10,7 @@ import { QueryNotice } from '@/components/page'
 import { dnsZoneOptionsQuery } from '@/features/dns-zones/data'
 import { certificateProvidersQuery } from '@/features/providers/data'
 import { providerLabel } from '@/features/providers/provider-display'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import {
   certificateFormSchema,
   type CertificateFormValues,
@@ -61,7 +62,10 @@ export function RequestCertificateSheet({
         config: { auto_renew: input.auto_renew },
       }),
     onSuccess: (response) => {
-      toast.success(response.message || '证书申请已提交，正在签发')
+      toastWriteSuccess(
+        response.message || '证书申请已提交，正在签发',
+        response.data
+      )
       void client.invalidateQueries({
         queryKey: queryKeys.certificates,
         refetchType: 'none',

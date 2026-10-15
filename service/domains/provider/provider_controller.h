@@ -62,7 +62,7 @@ private:
             status.emplace(*value);
         }
         const auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(
+        auto sub = service::live_resource::get_hub(c).subscribe(
             c.worker(), tenant, service::live_resource::resource::providers, {},
             service::live_resource::query_key("dns-options", keyword.value_or(""), status));
         co_await service::live_resource::stream_snapshot(
@@ -97,7 +97,7 @@ private:
             status.emplace(*v);
         }
         auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(
+        auto sub = service::live_resource::get_hub(c).subscribe(
             c.worker(), tenant, service::live_resource::resource::providers, {},
             service::live_resource::query_key("dns-list", page, size, keyword.value_or(""),
                 status));
@@ -115,7 +115,7 @@ private:
     ruvia::task<void> get_dns(ruvia::context& c) {
         auto id = require_id(c);
         auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(
+        auto sub = service::live_resource::get_hub(c).subscribe(
             c.worker(), tenant, service::live_resource::resource::providers, id,
             service::live_resource::query_key("dns-detail"));
         co_await service::live_resource::stream_snapshot(
@@ -129,7 +129,7 @@ private:
     }
     ruvia::task<void> list_certificates(ruvia::context& c) {
         auto tenant = tenant_id(c);
-        auto sub = service::live_resource::get_hub().subscribe(
+        auto sub = service::live_resource::get_hub(c).subscribe(
             c.worker(), tenant, service::live_resource::resource::providers, {},
             service::live_resource::query_key("certificate-list"));
         co_await service::live_resource::stream_snapshot(
@@ -149,22 +149,23 @@ private:
     }
     ruvia::task<ruvia::http_response> update_dns(ruvia::context& c) {
         auto v = expected_revision(c);
-        co_await get_dns_provider_service().update(c, tenant_id(c), require_id(c), v,
+        const auto operation_id = co_await get_dns_provider_service().update(c, tenant_id(c), require_id(c), v,
             c.req().validated<update_dns_provider_body>());
         service::common::set_revision_etag(c, v + 1);
-        co_return c.json(service::common::operation(c, "DNS 服务商账号已更新"));
+        co_return c.json(service::common::operation(c, "DNS 服务商账号已更新", operation_id));
     }
     ruvia::task<ruvia::http_response> verify_dns(ruvia::context& c) {
         auto v = expected_revision(c);
-        co_await get_dns_provider_service().verify_stored(c, tenant_id(c), require_id(c), v);
+        const auto operation_id =
+            co_await get_dns_provider_service().verify_stored(c, tenant_id(c), require_id(c), v);
         service::common::set_revision_etag(c, v);
-        co_return c.json(service::common::operation(c, "DNS 服务商凭据检测任务已提交"));
+        co_return c.json(service::common::operation(c, "DNS 服务商凭据检测任务已提交", operation_id));
     }
     ruvia::task<ruvia::http_response> remove_dns(ruvia::context& c) {
         auto v = expected_revision(c);
-        co_await get_dns_provider_service().remove(c, tenant_id(c), require_id(c), v);
+        const auto operation_id = co_await get_dns_provider_service().remove(c, tenant_id(c), require_id(c), v);
         service::common::set_revision_etag(c, v + 1);
-        co_return c.json(service::common::operation(c, "DNS 服务商账号已移除"));
+        co_return c.json(service::common::operation(c, "DNS 服务商账号已移除", operation_id));
     }
     ruvia::task<ruvia::http_response> create_certificate(ruvia::context& c) {
         co_await get_certificate_provider_service().create(
@@ -174,22 +175,24 @@ private:
     }
     ruvia::task<ruvia::http_response> update_certificate(ruvia::context& c) {
         auto v = expected_revision(c);
-        co_await get_certificate_provider_service().update(
+        const auto operation_id = co_await get_certificate_provider_service().update(
             c, tenant_id(c), require_id(c), v, c.req().validated<update_certificate_provider_body>());
         service::common::set_revision_etag(c, v + 1);
-        co_return c.json(service::common::operation(c, "证书供应商已更新"));
+        co_return c.json(service::common::operation(c, "证书供应商已更新", operation_id));
     }
     ruvia::task<ruvia::http_response> verify_certificate(ruvia::context& c) {
         auto v = expected_revision(c);
-        co_await get_certificate_provider_service().verify(c, tenant_id(c), require_id(c), v);
+        const auto operation_id =
+            co_await get_certificate_provider_service().verify(c, tenant_id(c), require_id(c), v);
         service::common::set_revision_etag(c, v);
-        co_return c.json(service::common::operation(c, "证书供应商检测任务已提交"));
+        co_return c.json(service::common::operation(c, "证书供应商检测任务已提交", operation_id));
     }
     ruvia::task<ruvia::http_response> remove_certificate(ruvia::context& c) {
         auto v = expected_revision(c);
-        co_await get_certificate_provider_service().remove(c, tenant_id(c), require_id(c), v);
+        const auto operation_id =
+            co_await get_certificate_provider_service().remove(c, tenant_id(c), require_id(c), v);
         service::common::set_revision_etag(c, v + 1);
-        co_return c.json(service::common::operation(c, "证书供应商已删除"));
+        co_return c.json(service::common::operation(c, "证书供应商已删除", operation_id));
     }
 };
 }  // namespace service::provider

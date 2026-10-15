@@ -16,24 +16,12 @@ RUVIA_MODEL(
     overview_issue_counts_dto,
     RUVIA_REQUIRED_FIELD_NAME("dns_zone_issue_count", dns_zone_issue_count, ruvia::int64),
     RUVIA_REQUIRED_FIELD_NAME("certificate_expiring_count", certificate_expiring_count, ruvia::int64),
-    RUVIA_REQUIRED_FIELD_NAME("certificate_failed_count", certificate_failed_count, ruvia::int64),
-    RUVIA_REQUIRED_FIELD_NAME("active_marker_count", active_marker_count, ruvia::int64),
-    RUVIA_REQUIRED_FIELD_NAME("retry_marker_count", retry_marker_count, ruvia::int64));
+    RUVIA_REQUIRED_FIELD_NAME("certificate_failed_count", certificate_failed_count, ruvia::int64));
 
-RUVIA_MODEL(overview_marker_dto, RUVIA_REQUIRED_FIELD(id, ruvia::string),
-    RUVIA_REQUIRED_FIELD_NAME("resource_type", resource_type, ruvia::string),
-    RUVIA_REQUIRED_FIELD_NAME("resource_id", resource_id, ruvia::string),
-    RUVIA_REQUIRED_FIELD_NAME("resource_name", resource_name, ruvia::string),
-    RUVIA_REQUIRED_FIELD(operation, ruvia::string),
-    RUVIA_REQUIRED_FIELD(status, ruvia::string),
-    RUVIA_OPTIONAL_FIELD_NAME("last_error", last_error, ruvia::string,
-        RUVIA_OMIT_EMPTY),
-    RUVIA_REQUIRED_FIELD_NAME("updated_at", updated_at, ruvia::string));
-
+// Task state is not part of the overview: its widgets read the task list
+// once (docs/task-center.md).
 RUVIA_MODEL(overview_data_dto, RUVIA_REQUIRED_FIELD(resources, overview_resource_counts_dto),
-    RUVIA_REQUIRED_FIELD(issues, overview_issue_counts_dto),
-    RUVIA_REQUIRED_FIELD_NAME("recent_markers", recent_markers,
-        ruvia::array<overview_marker_dto>));
+    RUVIA_REQUIRED_FIELD(issues, overview_issue_counts_dto));
 
 RUVIA_MODEL(overview_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
     RUVIA_REQUIRED_FIELD(message, ruvia::string),

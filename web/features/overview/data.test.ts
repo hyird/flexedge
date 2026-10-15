@@ -174,10 +174,7 @@ describe('attention items', () => {
       dns_zone_issue_count: 2,
       certificate_expiring_count: 0,
       certificate_failed_count: 1,
-      active_marker_count: 3,
-      retry_marker_count: 1,
     },
-    recent_markers: [],
   }
 
   test('overview schema requires tenant-wide node counts', () => {
@@ -188,28 +185,29 @@ describe('attention items', () => {
 
   test('links non-zero issues to filtered lists', () => {
     expect(
-      attentionItems(overview).map((item) => [item.href, item.count])
+      attentionItems(overview, 4).map((item) => [item.href, item.count])
     ).toEqual([
       ['/dns-zones?sync_status=issue', 2],
       ['/certificates?abnormal=1', 1],
-      ['/tasks?status=retrying', 1],
+      ['/tasks?status=attention', 4],
       ['/nodes?connection_status=offline', 2],
     ])
   })
 
   test('is empty when nothing needs attention', () => {
     expect(
-      attentionItems({
-        ...overview,
-        resources: { ...overview.resources, online_node_count: 5 },
-        issues: {
-          dns_zone_issue_count: 0,
-          certificate_expiring_count: 0,
-          certificate_failed_count: 0,
-          active_marker_count: 2,
-          retry_marker_count: 0,
+      attentionItems(
+        {
+          ...overview,
+          resources: { ...overview.resources, online_node_count: 5 },
+          issues: {
+            dns_zone_issue_count: 0,
+            certificate_expiring_count: 0,
+            certificate_failed_count: 0,
+          },
         },
-      })
+        0
+      )
     ).toEqual([])
   })
 })
@@ -272,10 +270,7 @@ describe('combined overview stream', () => {
         dns_zone_issue_count: 0,
         certificate_expiring_count: 0,
         certificate_failed_count: 0,
-        active_marker_count: 0,
-        retry_marker_count: 0,
       },
-      recent_markers: [],
     }
     const online = node('n1', 'online', { cpu_usage: 0.2 })
     const page = { list: [online], total: 1, page: 1, page_size: 100 }

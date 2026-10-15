@@ -217,7 +217,7 @@ inline ruvia::task<void> probe_website(service::background::worker_context& cont
             throw std::runtime_error("网站同步标记 lease 已失效");
         }
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(completion, context.db(), marker,
+    co_await service::sync_runtime::commit_and_publish_result_event(completion, context, marker,
         result_transition, trace);
     save_step.complete();
     co_return;

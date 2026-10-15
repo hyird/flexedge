@@ -3,10 +3,11 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import { Alert, Button, Skeleton, toast } from '@heroui/react'
+import { Alert, Button, Skeleton } from '@heroui/react'
 import { apiErrorMessage, isRevisionConflict } from '@/lib/api'
 import { SaveBar } from '@/components/save-bar'
 import { Section } from '@/components/section'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { ClusterAccessFields, ClusterBasicFields } from './cluster-fields'
 import {
   clusterFormSchema,
@@ -49,7 +50,7 @@ function ClusterConfigEditor({
     mutationFn: (values: ClusterFormValues) =>
       saveCluster(values, { id: cluster.id, revision: baseRevision }),
     onSuccess: (response, values) => {
-      toast.success(response.message)
+      toastWriteSuccess(response.message, response.data)
       form.reset(values)
       void client.invalidateQueries({ queryKey: clusterSnapshotKey })
     },

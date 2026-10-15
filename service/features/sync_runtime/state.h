@@ -14,7 +14,8 @@
 
 #include "service/features/attempt_trace/recorder.h"
 #include "service/features/attempt_trace/trace_store.h"
-#include "service/features/live_resource/fanout.h"
+#include "service/features/live_resource/notifications.h"
+#include "service/features/operation/work_origin.h"
 #include "service/features/sync_runtime/attempt_record.h"
 
 namespace service::sync_runtime {
@@ -126,6 +127,49 @@ parse_marker_operation(std::string_view operation) {
     return false;
 }
 
+// The subtask kind doing a marker's work.
+[[nodiscard]] inline service::operation::subtask_kind marker_subtask_kind(marker_resource_type resource_type,
+    marker_operation operation, service::operation::subtask_purpose purpose) {
+    using service::operation::subtask_kind;
+    switch (resource_type) {
+        case marker_resource_type::provider:
+            return subtask_kind::provider_verify;
+        case marker_resource_type::dns_zone:
+            if (operation == marker_operation::remove) {
+                return subtask_kind::dns_delete;
+            }
+            if (purpose == service::operation::subtask_purpose::dns_challenge) {
+                return subtask_kind::dns_challenge;
+            }
+            if (purpose == service::operation::subtask_purpose::dns_challenge_cleanup) {
+                return subtask_kind::dns_challenge_cleanup;
+            }
+            return subtask_kind::dns_sync;
+        case marker_resource_type::certificate:
+            return operation == marker_operation::renew ? subtask_kind::certificate_renew
+                                                        : subtask_kind::certificate_issue;
+        case marker_resource_type::website:
+            return subtask_kind::website_check;
+    }
+    throw std::invalid_argument("unsupported sync marker resource type");
+}
+
+// RETURNING columns of a claim: the claimed marker's subtask and task, empty
+// for unowned work. `alias` names the marker table in the claim statement.
+[[nodiscard]] inline std::string claimed_owner_columns(std::string_view alias) {
+    const auto marker = std::string(alias);
+    return "COALESCE(" + marker +
+           ".subtask_id::text, ''), COALESCE((SELECT owner.operation_id::text FROM "
+           "sys_operation_subtask owner WHERE owner.id = " +
+           marker + ".subtask_id), '')";
+}
+
+template <typename row_type>
+[[nodiscard]] service::operation::work_owner claimed_owner(const row_type& row, std::size_t subtask_column) {
+    return {.operation_id_ = std::string(row[subtask_column + 1].value().value_or("")),
+        .subtask_id_ = std::string(row[subtask_column].value().value_or(""))};
+}
+
 // A sync task is a coalesced, current-state marker. It is deliberately not a
 // historical workflow node: the aggregate remains the source of truth and
 // version fences decide whether a worker result is still current.
@@ -145,11 +189,14 @@ struct running_marker_lease final {
     std::chrono::steady_clock::time_point started_{};
 };
 
-// `event_id_` identifies the recorded attempt row when one was written.
+// `event_id_` identifies the recorded attempt row when one was written;
+// `owner_` is the subtask (and task) it was recorded for, empty for work that
+// belongs to no task.
 struct running_result_transition final {
     bool marker_transitioned_{};
     bool event_recorded_{};
     std::optional<std::int64_t> event_id_;
+    service::operation::work_owner owner_{};
 };
 
 inline constexpr std::int64_t retry_delay_seconds{15};
@@ -185,29 +232,40 @@ inline service::live_resource::resource resource_for_marker_type(marker_resource
         case marker_resource_type::website:
             return resource::websites;
     }
-    return resource::tasks;
+    return resource::operations;
 }
 
-inline void publish_recorded_result_event(const running_marker_lease& lease) {
-    const auto resource_value = resource_for_marker_type(lease.marker_.resource_type_);
-    using service::live_resource::resource;
-    service::live_resource::get_hub().publish(lease.marker_.tenant_id_, resource::tasks,
-        lease.marker_.marker_id_);
-    service::live_resource::get_hub().publish(lease.marker_.tenant_id_, resource_value,
-        lease.marker_.resource_id_);
+// The committed result of one attempt: its task (with the recorded attempt
+// when there is one) and the marker's resource.
+inline service::live_resource::notifications::resource_notification recorded_result_notification(
+    const running_marker_lease& lease, const running_result_transition& transition) {
+    service::live_resource::notifications::resource_notification notification(lease.marker_.tenant_id_);
+    if (transition.event_id_ && !transition.owner_.empty()) {
+        notification.task_attempt(transition.owner_.operation_id_,
+            {.subtask_id_ = transition.owner_.subtask_id_, .event_id_ = *transition.event_id_});
+    } else if (!transition.owner_.operation_id_.empty()) {
+        notification.changed(service::live_resource::resource::operations, transition.owner_.operation_id_);
+    }
+    notification.changed(resource_for_marker_type(lease.marker_.resource_type_), lease.marker_.resource_id_);
+    return notification;
 }
 
 }  // namespace detail
 
 // Commits the result, then stores the attempt trace with the worker's
 // autocommit handle (a trace failure is logged and never undoes or delays the
-// committed result), then publishes the change.
-template <typename transaction_type, typename database_type>
-inline ruvia::task<void> commit_and_publish_result_event(transaction_type& transaction, database_type&& database,
+// committed result), then notifies the change on the worker's own Redis
+// connection (a notification failure is logged as well). `node_config`: the
+// transaction may have changed node desired state (certificate material).
+// `caused`: work the result scheduled; the tasks it changed are notified.
+template <typename transaction_type, typename context_type>
+inline ruvia::task<void> commit_and_publish_result_event(transaction_type& transaction, context_type& context,
     const running_marker_lease& lease, const running_result_transition& transition,
-    service::attempt_trace::recorder& trace) {
+    service::attempt_trace::recorder& trace, bool node_config = false,
+    const service::operation::work_origin* caused = nullptr) {
     co_await transaction.commit();
     if (transition.event_id_) {
+        auto database = context.db();
         co_await service::attempt_trace::store_attempt_trace(database,
             {.tenant_id_ = lease.marker_.tenant_id_,
                 .task_id_ = lease.marker_.marker_id_,
@@ -215,10 +273,16 @@ inline ruvia::task<void> commit_and_publish_result_event(transaction_type& trans
                 .version_ = lease.marker_.version_},
             *transition.event_id_, trace);
     }
-    if (transition.event_recorded_) {
-        detail::publish_recorded_result_event(lease);
+    auto notification = transition.event_recorded_ || !transition.owner_.operation_id_.empty()
+                            ? detail::recorded_result_notification(lease, transition)
+                            : service::live_resource::notifications::resource_notification(lease.marker_.tenant_id_);
+    if (node_config) {
+        notification.node_config();
     }
-    co_return;
+    if (caused != nullptr) {
+        caused->add_changes(notification);
+    }
+    co_await service::live_resource::notify(context, notification);
 }
 
 [[nodiscard]] inline std::string_view resource_column(marker_resource_type resource_type) {
@@ -235,11 +299,17 @@ inline ruvia::task<void> commit_and_publish_result_event(transaction_type& trans
     throw std::invalid_argument("unsupported sync marker resource type");
 }
 
+// Queues work on a resource at `version` for the subtask `origin` names.
+// The marker coalesces: a newer version replaces pending work, whose subtask
+// is settled as merged into the new owner (or completed when it already ran),
+// and an older version merges into the current owner. Runs under the marker
+// row lock, so ownership changes are serialized with claims and results.
 inline ruvia::task<std::string> upsert_marker(ruvia::db_transaction& transaction,
     std::string_view tenant_id,
     marker_resource_type resource_type,
     std::string_view resource_id, marker_operation operation,
-    std::int64_t version) {
+    std::int64_t version, service::operation::work_origin& origin) {
+    using service::operation::work_origin;
     if (version <= 0) {
         throw std::invalid_argument("sync marker version must be positive");
     }
@@ -249,11 +319,41 @@ inline ruvia::task<std::string> upsert_marker(ruvia::db_transaction& transaction
     const auto column = resource_column(resource_type);
     const auto resource_type_value = resource_type_name(resource_type);
     const auto operation_value = marker_operation_name(operation);
+    const auto existing = co_await transaction.query(
+        "SELECT marker.version, marker.is_done AND marker.is_ok, COALESCE(marker.subtask_id::text, ''), "
+        "COALESCE(subtask.operation_id::text, '') FROM sys_sync_task marker LEFT JOIN "
+        "sys_operation_subtask subtask ON subtask.id = marker.subtask_id WHERE marker.tenant_id = $1 AND "
+        "marker.resource_type = $2 AND marker." +
+            std::string(column) + " = $3 FOR UPDATE OF marker",
+        tenant_id, resource_type_value, resource_id);
+    const bool exists = !existing.empty();
+    const auto existing_version = exists ? existing.front()[0].as<std::int64_t>().value_or(0) : 0;
+    const bool existing_ran = exists && existing.front()[1].as<bool>().value_or(false);
+    const auto existing_subtask = exists ? std::string(existing.front()[2].value().value_or("")) : std::string{};
+    const auto existing_operation = exists ? std::string(existing.front()[3].value().value_or("")) : std::string{};
+
+    std::string owner;
+    if (origin.get_mode() == work_origin::mode::repair) {
+        if (exists && existing_version == version) {
+            owner = existing_subtask;
+        } else {
+            const auto reopened = co_await service::operation::reopen_subtask_of_version(
+                transaction, tenant_id, resource_type_value, resource_id, version);
+            owner = reopened.subtask_id_;
+            origin.touch(reopened.operation_id_);
+        }
+    } else {
+        owner = (co_await origin.require_subtask(transaction, tenant_id,
+                     marker_subtask_kind(resource_type, operation, origin.purpose()), resource_type_value,
+                     resource_id, version))
+                    .value_or("");
+    }
+
     const auto rows = co_await transaction.query(
         "INSERT INTO sys_sync_task (tenant_id, resource_type, " + std::string(column) +
             ", operation, version, processed_version, is_done, is_ok, error, count_fails, "
-            "next_attempt_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, 0, FALSE, "
-            "FALSE, '', 0, NOW(), NOW(), NOW()) ON CONFLICT (tenant_id, resource_type, "
+            "next_attempt_at, created_at, updated_at, subtask_id) VALUES ($1, $2, $3, $4, $5, 0, FALSE, "
+            "FALSE, '', 0, NOW(), NOW(), NOW(), NULLIF($6, '')::uuid) ON CONFLICT (tenant_id, resource_type, "
             "resource_id) DO UPDATE SET version = GREATEST(sys_sync_task.version, "
             "EXCLUDED.version), operation = CASE WHEN EXCLUDED.version >= sys_sync_task.version "
             "THEN EXCLUDED.operation ELSE sys_sync_task.operation END, is_done = CASE WHEN "
@@ -269,43 +369,115 @@ inline ruvia::task<std::string> upsert_marker(ruvia::db_transaction& transaction
             "sys_sync_task.updated_at END, lease_owner = CASE WHEN EXCLUDED.version > "
             "sys_sync_task.version THEN NULL ELSE sys_sync_task.lease_owner END, lease_until = "
             "CASE WHEN EXCLUDED.version > sys_sync_task.version THEN NULL ELSE "
-            "sys_sync_task.lease_until END RETURNING id",
-        tenant_id, resource_type_value, resource_id, operation_value, version);
+            "sys_sync_task.lease_until END, subtask_id = CASE WHEN EXCLUDED.version >= "
+            "sys_sync_task.version THEN EXCLUDED.subtask_id ELSE sys_sync_task.subtask_id END RETURNING id",
+        tenant_id, resource_type_value, resource_id, operation_value, version, std::string_view(owner));
     if (rows.empty()) {
         throw std::runtime_error("sync marker could not be created");
+    }
+    const auto closed_by = origin.operation_id().value_or("");
+    if (exists && version >= existing_version && !existing_subtask.empty() && existing_subtask != owner) {
+        // Work that already ran keeps its result; pending or running work is
+        // taken over by the new owner (an equal version keeps a running
+        // attempt, whose result then belongs to the new owner).
+        const auto settled = existing_ran
+                                 ? co_await service::operation::settle_subtask(transaction, tenant_id,
+                                       existing_subtask, service::operation::state_completed)
+                                 : co_await service::operation::settle_subtask(transaction, tenant_id,
+                                       existing_subtask, service::operation::state_merged, owner, closed_by);
+        origin.touch(settled.value_or(existing_operation));
+    }
+    if (exists && version < existing_version && !owner.empty() && owner != existing_subtask) {
+        (void)co_await service::operation::settle_subtask(transaction, tenant_id, owner,
+            service::operation::state_merged, existing_subtask, closed_by);
+        origin.touch(existing_operation);
     }
     co_return std::string(rows.front()[0].value().value_or(""));
 }
 
+// Removes a resource's marker (the resource is deleted or needs no more
+// work): its subtask is cancelled, or completed when its work already ran.
 inline ruvia::task<void> remove_marker(ruvia::db_transaction& transaction, std::string_view tenant_id,
     marker_resource_type resource_type,
-    std::string_view resource_id) {
+    std::string_view resource_id, service::operation::work_origin& origin) {
     const auto column = resource_column(resource_type);
-    (void)co_await transaction.execute(
-        "DELETE FROM sys_sync_task WHERE tenant_id = $1 AND resource_type = $2 AND " +
-            std::string(column) + " = $3",
+    const auto removed = co_await transaction.query(
+        "DELETE FROM sys_sync_task WHERE tenant_id = $1 AND resource_type = $2 AND " + std::string(column) +
+            " = $3 RETURNING COALESCE(subtask_id::text, ''), is_done AND is_ok",
         tenant_id, resource_type_name(resource_type), resource_id);
-    co_return;
+    if (removed.empty()) {
+        co_return;
+    }
+    const auto subtask = std::string(removed.front()[0].value().value_or(""));
+    if (subtask.empty()) {
+        co_return;
+    }
+    std::optional<std::string> settled;
+    if (removed.front()[1].as<bool>().value_or(false)) {
+        settled = co_await service::operation::settle_subtask(transaction, tenant_id, subtask,
+            service::operation::state_completed);
+    } else {
+        // Cancelling alone starts no task: the cancelling task is named
+        // only when the write scheduled work of its own.
+        settled = co_await service::operation::settle_subtask(transaction, tenant_id, subtask,
+            service::operation::state_cancelled, {}, origin.operation_id().value_or(""));
+    }
+    if (settled) {
+        origin.touch(*settled);
+    }
 }
 
-template <typename database_type>
-inline ruvia::task<void> recover_stale_running(database_type& database, marker_resource_type resource_type) {
-    const auto rows = co_await database.query(
-        "UPDATE sys_sync_task SET is_done = FALSE, is_ok = FALSE, count_fails = count_fails + 1, "
+// Notifies the changes of several tenants after one autocommit statement:
+// one notification per tenant.
+template <typename context_type>
+inline ruvia::task<void> notify_by_tenant(context_type& context,
+    std::vector<service::live_resource::notifications::resource_notification> notifications) {
+    for (const auto& notification : notifications) {
+        co_await service::live_resource::notify(context, notification);
+    }
+}
+
+inline service::live_resource::notifications::resource_notification& tenant_notification(
+    std::vector<service::live_resource::notifications::resource_notification>& notifications,
+    std::string_view tenant_id) {
+    for (auto& notification : notifications) {
+        if (notification.tenant_id_ == tenant_id) {
+            return notification;
+        }
+    }
+    return notifications.emplace_back(tenant_id);
+}
+
+// Notifies the tasks a committed background transaction changed (nothing
+// when it changed none).
+template <typename context_type>
+inline ruvia::task<void> notify_origin(context_type& context, std::string_view tenant_id,
+    const service::operation::work_origin& origin) {
+    service::live_resource::notifications::resource_notification notification(tenant_id);
+    origin.add_changes(notification);
+    co_await service::live_resource::notify(context, notification);
+}
+
+template <typename context_type>
+inline ruvia::task<void> recover_stale_running(context_type& context, marker_resource_type resource_type) {
+    const auto rows = co_await context.db().query(
+        "UPDATE sys_sync_task task SET is_done = FALSE, is_ok = FALSE, count_fails = count_fails + 1, "
         "error = $2, next_attempt_at = NOW() + CAST($3 AS BIGINT) * INTERVAL '1 second', "
         "lease_owner = NULL, lease_until = NULL, updated_at = NOW() WHERE resource_type = $1 "
-        "AND lease_until IS NOT NULL AND lease_until <= NOW() RETURNING tenant_id, id, resource_id",
+        "AND lease_until IS NOT NULL AND lease_until <= NOW() RETURNING tenant_id, resource_id, " +
+            claimed_owner_columns("task"),
         resource_type_name(resource_type), std::string_view{lease_recovery_retry_error},
         retry_delay_seconds);
+    std::vector<service::live_resource::notifications::resource_notification> notifications;
     for (const auto& row : rows) {
-        service::live_resource::get_hub().publish(row[0].value().value_or(""),
-            service::live_resource::resource::tasks,
-            row[1].value().value_or(""));
-        service::live_resource::get_hub().publish(
-            row[0].value().value_or(""), detail::resource_for_marker_type(resource_type),
-            row[2].value().value_or(""));
+        auto& notification = tenant_notification(notifications, row[0].value().value_or(""));
+        notification.changed(detail::resource_for_marker_type(resource_type), row[1].value().value_or(""));
+        const auto owner = claimed_owner(row, 2);
+        if (!owner.operation_id_.empty()) {
+            notification.changed(service::live_resource::resource::operations, owner.operation_id_);
+        }
     }
-    co_return;
+    co_await notify_by_tenant(context, std::move(notifications));
 }
 
 template <typename database_type>
@@ -332,14 +504,21 @@ inline ruvia::task<bool> complete_running(database_type& database, const running
     co_return result.affected_rows() != 0;
 }
 
+// The attempt row a result recorded and the subtask it belongs to.
+struct recorded_attempt final {
+    std::int64_t event_id_{};
+    service::operation::work_owner owner_{};
+};
+
 // Records the attempt that just transitioned the marker. Must run in the same
 // transaction right after complete_running/fail_running: the row is copied
-// from the marker only while the marker is in the matching state, and that
-// UPDATE holds the marker row lock that serializes attempt numbering. `detail`
-// is validated before binding (accepted_detail), so an unusable detail is
-// replaced by the dropped marker instead of failing the result transaction.
+// from the marker (including the subtask doing its work) only while the
+// marker is in the matching state, and that UPDATE holds the marker row lock
+// that serializes attempt numbering. `detail` is validated before binding
+// (accepted_detail), so an unusable detail is replaced by the dropped marker
+// instead of failing the result transaction.
 template <typename database_type>
-inline ruvia::task<std::optional<std::int64_t>> record_running_result_event(database_type& database,
+inline ruvia::task<std::optional<recorded_attempt>> record_running_result_event(database_type& database,
     const running_marker_lease& lease,
     std::string_view outcome, std::string_view detail) {
     if (outcome != event_outcome_completed && outcome != event_outcome_failed) {
@@ -361,7 +540,8 @@ inline ruvia::task<std::optional<std::int64_t>> record_running_result_event(data
         attempt_started_at(source, emitted_at, elapsed),
         source.cast(source.value(elapsed.value_or(0)), ruvia::db_data_type::big_int),
         failed ? marker("next_attempt_at") : source.cast(source.null_value(), ruvia::db_data_type::timestamp_tz),
-        source.cast(source.value(accepted_detail(detail)), ruvia::db_data_type::jsonb), emitted_at});
+        source.cast(source.value(accepted_detail(detail)), ruvia::db_data_type::jsonb), emitted_at,
+        marker("subtask_id")});
     source.where(equals(marker("tenant_id"), source.value(lease.marker_.tenant_id_)))
         .and_where(equals(marker("id"), source.value(lease.marker_.marker_id_)))
         .and_where(equals(marker("version"), source.value(lease.marker_.version_)));
@@ -374,27 +554,61 @@ inline ruvia::task<std::optional<std::int64_t>> record_running_result_event(data
         source.and_where(marker("is_done")).and_where(marker("is_ok"));
     }
     ruvia::db_query insert;
-    insert.insert_into("sys_sync_event", attempt_event_columns).insert_from(source).returning({insert.column("id")});
+    insert.insert_into("sys_sync_event", attempt_event_columns)
+        .insert_from(source)
+        .returning({insert.column("id"),
+            insert.coalesce({insert.cast(insert.column("subtask_id"), ruvia::db_data_type::text),
+                insert.value(std::string_view{})})});
     const auto rows = co_await database.query(insert);
     if (rows.empty()) {
         co_return std::nullopt;
     }
-    co_return rows.front()[0].template as<std::int64_t>();
+    recorded_attempt recorded{.event_id_ = rows.front()[0].template as<std::int64_t>().value_or(0),
+        .owner_ = {.operation_id_ = {}, .subtask_id_ = std::string(rows.front()[1].value().value_or(""))}};
+    if (!recorded.owner_.subtask_id_.empty()) {
+        const auto owner = co_await database.query(
+            "SELECT operation_id::text FROM sys_operation_subtask WHERE id = $1::uuid",
+            std::string_view(recorded.owner_.subtask_id_));
+        if (!owner.empty()) {
+            recorded.owner_.operation_id_ = std::string(owner.front()[0].value().value_or(""));
+        }
+    }
+    co_return recorded;
 }
 
-template <typename database_type>
-inline ruvia::task<void> prune_result_events(database_type& database) {
-    const auto removed = co_await database.query(
+// Hourly retention: attempts older than 7 days (their traces cascade), then
+// tasks created more than 7 days ago whose work is all settled and which
+// recorded nothing within the period. Open histories of affected tasks resend
+// once; lists re-read.
+template <typename context_type>
+inline ruvia::task<void> prune_result_events(context_type& context) {
+    const auto removed = co_await context.db().query(
         "WITH removed AS (DELETE FROM sys_sync_event WHERE emitted_at < NOW() - INTERVAL '7 days' "
-        "RETURNING tenant_id, task_id) SELECT DISTINCT tenant_id, task_id FROM removed");
-    // The worker passes its autocommit database handle. Retention changes task
-    // history and status projections just like any other committed mutation.
+        "RETURNING subtask_id) SELECT DISTINCT subtask.tenant_id::text, subtask.operation_id::text FROM "
+        "removed INNER JOIN sys_operation_subtask subtask ON subtask.id = removed.subtask_id");
+    const auto expired = co_await context.db().query(
+        "DELETE FROM sys_operation operation WHERE operation.created_at < NOW() - INTERVAL '7 days' AND "
+        "NOT EXISTS (SELECT 1 FROM sys_operation_subtask subtask WHERE subtask.operation_id = operation.id "
+        "AND subtask.state = 'open' AND (EXISTS (SELECT 1 FROM sys_sync_task marker WHERE "
+        "marker.subtask_id = subtask.id AND NOT (marker.is_done AND marker.is_ok)) OR EXISTS (SELECT 1 FROM "
+        "sys_node_release_target target WHERE target.subtask_id = subtask.id AND target.status IN "
+        "('pending', 'failed')) OR (subtask.kind = 'node_config' AND EXISTS (SELECT 1 FROM sys_node node "
+        "WHERE node.tenant_id = subtask.tenant_id AND node.id = subtask.resource_id AND node.deleted_at IS "
+        "NULL AND node.node_spec_revision = subtask.version AND node.applied_node_spec_revision < "
+        "subtask.version)))) AND NOT EXISTS (SELECT 1 FROM sys_operation_subtask subtask INNER JOIN "
+        "sys_sync_event event ON event.subtask_id = subtask.id WHERE subtask.operation_id = operation.id "
+        "AND event.emitted_at >= NOW() - INTERVAL '7 days') RETURNING operation.tenant_id::text, "
+        "operation.id::text");
+    std::vector<service::live_resource::notifications::resource_notification> notifications;
     for (const auto& row : removed) {
-        service::live_resource::get_hub().publish(row[0].value().value_or(""),
-            service::live_resource::resource::tasks,
-            row[1].value().value_or(""));
+        tenant_notification(notifications, row[0].value().value_or(""))
+            .task_history_reset(row[1].value().value_or(""));
     }
-    co_return;
+    for (const auto& row : expired) {
+        tenant_notification(notifications, row[0].value().value_or(""))
+            .changed(service::live_resource::resource::operations, row[1].value().value_or(""));
+    }
+    co_await notify_by_tenant(context, std::move(notifications));
 }
 
 template <typename database_type>
@@ -404,11 +618,12 @@ complete_running_and_record_event(database_type& database, const running_marker_
     if (!co_await complete_running(database, lease)) {
         co_return running_result_transition{};
     }
-    const auto event_id = co_await record_running_result_event(database, lease, event_outcome_completed, detail);
+    const auto recorded = co_await record_running_result_event(database, lease, event_outcome_completed, detail);
     co_return running_result_transition{
         .marker_transitioned_ = true,
-        .event_recorded_ = event_id.has_value(),
-        .event_id_ = event_id,
+        .event_recorded_ = recorded.has_value(),
+        .event_id_ = recorded ? std::optional<std::int64_t>(recorded->event_id_) : std::nullopt,
+        .owner_ = recorded ? recorded->owner_ : service::operation::work_owner{},
     };
 }
 
@@ -422,13 +637,26 @@ inline ruvia::task<bool> release_running(database_type& database, const running_
     co_return result.affected_rows() != 0;
 }
 
+// Removes the marker whose work (a deletion) is done; its subtask completes.
+// Returns the subtask's owner, or nothing when the lease was lost.
 template <typename database_type>
-inline ruvia::task<bool> remove_running(database_type& database, const running_marker_lease& lease) {
-    const auto result = co_await database.execute(
+inline ruvia::task<std::optional<service::operation::work_owner>> remove_running(database_type& database,
+    const running_marker_lease& lease) {
+    const auto removed = co_await database.query(
         "DELETE FROM sys_sync_task WHERE tenant_id = $1 AND id = $2 AND version = $3 AND "
-        "lease_owner = $4 AND lease_until IS NOT NULL",
+        "lease_owner = $4 AND lease_until IS NOT NULL RETURNING COALESCE(subtask_id::text, '')",
         lease.marker_.tenant_id_, lease.marker_.marker_id_, lease.marker_.version_, lease.owner_);
-    co_return result.affected_rows() != 0;
+    if (removed.empty()) {
+        co_return std::nullopt;
+    }
+    service::operation::work_owner owner{.operation_id_ = {},
+        .subtask_id_ = std::string(removed.front()[0].value().value_or(""))};
+    if (!owner.subtask_id_.empty()) {
+        const std::optional<std::string> settled = co_await service::operation::settle_subtask(database,
+            lease.marker_.tenant_id_, std::string_view(owner.subtask_id_), service::operation::state_completed);
+        owner.operation_id_ = settled.value_or("");
+    }
+    co_return owner;
 }
 
 template <typename database_type>
@@ -444,6 +672,36 @@ inline ruvia::task<bool> fail_running(database_type& database, const running_mar
     co_return result.affected_rows() != 0;
 }
 
+// A failure of work that belongs to no task (scheduled before the upgrade,
+// by a server without task tracking, or re-queued by such a server after its
+// subtask's version) becomes visible: the system task 「后台任务」 adopts the
+// marker, so this and later attempts belong to it.
+template <typename database_type>
+inline ruvia::task<void> adopt_unowned_marker(database_type& database, const running_marker_lease& lease) {
+    const auto rows = co_await database.query(
+        "SELECT marker.resource_type, marker.resource_id::text, marker.operation FROM sys_sync_task marker "
+        "WHERE marker.tenant_id = $1 AND marker.id = $2 AND NOT EXISTS (SELECT 1 FROM "
+        "sys_operation_subtask owner WHERE owner.id = marker.subtask_id AND owner.version = marker.version)",
+        lease.marker_.tenant_id_, lease.marker_.marker_id_);
+    if (rows.empty()) {
+        co_return;
+    }
+    const auto resource_type = std::string(rows.front()[0].value().value_or(""));
+    const auto resource_id = std::string(rows.front()[1].value().value_or(""));
+    const auto operation = require_marker_operation(rows.front()[2].value().value_or(""));
+    const auto marker_type = resource_type == "provider"      ? marker_resource_type::provider
+                             : resource_type == "dns_zone"    ? marker_resource_type::dns_zone
+                             : resource_type == "certificate" ? marker_resource_type::certificate
+                                                              : marker_resource_type::website;
+    auto origin = service::operation::work_origin::system(service::operation::action::system_untracked,
+        resource_type, resource_id);
+    const auto subtask = co_await origin.require_subtask(database, lease.marker_.tenant_id_,
+        marker_subtask_kind(marker_type, operation, service::operation::subtask_purpose::work), resource_type,
+        resource_id, lease.marker_.version_);
+    (void)co_await database.execute("UPDATE sys_sync_task SET subtask_id = $3::uuid WHERE tenant_id = $1 AND id = $2",
+        lease.marker_.tenant_id_, lease.marker_.marker_id_, std::string_view(subtask.value_or("")));
+}
+
 template <typename database_type>
 inline ruvia::task<running_result_transition>
 fail_running_and_record_event(database_type& database, const running_marker_lease& lease,
@@ -451,11 +709,13 @@ fail_running_and_record_event(database_type& database, const running_marker_leas
     if (!co_await fail_running(database, lease, error)) {
         co_return running_result_transition{};
     }
-    const auto event_id = co_await record_running_result_event(database, lease, event_outcome_failed, detail);
+    co_await adopt_unowned_marker(database, lease);
+    const auto recorded = co_await record_running_result_event(database, lease, event_outcome_failed, detail);
     co_return running_result_transition{
         .marker_transitioned_ = true,
-        .event_recorded_ = event_id.has_value(),
-        .event_id_ = event_id,
+        .event_recorded_ = recorded.has_value(),
+        .event_id_ = recorded ? std::optional<std::int64_t>(recorded->event_id_) : std::nullopt,
+        .owner_ = recorded ? recorded->owner_ : service::operation::work_owner{},
     };
 }
 

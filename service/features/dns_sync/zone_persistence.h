@@ -126,10 +126,12 @@ import_initial_remote_records(service::background::worker_context& context, cons
     if (!co_await service::sync_runtime::release_running(transaction, lease)) {
         throw std::runtime_error("DNS 同步标记 lease 已失效");
     }
-    (void)co_await enqueue_zone_revision(
-        transaction, task.tenant_id_, task.resource_id_,
-        updated.front()[0].as<std::int64_t>().value_or(task.version_ + 1));
+    // The same subtask continues with the imported revision.
+    auto origin = service::operation::work_origin::continuing(task.owner_);
+    (void)co_await enqueue_zone_revision(transaction, task.tenant_id_, task.resource_id_,
+        updated.front()[0].as<std::int64_t>().value_or(task.version_ + 1), origin);
     co_await transaction.commit();
+    co_await service::sync_runtime::notify_origin(context, task.tenant_id_, origin);
     co_return;
 }
 
@@ -201,7 +203,7 @@ store_conflicts(service::background::worker_context& context, service::attempt_t
     } else {
         (void)co_await service::sync_runtime::release_running(transaction, lease);
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context.db(), lease,
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease,
         result_transition, trace);
     co_return;
 }
@@ -294,11 +296,13 @@ inline ruvia::task<bool> persist_remote_merge(service::background::worker_contex
     if (!co_await service::sync_runtime::renew_running_lease(transaction, lease)) {
         throw std::runtime_error("DNS 同步标记 lease 已失效");
     }
-    (void)co_await enqueue_zone_revision(
-        transaction, task.tenant_id_, task.resource_id_,
-        updated.front()[0].as<std::int64_t>().value_or(desired_revision + 1), task.operation_);
+    // The same subtask continues with the merged revision.
+    auto origin = service::operation::work_origin::continuing(task.owner_);
+    (void)co_await enqueue_zone_revision(transaction, task.tenant_id_, task.resource_id_,
+        updated.front()[0].as<std::int64_t>().value_or(desired_revision + 1), origin, task.operation_);
     (void)co_await service::sync_runtime::release_running(transaction, lease);
     co_await transaction.commit();
+    co_await service::sync_runtime::notify_origin(context, task.tenant_id_, origin);
     co_return true;
 }
 
@@ -327,9 +331,12 @@ inline ruvia::task<void> persist_synced_zone(service::background::worker_context
             throw std::runtime_error("DNS 同步标记 lease 已失效");
         }
         if (task.operation_ == service::sync_runtime::marker_operation::remove) {
-            if (!co_await service::sync_runtime::remove_running(transaction, lease)) {
+            const auto removed = co_await service::sync_runtime::remove_running(transaction, lease);
+            if (!removed) {
                 throw std::runtime_error("DNS 删除同步标记 lease 已失效");
             }
+            result_transition.marker_transitioned_ = true;
+            result_transition.owner_ = *removed;
         } else {
             result_transition = co_await service::sync_runtime::complete_running_and_record_event(
                 transaction, lease, detail);
@@ -338,7 +345,7 @@ inline ruvia::task<void> persist_synced_zone(service::background::worker_context
             }
         }
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context.db(), lease,
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease,
         result_transition, trace);
     co_return;
 }
@@ -352,14 +359,21 @@ finish_deleted_zone_without_remote(service::background::worker_context& context,
         "sync_status = 'synced', last_synced_at = NOW(), last_error = NULL, updated_at = NOW() "
         "WHERE id = $1 AND tenant_id = $2 AND desired_revision = $3",
         task.resource_id_, task.tenant_id_, task.version_);
-    if (updated.affected_rows() != 0 &&
-        !co_await service::sync_runtime::remove_running(transaction, lease)) {
-        throw std::runtime_error("DNS 删除同步标记 lease 已失效");
-    }
-    if (updated.affected_rows() == 0) {
+    std::optional<service::operation::work_owner> removed;
+    if (updated.affected_rows() != 0) {
+        removed = co_await service::sync_runtime::remove_running(transaction, lease);
+        if (!removed) {
+            throw std::runtime_error("DNS 删除同步标记 lease 已失效");
+        }
+    } else {
         (void)co_await service::sync_runtime::release_running(transaction, lease);
     }
     co_await transaction.commit();
+    if (removed && !removed->operation_id_.empty()) {
+        co_await service::live_resource::notify(context,
+            service::live_resource::notifications::resource_notification(task.tenant_id_)
+                .changed(service::live_resource::resource::operations, removed->operation_id_));
+    }
     co_return;
 }
 
@@ -383,7 +397,7 @@ inline ruvia::task<void> fail_dns_task(service::background::worker_context& cont
             task.resource_id_, permanent ? std::string_view{"failed"} : std::string_view{"pending"},
             std::string_view(message), task.version_, task.tenant_id_);
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context.db(), lease,
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease,
         result_transition, trace);
     if (result_transition.marker_transitioned_) {
         service::sync_runtime::log_attempt_failure("DNS sync task", task.id_, message);

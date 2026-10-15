@@ -406,6 +406,12 @@ if(BUILD_TESTING)
         SOURCES tests/live_resource.cpp
         LIBRARIES ruvia::web
     )
+    # Needs REDIS_TEST_PORT / REDIS_TEST_DATABASE (isolated Redis); skipped otherwise.
+    flexedge_add_test(resource_notification
+        SOURCES tests/resource_notification.cpp
+        LIBRARIES flexedge_node_protocol ruvia::web
+    )
+    set_tests_properties(flexedge_resource_notification PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
     flexedge_add_test(read_projection BIG_OBJECT
         SOURCES tests/read_projection.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto ZLIB::ZLIB

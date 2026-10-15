@@ -4,7 +4,7 @@ import { ListView, Widget, type DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Button, Chip, Link, Skeleton } from '@heroui/react'
 import { formatNumber, ratioOf } from '@/lib/format'
-import { DataTable, TruncatedText } from '@/components/data-table'
+import { DataTable } from '@/components/data-table'
 import { KpiQuantity } from '@/components/kpi-quantity'
 import { LinkButton } from '@/components/link-button'
 import { MetricMeter } from '@/components/metric-meter'
@@ -13,14 +13,15 @@ import { RelativeTime } from '@/components/relative-time'
 import { StatusChip } from '@/components/status-chip'
 import { NodeConnectionChip } from '@/features/nodes/node-connection-chip'
 import type { Node } from '@/features/nodes/types'
+import { recentOperationsQuery } from '@/features/tasks/data'
 import {
-  taskHref,
-  taskResourceTarget,
-  taskStatusLabels,
-  taskStatuses,
-  taskStatusTones,
-  taskTitle,
+  actorLabel,
+  describeOperationStatus,
+  operationHref,
+  operationStatusLabels,
+  operationTitle,
 } from '@/features/tasks/task-display'
+import type { Operation } from '@/features/tasks/types'
 import {
   attentionItems,
   nodeHealth,
@@ -29,7 +30,6 @@ import {
   overviewQuery,
   overviewTrafficQuery,
   type Overview,
-  type OverviewMarker,
   type OverviewTraffic,
 } from './data'
 import {
@@ -40,14 +40,23 @@ import {
 
 /** Overview dashboard. Holds one live stream while mounted, the combined
  * `/api/overview/stream` (events `snapshot`, `traffic`, `nodes`,
- * `node-runtime`); it is released when the page unmounts. */
+ * `node-runtime`); it is released when the page unmounts. Recent tasks are a
+ * one-shot read of the six newest (`/api/operations/stream`, closed after
+ * its first frame). */
 export function OverviewPage() {
   const overview = useQuery(overviewQuery)
   const traffic = useQuery(overviewTrafficQuery)
   const nodes = useQuery(overviewNodesQuery)
+  const tasks = useQuery({
+    ...recentOperationsQuery(6),
+    meta: { inlineError: true },
+  })
   const health = nodes.data ? nodeHealth(nodes.data.list) : undefined
   const refreshing =
-    overview.isFetching || traffic.isFetching || nodes.isFetching
+    overview.isFetching ||
+    traffic.isFetching ||
+    nodes.isFetching ||
+    tasks.isFetching
   return (
     <Page
       title='概览'
@@ -64,12 +73,14 @@ export function OverviewPage() {
           size='sm'
           variant='tertiary'
           isPending={refreshing}
-          // All three share one connection: the first refetch reconnects it
-          // and the others await the fresh frames of that connection.
+          // The first three share one connection: the first refetch
+          // reconnects it and the others await its fresh frames; tasks take
+          // a new one-shot snapshot.
           onPress={() => {
             void overview.refetch()
             void traffic.refetch()
             void nodes.refetch()
+            void tasks.refetch()
           }}
         >
           <ArrowRotateLeft className='size-4' />
@@ -91,7 +102,10 @@ export function OverviewPage() {
         <BandwidthPanel query={traffic} />
         <AttentionPanel
           overview={overview.data}
-          isLoading={overview.isPending}
+          attentionTasks={
+            tasks.isPending ? undefined : (tasks.data?.attention ?? 0)
+          }
+          isLoading={overview.isPending || tasks.isPending}
         />
       </div>
       <div className='grid gap-6 lg:grid-cols-12'>
@@ -99,7 +113,7 @@ export function OverviewPage() {
         <StatusClassPanel query={traffic} />
       </div>
       <NodeHealthPanel query={nodes} nodes={health?.ordered} />
-      <RecentTasksPanel query={overview} />
+      <RecentTasksPanel query={tasks} />
     </Page>
   )
 }
@@ -250,12 +264,17 @@ function OverviewKpis({
 
 function AttentionPanel({
   overview,
+  attentionTasks,
   isLoading,
 }: {
   overview?: Overview
+  attentionTasks: number | undefined
   isLoading: boolean
 }) {
-  const items = overview ? attentionItems(overview) : undefined
+  const items =
+    overview && attentionTasks !== undefined
+      ? attentionItems(overview, attentionTasks)
+      : undefined
   return (
     <Widget className='min-w-0 lg:col-span-4'>
       <Widget.Header>
@@ -280,7 +299,7 @@ function AttentionPanel({
                 size='sm'
                 icon={<CircleCheck />}
                 title='一切正常'
-                description='没有同步异常、到期证书、待重试任务或未在线节点。'
+                description='没有同步异常、到期证书、需关注任务或未在线节点。'
               />
             )}
           >
@@ -420,65 +439,50 @@ function NodeHealthPanel({
   )
 }
 
-const markerColumns: DataGridColumn<OverviewMarker>[] = [
+const taskColumns: DataGridColumn<Operation>[] = [
   {
-    id: 'task',
+    id: 'operation',
     header: '任务',
     isRowHeader: true,
-    minWidth: 140,
-    cell: (marker) => (
-      <Link href={taskHref(marker)} className='font-medium'>
-        {taskTitle(marker)}
+    minWidth: 240,
+    cell: (operation) => (
+      <Link
+        href={operationHref(operation.id)}
+        className='block truncate font-medium'
+      >
+        {operationTitle(operation)}
       </Link>
     ),
   },
   {
-    id: 'resource',
-    header: '关联资源',
-    minWidth: 180,
-    cell: (marker) => {
-      const target = taskResourceTarget({
-        resource_type: marker.resource_type,
-        resource_id: marker.resource_id,
-        name: marker.resource_name,
-      })
-      return (
-        <Link
-          href={target.href}
-          routerOptions={target.state && { state: target.state }}
-          className='truncate'
-        >
-          {marker.resource_name}
-        </Link>
-      )
-    },
+    id: 'actor',
+    header: '发起人',
+    minWidth: 100,
+    cell: (operation) => (
+      <span className='block truncate'>{actorLabel(operation) || '—'}</span>
+    ),
   },
   {
     id: 'status',
     header: '状态',
     minWidth: 100,
-    cell: (marker) => (
-      <StatusChip
-        status={marker.status}
-        label={taskStatuses[marker.status as keyof typeof taskStatuses]}
-        tone={taskStatusTones[marker.status as keyof typeof taskStatusTones]}
-        reserve={taskStatusLabels}
-      />
-    ),
+    cell: (operation) => {
+      const status = describeOperationStatus(operation.status)
+      return (
+        <StatusChip
+          label={status.label}
+          tone={status.tone}
+          reserve={operationStatusLabels}
+        />
+      )
+    },
   },
   {
-    id: 'error',
-    header: '最近错误',
-    minWidth: 200,
-    cell: (marker) => (
-      <TruncatedText text={marker.last_error} className='max-w-72 text-muted' />
-    ),
-  },
-  {
-    id: 'updated_at',
-    header: '更新时间',
-    cell: (marker) => (
-      <RelativeTime value={marker.updated_at} className='text-muted' />
+    id: 'created_at',
+    header: '时间',
+    minWidth: 100,
+    cell: (operation) => (
+      <RelativeTime value={operation.created_at} className='text-muted' />
     ),
   },
 ]
@@ -487,7 +491,7 @@ function RecentTasksPanel({
   query,
 }: {
   query: {
-    data?: { recent_markers: OverviewMarker[] }
+    data?: { list: Operation[] }
     isPending: boolean
     isError: boolean
     error: unknown
@@ -503,16 +507,13 @@ function RecentTasksPanel({
       <Widget.Content className='p-0'>
         <DataTable
           label='最近任务'
-          columns={markerColumns}
-          data={query.data?.recent_markers.slice(0, 6)}
+          columns={taskColumns}
+          data={query.data?.list}
           isLoading={query.isPending}
           error={query.isError ? query.error : undefined}
           onRetry={query.refetch}
-          minWidth={760}
-          empty={{
-            title: '暂无任务',
-            description: '创建资源或提交配置后，可在这里查看执行情况。',
-          }}
+          minWidth={640}
+          empty={{ title: '暂无任务' }}
         />
       </Widget.Content>
     </Widget>

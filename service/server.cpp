@@ -63,7 +63,7 @@
 #include "service/features/certificate/worker.h"
 #include "service/features/dns_sync/worker.h"
 #include "service/features/initial_admin/bootstrap.h"
-#include "service/features/live_resource/node_runtime.h"
+#include "service/features/live_resource/notification_reader.h"
 #include "service/features/log_ingest/fanout.h"
 #include "service/features/log_ingest/ingest.h"
 #include "service/features/node_release/catalog.h"
@@ -140,8 +140,20 @@ ruvia::db_config configure_database(ruvia::application& app) {
     return db_config;
 }
 
-void configure_redis(ruvia::application& app) {
-    app.redis({.config_ = service::config::redis_config(app.env())});
+ruvia::redis_config configure_redis(ruvia::application& app) {
+    auto config = service::config::redis_config(app.env());
+    app.redis({.config_ = config});
+    return config;
+}
+
+// Every Web Worker owns its live delivery state; nothing is shared between
+// workers. Changes arrive only through the worker's own Redis readers.
+void configure_worker_states(ruvia::application& app) {
+    app.use_worker_state<service::live_resource::hub>();
+    app.use_worker_state<service::live_resource::node_deadlines>();
+    app.use_worker_state<service::live_resource::notifications::sender>();
+    app.use_worker_state<service::node_dispatch::fanout::hub>();
+    app.use_worker_state<service::log_ingest::fanout::hub>();
 }
 
 std::filesystem::path system_ca_bundle([[maybe_unused]] const std::filesystem::path& runtime_dir) {
@@ -348,7 +360,8 @@ int main(int argc, char* argv[]) {
         configure_document_root(app, runtime_dir);
         auto database = configure_database(app);
         service::initial_admin::initialize(database, std::move(initial_admin));
-        configure_redis(app);
+        const auto redis = configure_redis(app);
+        configure_worker_states(app);
         configure_outbound_origins(app, runtime_dir);
         configure_http_server(app);
 
@@ -389,22 +402,34 @@ int main(int argc, char* argv[]) {
                 co_await service::website_dispatch::run_worker(context);
             },
         });
+        // Background workers reuse the Redis settings; each owns one connection.
+        auto background_redis = redis;
+        background_redis.pool_size_per_worker_ = 1;
+        background_redis.blocking_pool_size_per_worker_ = 1;
         service::background::worker_pool background_workers(
-            database, service::config::get_outbound_origins(), std::move(workers));
+            database, background_redis, service::config::get_outbound_origins(), std::move(workers));
         const auto log_consumer_instance = service::utils::random_token().substr(0, 32);
         app.on_start([&background_workers, log_consumer_instance] {
                background_workers.start();
-               auto log_workers = ruvia::app().workers();
-               if (log_workers.empty()) {
-                   throw std::runtime_error("log fanout requires a web worker");
+               auto web_workers = ruvia::app().workers();
+               if (web_workers.empty()) {
+                   throw std::runtime_error("resource notifications require a web worker");
                }
-               for (auto& worker : log_workers) {
+               for (auto& worker : web_workers) {
                    const auto deadlines_posted = worker.post(
                        [](ruvia::web_worker_context& context) -> ruvia::task<void> {
                            co_await service::live_resource::seed_node_deadlines(context);
+                           co_await service::live_resource::get_node_deadlines(context).run(context);
                        });
                    if (!deadlines_posted.accepted()) {
-                       throw std::runtime_error("node deadline initialization could not start");
+                       throw std::runtime_error("node deadlines could not start");
+                   }
+                   const auto notifications_posted = worker.post(
+                       [](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                           co_await service::live_resource::run_notification_reader(context);
+                       });
+                   if (!notifications_posted.accepted()) {
+                       throw std::runtime_error("resource notification reader could not start");
                    }
                    const auto fanout_posted = worker.post(
                        [](ruvia::web_worker_context& context) -> ruvia::task<void> {

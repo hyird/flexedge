@@ -21,7 +21,9 @@
 #include "service/features/node_dispatch/apply_history.h"
 #include "service/features/sync_runtime/state.h"
 #include "support/attempt_trace_fixture.h"
+#include "support/operation_fixture.h"
 #include "support/postgres_test.h"
+#include "support/recorded_notifications.h"
 
 namespace {
 
@@ -57,18 +59,12 @@ constexpr std::string_view legacy_task = "00000000-0000-4000-8000-000000000161";
 constexpr std::string_view legacy_resource = "00000000-0000-4000-8000-000000000162";
 
 std::vector<std::string> canaries;
+// The task and subtask doing the marker's DNS sync, and a task of the same
+// tenant that does other work.
+service::operation::work_owner dns_owner;
+service::operation::work_owner provider_owner;
 
-struct read_context final {
-    ruvia::db_handle handle_;
-    std::pmr::memory_resource* pool_;
-
-    ruvia::db_handle& db() {
-        return handle_;
-    }
-    [[nodiscard]] std::pmr::memory_resource* pool() const {
-        return pool_;
-    }
-};
+using read_context = test_support::read_context<ruvia::db_handle>;
 
 ruvia::db_config with_database(const ruvia::db_config& base, std::string_view database) {
     auto config = base;
@@ -84,11 +80,15 @@ std::string text(const ruvia::db_rows& rows, std::size_t column = 0) {
     return std::string(rows.front()[column].value().value_or(""));
 }
 
-std::vector<ruvia::db_migration> migrations_before_traces() {
+// Migrations up to `last` (inclusive).
+std::vector<ruvia::db_migration> migrations_through(std::string_view last) {
     const auto& all = service::config::schema_migrations;
-    require(all.back().id() == "0024_task_attempt_traces", "0024 is the newest migration");
-    require(all[all.size() - 2].id() == "0023_task_attempt_details", "0024 follows 0023");
-    return {all.begin(), all.end() - 1};
+    for (std::size_t index = 0; index < all.size(); ++index) {
+        if (all[index].id() == last) {
+            return {all.begin(), all.begin() + static_cast<std::ptrdiff_t>(index + 1)};
+        }
+    }
+    throw std::runtime_error("attempt trace store: unknown migration " + std::string(last));
 }
 
 int migrate(const ruvia::db_config& config, std::span<const ruvia::db_migration> migrations,
@@ -156,6 +156,11 @@ ruvia::task<void> insert_fixture(ruvia::db_handle& db) {
         "INSERT INTO sys_sync_task(id, tenant_id, resource_type, dns_zone_id, operation, version) VALUES "
         "($1, $2, 'dns_zone', $3, 'sync', 1)",
         marker, tenant, zone);
+    dns_owner = co_await test_support::own_work(db, tenant, service::operation::action::dns_zone_sync, "dns_zone",
+        zone, service::operation::subtask_kind::dns_sync, "dns_zone", zone, 1, marker);
+    provider_owner = co_await test_support::own_work(db, tenant, service::operation::action::provider_verify,
+        "provider", provider, service::operation::subtask_kind::provider_verify, "provider", provider, 1);
+    require(!dns_owner.empty() && !provider_owner.empty(), "fixture tasks");
 }
 
 // One failed attempt through the production path: the marker transition and
@@ -187,7 +192,9 @@ ruvia::task<std::optional<std::int64_t>> record_attempt(ruvia::db_handle& db, st
     auto transaction = co_await db.begin_transaction();
     const auto transition = co_await service::sync_runtime::fail_running_and_record_event(transaction, lease, error,
         R"({"kind":"dns_sync","truncated":false})");
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, db, lease, transition, trace);
+    test_support::recorded_notifications worker{.handle_ = db};
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, worker, lease, transition, trace);
+    require(worker.sent_.size() == 1 && worker.committed_[0], "result notified after its commit");
     step.complete();
     require(transition.marker_transitioned_ && transition.event_recorded_ && transition.event_id_.has_value(),
         "attempt recorded with its id");
@@ -256,21 +263,25 @@ ruvia::task<void> verify_node_apply_trace(ruvia::db_handle& db, read_context& co
         context.pool());
     co_await transaction.commit();
     require(recorded.has_value() && recorded->version_ == 7, "node attempt id and release generation");
+    // The unowned target's failure is adopted by the system task 「后台任务」.
+    const auto node_owner = recorded->owner_;
+    require(!node_owner.empty(), "failed unowned node work belongs to a system task");
     co_await service::attempt_trace::store_attempt_trace(db,
         {.tenant_id_ = tenant, .task_id_ = release, .resource_id_ = node, .version_ = recorded->version_},
         recorded->event_id_, trace);
     result_step.complete();
 
     auto& tasks = service::task::get_task_service();
-    const auto history = co_await tasks.history(context, std::string(tenant), std::string(release), std::string(node), 7);
+    const auto history =
+        co_await tasks.history(context, std::string(tenant), node_owner.operation_id_, node_owner.subtask_id_);
     const auto summary = ruvia::from_json<summary_input>(history.get<"list">()[0].get<"trace">().view());
     require(summary && summary->get<"state">().view() == "available" &&
                 summary->get<"failed_step">()->get<"code">().view() == "validate_config" &&
                 summary->get<"steps">().size() == 3 && summary->get<"steps">()[0].get<"code">().view() == "stage_config" &&
                 summary->get<"steps">()[2].get<"code">().view() == "record_result",
         "node apply summary orders reported steps by start");
-    const auto full = co_await tasks.attempt_trace(context, std::string(tenant), std::string(release),
-        recorded->event_id_);
+    const auto full =
+        co_await tasks.attempt_trace(context, std::string(tenant), node_owner.operation_id_, recorded->event_id_);
     const auto json = std::string(ruvia::to_json(full));
     require(full.get<"kind">().view() == "node_apply" && full.get<"worker_type">().view() == "web" &&
                 full.get<"resource_type">().view() == "node" &&
@@ -294,9 +305,14 @@ ruvia::task<void> verify_records(ruvia::db_client& client) {
     co_await insert_fixture(db);
     auto& tasks = service::task::get_task_service();
 
+    // Attempts retained before migration 0025 were removed with their traces.
+    const auto legacy_rows = co_await db.query("SELECT count(*) FROM sys_sync_event WHERE task_id = $1", legacy_task);
+    require(integer(legacy_rows) == 0, "attempts recorded before tasks are removed by 0025");
+
     // A recorded attempt carries its summary in the history and its full trace.
     const auto first = co_await record_attempt(db, "Cloudflare API 连接失败");
-    const auto history = co_await tasks.history(context, std::string(tenant), std::string(marker), std::string(zone), 1);
+    const auto history = co_await tasks.history(context, std::string(tenant), dns_owner.operation_id_,
+        dns_owner.subtask_id_);
     require(history.get<"list">().size() == 1, "one attempt");
     const auto summary = ruvia::from_json<summary_input>(history.get<"list">()[0].get<"trace">().view());
     require(summary.has_value(), "trace summary matches its contract");
@@ -305,44 +321,30 @@ ruvia::task<void> verify_records(ruvia::db_client& client) {
                 summary->get<"failed_step">()->get<"code">().view() == "find_zone" &&
                 summary->get<"call_count">().value_ == 1 && summary->get<"steps">().size() == 2,
         "summary of the stored trace");
-    const auto full = co_await tasks.attempt_trace(context, std::string(tenant), std::string(marker), *first);
+    const auto full = co_await tasks.attempt_trace(context, std::string(tenant), dns_owner.operation_id_, *first);
     const auto json = std::string(ruvia::to_json(full));
     require(full.get<"state">().view() == "available" && full.get<"kind">().view() == "dns_sync" &&
                 full.get<"worker_type">().view() == "dns-sync" && full.get<"attempt">().value_ == 1 &&
                 full.get<"outcome">().view() == "failed" && full.get<"resource_type">().view() == "dns_zone" &&
-                full.get<"steps">().is_array() && json.find("connect_failed") != std::string::npos &&
-                json.find("Bearer") == std::string::npos,
+                full.get<"subtask_id">().view() == dns_owner.subtask_id_ && full.get<"steps">().is_array() &&
+                json.find("connect_failed") != std::string::npos && json.find("Bearer") == std::string::npos,
         "full trace joined with its attempt: " + json.substr(0, 300));
 
-    // Tenant and task scoping, and attempts without a trace.
+    // Tenant and task scoping.
     bool other_tenant_rejected = false;
     try {
-        (void)co_await tasks.attempt_trace(context, std::string(other_tenant), std::string(marker), *first);
+        (void)co_await tasks.attempt_trace(context, std::string(other_tenant), dns_owner.operation_id_, *first);
     } catch (const std::exception&) {
         other_tenant_rejected = true;
     }
     require(other_tenant_rejected, "another tenant cannot read the trace");
     bool other_task_rejected = false;
     try {
-        (void)co_await tasks.attempt_trace(context, std::string(tenant), std::string(legacy_task), *first);
+        (void)co_await tasks.attempt_trace(context, std::string(tenant), provider_owner.operation_id_, *first);
     } catch (const std::exception&) {
         other_task_rejected = true;
     }
-    require(other_task_rejected, "the attempt must belong to the task");
-    const auto legacy_rows =
-        co_await db.query("SELECT id FROM sys_sync_event WHERE task_id = $1", legacy_task);
-    const auto legacy = co_await tasks.attempt_trace(context, std::string(tenant), std::string(legacy_task),
-        integer(legacy_rows));
-    require(legacy.get<"state">().view() == "none" && legacy.get<"kind">().view() == "none" &&
-                legacy.get<"worker_type">().view() == "dns-sync" && legacy.get<"steps">().view() == "[]",
-        "attempt before traces reads as none");
-    const auto legacy_history =
-        co_await tasks.history(context, std::string(tenant), std::string(legacy_task), std::string(legacy_resource), 1);
-    const auto legacy_summary = ruvia::from_json<summary_input>(legacy_history.get<"list">()[0].get<"trace">().view());
-    require(legacy_summary && legacy_summary->get<"state">().view() == "none" &&
-                legacy_summary->get<"attempt_id">().view() == std::to_string(integer(legacy_rows)) &&
-                !legacy_summary->get<"failed_step">().has_value(),
-        "history summary of an attempt without trace");
+    require(other_task_rejected, "the attempt must belong to a subtask of the task");
 
     // Retention: the newest attempts and the first one keep their traces.
     std::vector<std::int64_t> ids{*first};
@@ -380,12 +382,18 @@ ruvia::task<void> verify_records(ruvia::db_client& client) {
                 integer(after, 4) == 0 && text(after, 5) == "failed",
         "failure, lease release and retry schedule unchanged without a stored trace");
     const auto isolated_history =
-        co_await tasks.history(context, std::string(tenant), std::string(marker), std::string(zone), 1);
+        co_await tasks.history(context, std::string(tenant), dns_owner.operation_id_, dns_owner.subtask_id_);
     const auto isolated_summary =
         ruvia::from_json<summary_input>(isolated_history.get<"list">()[0].get<"trace">().view());
     require(isolated_summary && isolated_summary->get<"state">().view() == "none" &&
-                isolated_summary->get<"attempt_id">().view() == std::to_string(*isolated),
+                isolated_summary->get<"attempt_id">().view() == std::to_string(*isolated) &&
+                !isolated_summary->get<"failed_step">().has_value(),
         "history shows the attempt without a trace");
+    const auto untraced = co_await tasks.attempt_trace(context, std::string(tenant), dns_owner.operation_id_, *isolated);
+    require(untraced.get<"state">().view() == "none" && untraced.get<"kind">().view() == "dns_sync" &&
+                untraced.get<"worker_type">().view() == "dns-sync" && untraced.get<"steps">().view() == "[]" &&
+                untraced.get<"attempt">().value_ == 26,
+        "an attempt without a stored trace reads as none");
     (void)co_await db.execute("ALTER TABLE sys_sync_event_trace DROP CONSTRAINT ck_forced_failure");
 
     co_await verify_node_apply_trace(db, context);
@@ -393,7 +401,8 @@ ruvia::task<void> verify_records(ruvia::db_client& client) {
     // Retention of the history removes the traces with their attempts.
     (void)co_await db.execute(
         "UPDATE sys_sync_event SET emitted_at = NOW() - INTERVAL '8 days' WHERE tenant_id = $1", tenant);
-    co_await service::sync_runtime::prune_result_events(db);
+    test_support::recorded_notifications pruner{.handle_ = db};
+    co_await service::sync_runtime::prune_result_events(pruner);
     require(co_await trace_count(db) == 0, "traces follow the 7 day history retention");
     const auto orphaned = co_await db.query("SELECT count(*) FROM sys_sync_event_trace");
     require(integer(orphaned) == 0, "no trace without its attempt");
@@ -436,13 +445,17 @@ int main() {
     const auto drift = with_database(*base, drift_database);
     const auto& all = service::config::schema_migrations;
     try {
-        const auto before = migrations_before_traces();
+        const auto before = migrations_through("0023_task_attempt_details");
+        const auto through_traces = migrations_through("0024_task_attempt_traces");
         if (test_support::run_postgres_test(*base, recreate_databases) != 0 ||
             migrate(fresh, all, all.size(), "fresh install") != 0 || migrate(fresh, all, 0, "fresh repeat") != 0 ||
             test_support::run_postgres_test(fresh, verify_schema) != 0 ||
             migrate(upgrade, before, before.size(), "0023 install") != 0 ||
             test_support::run_postgres_test(upgrade, insert_legacy_rows) != 0 ||
-            migrate(upgrade, all, 1, "0024 upgrade") != 0 || migrate(upgrade, all, 0, "upgrade repeat") != 0 ||
+            migrate(upgrade, through_traces, 1, "0024 upgrade") != 0 ||
+            test_support::run_postgres_test(upgrade, verify_schema) != 0 ||
+            migrate(upgrade, all, all.size() - through_traces.size(), "0025 upgrade") != 0 ||
+            migrate(upgrade, all, 0, "upgrade repeat") != 0 ||
             test_support::run_postgres_test(upgrade, verify_schema) != 0 ||
             test_support::run_postgres_test(upgrade, verify_records) != 0 ||
             migrate(drift, before, before.size(), "drift install") != 0 ||

@@ -230,6 +230,15 @@ describe('node API contracts', () => {
   it('does not expose unsolicited update data as credentials', async () => {
     respond({ code: 0, message: 'updated', data: { secret: 'unvalidated' } })
     expect((await updateNode({ id, revision: 7 }, input)).data).toBeUndefined()
+    // Only the started task survives (operation-tasks contract §6).
+    respond({
+      code: 0,
+      message: 'updated',
+      data: { secret: 'unvalidated', operation_id: 'op-1' },
+    })
+    expect((await updateNode({ id, revision: 7 }, input)).data).toEqual({
+      operation_id: 'op-1',
+    })
   })
 
   it('patches the node detail stream in place without a new snapshot', async () => {

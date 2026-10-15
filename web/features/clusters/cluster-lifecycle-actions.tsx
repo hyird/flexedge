@@ -2,9 +2,10 @@ import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { TrashBin } from '@gravity-ui/icons'
-import { Button, toast } from '@heroui/react'
+import { Button } from '@heroui/react'
 import { queryKeys } from '@/lib/query-keys'
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { clusterSnapshotKey, removeCluster } from './data'
 import type { Cluster } from './types'
 
@@ -37,7 +38,7 @@ export function ClusterLifecycleActions({ cluster }: { cluster: Cluster }) {
         confirmLabel='删除集群'
         onConfirm={async () => {
           const response = await removeCluster(cluster)
-          toast.success(response.message)
+          toastWriteSuccess(response.message, response.data)
           // The cluster is gone, so an unsaved configuration draft is moot.
           await navigate({
             to: '/clusters',

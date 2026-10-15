@@ -32,8 +32,7 @@ ruvia::task<void> run_marker_worker_loop(worker_context& context, std::chrono::s
                 break;
             }
             if (std::chrono::steady_clock::now() >= next_event_prune) {
-                auto db = context.db();
-                co_await service::sync_runtime::prune_result_events(db);
+                co_await service::sync_runtime::prune_result_events(context);
                 next_event_prune = std::chrono::steady_clock::now() + std::chrono::hours{1};
             }
             if (context.get_stop_token().stop_requested()) {

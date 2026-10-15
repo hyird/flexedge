@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "service/features/live_resource/fanout.h"
+#include "service/features/live_resource/notifications.h"
 #include "service/features/live_resource/snapshot_cache.h"
 
 #define REQUIRE(condition)                                                                  \
@@ -528,43 +529,89 @@ int main() {
         node.reset();
         fanout.publish("tenant-a", resource::nodes, "node-a");
 
-        // Same-class readers receive only notifications published by their own worker.
-        std::optional<hub::subscription> worker_a;
-        worker_a.emplace(fanout.subscribe(first_loop.handle(), "tenant-a", resource::tasks,
-            "worker-filter-probe"));
-        auto worker_b = fanout.subscribe(second_loop.handle(), "tenant-a", resource::tasks,
-            "worker-filter-probe");
-        const auto worker_a_id = first_loop.handle().id();
-        const auto worker_b_id = second_loop.handle().id();
-        fanout.publish_for_worker(worker_a_id, "tenant-a", resource::tasks, "worker-filter-probe");
-        REQUIRE(first_loop.start(receive(*worker_a, std::chrono::seconds(1))).get().has_value());
-        REQUIRE(worker_a->drain().snapshot_);
-        REQUIRE(second_loop.start(receive(worker_b, std::chrono::milliseconds(20))).get().status() ==
+        // Subtask attempt notices reach only incremental parts of exactly that
+        // operation in that tenant; other operation subscriptions just re-read.
+        using service::live_resource::subscription_part;
+        using service::live_resource::task_attempt_notice;
+        std::vector<subscription_part> history_parts;
+        history_parts.push_back({resource::operations, "task-a", service::live_resource::query_key("history", "s"), true});
+        history_parts.push_back({resource::operations, "task-a", service::live_resource::query_key("detail")});
+        auto history = fanout.subscribe(first_loop.handle(), "tenant-a", std::move(history_parts));
+        auto other_task = fanout.subscribe(first_loop.handle(), "tenant-a", resource::operations, "task-b");
+        auto task_list = fanout.subscribe(second_loop.handle(), "tenant-a", resource::operations);
+        std::vector<subscription_part> foreign_parts;
+        foreign_parts.push_back({resource::operations, "task-a", service::live_resource::query_key("history", "s"), true});
+        auto foreign_history = fanout.subscribe(second_loop.handle(), "tenant-b", std::move(foreign_parts));
+        fanout.publish_task_attempt("tenant-a", "task-a", {.subtask_id_ = "s", .event_id_ = 7});
+        REQUIRE(first_loop.start(receive(history, std::chrono::seconds(1))).get().has_value());
+        const auto attempt = history.drain(0);
+        REQUIRE(attempt.task_attempts_.size() == 1 && attempt.task_attempts_[0].event_id_ == 7 &&
+                !attempt.history_reset_ && !attempt.recovery_);
+        REQUIRE(history.drain(1).snapshot_ && history.drain(1).task_attempts_.empty());
+        REQUIRE(second_loop.start(receive(task_list, std::chrono::seconds(1))).get().has_value());
+        REQUIRE(task_list.drain().task_attempts_.empty());
+        REQUIRE(first_loop.start(receive(other_task, std::chrono::milliseconds(20))).get().status() ==
                 ruvia::worker_wait_status::timed_out);
+        REQUIRE(second_loop.start(receive(foreign_history, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::worker_wait_status::timed_out);
+        // A part that falls behind drops its notices for one recovery snapshot.
+        for (std::int64_t event = 0; event <= static_cast<std::int64_t>(service::live_resource::max_pending_task_attempts);
+            ++event) {
+            fanout.publish_task_attempt("tenant-a", "task-a", {.subtask_id_ = "s", .event_id_ = event});
+        }
+        const auto overflow = history.drain(0);
+        REQUIRE(overflow.history_reset_ && overflow.task_attempts_.empty());
+        fanout.reset_task_history("tenant-a", "task-a");
+        REQUIRE(history.drain(0).history_reset_);
+        // A recovery reaches every subscription of the tenant once, marked so
+        // the stream writes it even when its bytes are unchanged.
+        fanout.recover("tenant-a");
+        const auto recovered = history.drain(0);
+        REQUIRE(recovered.snapshot_ && recovered.history_reset_ && recovered.recovery_);
+        const auto other_recovered = other_task.drain();
+        REQUIRE(other_recovered.snapshot_ && other_recovered.recovery_ && !foreign_history.drain().snapshot_);
+        // Ordinary changes are not recoveries.
+        fanout.publish("tenant-a", resource::operations, "task-b");
+        const auto ordinary = other_task.drain();
+        REQUIRE(ordinary.snapshot_ && !ordinary.recovery_);
 
-        fanout.publish_for_worker(worker_a_id, "tenant-a", resource::tasks, "worker-filter-probe");
-        fanout.publish_for_worker(worker_a_id, "tenant-a", resource::tasks, "worker-filter-probe");
-        REQUIRE(first_loop.start(receive(*worker_a, std::chrono::seconds(1))).get().has_value());
-        REQUIRE(worker_a->drain().snapshot_);
-        REQUIRE(first_loop.start(receive(*worker_a, std::chrono::milliseconds(20))).get().status() ==
-                ruvia::worker_wait_status::timed_out);
-        REQUIRE(second_loop.start(receive(worker_b, std::chrono::milliseconds(20))).get().status() ==
-                ruvia::worker_wait_status::timed_out);
+        // A stream part writes a snapshot only when its bytes changed, however
+        // often the cache re-read it; forgetting (initial, recovery) writes again.
+        service::live_resource::written_snapshot written;
+        REQUIRE(written.replace(R"({"name":"a"})"));
+        REQUIRE(!written.replace(R"({"name":"a"})"));
+        REQUIRE(!written.replace(std::string(R"({"name":"a"})")));
+        REQUIRE(written.replace(R"({"name":"b"})"));
+        REQUIRE(!written.replace(R"({"name":"b"})"));
+        REQUIRE(written.replace(R"({"name":"a"})"));
+        written.forget();
+        REQUIRE(written.replace(R"({"name":"a"})"));
+        REQUIRE(!written.replace(R"({"name":"a"})"));
+        REQUIRE(written.replace(std::string(R"({"name":"a"})") + std::string(1, '\0')));
 
-        fanout.publish_for_worker(worker_b_id, "tenant-a", resource::tasks, "worker-filter-probe");
-        REQUIRE(second_loop.start(receive(worker_b, std::chrono::seconds(1))).get().has_value());
-        REQUIRE(worker_b.drain().snapshot_);
-        REQUIRE(first_loop.start(receive(*worker_a, std::chrono::milliseconds(20))).get().status() ==
-                ruvia::worker_wait_status::timed_out);
-
-        // Releasing one worker's subscription prevents later targeted events from leaving stale work.
-        worker_a.reset();
-        fanout.publish_for_worker(worker_a_id, "tenant-a", resource::tasks, "worker-filter-probe");
-        REQUIRE(second_loop.start(receive(worker_b, std::chrono::milliseconds(20))).get().status() ==
-                ruvia::worker_wait_status::timed_out);
-        fanout.publish_for_worker(worker_b_id, "tenant-a", resource::tasks, "worker-filter-probe");
-        REQUIRE(second_loop.start(receive(worker_b, std::chrono::seconds(1))).get().has_value());
-        REQUIRE(worker_b.drain().snapshot_);
+        // Stream entries round-trip; oversized lists degrade to a recovery.
+        namespace notifications = service::live_resource::notifications;
+        notifications::resource_notification sent("tenant-a");
+        sent.changed(resource::websites, "site")
+            .changed(resource::operations)
+            .task_attempt("task-a", {.subtask_id_ = "s", .event_id_ = 9})
+            .task_history_reset("task-b")
+            .node_runtime("node-a", R"({"id":"node-a"})")
+            .origin_runtime("site", R"({"id":"site"})")
+            .node_config();
+        const auto fields = notifications::encode(notifications::bounded(sent));
+        const auto parsed = notifications::decode(fields);
+        REQUIRE(parsed && parsed->tenant_id_ == "tenant-a" && parsed->changes_ == sent.changes_ &&
+                parsed->task_attempts_.size() == 1 && parsed->task_attempts_[0].notice_.event_id_ == 9 &&
+                parsed->task_attempts_[0].notice_.subtask_id_ == "s" && parsed->task_history_resets_[0] == "task-b" &&
+                parsed->node_id_ == "node-a" && parsed->node_runtime_ == R"({"id":"node-a"})" &&
+                parsed->origin_runtime_.size() == 1 && parsed->node_config_ && !parsed->missed_until_);
+        notifications::resource_notification many("tenant-a");
+        for (std::size_t index = 0; index <= notifications::max_items; ++index) {
+            many.changed(resource::websites, "site-" + std::to_string(index));
+        }
+        const auto degraded = notifications::bounded(many);
+        REQUIRE(degraded.changes_.empty() && degraded.missed_until_);
 
         run_query_key_tests();
         run_snapshot_cache_tests();

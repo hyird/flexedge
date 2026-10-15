@@ -19,14 +19,14 @@
 #include "service/features/certificate/dns_challenge.h"
 #include "service/features/certificate/queue.h"
 #include "service/features/dns/registry.h"
-#include "service/features/live_resource/fanout.h"
+#include "service/features/live_resource/notifications.h"
 #include "service/features/sync_runtime/state.h"
 
 namespace service::certificate {
 
 class certificate_command_service final {
 public:
-    ruvia::task<void> create(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<std::optional<std::string>> create(ruvia::context& c, const std::string& tenant_id,
         const create_certificate_body& body) {
         const auto& domain_input = body.get<"domain">();
         const auto& provider_id_input = body.get<"certificate_provider_id">();
@@ -96,13 +96,12 @@ public:
             }
             throw;
         }
+        auto origin = start(c, service::operation::action::certificate_create, certificate_id);
         (void)co_await service::certificate_issuance::enqueue_certificate_revision(
-            transaction, tenant_id, certificate_id, 1, service::sync_runtime::marker_operation::issue);
+            transaction, tenant_id, certificate_id, 1, service::sync_runtime::marker_operation::issue, origin);
         co_await transaction.commit();
-        service::live_resource::get_hub().publish(tenant_id, service::live_resource::resource::certificates,
-            certificate_id);
-        service::live_resource::get_hub().publish(tenant_id, service::live_resource::resource::tasks);
-        co_return;
+        co_await notify(c, tenant_id, certificate_id, origin);
+        co_return origin.operation_id();
     }
 
     ruvia::task<void> update(
@@ -134,13 +133,15 @@ public:
             service::common::throw_app_error(certificate_error::revision_conflict);
         }
         co_await transaction.commit();
-        service::live_resource::get_hub().publish(tenant_id, service::live_resource::resource::certificates, id);
-        service::live_resource::get_hub().publish(tenant_id, service::live_resource::resource::tasks);
+        co_await service::live_resource::notify(c,
+            service::live_resource::notifications::resource_notification(tenant_id)
+                .changed(service::live_resource::resource::certificates, id));
         co_return;
     }
 
-    ruvia::task<void> renew(ruvia::context& c, const std::string& tenant_id, const std::string& id,
-        std::int64_t expected_revision) {
+    ruvia::task<std::optional<std::string>> renew(ruvia::context& c, const std::string& tenant_id,
+        const std::string& id, std::int64_t expected_revision) {
+        auto origin = start(c, service::operation::action::certificate_renew, id);
         auto transaction = co_await c.db().begin_transaction();
         const auto rows = co_await transaction.query(
             "SELECT revision, issuance_revision, issued_revision FROM sys_certificate WHERE id = "
@@ -165,16 +166,15 @@ public:
             service::common::throw_app_error(certificate_error::revision_conflict);
         }
         (void)co_await service::certificate_issuance::enqueue_certificate_revision(
-            transaction, tenant_id, id, issuance_revision,
-            service::sync_runtime::marker_operation::renew);
+            transaction, tenant_id, id, issuance_revision, service::sync_runtime::marker_operation::renew, origin);
         co_await transaction.commit();
-        service::live_resource::get_hub().publish(tenant_id, service::live_resource::resource::certificates, id);
-        service::live_resource::get_hub().publish(tenant_id, service::live_resource::resource::tasks);
-        co_return;
+        co_await notify(c, tenant_id, id, origin);
+        co_return origin.operation_id();
     }
 
-    ruvia::task<void> remove(ruvia::context& c, const std::string& tenant_id, const std::string& id,
-        std::int64_t expected_revision) {
+    ruvia::task<std::optional<std::string>> remove(ruvia::context& c, const std::string& tenant_id,
+        const std::string& id, std::int64_t expected_revision) {
+        auto origin = start(c, service::operation::action::certificate_delete, id);
         auto transaction = co_await c.db().begin_transaction();
         const auto certificates =
             co_await transaction.query(
@@ -205,16 +205,32 @@ public:
             service::common::throw_app_error(certificate_error::not_found);
         }
         co_await service::certificate_issuance::retire_dns_challenges_for_deleted_certificate(
-            transaction, tenant_id, dns_zone_id, id);
+            transaction, tenant_id, dns_zone_id, id, origin);
         co_await service::sync_runtime::remove_marker(
-            transaction, tenant_id, service::sync_runtime::marker_resource_type::certificate, id);
+            transaction, tenant_id, service::sync_runtime::marker_resource_type::certificate, id, origin);
         co_await transaction.commit();
-        service::live_resource::get_hub().publish(tenant_id, service::live_resource::resource::certificates, id);
-        service::live_resource::get_hub().publish(tenant_id, service::live_resource::resource::tasks);
-        co_return;
+        co_await notify(c, tenant_id, id, origin);
+        co_return origin.operation_id();
     }
 
 private:
+    static service::operation::work_origin start(ruvia::context& c, service::operation::action action,
+        const std::string& id) {
+        return service::operation::work_origin::start({.action_ = action,
+            .actor_id_ = service::middleware::current_principal(c).admin_id_,
+            .target_type_ = "certificate",
+            .target_id_ = id,
+            .summary_ = "{}"});
+    }
+
+    static ruvia::task<void> notify(ruvia::context& c, const std::string& tenant_id, const std::string& id,
+        const service::operation::work_origin& origin) {
+        service::live_resource::notifications::resource_notification notification(tenant_id);
+        notification.changed(service::live_resource::resource::certificates, id);
+        origin.add_changes(notification);
+        co_await service::live_resource::notify(c, notification);
+    }
+
     static std::string
     serialize_certificate_config(ruvia::context& c,
         const service::certificate_issuance::certificate_config_data& config) {

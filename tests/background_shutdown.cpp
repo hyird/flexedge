@@ -11,6 +11,7 @@
 
 #include "service/config/outbound.h"
 #include "service/features/background/worker_pool.h"
+#include "support/redis_test.h"
 
 namespace {
 
@@ -48,6 +49,11 @@ int main() {
 
     try {
         auto db = isolated_postgres_config();
+        // Every background worker owns its Redis connection as well.
+        const auto redis = test_support::isolated_redis_config();
+        if (!redis) {
+            return 77;
+        }
         auto origins = service::config::make_outbound_origins("");
         std::atomic_bool query_started{};
         std::atomic_bool worker_finished{};
@@ -57,6 +63,8 @@ int main() {
             .outbound_aliases_ = {},
             .run_ = [&query_started, &worker_finished](service::background::worker_context& context)
                 -> ruvia::task<void> {
+                // The worker's own Redis connection is usable on its loop.
+                co_await context.redis().ping();
                 query_started.store(true, std::memory_order_release);
                 try {
                     (void)co_await context.db().query("SELECT pg_sleep(30)");
@@ -67,7 +75,7 @@ int main() {
                 worker_finished.store(true, std::memory_order_release);
             },
         });
-        service::background::worker_pool pool(db, origins, std::move(definitions));
+        service::background::worker_pool pool(db, *redis, origins, std::move(definitions));
         pool.start();
 
         const auto started_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -96,7 +104,7 @@ int main() {
             .run_ = [](service::background::worker_context&) -> ruvia::task<void> { co_return; },
         });
         service::background::worker_pool unavailable_pool(
-            unavailable_db, origins, std::move(unavailable_workers));
+            unavailable_db, *redis, origins, std::move(unavailable_workers));
         bool connection_failure_observed{};
         try {
             unavailable_pool.start();

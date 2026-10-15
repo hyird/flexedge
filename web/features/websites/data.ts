@@ -77,6 +77,8 @@ type WebsiteInput = {
 const createdWebsiteSchema = z.object({
   id: z.string().uuid(),
   revision: z.number().int().positive(),
+  // Contract (operation-tasks §6): the task the creation started.
+  operation_id: z.string().optional(),
 })
 
 /** `POST /websites?cluster_id=` answers `{ id, revision }` of the new website. */

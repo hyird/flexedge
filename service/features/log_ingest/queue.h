@@ -14,9 +14,11 @@
 #include <utility>
 #include <vector>
 
-#include "service/features/log_ingest/redis_protocol.h"
+#include "service/utils/redis_reply.h"
 
 namespace service::log_ingest::queue {
+
+using service::utils::require_redis_success;
 
 inline constexpr std::string_view stream_key{"flexedge:log-deliveries:v3"};
 inline constexpr std::string_view retained_bytes_key{"flexedge:log-deliveries:v3:bytes"};

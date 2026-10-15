@@ -2,12 +2,16 @@
 #include <ruvia/core/task.h>
 #include <ruvia/web/db/db_transaction.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
+
+#include "service/features/operation/work_origin.h"
 
 namespace service::node_dispatch {
 struct release_allocation {
@@ -52,18 +56,58 @@ inline ruvia::task<void> link_release_object(ruvia::db_transaction& transaction,
     co_return;
 }
 
+// Activates a built release: one target per eligible node, each owned by a
+// node publish subtask of `origin` (none for unowned work). Pending or failed
+// targets of earlier releases are superseded: their subtasks merge into the
+// new subtask of the same node, or are cancelled when the node is no longer
+// a target.
 inline ruvia::task<void> activate_cluster_release(ruvia::db_transaction& transaction,
-    std::string_view tenant_id, std::string_view cluster_id, std::string_view release_id,
-    std::string_view manifest_digest, std::string_view manifest_envelope) {
-    const auto targets = co_await transaction.execute(
+    std::string_view tenant_id, std::string_view cluster_id, std::string_view release_id, std::int64_t generation,
+    std::string_view manifest_digest, std::string_view manifest_envelope, service::operation::work_origin& origin) {
+    const auto targets = co_await transaction.query(
         "INSERT INTO sys_node_release_target (tenant_id, release_id, node_id, status, updated_at) "
         "SELECT node.tenant_id, $3, node.id, 'pending', NOW() FROM sys_node node WHERE "
         "node.tenant_id = $1 AND node.cluster_id = $2 AND node.registration_status = 'registered' "
         "AND node.status = 'enabled' AND node.agent_id IS NOT NULL AND "
         "node.node_secret_hash IS NOT NULL AND node.node_secret_envelope IS NOT NULL AND "
-        "node.deleted_at IS NULL",
+        "node.deleted_at IS NULL RETURNING node_id::text",
         tenant_id, cluster_id, release_id);
-    const auto target_count = static_cast<std::int64_t>(targets.affected_rows());
+    const auto target_count = static_cast<std::int64_t>(targets.size());
+    std::vector<std::pair<std::string, std::string>> owners;
+    owners.reserve(targets.size());
+    for (const auto& row : targets) {
+        const auto node_id = std::string(row[0].value().value_or(""));
+        const auto subtask = co_await origin.require_subtask(transaction, tenant_id,
+            service::operation::subtask_kind::node_publish, "node", node_id, generation);
+        if (subtask) {
+            (void)co_await transaction.execute(
+                "UPDATE sys_node_release_target SET subtask_id = $4::uuid WHERE tenant_id = $1 AND "
+                "release_id = $2 AND node_id = $3",
+                tenant_id, release_id, std::string_view(node_id), std::string_view(*subtask));
+        }
+        owners.emplace_back(node_id, subtask.value_or(""));
+    }
+    const auto superseded = co_await transaction.query(
+        "SELECT target.subtask_id::text, target.node_id::text FROM sys_node_release_target target "
+        "INNER JOIN sys_cluster_release release ON release.tenant_id = target.tenant_id AND release.id = "
+        "target.release_id INNER JOIN sys_operation_subtask subtask ON subtask.id = target.subtask_id WHERE "
+        "target.tenant_id = $1 AND release.cluster_id = $2 AND release.id <> $3 AND target.status IN "
+        "('pending', 'failed') AND subtask.state = 'open'",
+        tenant_id, cluster_id, release_id);
+    const auto closed_by = origin.operation_id().value_or("");
+    for (const auto& row : superseded) {
+        const auto subtask = std::string(row[0].value().value_or(""));
+        const auto node_id = row[1].value().value_or("");
+        const auto next = std::find_if(owners.begin(), owners.end(),
+            [&](const auto& owner) { return owner.first == node_id; });
+        if (next != owners.end() && next->second == subtask) {
+            continue;
+        }
+        const auto settled = co_await service::operation::settle_subtask(transaction, tenant_id, subtask,
+            next == owners.end() ? service::operation::state_cancelled : service::operation::state_merged,
+            next == owners.end() ? std::string_view{} : std::string_view(next->second), closed_by);
+        origin.touch(settled.value_or(""));
+    }
     (void)co_await transaction.execute(
         "UPDATE sys_cluster_release SET manifest_digest = $3, manifest_envelope = $4, status = "
         "'active', target_node_count = $5, activated_at = NOW() WHERE tenant_id = $1 AND id = $2 "

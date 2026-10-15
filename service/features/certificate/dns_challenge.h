@@ -23,6 +23,15 @@ struct dns_challenge_config_view final {
     std::string_view zone_domain_;
     std::string_view certificate_id_;
     std::int64_t minimum_record_ttl_;
+    // The issuance subtask; challenge publishing and cleanup are its children.
+    service::operation::work_owner owner_{};
+};
+
+// A DNS sync the issuance waits for, and the subtask doing it (empty for
+// unowned issuance work).
+struct queued_dns_sync final {
+    std::string marker_id_;
+    std::string subtask_id_;
 };
 
 struct dns_challenge_spec final {
@@ -33,7 +42,7 @@ struct dns_challenge_spec final {
 inline ruvia::task<void> retire_dns_challenges_for_deleted_certificate(ruvia::db_transaction& transaction,
     std::string_view tenant_id,
     std::string_view dns_zone_id,
-    std::string_view certificate_id) {
+    std::string_view certificate_id, service::operation::work_origin& origin) {
     const auto rows = co_await transaction.query(
         "SELECT runtime::text, desired_revision FROM sys_dns_zone WHERE tenant_id = $1 AND id = "
         "$2 AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
@@ -65,12 +74,26 @@ inline ruvia::task<void> retire_dns_challenges_for_deleted_certificate(ruvia::db
     }
     (void)co_await service::dns_sync::enqueue_zone_revision(
         transaction, std::string(tenant_id), std::string(dns_zone_id),
-        updated.front()[0].as<std::int64_t>().value_or(1));
+        updated.front()[0].as<std::int64_t>().value_or(1), origin);
     co_return;
 }
 
+namespace detail {
+
+template <typename transaction_type>
+ruvia::task<queued_dns_sync> queued_sync(transaction_type& transaction, std::string_view tenant_id,
+    std::string marker_id) {
+    const auto rows = co_await transaction.query(
+        "SELECT COALESCE(subtask_id::text, '') FROM sys_sync_task WHERE tenant_id = $1 AND id = $2",
+        tenant_id, std::string_view(marker_id));
+    co_return queued_dns_sync{.marker_id_ = std::move(marker_id),
+        .subtask_id_ = rows.empty() ? std::string{} : std::string(rows.front()[0].value().value_or(""))};
+}
+
+}  // namespace detail
+
 template <typename runtime_type>
-ruvia::task<std::string> persist_dns_challenges(
+ruvia::task<queued_dns_sync> persist_dns_challenges(
     runtime_type& context, const service::sync_runtime::running_marker_lease& certificate_marker,
     const dns_challenge_config_view& config, const std::vector<dns_challenge_spec>& specs) {
     auto transaction = co_await context.db().begin_transaction();
@@ -118,20 +141,25 @@ ruvia::task<std::string> persist_dns_challenges(
     if (updated.empty()) {
         throw std::runtime_error("DNS-01 托管域名版本已变化");
     }
-    const auto marker_id = co_await service::dns_sync::enqueue_zone_revision(
-        transaction, std::string(certificate_marker.marker_.tenant_id_), std::string(config.dns_zone_id_),
-        updated.front()[0].template as<std::int64_t>().value_or(1));
+    auto origin =
+        service::operation::work_origin::caused_by(config.owner_, service::operation::subtask_purpose::dns_challenge);
+    auto queued = co_await detail::queued_sync(transaction, certificate_marker.marker_.tenant_id_,
+        co_await service::dns_sync::enqueue_zone_revision(transaction,
+            std::string(certificate_marker.marker_.tenant_id_), std::string(config.dns_zone_id_),
+            updated.front()[0].template as<std::int64_t>().value_or(1), origin));
     if (!co_await service::sync_runtime::renew_running_lease(transaction, certificate_marker)) {
         throw std::runtime_error("证书同步标记 lease 已失效");
     }
     co_await transaction.commit();
-    co_return marker_id;
+    co_await service::sync_runtime::notify_origin(context, certificate_marker.marker_.tenant_id_, origin);
+    co_return queued;
 }
 
 template <typename runtime_type>
-ruvia::task<std::string>
-retire_dns_challenges(runtime_type& context, std::string_view dns_zone_id, std::string_view certificate_id,
+ruvia::task<queued_dns_sync> retire_dns_challenges(runtime_type& context, const dns_challenge_config_view& config,
     const service::sync_runtime::running_marker_lease& certificate_marker) {
+    const auto dns_zone_id = config.dns_zone_id_;
+    const auto certificate_id = config.certificate_id_;
     auto transaction = co_await context.db().begin_transaction();
     const auto rows = co_await transaction.query(
         "SELECT runtime::text, desired_revision FROM sys_dns_zone WHERE tenant_id = $1 AND id = "
@@ -151,7 +179,7 @@ retire_dns_challenges(runtime_type& context, std::string_view dns_zone_id, std::
         [&](const auto& challenge) { return challenge.certificate_id_ == certificate_id; });
     if (old_size == next_runtime.challenge_records_.size()) {
         co_await transaction.commit();
-        co_return std::string{};
+        co_return queued_dns_sync{};
     }
     const auto runtime_output =
         service::dns_sync::to_output(next_runtime, {.resource_ = context.pool()});
@@ -165,14 +193,18 @@ retire_dns_challenges(runtime_type& context, std::string_view dns_zone_id, std::
     if (updated.empty()) {
         throw std::runtime_error("DNS-01 托管域名版本已变化");
     }
-    const auto marker_id = co_await service::dns_sync::enqueue_zone_revision(
-        transaction, std::string(certificate_marker.marker_.tenant_id_), std::string(dns_zone_id),
-        updated.front()[0].template as<std::int64_t>().value_or(1));
+    auto origin = service::operation::work_origin::caused_by(config.owner_,
+        service::operation::subtask_purpose::dns_challenge_cleanup);
+    auto queued = co_await detail::queued_sync(transaction, certificate_marker.marker_.tenant_id_,
+        co_await service::dns_sync::enqueue_zone_revision(transaction,
+            std::string(certificate_marker.marker_.tenant_id_), std::string(dns_zone_id),
+            updated.front()[0].template as<std::int64_t>().value_or(1), origin));
     if (!co_await service::sync_runtime::renew_running_lease(transaction, certificate_marker)) {
         throw std::runtime_error("证书同步标记 lease 已失效");
     }
     co_await transaction.commit();
-    co_return marker_id;
+    co_await service::sync_runtime::notify_origin(context, certificate_marker.marker_.tenant_id_, origin);
+    co_return queued;
 }
 
 inline ruvia::task<void>

@@ -16,7 +16,8 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     (void)co_await tx.execute("CREATE TEMP TABLE sys_cluster (id text,tenant_id text,dns_zone_id text,hostname_prefix text,status text,release_generation bigint,current_release_id uuid,updated_at timestamptz,deleted_at timestamptz) ON COMMIT DROP");
     (void)co_await tx.execute("CREATE TEMP TABLE sys_cluster_release (id uuid DEFAULT gen_random_uuid(),tenant_id text,cluster_id text,generation bigint,schema_version bigint,status text,manifest_digest text,manifest_envelope text,target_node_count bigint,created_at timestamptz,activated_at timestamptz) ON COMMIT DROP");
     (void)co_await tx.execute("CREATE TEMP TABLE sys_node (id text,tenant_id text,cluster_id text,registration_status text,status text,agent_id text,node_secret_hash text,node_secret_envelope text,desired_release_id uuid,updated_at timestamptz,deleted_at timestamptz) ON COMMIT DROP");
-    (void)co_await tx.execute("CREATE TEMP TABLE sys_node_release_target (tenant_id text,release_id uuid,node_id text,status text,updated_at timestamptz) ON COMMIT DROP");
+    (void)co_await tx.execute("CREATE TEMP TABLE sys_node_release_target (tenant_id text,release_id uuid,node_id text,status text,updated_at timestamptz,subtask_id uuid) ON COMMIT DROP");
+    (void)co_await tx.execute("CREATE TEMP TABLE sys_operation_subtask (id uuid,tenant_id text,operation_id uuid,state text,merged_into_id uuid,closed_by_operation_id uuid,closed_at timestamptz) ON COMMIT DROP");
     (void)co_await tx.execute("CREATE TEMP TABLE sys_cluster_release_object (tenant_id text,release_id uuid,position bigint,object_digest text) ON COMMIT DROP");
     (void)co_await tx.execute("INSERT INTO sys_dns_zone VALUES ('z','t','example.com',NULL)");
     (void)co_await tx.execute("INSERT INTO sys_cluster VALUES ('c','t','z','edge','enabled',0,NULL,NOW(),NULL)");
@@ -48,7 +49,13 @@ ruvia::task<void> verify(ruvia::db_client& client) {
         const auto allocated = co_await service::node_dispatch::allocate_cluster_release(tx, "t", "c", 5);
         require(allocated.generation_ == generation && allocated.access_domain_ == "edge.example.com" && allocated.enabled_);
         co_await service::node_dispatch::link_release_object(tx, "t", allocated.id_, 0, "digest");
-        co_await service::node_dispatch::activate_cluster_release(tx, "t", "c", allocated.id_, "digest", "envelope");
+        // Unowned work (a repair) creates no subtasks; ownership is covered
+        // by the operation task tests on the real schema.
+        auto origin = service::operation::work_origin::repair();
+        co_await service::node_dispatch::activate_cluster_release(tx, "t", "c", allocated.id_, allocated.generation_,
+            "digest", "envelope", origin);
+        require(!origin.operation_id() && origin.touched().empty());
+        require((co_await tx.query("SELECT 1 FROM sys_node_release_target WHERE subtask_id IS NOT NULL")).empty());
         require((co_await service::node_dispatch::lock_current_release_schema_version(tx, "t", "c")) == 5);
         const auto targets = co_await tx.query("SELECT node_id,status FROM sys_node_release_target WHERE release_id=$1", allocated.id_);
         require(targets.size() == 1 && targets[0][0].value() == "active" && targets[0][1].value() == "pending");

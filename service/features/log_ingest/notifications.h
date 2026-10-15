@@ -12,9 +12,11 @@
 #include <string_view>
 #include <vector>
 
-#include "service/features/log_ingest/redis_protocol.h"
+#include "service/utils/redis_reply.h"
 
 namespace service::log_ingest::notifications {
+
+using service::utils::require_redis_success;
 
 inline constexpr std::string_view stream_key{"flexedge:log-notifications:v2"};
 inline constexpr std::int64_t max_entries{200000};

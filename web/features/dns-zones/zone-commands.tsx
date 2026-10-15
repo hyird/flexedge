@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { toast } from '@heroui/react'
 import { queryKeys } from '@/lib/query-keys'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Mono } from '@/components/mono'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { removeDnsZone, syncDnsZone } from './data'
 import type { DnsZone } from './types'
 
@@ -40,8 +40,8 @@ export function useZoneCommands({
       queryKey: queryKeys.dnsZones,
       refetchType: 'none',
     })
-  const onSynced = (response: { message: string }) => {
-    toast.success(response.message || '同步任务已提交')
+  const onSynced = (response: { message: string; data?: unknown }) => {
+    toastWriteSuccess(response.message || '同步任务已提交', response.data)
     void markStale()
   }
   // "立即同步" reports failures by toast; conflict resolution and removal run
@@ -56,7 +56,7 @@ export function useZoneCommands({
     meta: { inlineError: true },
     mutationFn: removeDnsZone,
     onSuccess: (response) => {
-      toast.success(response.message || '域名已移除')
+      toastWriteSuccess(response.message || '域名已移除', response.data)
       void markStale()
       onRemoved?.()
     },

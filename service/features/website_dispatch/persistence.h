@@ -9,7 +9,7 @@
 #include <string_view>
 
 #include "service/features/background/worker_pool.h"
-#include "service/features/live_resource/fanout.h"
+#include "service/features/live_resource/notifications.h"
 #include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/website_dispatch/task.h"
@@ -25,6 +25,7 @@ inline ruvia::task<void> reconcile_markers(service::background::worker_context& 
         "marker.resource_id = website.id AND marker.version = website.revision) ORDER BY "
         "website.updated_at ASC LIMIT 64");
     for (const auto& row : missing) {
+        auto origin = service::operation::work_origin::repair();
         auto transaction = co_await db.begin_transaction();
         const auto tenant_id = std::string(row[0].value().value_or(""));
         const auto website_id = std::string(row[1].value().value_or(""));
@@ -33,17 +34,13 @@ inline ruvia::task<void> reconcile_markers(service::background::worker_context& 
             "SELECT revision FROM sys_website WHERE tenant_id = $1 AND id = $2 AND revision = $3 "
             "AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
             tenant_id, website_id, revision);
-        std::string marker_id;
         if (!locked.empty()) {
-            marker_id = co_await service::sync_runtime::upsert_marker(
-                transaction, tenant_id, service::sync_runtime::marker_resource_type::website,
-                website_id, service::sync_runtime::marker_operation::apply, revision);
+            (void)co_await service::sync_runtime::upsert_marker(transaction, tenant_id,
+                service::sync_runtime::marker_resource_type::website, website_id,
+                service::sync_runtime::marker_operation::apply, revision, origin);
         }
         co_await transaction.commit();
-        if (!marker_id.empty()) {
-            service::live_resource::get_hub().publish(tenant_id, service::live_resource::resource::tasks,
-                marker_id);
-        }
+        co_await service::sync_runtime::notify_origin(context, tenant_id, origin);
     }
     co_return;
 }
@@ -60,16 +57,20 @@ claim(service::background::worker_context& context) {
         "1) "
         "UPDATE sys_sync_task marker SET lease_owner = $1, lease_until = NOW() + INTERVAL '60 "
         "seconds', updated_at = NOW() FROM candidate WHERE marker.id = candidate.id RETURNING "
-        "marker.id, marker.tenant_id, marker.resource_id, marker.version, marker.count_fails",
+        "marker.id, marker.tenant_id, marker.resource_id, marker.version, marker.count_fails, " +
+            service::sync_runtime::claimed_owner_columns("marker"),
         context.lease_owner());
     if (rows.empty()) {
         co_return std::nullopt;
     }
     const auto claimed_at = std::chrono::steady_clock::now();
     const auto& row = rows.front();
-    service::live_resource::get_hub().publish(row[1].value().value_or(""),
-        service::live_resource::resource::tasks,
-        row[0].value().value_or(""));
+    const auto owner = service::sync_runtime::claimed_owner(row, 5);
+    service::live_resource::notifications::resource_notification notification(row[1].value().value_or(""));
+    if (!owner.operation_id_.empty()) {
+        notification.changed(service::live_resource::resource::operations, owner.operation_id_);
+    }
+    co_await service::live_resource::notify(context, notification);
     co_return website_marker{
         .id_ = std::string(row[0].value().value_or("")),
         .tenant_id_ = std::string(row[1].value().value_or("")),
@@ -90,7 +91,7 @@ inline ruvia::task<void> fail_website_marker(service::background::worker_context
     auto transaction = co_await context.db().begin_transaction();
     const auto result_transition = co_await service::sync_runtime::fail_running_and_record_event(
         transaction, lease, message, detail);
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context.db(), lease,
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease,
         result_transition, trace);
     if (result_transition.marker_transitioned_) {
         service::sync_runtime::log_attempt_failure("Website sync marker", marker.id_, message);

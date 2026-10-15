@@ -2,13 +2,11 @@
 
 #include <ruvia/core/channel.h>
 #include <ruvia/core/task.h>
-#include <ruvia/web/web_worker.h>
+#include <ruvia/core/worker_wait_result.h>
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <mutex>
 #include <optional>
 #include <ranges>
 #include <stdexcept>
@@ -20,9 +18,13 @@
 
 namespace service::node_dispatch::fanout {
 
-inline constexpr auto sse_heartbeat_interval = std::chrono::seconds(15);
 inline constexpr std::size_t subscriber_signal_capacity{1};
 
+// Worker-local wakeups of node control connections waiting for a desired
+// state change. Every Web Worker owns one (Ruvia worker state); its resource
+// notification reader wakes only the connections this worker holds. A
+// separate hub from live_resource: node heartbeats must not wake
+// configuration watches.
 class hub final {
 public:
     class subscription final {
@@ -85,7 +87,6 @@ public:
         }
         auto [sender, receiver] =
             ruvia::make_channel<std::uint64_t>(worker, {.capacity_ = subscriber_signal_capacity});
-        const std::lock_guard lock(mutex_);
         const auto id = next_subscription_id_++;
         auto key = std::string(tenant_id);
         subscribers_[key].push_back({.id_ = id, .sender_ = std::move(sender)});
@@ -93,27 +94,18 @@ public:
     }
 
     void publish(std::string_view tenant_id) {
-        std::vector<subscriber> subscribers;
-        {
-            const std::lock_guard lock(mutex_);
-            const auto found = subscribers_.find(std::string(tenant_id));
-            if (found == subscribers_.end()) {
-                return;
-            }
-            subscribers = found->second;
+        const auto found = subscribers_.find(std::string(tenant_id));
+        if (found == subscribers_.end()) {
+            return;
         }
+        wake(found->second);
+    }
 
-        const auto signal = next_signal_.fetch_add(1, std::memory_order_relaxed);
-        std::vector<std::uint64_t> closed;
-        for (const auto& subscriber : subscribers) {
-            const auto result = subscriber.sender_.send(signal);
-            if (result.status() == ruvia::channel_send_status::closed ||
-                result.status() == ruvia::channel_send_status::worker_stopping) {
-                closed.push_back(subscriber.id_);
-            }
-        }
-        if (!closed.empty()) {
-            remove_closed(tenant_id, closed);
+    // Notifications may have been missed: every connection re-reads once.
+    void publish_all() {
+        for (auto& [tenant_id, subscribers] : subscribers_) {
+            (void)tenant_id;
+            wake(subscribers);
         }
     }
 
@@ -123,8 +115,16 @@ private:
         ruvia::channel_sender<std::uint64_t> sender_;
     };
 
+    void wake(std::vector<subscriber>& subscribers) {
+        const auto signal = next_signal_++;
+        std::erase_if(subscribers, [signal](const subscriber& subscriber) {
+            const auto result = subscriber.sender_.send(signal);
+            return result.status() == ruvia::channel_send_status::closed ||
+                   result.status() == ruvia::channel_send_status::worker_stopping;
+        });
+    }
+
     void unsubscribe(std::string_view tenant_id, std::uint64_t id) noexcept {
-        const std::lock_guard lock(mutex_);
         const auto found = subscribers_.find(std::string(tenant_id));
         if (found == subscribers_.end()) {
             return;
@@ -136,30 +136,15 @@ private:
         }
     }
 
-    void remove_closed(std::string_view tenant_id, const std::vector<std::uint64_t>& closed) noexcept {
-        const std::lock_guard lock(mutex_);
-        const auto found = subscribers_.find(std::string(tenant_id));
-        if (found == subscribers_.end()) {
-            return;
-        }
-        auto& values = found->second;
-        std::erase_if(values, [&closed](const subscriber& subscriber) {
-            return std::ranges::find(closed, subscriber.id_) != closed.end();
-        });
-        if (values.empty()) {
-            subscribers_.erase(found);
-        }
-    }
-
-    std::mutex mutex_;
     std::unordered_map<std::string, std::vector<subscriber>> subscribers_;
-    std::atomic<std::uint64_t> next_signal_{1};
+    std::uint64_t next_signal_{1};
     std::uint64_t next_subscription_id_{1};
 };
 
-inline hub& get_hub() {
-    static hub value;
-    return value;
+// The calling worker's node dispatch hub (registered with use_worker_state).
+template <typename context_type>
+hub& get_hub(context_type& context) {
+    return context.template worker_state<hub>();
 }
 
 }  // namespace service::node_dispatch::fanout

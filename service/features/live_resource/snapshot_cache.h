@@ -4,6 +4,7 @@
 #include <ruvia/core/worker_handle.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -12,9 +13,12 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <openssl/evp.h>
 
 #include "service/features/live_resource/query_key.h"
 
@@ -25,6 +29,43 @@ namespace service::live_resource {
 struct snapshot final {
     std::string data_;
     bool failure_{};
+};
+
+// The last snapshot bytes one stream part wrote, kept as size + SHA-256 so
+// equal bytes are never written twice however often the cache drops and
+// re-reads the snapshot, without pinning the bytes themselves.
+class written_snapshot final {
+public:
+    // Records `bytes`; true when they must be written (nothing recorded yet,
+    // different bytes, or a digest that could not be computed).
+    bool replace(std::string_view bytes) {
+        const auto value = fingerprint_of(bytes);
+        const bool changed = !value || !last_ || *last_ != *value;
+        last_ = value;
+        return changed;
+    }
+    // The next bytes are written whatever they are (initial snapshot,
+    // recovery after missed notifications, after an error frame).
+    void forget() noexcept {
+        last_.reset();
+    }
+
+private:
+    struct fingerprint final {
+        std::size_t size_{};
+        std::array<unsigned char, 32> sha256_{};
+        friend bool operator==(const fingerprint&, const fingerprint&) = default;
+    };
+    static std::optional<fingerprint> fingerprint_of(std::string_view bytes) {
+        fingerprint value{.size_ = bytes.size(), .sha256_ = {}};
+        unsigned int length = 0;
+        if (EVP_Digest(bytes.data(), bytes.size(), value.sha256_.data(), &length, EVP_sha256(), nullptr) != 1 ||
+            length != value.sha256_.size()) {
+            return std::nullopt;
+        }
+        return value;
+    }
+    std::optional<fingerprint> last_;
 };
 
 class snapshot_capacity_error final : public std::runtime_error {

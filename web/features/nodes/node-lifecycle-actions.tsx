@@ -2,9 +2,10 @@ import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { TrashBin } from '@gravity-ui/icons'
-import { Button, toast } from '@heroui/react'
+import { Button } from '@heroui/react'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { clusterSnapshotKey } from '@/features/clusters/data'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { nodeQuery, nodeSnapshotQuery, removeNode } from './data'
 import type { Node } from './types'
 
@@ -34,7 +35,7 @@ export function NodeLifecycleActions({ node }: { node: Node }) {
         confirmLabel='删除节点'
         onConfirm={async () => {
           const response = await removeNode(node)
-          toast.success(response.message)
+          toastWriteSuccess(response.message, response.data)
           // The node is gone, so an unsaved config draft is moot.
           await navigate({ to: '/nodes', replace: true, ignoreBlocker: true })
           client.removeQueries({ queryKey: nodeQuery(node.id).queryKey })

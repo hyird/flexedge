@@ -8,6 +8,8 @@
 #include <ruvia/web/db/db_handle.h>
 #include <ruvia/web/db/db_types.h>
 #include <ruvia/web/http_client.h>
+#include <ruvia/web/redis/redis_handle.h>
+#include <ruvia/web/redis/redis_types.h>
 
 #include <cstddef>
 #include <memory>
@@ -19,6 +21,7 @@
 #include <vector>
 
 #include "service/config/outbound.h"
+#include "service/features/live_resource/notifications.h"
 
 namespace service::background {
 
@@ -34,6 +37,10 @@ public:
     worker_context& operator=(worker_context&&) = delete;
 
     [[nodiscard]] ruvia::db_handle db() const;
+    // This worker's own Redis connection; it carries the worker's resource
+    // notifications, sent after each commit.
+    [[nodiscard]] ruvia::redis_handle redis() const;
+    [[nodiscard]] service::live_resource::notifications::sender& resource_notifications() const noexcept;
     [[nodiscard]] ruvia::http_client& get_http_client(std::string_view alias) const;
     [[nodiscard]] const ruvia::worker_handle& worker() const noexcept;
     [[nodiscard]] std::pmr::memory_resource* pool() const noexcept;
@@ -43,7 +50,7 @@ public:
 private:
     struct impl;
 
-    worker_context(ruvia::event_loop loop, ruvia::db_config database,
+    worker_context(ruvia::event_loop loop, ruvia::db_config database, const ruvia::redis_config& redis,
         const service::config::outbound_origins& origins, std::string worker_name,
         std::span<const std::string_view> outbound_aliases);
 
@@ -61,8 +68,8 @@ struct worker_definition final {
 
 class worker_pool final {
 public:
-    worker_pool(const ruvia::db_config& database, const service::config::outbound_origins& origins,
-        std::vector<worker_definition> workers);
+    worker_pool(const ruvia::db_config& database, const ruvia::redis_config& redis,
+        const service::config::outbound_origins& origins, std::vector<worker_definition> workers);
     ~worker_pool();
 
     worker_pool(const worker_pool&) = delete;

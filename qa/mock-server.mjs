@@ -949,47 +949,6 @@ let db = {
       ...timestamps,
     },
   ],
-  tasks: [
-    {
-      id: 'certificate:issue:qa',
-      resource_type: 'certificate',
-      resource_id: uuid(992),
-      name: 'static.example.test',
-      operation: 'issue',
-      version: 1,
-      status: 'running',
-      error: '',
-      failures: 0,
-      updated_at: initialTime,
-      next_attempt_at: '',
-    },
-    {
-      id: 'dns-zone:sync:qa',
-      resource_type: 'dns_zone',
-      resource_id: uuid(983),
-      name: 'backup.test',
-      operation: 'sync',
-      version: 2,
-      status: 'retrying',
-      error: 'QA 场景：供应商令牌等待验证',
-      failures: 2,
-      updated_at: initialTime,
-      next_attempt_at: '2026-10-01T01:35:00Z',
-    },
-    {
-      id: 'website:deploy:qa',
-      resource_type: 'website',
-      resource_id: websiteId,
-      name: 'QA 网站',
-      operation: 'deploy',
-      version: 4,
-      status: 'completed',
-      error: '',
-      failures: 0,
-      updated_at: initialTime,
-      next_attempt_at: '',
-    },
-  ],
   nodeLogs: {
     [nodeId]: [
       {
@@ -1196,87 +1155,74 @@ generatedWebsites.forEach(([name, host, status, logging, deploy], index) => {
     ...timestamps,
   })
 })
-db.tasks.push(
-  {
-    id: 'node:deploy:qa-06',
-    resource_type: 'node',
-    resource_id: uuid(1003),
-    name: 'QA Edge 06',
-    operation: 'deploy',
-    version: 1,
-    status: 'queued',
-    error: '',
-    failures: 0,
-    updated_at: '2026-10-01T01:29:30Z',
-    next_attempt_at: '',
-  },
-  {
-    id: 'certificate:renew:qa',
-    resource_type: 'certificate',
-    resource_id: certificateId,
-    name: 'qa.example.test',
-    operation: 'renew',
-    version: 2,
-    status: 'failed',
-    error: 'QA 场景：DNS-01 验证超时',
-    failures: 3,
-    updated_at: '2026-10-01T01:10:00Z',
-    next_attempt_at: '',
-  },
-  {
-    id: 'dns-zone:sync:example',
-    resource_type: 'dns_zone',
-    resource_id: zoneId,
-    name: 'example.test',
-    operation: 'sync',
-    version: 4,
-    status: 'recovered',
-    error: '',
-    failures: 1,
-    updated_at: '2026-10-01T00:55:00Z',
-    next_attempt_at: '',
-  },
-  {
-    id: 'provider:verify:cloudflare',
-    resource_type: 'provider',
-    resource_id: dnsProviderId,
-    name: 'Cloudflare 生产账号',
-    operation: 'verify',
-    version: 3,
-    status: 'completed',
-    error: '',
-    failures: 0,
-    updated_at: '2026-10-01T00:40:00Z',
-    next_attempt_at: '',
-  }
-)
-// Execution history for `/api/tasks/:id/history/stream?version&resource_id`
-// (local://task-history-contract v1), keyed by `${task id}|${resource id}`
-// and kept out of `db.tasks` so list keyword search ignores it. Times use the
-// backend's `…ffffff+00` format, relative to server start so "下次重试"
-// counts down in the browser. Covered: DNS diff + conflicts + >100 attempts
-// (truncated) + legacy rows, certificate stages, website domain checks, DNS
-// and certificate provider verification, node apply (incl. heartbeat); the
-// running certificate issue has no attempts yet (empty state).
-// `/__qa/control?event=task-history&id=<task>&mode=error|empty|fail|reset`
-// (`fail` appends a failed attempt now with the sync retry 15 s later).
-// Attempt traces (build/task-trace/contract.md): each history item carries a
-// `trace` summary; `/api/tasks/:id/attempts/:attempt_id/trace/stream` serves
-// the full trace as a one-shot snapshot (404 for an attempt of another task).
-// Covered: Cloudflare find_zone transport error, Aliyun 404 with redacted
-// signature parameters (newest 20 of the failure run only, like retention),
-// ACME issue/renew with folded polling and a DoH check, website DoH checks,
-// DNS / ZeroSSL provider verification, node apply messages; legacy rows and
-// heartbeats have `state: none`.
-// `/__qa/control?event=task-trace&mode=error|reset` fails every trace read.
+// Task center (build/operation-tasks/contract.md): a task is one user
+// operation or system action (`db.operations`), its subtasks the background
+// work it caused (embedded as `subtasks`). Execution records live in
+// `db.subtaskRecords[subtask id]`, newest first, outside the tasks so list
+// keyword search ignores them. A task's status, counters and times are
+// derived on read (design §5.2). Times use the backend's `…ffffff+00` format,
+// relative to server start so "n 秒后重试" counts down in the browser.
+// Streams: `/api/operations/stream` (list), `/api/operations/:id/stream
+// ?subtask_id=` (`snapshot`, then `history` of the expanded subtask; a new
+// record arrives as `attempt` before the new `snapshot`) and
+// `/api/operations/:id/attempts/:attempt_id/trace/stream` (one-shot trace).
+// Writes that start background work create a task and answer its
+// `operation_id` (contract §6). QA controls (`/__qa/control?event=…`):
+// - `operation-attempt&operation=<id>&subtask=<id>&outcome=failed|completed`
+//   appends a record now (failed → retrying, retry 15 s later;
+//   `retryable=0` makes a node failure final);
+// - `operation-complete&operation=<id>&subtask=<id>` completes a subtask;
+// - `operation-claim&operation=<id>&subtask=<id>` runs sync-type work (node
+//   work is never `running`);
+// - `operation-create&action=website.update&target=<resource id>`;
+// - `operation-history-reset&operation=<id>&subtask=<id>&keep=0` drops all
+//   but the newest `keep` records (retention) and re-sends `history`;
+// - `operation-trace&mode=error|reset` fails every trace read.
 const historyBase = Date.now()
 const historyStamp = (ms) => new Date(ms).toISOString().replace('Z', '000+00')
 const historyAt = (seconds) => historyStamp(historyBase + seconds * 1000)
-const historyKey = (task) => `${task.id}|${task.resource_id}`
+const stampMs = (stamp) =>
+  Date.parse(stamp.replace(/(\.\d{3})\d{3}\+00$/, '$1Z'))
 // Full traces by attempt id; immutable like stored traces, so outside `db`.
 const traceDocuments = new Map()
 let attemptSequence = 48000
-let taskTraceMode = 'reset'
+let operationTraceMode = 'reset'
+const user = {
+  id: uuid(101),
+  username: 'admin',
+  nickname: 'QA 管理员',
+  status: 'active',
+}
+const operationStatuses = [
+  'queued',
+  'running',
+  'retrying',
+  'failed',
+  'partial_failed',
+  'attention_required',
+  'completed',
+  'merged',
+  'cancelled',
+]
+const operationGroups = {
+  active: ['queued', 'running', 'retrying'],
+  attention: ['retrying', 'failed', 'partial_failed', 'attention_required'],
+}
+const settledStatuses = [
+  'completed',
+  'failed',
+  'attention_required',
+  'merged',
+  'cancelled',
+]
+const operationTargetTypes = [
+  'website',
+  'cluster',
+  'node',
+  'dns_zone',
+  'certificate',
+  'provider',
+]
 function historyAttempt(
   attempt,
   outcome,
@@ -1285,6 +1231,7 @@ function historyAttempt(
     duration,
     error = '',
     retry = false,
+    retryAt,
     detail = { kind: 'none', truncated: false },
     trace,
   }
@@ -1301,8 +1248,14 @@ function historyAttempt(
     started_at: known ? historyAt(start) : '',
     emitted_at: historyAt(emitted),
     duration_ms: duration ?? 0,
-    // Sync tasks retry 15 s after a failure.
-    next_attempt_at: retry ? historyAt(emitted + 15) : '',
+    // Sync work retries 15 s after a failure; `retryAt` (seconds from server
+    // start) pins the next attempt instead.
+    next_attempt_at:
+      retryAt !== undefined
+        ? historyAt(retryAt)
+        : retry
+          ? historyAt(emitted + 15)
+          : '',
     detail,
     trace: trace
       ? storeTrace(attemptId, start, trace)
@@ -1570,14 +1523,14 @@ const workerTypes = {
   provider: 'provider-verification',
   node: 'web',
 }
-/** Full trace snapshot: attempt fields from the history row, steps stored. */
-function traceSnapshot(task, item) {
+/** Full trace snapshot: attempt fields from the record, steps stored. */
+function traceSnapshot(subtask, item) {
   const stored = traceDocuments.get(item.trace.attempt_id)
   return {
     attempt_id: item.trace.attempt_id,
-    task_id: task.id,
-    resource_type: task.resource_type,
-    resource_id: task.resource_id,
+    subtask_id: subtask.id,
+    resource_type: subtask.resource_type,
+    resource_id: subtask.resource_id,
     kind: stored?.kind ?? item.detail.kind,
     state: stored ? 'available' : 'none',
     attempt: item.attempt,
@@ -1586,7 +1539,8 @@ function traceSnapshot(task, item) {
     started_at: item.started_at,
     emitted_at: item.emitted_at,
     duration_ms: item.duration_ms,
-    worker_type: stored?.worker_type ?? workerTypes[task.resource_type] ?? '',
+    worker_type:
+      stored?.worker_type ?? workerTypes[subtask.resource_type] ?? '',
     capture: stored?.capture ?? {
       truncated: false,
       degraded: false,
@@ -1600,19 +1554,28 @@ function traceSnapshot(task, item) {
     steps: stored?.steps ?? [],
   }
 }
-function historySnapshot(task, attempts) {
-  const failures = attempts.filter((item) => item.outcome === 'failed')
+/** `history_summary_dto` over every retained record of a subtask. */
+function historySummary(subtask) {
+  const records = db.subtaskRecords[subtask.id] ?? []
+  const failures = records.filter((item) => item.outcome === 'failed')
   return {
-    truncated: attempts.length > 100,
-    summary: {
-      attempt_count: attempts.length,
-      failure_count: failures.length,
-      first_failure_at: failures.at(-1)?.emitted_at ?? '',
-      last_success_at:
-        attempts.find((item) => item.outcome === 'completed')?.emitted_at ?? '',
-      next_attempt_at: task.status === 'retrying' ? task.next_attempt_at : '',
-    },
-    list: attempts.slice(0, 100),
+    attempt_count: records.length,
+    failure_count: failures.length,
+    first_failure_at: failures.at(-1)?.emitted_at ?? '',
+    last_success_at:
+      records.find((item) => item.outcome === 'completed')?.emitted_at ?? '',
+    next_attempt_at:
+      subtask.status === 'retrying' ? subtask.next_attempt_at : '',
+  }
+}
+/** `subtask_history_dto`: the newest 100 records. */
+function subtaskHistory(subtask) {
+  const records = db.subtaskRecords[subtask.id] ?? []
+  return {
+    subtask_id: subtask.id,
+    list: records.slice(0, 100),
+    truncated: records.length > 100,
+    summary: historySummary(subtask),
   }
 }
 const dnsRecord = (
@@ -1643,29 +1606,6 @@ function dnsDetail({
     ...counts,
   }
 }
-const dnsDiff = dnsDetail({
-  created: [
-    dnsRecord('static', 'CNAME', 'edge-qa.example.test'),
-    dnsRecord('_acme-challenge.static', 'TXT', 'Zq8m1y2QvB7oP0xKk3sNw4rT5uV6', {
-      ttl: 120,
-    }),
-  ],
-  updated: [
-    {
-      before: dnsRecord('www', 'A', '203.0.113.10', { line_code: 'telecom' }),
-      after: dnsRecord('www', 'A', '203.0.113.24', {
-        ttl: 300,
-        line_code: 'telecom',
-      }),
-    },
-    {
-      before: dnsRecord('@', 'MX', 'mx1.example.test', { priority: 10 }),
-      after: dnsRecord('@', 'MX', 'mx2.example.test', { priority: 5 }),
-    },
-  ],
-  deleted: [dnsRecord('old-api', 'AAAA', '2001:db8::17')],
-  unchanged_count: 14,
-})
 const certificateDetail = (operation, stage, success = {}) => ({
   kind: 'certificate',
   truncated: false,
@@ -1694,7 +1634,7 @@ const domainsDetail = (domains, checked = domains.length) => ({
   kind: 'website_domains',
   truncated: false,
   expected_target: 'edge-qa.example.test',
-  domain_count: 4,
+  domain_count: domains.length,
   checked_count: checked,
   domains,
 })
@@ -1983,8 +1923,7 @@ const acmeNonce = (at, repeat = 1) =>
     response_headers: nonceHeaders(),
   })
 const authzPath = (index) => `/acme/authz/237841${index}/5678${index}`
-function acmeAuthorization(index, status, { at = 1, repeat = 1 } = {}) {
-  const domain = index ? 'www.qa.example.test' : 'qa.example.test'
+function acmeAuthorization(index, status, domain, { at = 1, repeat = 1 } = {}) {
   return httpCall('acme.authorization', {
     method: 'POST',
     origin: letsEncrypt,
@@ -2016,14 +1955,21 @@ function acmeAuthorization(index, status, { at = 1, repeat = 1 } = {}) {
     ),
   })
 }
-const relatedSync = () => ({
-  task_id: 'dns-zone:sync:example',
+// Trace link from a certificate DNS step (contract §3.7): `subtask_id` is
+// the matching child subtask of the task, or '' when it has none.
+const relatedLabels = {
+  dns_challenge: 'DNS 验证记录',
+  dns_challenge_cleanup: '清理验证记录',
+}
+const relatedDns = (operationId, kind, zone, subtask) => ({
+  task_id: operationId,
   resource_type: 'dns_zone',
-  resource_id: zoneId,
-  label: 'DNS 同步',
+  resource_id: zone.id,
+  label: `${relatedLabels[kind]} · ${zone.domain}`,
+  subtask_id: subtask?.id ?? '',
 })
-function challengeCheck(at, repeat, data) {
-  const name = '_acme-challenge.qa.example.test'
+function challengeCheck(at, repeat, data, domain) {
+  const name = `_acme-challenge.${domain}`
   return httpCall('doh.resolve', {
     origin: 'https://dns.alidns.com',
     path: '/resolve',
@@ -2057,17 +2003,17 @@ function challengeCheck(at, repeat, data) {
     },
   })
 }
-const certificatePrepare = (operation) =>
+const certificatePrepare = (operation, domains) =>
   traceStep('prepare', '准备签发', 21, {
     logs: [
       [
         5,
         'info',
-        `${operation === 'renew' ? '续期' : '签发'}证书：qa.example.test、www.qa.example.test`,
+        `${operation === 'renew' ? '续期' : '签发'}证书：${domains.join('、')}`,
       ],
     ],
   })
-const certificateOrder = () =>
+const certificateOrder = (domains) =>
   traceStep('order', '创建订单', 455, {
     calls: [
       acmeNonce(1),
@@ -2082,10 +2028,7 @@ const certificateOrder = () =>
           tracePair('content-type', 'application/jose+json')
         ),
         request_body: jws(`${letsEncrypt}/acme/new-order`, {
-          identifiers: [
-            { type: 'dns', value: 'qa.example.test' },
-            { type: 'dns', value: 'www.qa.example.test' },
-          ],
+          identifiers: domains.map((value) => ({ type: 'dns', value })),
         }),
         response_headers: [
           tracePair('location', `${letsEncrypt}/acme/order/1789320/30419875`),
@@ -2093,8 +2036,8 @@ const certificateOrder = () =>
         ],
         response_body: traceBody(
           pretty({
-            authorizations: [0, 1].map(
-              (index) => `${letsEncrypt}${authzPath(index)}`
+            authorizations: domains.map(
+              (_, index) => `${letsEncrypt}${authzPath(index)}`
             ),
             finalize: `${letsEncrypt}/acme/finalize/1789320/30419875`,
             status: 'pending',
@@ -2103,42 +2046,41 @@ const certificateOrder = () =>
       }),
     ],
   })
-const certificateAuthorization = () =>
+const certificateAuthorization = (domains) =>
   traceStep('authorization', '获取域名授权', 210, {
-    calls: [
-      acmeAuthorization(0, 'pending'),
-      acmeAuthorization(1, 'pending', { at: 104 }),
-    ],
+    calls: domains.map((domain, index) =>
+      acmeAuthorization(index, 'pending', domain, { at: 1 + index * 103 })
+    ),
   })
-function certificateRenewFailureTrace(wait) {
+/** `challenge`/`cleanup`: `related_task` of the DNS steps, if any. */
+function certificateRenewFailureTrace({ wait, domains, challenge, cleanup }) {
   return {
     kind: 'certificate',
     worker_type: 'certificate',
     steps: [
-      certificatePrepare('renew'),
+      certificatePrepare('renew', domains),
       traceStep('account', 'ACME 账户', 190, {
         calls: [acmeDirectory(1), acmeNonce(150)],
         logs: [[188, 'info', '复用已注册的 ACME 账户']],
       }),
-      certificateOrder(),
-      certificateAuthorization(),
+      certificateOrder(domains),
+      certificateAuthorization(domains),
       traceStep('dns_challenge', '写入 DNS 验证记录并等待生效', wait, {
-        subject: '_acme-challenge.qa.example.test',
+        subject: `_acme-challenge.${domains[0]}`,
         outcome: 'failed',
-        error:
-          'DNS-01 验证超时：_acme-challenge.qa.example.test 的 TXT 记录在 120 秒内未在权威服务器上生效。',
-        related_task: relatedSync(),
-        calls: [challengeCheck(10_200, 14, `"${redacted}"`)],
+        error: `DNS-01 验证超时：_acme-challenge.${domains[0]} 的 TXT 记录在 120 秒内未在权威服务器上生效。`,
+        related_task: challenge,
+        calls: [challengeCheck(10_200, 14, `"${redacted}"`, domains[0])],
         logs: [
-          [8, 'info', '已写入 2 条验证记录，等待 DNS 同步任务完成'],
+          [8, 'info', `已写入 ${domains.length} 条验证记录，等待 DNS 同步任务完成`],
           [10_100, 'info', 'DNS 同步已完成，开始检查公共解析'],
           [18_300, 'warning', 'TXT 记录尚未生效：解析结果与期望值不一致', 14],
           [wait - 4, 'error', '120 秒内 TXT 记录未生效，停止等待'],
         ],
       }),
       traceStep('cleanup', '清理 DNS 验证记录', 3100, {
-        related_task: relatedSync(),
-        logs: [[3096, 'info', '已删除 2 条验证记录']],
+        related_task: cleanup,
+        logs: [[3096, 'info', `已删除 ${domains.length} 条验证记录`]],
       }),
       traceStep('record_failure', '记录失败', 6, {
         logs: [[5, 'error', '续期失败，将在下一个续期窗口重试']],
@@ -2146,7 +2088,7 @@ function certificateRenewFailureTrace(wait) {
     ],
   }
 }
-function certificateIssueTrace() {
+function certificateIssueTrace({ domains, challenge, cleanup }) {
   const order = `${letsEncrypt}/acme/order/1789320/30419875`
   const orderPoll = (status, at, repeat) =>
     httpCall('acme.order_poll', {
@@ -2165,7 +2107,7 @@ function certificateIssueTrace() {
     kind: 'certificate',
     worker_type: 'certificate',
     steps: [
-      certificatePrepare('issue'),
+      certificatePrepare('issue', domains),
       traceStep('account', 'ACME 账户', 980, {
         calls: [
           acmeDirectory(1),
@@ -2202,20 +2144,20 @@ function certificateIssueTrace() {
         ],
         logs: [[978, 'info', '已注册新的 ACME 账户']],
       }),
-      certificateOrder(),
-      certificateAuthorization(),
+      certificateOrder(domains),
+      certificateAuthorization(domains),
       traceStep('dns_challenge', '写入 DNS 验证记录并等待生效', 31_000, {
-        subject: '_acme-challenge.qa.example.test',
-        related_task: relatedSync(),
-        calls: [challengeCheck(10_400, 3, `"${redacted}"`)],
+        subject: `_acme-challenge.${domains[0]}`,
+        related_task: challenge,
+        calls: [challengeCheck(10_400, 3, `"${redacted}"`, domains[0])],
         logs: [
-          [8, 'info', '已写入 2 条验证记录，等待 DNS 同步任务完成'],
+          [8, 'info', `已写入 ${domains.length} 条验证记录，等待 DNS 同步任务完成`],
           [20_900, 'info', 'TXT 记录已在公共解析生效，固定等待 10 秒'],
         ],
       }),
       traceStep('validation', '证书颁发机构验证', 22_000, {
         calls: [
-          ...[0, 1].map((index) =>
+          ...domains.map((_, index) =>
             httpCall('acme.challenge', {
               method: 'POST',
               origin: letsEncrypt,
@@ -2233,9 +2175,10 @@ function certificateIssueTrace() {
             })
           ),
           acmeNonce(260, 11),
-          acmeAuthorization(0, 'pending', { at: 300, repeat: 9 }),
-          acmeAuthorization(0, 'valid', { at: 18_400 }),
-          acmeAuthorization(1, 'valid', { at: 18_600 }),
+          acmeAuthorization(0, 'pending', domains[0], { at: 300, repeat: 9 }),
+          ...domains.map((domain, index) =>
+            acmeAuthorization(index, 'valid', domain, { at: 18_400 + index * 200 })
+          ),
         ],
         logs: [
           [300, 'info', '授权状态 pending，2 秒后再次检查', 9],
@@ -2243,7 +2186,7 @@ function certificateIssueTrace() {
         ],
       }),
       traceStep('cleanup', '清理 DNS 验证记录', 2800, {
-        related_task: relatedSync(),
+        related_task: cleanup,
       }),
       traceStep('finalize', '提交证书请求并等待签发', 9000, {
         calls: [
@@ -2286,7 +2229,7 @@ function certificateIssueTrace() {
                   issuer: "CN=R11,O=Let's Encrypt,C=US",
                   not_after: '2026-11-13T07:12:43Z',
                   serial_number: '04A1F3C2B9D87E6510FA33C1D2E4B5A69C70',
-                  subject: 'CN=qa.example.test',
+                  subject: `CN=${domains[0]}`,
                 },
                 {
                   issuer: 'CN=ISRG Root X1,O=Internet Security Research Group,C=US',
@@ -2599,303 +2542,1009 @@ function nodeApplyTrace(attempt, phase, error = '') {
     ],
   }
 }
-function buildTaskHistories() {
-  // backup.test sync: 137 attempts, list truncated to the newest 100. Runs of
-  // identical failures collapse; a success with a diff breaks them. Only the
-  // newest 20 failures keep a full trace (the retention limit).
-  const backup = []
-  for (let attempt = 137, start = -40; attempt >= 1; attempt -= 1) {
-    const step = 137 - attempt
-    if (step < 42)
-      backup.push(
-        historyAttempt(attempt, 'failed', {
-          start,
-          duration: 204 + step * 3,
-          error:
-            'DescribeDomains 返回 InvalidAccessKeyId.NotFound：Specified access key is not found.',
-          retry: true,
-          trace: step < 20 ? aliyunSyncFailureTrace() : undefined,
-        })
-      )
-    else if (step === 42)
-      backup.push(
-        historyAttempt(attempt, 'completed', {
-          start,
-          duration: 3480,
-          detail: dnsDiff,
-        })
-      )
-    else if (step < 78)
-      backup.push(
-        historyAttempt(attempt, 'failed', {
-          start,
-          duration: 30_000,
-          error:
-            '请求 dnsapi.cn 超时（30 秒）\nPOST https://dnsapi.cn/Record.List\ncontext deadline exceeded (Client.Timeout exceeded while awaiting headers)',
-          retry: true,
-          // Only the operations finished before the failure are listed.
-          detail: dnsDetail({
-            deleted: [dnsRecord('legacy-cdn', 'CNAME', 'cdn.old-vendor.test')],
-            unchanged_count: 0,
-          }),
-        })
-      )
-    else
-      backup.push(
-        historyAttempt(attempt, 'completed', {
-          start,
-          duration: 900 + (step % 5) * 110,
-          detail: dnsDetail(),
-        })
-      )
-    start -= step < 42 ? 16 : 300
+// Task fixtures. Together they cover every task status (merged, cancelled,
+// partial failure and a system task included, plus a task by another
+// administrator for `actor=me`), every subtask kind but `dns_delete`,
+// recovered and >100-record (truncated) histories, a certificate issue whose
+// DNS steps link to its child subtasks, and a record without start time or
+// trace (heartbeat confirmation). IDs: tasks uuid(7001…), their subtasks
+// uuid(7100 + 10 × task + n).
+db.subtaskRecords = {}
+const operatorId = uuid(102)
+/** One stored subtask; its records (newest first) go to `db.subtaskRecords`.
+ * Settlement time, next retry and error default to the newest record. */
+function seedSubtask(number, fields, records = []) {
+  const id = uuid(number)
+  db.subtaskRecords[id] = records
+  return {
+    id,
+    parent_id: '',
+    warning: '',
+    running_since: '',
+    finished_at: settledStatuses.includes(fields.status)
+      ? (records[0]?.emitted_at ?? fields.created_at)
+      : '',
+    next_attempt_at:
+      fields.status === 'retrying' ? (records[0]?.next_attempt_at ?? '') : '',
+    error: ['retrying', 'failed'].includes(fields.status)
+      ? (records[0]?.error ?? '')
+      : '',
+    ...fields,
   }
-  // example.test sync: recovered after a Cloudflare connection failure at
-  // find_zone; conflicts block one push, the newest detail is truncated and
-  // the oldest two rows predate the upgrade (no trace).
-  const example = [
-    historyAttempt(5, 'completed', {
-      start: -1500,
-      duration: 2731,
-      detail: dnsDetail({
-        created: Array.from({ length: 50 }, (_, index) =>
-          dnsRecord(`node-${index + 1}`, 'A', `203.0.113.${index + 31}`)
-        ),
-        created_count: 64,
-        unchanged_count: 10,
-        truncated: true,
-      }),
-      trace: cloudflareSyncTrace(),
-    }),
-    historyAttempt(4, 'completed', {
-      start: -2400,
-      duration: 1650,
-      // Conflicts block the push; the attempt itself still completes.
-      detail: dnsDetail({
-        conflicts: [
-          {
-            name: 'www',
-            type: 'A',
-            line_code: 'telecom',
-            local_content: '203.0.113.10',
-            remote_content: '198.51.100.77',
-          },
-          {
-            name: 'api',
-            type: 'CNAME',
-            line_code: 'default',
-            local_content: 'edge-qa.example.test',
-            remote_content: '（远端已删除）',
-          },
-        ],
-        unchanged_count: 16,
-      }),
-    }),
-    historyAttempt(3, 'failed', {
-      start: -9000,
-      duration: 5030,
-      error: 'Cloudflare API 连接失败',
-      retry: true,
-      detail: dnsDetail({ unchanged_count: 0 }),
-      trace: cloudflareSyncFailureTrace(),
-    }),
-    historyAttempt(2, 'failed', {
-      start: -86_400,
-      error: '供应商接口返回 HTTP 502',
-    }),
-    historyAttempt(1, 'completed', { start: -90_000 }),
-  ]
-  const renew = [
-    ...[4, 3, 2].map((attempt, index) =>
+}
+const seedOperation = (number, fields, subtasks) => ({
+  id: uuid(number),
+  actor_type: 'user',
+  actor_user_id: user.id,
+  actor_name: user.nickname,
+  summary: {},
+  ...fields,
+  subtasks,
+})
+const work = (kind, resource_type, resource_id, resource_name) => ({
+  kind,
+  resource_type,
+  resource_id,
+  resource_name,
+})
+const nodeResult = (node, name, patch) =>
+  nodeApply({ node_id: node, node_name: name, ...patch })
+const reloadTimeout = '激活配置失败：reload 超时'
+const nginxInvalid =
+  'nginx 配置校验失败：unknown directive "proxy_cache_lock_age"'
+const shopDomains = ['shop.example.test'],
+  legacyDomains = ['legacy.example.test'],
+  removedNodeId = uuid(7090),
+  removedProviderId = uuid(7091)
+// backup.test sync: 137 records, the list truncated to the newest 100. Runs
+// of identical failures collapse; a success with a diff breaks them. Only the
+// newest 20 failures keep a full trace (the retention limit).
+const backupRecords = []
+for (let attempt = 137, start = -10; attempt >= 1; attempt -= 1) {
+  const step = 137 - attempt
+  if (step < 42)
+    backupRecords.push(
       historyAttempt(attempt, 'failed', {
-        start: -600 - index * 1800,
-        duration: 120_000 + index * 4000,
+        start,
+        duration: 204 + step * 3,
         error:
-          'DNS-01 验证超时：_acme-challenge.qa.example.test 的 TXT 记录在 120 秒内未在权威服务器上生效。',
-        detail: certificateDetail('renew', 'dns_challenge'),
-        trace: certificateRenewFailureTrace(116_010 + index * 4000),
+          'DescribeDomains 返回 InvalidAccessKeyId.NotFound：Specified access key is not found.',
+        retry: true,
+        trace: step < 20 ? aliyunSyncFailureTrace() : undefined,
       })
-    ),
-    historyAttempt(1, 'completed', {
-      start: -5_184_000,
-      duration: 74_500,
-      detail: certificateDetail('issue', 'completed', {
-        issuer: "CN=R11,O=Let's Encrypt,C=US",
-        not_before: '2026-08-15T07:12:44Z',
-        not_after: '2026-11-13T07:12:43Z',
-        serial_number: '04A1F3C2B9D87E6510FA33C1D2E4B5A69C70',
-        fingerprint_sha256:
-          '3B:7E:91:0C:44:A2:5D:E8:19:6F:C0:B3:72:58:9A:DE:01:F4:6C:28:B5:93:7A:E0:4D:16:C9:8B:52:3F:A7:E1',
+    )
+  else if (step === 42)
+    backupRecords.push(
+      historyAttempt(attempt, 'completed', {
+        start,
+        duration: 3480,
+        detail: dnsDetail({
+          created: [
+            dnsRecord('static', 'CNAME', 'edge-qa.example.test'),
+            dnsRecord('_acme-challenge.static', 'TXT', 'Zq8m1y2QvB7oP0xKk3sNw4rT5uV6', {
+              ttl: 120,
+            }),
+          ],
+          updated: [
+            {
+              before: dnsRecord('www', 'A', '203.0.113.10', {
+                line_code: 'telecom',
+              }),
+              after: dnsRecord('www', 'A', '203.0.113.24', {
+                ttl: 300,
+                line_code: 'telecom',
+              }),
+            },
+            {
+              before: dnsRecord('@', 'MX', 'mx1.backup.test', { priority: 10 }),
+              after: dnsRecord('@', 'MX', 'mx2.backup.test', { priority: 5 }),
+            },
+          ],
+          deleted: [dnsRecord('old-api', 'AAAA', '2001:db8::17')],
+          unchanged_count: 14,
+        }),
+      })
+    )
+  else if (step < 78)
+    backupRecords.push(
+      historyAttempt(attempt, 'failed', {
+        start,
+        duration: 30_000,
+        error:
+          '请求 dnsapi.cn 超时（30 秒）\nPOST https://dnsapi.cn/Record.List\ncontext deadline exceeded (Client.Timeout exceeded while awaiting headers)',
+        retry: true,
+        // Only the operations finished before the failure are listed.
+        detail: dnsDetail({
+          deleted: [dnsRecord('legacy-cdn', 'CNAME', 'cdn.old-vendor.test')],
+          unchanged_count: 0,
+        }),
+      })
+    )
+  else
+    backupRecords.push(
+      historyAttempt(attempt, 'completed', {
+        start,
+        duration: 900 + (step % 5) * 110,
+        detail: dnsDetail(),
+      })
+    )
+  start -= step < 42 ? 16 : 300
+}
+const backupCreatedAt = historyStamp(
+  stampMs(backupRecords.at(-1).started_at) - 2000
+)
+const challengeRecord = (name, token) =>
+  dnsRecord(`_acme-challenge.${name}`, 'TXT', token, { ttl: 120 })
+// Certificate DNS steps link to these child subtasks (contract §3.7).
+const shopChallenge = seedSubtask(
+    7122,
+    {
+      ...work('dns_challenge', 'dns_zone', zoneId, 'example.test'),
+      parent_id: uuid(7121),
+      status: 'completed',
+      created_at: historyAt(-10_793),
+    },
+    [
+      historyAttempt(1, 'completed', {
+        start: -10_793,
+        duration: 1210,
+        detail: dnsDetail({
+          created: [challengeRecord('shop', 'Zq8m1y2QvB7oP0xKk3sNw4rT5uV6')],
+        }),
       }),
-      trace: certificateIssueTrace(),
-    }),
-  ]
-  const website = [
-    historyAttempt(3, 'completed', {
-      start: -120,
-      duration: 152,
-      detail: domainsDetail(
+    ]
+  ),
+  shopCleanup = seedSubtask(
+    7123,
+    {
+      ...work('dns_challenge_cleanup', 'dns_zone', zoneId, 'example.test'),
+      parent_id: uuid(7121),
+      status: 'completed',
+      created_at: historyAt(-10_740),
+    },
+    [
+      historyAttempt(1, 'completed', {
+        start: -10_740,
+        duration: 980,
+        detail: dnsDetail({
+          deleted: [challengeRecord('shop', 'Zq8m1y2QvB7oP0xKk3sNw4rT5uV6')],
+        }),
+      }),
+    ]
+  ),
+  // Every renewal attempt writes and then removes the TXT records again.
+  renewChallenge = seedSubtask(
+    7182,
+    {
+      ...work('dns_challenge', 'dns_zone', zoneId, 'example.test'),
+      parent_id: uuid(7181),
+      status: 'completed',
+      created_at: historyAt(-398),
+    },
+    [-128, -263, -398].map((start, index) =>
+      historyAttempt(3 - index, 'completed', {
+        start,
+        duration: 1180,
+        detail: dnsDetail({
+          created: [challengeRecord('legacy', 'Hn4c7Lq0WzR2yT8vB1mK5sXe9PdA')],
+        }),
+      })
+    )
+  ),
+  renewCleanup = seedSubtask(
+    7183,
+    {
+      ...work('dns_challenge_cleanup', 'dns_zone', zoneId, 'example.test'),
+      parent_id: uuid(7181),
+      status: 'completed',
+      created_at: historyAt(-275),
+    },
+    [-13, -144, -275].map((start, index) =>
+      historyAttempt(3 - index, 'completed', {
+        start,
+        duration: 1040,
+        detail: dnsDetail({
+          deleted: [challengeRecord('legacy', 'Hn4c7Lq0WzR2yT8vB1mK5sXe9PdA')],
+        }),
+      })
+    )
+  )
+const exampleZone = { id: zoneId, domain: 'example.test' }
+db.operations = [
+  // Retrying: QA Edge 02 fails to activate (next attempt 40 s after start);
+  // the DNS sync recovered after one failure.
+  seedOperation(
+    7001,
+    {
+      action: 'website.update',
+      target_type: 'website',
+      target_id: uuid(1201),
+      target_name: '官网',
+      created_at: historyAt(-900),
+      summary: { sections: ['domains', 'https'] },
+    },
+    [
+      seedSubtask(
+        7111,
+        {
+          ...work('dns_sync', 'dns_zone', zoneId, 'example.test'),
+          status: 'completed',
+          created_at: historyAt(-900),
+        },
         [
-          'qa.example.test',
-          'www.qa.example.test',
-          '*.img.qa.example.test',
-          'legacy.qa.example.test',
-        ].map((hostname) =>
-          domainResult(hostname, 'verified', ['edge-qa.example.test'])
+          historyAttempt(2, 'completed', {
+            start: -878,
+            duration: 2731,
+            detail: dnsDetail({
+              created: Array.from({ length: 50 }, (_, index) =>
+                dnsRecord(`node-${index + 1}`, 'A', `203.0.113.${index + 31}`)
+              ),
+              created_count: 64,
+              unchanged_count: 10,
+              truncated: true,
+            }),
+            trace: cloudflareSyncTrace(),
+          }),
+          historyAttempt(1, 'failed', {
+            start: -898,
+            duration: 5030,
+            error: 'Cloudflare API 连接失败',
+            retry: true,
+            detail: dnsDetail({ unchanged_count: 0 }),
+            trace: cloudflareSyncFailureTrace(),
+          }),
+        ]
+      ),
+      seedSubtask(
+        7112,
+        {
+          ...work('node_publish', 'node', nodeId, 'QA Edge 01'),
+          status: 'completed',
+          created_at: historyAt(-900),
+        },
+        [
+          historyAttempt(1, 'completed', {
+            start: -870,
+            duration: 1830,
+            detail: nodeResult(nodeId, 'QA Edge 01'),
+            trace: nodeApplyTrace(1, ''),
+          }),
+        ]
+      ),
+      seedSubtask(
+        7113,
+        {
+          ...work('node_publish', 'node', uuid(973), 'QA Edge 02'),
+          status: 'retrying',
+          created_at: historyAt(-900),
+        },
+        [
+          historyAttempt(3, 'failed', {
+            start: -26,
+            duration: 15_400,
+            error: reloadTimeout,
+            retryAt: 40,
+            detail: nodeResult(uuid(973), 'QA Edge 02', {
+              result: 'failed',
+              phase: 'activate',
+              error_code: 'apply_failed',
+              retryable: true,
+            }),
+            trace: nodeApplyTrace(3, 'activate', reloadTimeout),
+          }),
+          historyAttempt(2, 'failed', {
+            start: -420,
+            duration: 15_200,
+            error: reloadTimeout,
+            retry: true,
+            detail: nodeResult(uuid(973), 'QA Edge 02', {
+              result: 'failed',
+              phase: 'activate',
+              error_code: 'apply_failed',
+              retryable: true,
+            }),
+            trace: nodeApplyTrace(2, 'activate', reloadTimeout),
+          }),
+          historyAttempt(1, 'failed', {
+            start: -868,
+            duration: 2300,
+            error: '暂存配置失败：磁盘空间不足（剩余 112 MiB）',
+            retry: true,
+            detail: nodeResult(uuid(973), 'QA Edge 02', {
+              result: 'failed',
+              phase: 'stage',
+              error_code: 'apply_failed',
+              retryable: true,
+            }),
+          }),
+        ]
+      ),
+      seedSubtask(
+        7114,
+        {
+          ...work('website_check', 'website', uuid(1201), '官网'),
+          status: 'completed',
+          created_at: historyAt(-900),
+        },
+        [
+          historyAttempt(1, 'completed', {
+            start: -860,
+            duration: 152,
+            detail: domainsDetail(
+              ['www.example.test', 'www-cn.example.test'].map((hostname) =>
+                domainResult(hostname, 'verified', ['edge-qa.example.test'])
+              )
+            ),
+            trace: websiteCheckTrace([
+              ['www.example.test', 'edge-qa.example.test'],
+              ['www-cn.example.test', 'edge-qa.example.test'],
+            ]),
+          }),
+        ]
+      ),
+    ]
+  ),
+  // Completed certificate issue with its DNS child subtasks, then publish.
+  seedOperation(
+    7002,
+    {
+      action: 'certificate.create',
+      target_type: 'certificate',
+      target_id: uuid(993),
+      target_name: 'shop.example.test',
+      created_at: historyAt(-10_800),
+    },
+    [
+      seedSubtask(
+        7121,
+        {
+          ...work('certificate_issue', 'certificate', uuid(993), 'shop.example.test'),
+          status: 'completed',
+          created_at: historyAt(-10_800),
+        },
+        [
+          historyAttempt(1, 'completed', {
+            start: -10_795,
+            duration: 74_500,
+            detail: certificateDetail('issue', 'completed', {
+              domains: shopDomains,
+              issuer: "CN=R11,O=Let's Encrypt,C=US",
+              not_before: '2026-07-28T00:00:00Z',
+              not_after: '2026-10-26T00:00:00Z',
+              serial_number: '04A1F3C2B9D87E6510FA33C1D2E4B5A69C70',
+              fingerprint_sha256: Array(32).fill('CD').join(':'),
+            }),
+            trace: certificateIssueTrace({
+              domains: shopDomains,
+              challenge: relatedDns(
+                uuid(7002),
+                'dns_challenge',
+                exampleZone,
+                shopChallenge
+              ),
+              cleanup: relatedDns(
+                uuid(7002),
+                'dns_challenge_cleanup',
+                exampleZone,
+                shopCleanup
+              ),
+            }),
+          }),
+        ]
+      ),
+      shopChallenge,
+      shopCleanup,
+      seedSubtask(
+        7124,
+        {
+          ...work('node_publish', 'node', nodeId, 'QA Edge 01'),
+          status: 'completed',
+          created_at: historyAt(-10_721),
+        },
+        [
+          historyAttempt(1, 'completed', {
+            start: -10_720,
+            duration: 1650,
+            detail: nodeResult(nodeId, 'QA Edge 01'),
+            trace: nodeApplyTrace(1, ''),
+          }),
+        ]
+      ),
+    ]
+  ),
+  // Needs attention: the pushed records conflict with a remote change.
+  seedOperation(
+    7003,
+    {
+      action: 'dns_zone.update_records',
+      target_type: 'dns_zone',
+      target_id: uuid(987),
+      target_name: 'conflict.test',
+      actor_user_id: operatorId,
+      actor_name: '运维值班',
+      created_at: historyAt(-5400),
+      summary: { record_counts: { created: 2, updated: 1, deleted: 0 } },
+    },
+    [
+      seedSubtask(
+        7131,
+        {
+          ...work('dns_sync', 'dns_zone', uuid(987), 'conflict.test'),
+          status: 'attention_required',
+          warning: 'dns_conflict',
+          created_at: historyAt(-5400),
+        },
+        [
+          historyAttempt(1, 'completed', {
+            start: -5398,
+            duration: 1650,
+            detail: dnsDetail({
+              created: [
+                dnsRecord('api', 'A', '192.0.2.21'),
+                dnsRecord('@', 'MX', 'mx.conflict.test', { priority: 10 }),
+              ],
+              updated: [
+                {
+                  before: dnsRecord('@', 'TXT', '"v=spf1 -all"'),
+                  after: dnsRecord('@', 'TXT', '"v=spf1 mx -all"'),
+                },
+              ],
+              conflicts: [
+                {
+                  name: 'www',
+                  type: 'A',
+                  line_code: 'default',
+                  local_content: '192.0.2.10',
+                  remote_content: '198.51.100.7',
+                },
+              ],
+              unchanged_count: 3,
+            }),
+          }),
+        ]
+      ),
+    ]
+  ),
+  // Merged: a newer save of the same website took over the DNS sync and the
+  // publish; the domain check was absorbed by the check of 7012, which has
+  // no receiving subtask to point to (`closed_by` only).
+  seedOperation(
+    7004,
+    {
+      action: 'website.update',
+      target_type: 'website',
+      target_id: brandWebsiteId,
+      target_name: '品牌官网',
+      created_at: historyAt(-300),
+      summary: { sections: ['origins'] },
+    },
+    [
+      seedSubtask(7141, {
+        ...work('dns_sync', 'dns_zone', brandZoneId, 'brand.test'),
+        status: 'merged',
+        created_at: historyAt(-300),
+        finished_at: historyAt(-20),
+        merged_into: { operation_id: uuid(7007), subtask_id: uuid(7172) },
+      }),
+      seedSubtask(7142, {
+        ...work('node_publish', 'node', uuid(1004), 'QA Edge 07'),
+        status: 'merged',
+        created_at: historyAt(-300),
+        finished_at: historyAt(-20),
+        merged_into: { operation_id: uuid(7007), subtask_id: uuid(7174) },
+      }),
+      seedSubtask(7143, {
+        ...work('website_check', 'website', brandWebsiteId, '品牌官网'),
+        status: 'merged',
+        created_at: historyAt(-300),
+        finished_at: historyAt(-178),
+        closed_by: { operation_id: uuid(7012) },
+      }),
+    ]
+  ),
+  // Cancelled by the deletion of the (now removed) node.
+  seedOperation(
+    7005,
+    {
+      action: 'node.update',
+      target_type: 'node',
+      target_id: removedNodeId,
+      target_name: '广州 Edge 02',
+      created_at: historyAt(-172_800),
+      summary: { sections: ['endpoints'] },
+    },
+    [
+      seedSubtask(7151, {
+        ...work('node_config', 'node', removedNodeId, '广州 Edge 02'),
+        status: 'cancelled',
+        created_at: historyAt(-172_800),
+        finished_at: historyAt(-171_000),
+        closed_by: { operation_id: uuid(7006) },
+      }),
+    ]
+  ),
+  seedOperation(
+    7006,
+    {
+      action: 'node.delete',
+      target_type: 'node',
+      target_id: removedNodeId,
+      target_name: '广州 Edge 02',
+      created_at: historyAt(-171_000),
+    },
+    [
+      seedSubtask(
+        7161,
+        {
+          ...work('dns_sync', 'dns_zone', zoneId, 'example.test'),
+          status: 'completed',
+          created_at: historyAt(-171_000),
+        },
+        [
+          historyAttempt(1, 'completed', {
+            start: -170_998,
+            duration: 1320,
+            detail: dnsDetail({
+              deleted: [dnsRecord('edge', 'A', '198.51.100.62')],
+              unchanged_count: 17,
+            }),
+          }),
+        ]
+      ),
+    ]
+  ),
+  // Running (newest): the domain check runs; node publishes never run (they
+  // wait for the node), QA Edge 07 is offline.
+  seedOperation(
+    7007,
+    {
+      action: 'website.update',
+      target_type: 'website',
+      target_id: brandWebsiteId,
+      target_name: '品牌官网',
+      created_at: historyAt(-20),
+      summary: { sections: ['domains'] },
+    },
+    [
+      seedSubtask(
+        7171,
+        {
+          ...work('dns_sync', 'dns_zone', cdnZoneId, 'cdn.example.test'),
+          status: 'completed',
+          created_at: historyAt(-20),
+        },
+        [
+          historyAttempt(1, 'completed', {
+            start: -19,
+            duration: 1840,
+            detail: dnsDetail({
+              updated: [
+                {
+                  before: dnsRecord('img', 'CNAME', 'edge.example.test'),
+                  after: dnsRecord('img', 'CNAME', 'edge.example.test', {
+                    ttl: 300,
+                  }),
+                },
+              ],
+              unchanged_count: 0,
+            }),
+          }),
+        ]
+      ),
+      seedSubtask(
+        7172,
+        {
+          ...work('dns_sync', 'dns_zone', brandZoneId, 'brand.test'),
+          status: 'attention_required',
+          warning: 'dns_unpushed',
+          created_at: historyAt(-20),
+        },
+        [
+          historyAttempt(1, 'completed', {
+            start: -18,
+            duration: 2240,
+            detail: dnsDetail({
+              created: [dnsRecord('www', 'CNAME', 'edge.example.test')],
+              unchanged_count: 2,
+            }),
+          }),
+        ]
+      ),
+      seedSubtask(7173, {
+        ...work('node_publish', 'node', nodeId, 'QA Edge 01'),
+        status: 'queued',
+        created_at: historyAt(-20),
+      }),
+      seedSubtask(7174, {
+        ...work('node_publish', 'node', uuid(1004), 'QA Edge 07'),
+        status: 'queued',
+        created_at: historyAt(-20),
+      }),
+      seedSubtask(7175, {
+        ...work('website_check', 'website', brandWebsiteId, '品牌官网'),
+        status: 'running',
+        created_at: historyAt(-20),
+        running_since: historyAt(-6),
+      }),
+    ]
+  ),
+  // System task: the automatic renewal keeps retrying (sync-type work never
+  // fails for good); every attempt wrote and removed the TXT records.
+  seedOperation(
+    7008,
+    {
+      action: 'system.certificate_auto_renew',
+      target_type: 'certificate',
+      target_id: uuid(994),
+      target_name: 'legacy.example.test',
+      actor_type: 'system',
+      actor_user_id: '',
+      actor_name: '',
+      created_at: historyAt(-405),
+    },
+    [
+      seedSubtask(
+        7181,
+        {
+          ...work('certificate_renew', 'certificate', uuid(994), 'legacy.example.test'),
+          status: 'retrying',
+          created_at: historyAt(-405),
+        },
+        [3, 2, 1].map((attempt, index) =>
+          historyAttempt(attempt, 'failed', {
+            start: -130 - index * 135,
+            duration: 120_000 + index * 4000,
+            error:
+              'DNS-01 验证超时：_acme-challenge.legacy.example.test 的 TXT 记录在 120 秒内未在权威服务器上生效。',
+            retry: true,
+            retryAt: index ? undefined : 50,
+            detail: certificateDetail('renew', 'dns_challenge', {
+              domains: legacyDomains,
+            }),
+            trace: certificateRenewFailureTrace({
+              wait: 116_010 + index * 4000,
+              domains: legacyDomains,
+              challenge: relatedDns(
+                uuid(7008),
+                'dns_challenge',
+                exampleZone,
+                renewChallenge
+              ),
+              cleanup: relatedDns(
+                uuid(7008),
+                'dns_challenge_cleanup',
+                exampleZone,
+                renewCleanup
+              ),
+            }),
+          })
         )
       ),
-      trace: websiteCheckTrace([
-        ['qa.example.test', 'edge-qa.example.test'],
-        ['www.qa.example.test', 'edge-qa.example.test'],
-        ['*.img.qa.example.test', 'edge-qa.example.test'],
-        ['legacy.qa.example.test', 'edge-qa.example.test'],
-      ]),
-    }),
-    historyAttempt(2, 'failed', {
-      start: -3720,
-      duration: 5120,
-      error: '2 个域名未指向集群接入域名',
-      retry: true,
-      detail: domainsDetail(
+      renewChallenge,
+      renewCleanup,
+    ]
+  ),
+  // Provider check (another administrator): recovered, then one DNS sync
+  // per zone of the provider as child subtasks.
+  seedOperation(
+    7009,
+    {
+      action: 'provider.verify',
+      target_type: 'provider',
+      target_id: dnsProviderId,
+      target_name: 'Cloudflare 生产账号',
+      actor_user_id: operatorId,
+      actor_name: '运维值班',
+      created_at: historyAt(-259_200),
+    },
+    [
+      seedSubtask(
+        7191,
+        {
+          ...work('provider_verify', 'provider', dnsProviderId, 'Cloudflare 生产账号'),
+          status: 'completed',
+          created_at: historyAt(-259_200),
+        },
         [
-          domainResult('qa.example.test', 'verified', ['edge-qa.example.test']),
-          domainResult(
-            'www.qa.example.test',
-            'invalid',
-            ['cdn.old-vendor.test'],
-            'CNAME 指向 cdn.old-vendor.test，不是集群接入域名'
-          ),
-          domainResult(
-            '*.img.qa.example.test',
-            'unverified',
-            [],
-            '公共 DNS 查询超时'
-          ),
-        ],
-        3
+          historyAttempt(2, 'completed', {
+            start: -259_168,
+            duration: 412,
+            detail: providerDetail({
+              zone_count: 3,
+              zones: [
+                { name: 'example.test', status: 'active' },
+                { name: 'brand.test', status: 'active' },
+                { name: 'staging.example.test', status: 'pending' },
+              ],
+            }),
+            trace: cloudflareVerificationTrace(false),
+          }),
+          historyAttempt(1, 'failed', {
+            start: -259_198,
+            duration: 333,
+            error: 'Cloudflare API 返回 403：令牌缺少 Zone:Read 权限',
+            retry: true,
+            detail: providerDetail(),
+            trace: cloudflareVerificationTrace(true),
+          }),
+        ]
       ),
-      trace: websiteCheckTrace([
-        ['qa.example.test', 'edge-qa.example.test'],
-        ['www.qa.example.test', 'cdn.old-vendor.test'],
-        ['*.img.qa.example.test', '', 'timeout'],
-      ]),
-    }),
-    historyAttempt(1, 'completed', { start: -86_000 }),
-  ]
-  const provider = [
-    historyAttempt(2, 'completed', {
-      start: -900,
-      duration: 412,
-      detail: providerDetail({
-        zone_count: 3,
-        zones: [
-          { name: 'example.test', status: 'active' },
-          { name: 'backup.test', status: 'active' },
-          { name: 'staging.example.test', status: 'pending' },
-        ],
-      }),
-      trace: cloudflareVerificationTrace(false),
-    }),
-    historyAttempt(1, 'failed', {
-      start: -1800,
-      duration: 333,
-      error: 'Cloudflare API 返回 403：令牌缺少 Zone:Read 权限',
-      detail: providerDetail(),
-      trace: cloudflareVerificationTrace(true),
-    }),
-  ]
-  const certificateProvider = [
-    historyAttempt(1, 'completed', {
-      start: -5400,
-      duration: 2210,
-      detail: providerDetail({
-        provider: 'zerossl',
-        provider_kind: 'certificate',
-        directory_url: 'https://acme.zerossl.com/v2/DV90',
-        external_account: 'fetched',
-      }),
-      trace: zeroSslVerificationTrace(),
-    }),
-  ]
-  // Node publish: no control-plane retry schedule; the newest record is a
-  // heartbeat confirmation without a start time.
-  const node = [
-    historyAttempt(4, 'completed', {
-      start: -30,
-      detail: nodeApply({ source: 'heartbeat' }),
-    }),
-    historyAttempt(3, 'failed', {
-      start: -400,
-      duration: 2300,
-      error: 'nginx 配置校验失败：unknown directive "proxy_cache_lock_age"',
-      detail: nodeApply({
-        result: 'failed',
-        phase: 'validate',
-        error_code: 'artifact_invalid',
-      }),
-      trace: nodeApplyTrace(
-        3,
-        'validate',
-        'nginx 配置校验失败：unknown directive "proxy_cache_lock_age"'
+      ...[
+        [7192, zoneId, 'example.test'],
+        [7193, brandZoneId, 'brand.test'],
+      ].map(([number, zone, domain], index) =>
+        seedSubtask(
+          number,
+          {
+            ...work('dns_sync', 'dns_zone', zone, domain),
+            parent_id: uuid(7191),
+            status: 'completed',
+            created_at: historyAt(-259_167),
+          },
+          [
+            historyAttempt(1, 'completed', {
+              start: -259_166 + index,
+              duration: 980,
+              detail: dnsDetail(),
+            }),
+          ]
+        )
       ),
-    }),
-    historyAttempt(2, 'failed', {
-      start: -900,
-      duration: 15_400,
-      error: '激活配置失败：reload 超时',
-      detail: nodeApply({
-        result: 'failed',
-        phase: 'activate',
-        error_code: 'apply_failed',
-        retryable: true,
+    ]
+  ),
+  // Retrying for hours: 137 records, the history list truncated to 100.
+  seedOperation(
+    7010,
+    {
+      action: 'dns_zone.sync',
+      target_type: 'dns_zone',
+      target_id: uuid(983),
+      target_name: 'backup.test',
+      created_at: backupCreatedAt,
+    },
+    [
+      seedSubtask(
+        7201,
+        {
+          ...work('dns_sync', 'dns_zone', uuid(983), 'backup.test'),
+          status: 'retrying',
+          created_at: backupCreatedAt,
+        },
+        backupRecords
+      ),
+    ]
+  ),
+  // Partial failure: QA Edge 06 rejects the configuration (not retryable);
+  // QA Edge 05 was confirmed by a heartbeat (record without start or trace).
+  seedOperation(
+    7011,
+    {
+      action: 'cluster.update',
+      target_type: 'cluster',
+      target_id: clusterId,
+      target_name: 'QA Cluster',
+      created_at: historyAt(-7200),
+      summary: { sections: ['basic'] },
+    },
+    [
+      seedSubtask(
+        7211,
+        {
+          ...work('dns_sync', 'dns_zone', zoneId, 'example.test'),
+          status: 'completed',
+          created_at: historyAt(-7200),
+        },
+        [
+          historyAttempt(1, 'completed', {
+            start: -7195,
+            duration: 1120,
+            detail: dnsDetail({
+              updated: [
+                {
+                  before: dnsRecord('edge', 'A', '192.0.2.10'),
+                  after: dnsRecord('edge', 'A', '192.0.2.10', { ttl: 300 }),
+                },
+              ],
+              unchanged_count: 16,
+            }),
+          }),
+        ]
+      ),
+      seedSubtask(
+        7212,
+        {
+          ...work('node_publish', 'node', uuid(1002), 'QA Edge 05'),
+          status: 'completed',
+          created_at: historyAt(-7200),
+        },
+        [
+          historyAttempt(1, 'completed', {
+            start: -7150,
+            detail: nodeResult(uuid(1002), 'QA Edge 05', {
+              source: 'heartbeat',
+            }),
+          }),
+        ]
+      ),
+      seedSubtask(
+        7213,
+        {
+          ...work('node_publish', 'node', uuid(1003), 'QA Edge 06'),
+          status: 'failed',
+          created_at: historyAt(-7200),
+        },
+        [
+          historyAttempt(1, 'failed', {
+            start: -7180,
+            duration: 2300,
+            error: nginxInvalid,
+            detail: nodeResult(uuid(1003), 'QA Edge 06', {
+              result: 'failed',
+              phase: 'validate',
+              error_code: 'artifact_invalid',
+            }),
+            trace: nodeApplyTrace(1, 'validate', nginxInvalid),
+          }),
+        ]
+      ),
+    ]
+  ),
+  // Needs attention: the apex still points to the old vendor.
+  seedOperation(
+    7012,
+    {
+      action: 'website.check_domains',
+      target_type: 'website',
+      target_id: brandWebsiteId,
+      target_name: '品牌官网',
+      created_at: historyAt(-200),
+    },
+    [
+      seedSubtask(
+        7221,
+        {
+          ...work('website_check', 'website', brandWebsiteId, '品牌官网'),
+          status: 'attention_required',
+          warning: 'domain_unverified',
+          created_at: historyAt(-200),
+        },
+        [
+          historyAttempt(2, 'completed', {
+            start: -180,
+            duration: 152,
+            detail: domainsDetail([
+              domainResult(
+                'brand.test',
+                'invalid',
+                ['cdn.old-vendor.test'],
+                'CNAME 指向 cdn.old-vendor.test，不是集群接入域名'
+              ),
+              domainResult('www.brand.test', 'verified', ['edge-qa.example.test']),
+              domainResult('img.cdn.example.test', 'verified', [
+                'edge-qa.example.test',
+              ]),
+            ]),
+            trace: websiteCheckTrace([
+              ['brand.test', 'cdn.old-vendor.test'],
+              ['www.brand.test', 'edge-qa.example.test'],
+              ['img.cdn.example.test', 'edge-qa.example.test'],
+            ]),
+          }),
+          historyAttempt(1, 'failed', {
+            start: -199,
+            duration: 4000,
+            error: '公共 DNS 查询超时',
+            retry: true,
+            detail: domainsDetail([
+              domainResult(
+                'brand.test',
+                'invalid',
+                ['cdn.old-vendor.test'],
+                'CNAME 指向 cdn.old-vendor.test，不是集群接入域名'
+              ),
+              domainResult('www.brand.test', 'unverified', [], '公共 DNS 查询超时'),
+            ]),
+            trace: websiteCheckTrace([
+              ['brand.test', 'cdn.old-vendor.test'],
+              ['www.brand.test', '', 'timeout'],
+            ]),
+          }),
+        ]
+      ),
+    ]
+  ),
+  seedOperation(
+    7013,
+    {
+      action: 'provider.verify',
+      target_type: 'provider',
+      target_id: uuid(812),
+      target_name: 'zerossl',
+      created_at: historyAt(-432_000),
+    },
+    [
+      seedSubtask(
+        7231,
+        {
+          ...work('provider_verify', 'provider', uuid(812), 'zerossl'),
+          status: 'completed',
+          created_at: historyAt(-432_000),
+        },
+        [
+          historyAttempt(1, 'completed', {
+            start: -431_995,
+            duration: 2210,
+            detail: providerDetail({
+              provider: 'zerossl',
+              provider_kind: 'certificate',
+              directory_url: 'https://acme.zerossl.com/v2/DV90',
+              external_account: 'fetched',
+            }),
+            trace: zeroSslVerificationTrace(),
+          }),
+        ]
+      ),
+    ]
+  ),
+  // Failed: QA Edge 08 rejects the new configuration (not retryable); only
+  // node reports fail for good.
+  seedOperation(
+    7014,
+    {
+      action: 'node.update',
+      target_type: 'node',
+      target_id: uuid(1005),
+      target_name: 'QA Edge 08',
+      created_at: historyAt(-3000),
+      summary: { sections: ['basic'] },
+    },
+    [
+      seedSubtask(
+        7241,
+        {
+          ...work('node_config', 'node', uuid(1005), 'QA Edge 08'),
+          status: 'failed',
+          created_at: historyAt(-3000),
+        },
+        [
+          historyAttempt(1, 'failed', {
+            start: -2990,
+            duration: 2100,
+            error: nginxInvalid,
+            detail: nodeResult(uuid(1005), 'QA Edge 08', {
+              result: 'failed',
+              phase: 'validate',
+              error_code: 'artifact_invalid',
+            }),
+            trace: nodeApplyTrace(1, 'validate', nginxInvalid),
+          }),
+        ]
+      ),
+    ]
+  ),
+  // Cancelled without `closed_by`: deleting the certificate provider (a
+  // write without a task of its own) cancelled the pending check.
+  seedOperation(
+    7015,
+    {
+      action: 'provider.update',
+      target_type: 'provider',
+      target_kind: 'certificate',
+      target_id: removedProviderId,
+      target_name: 'letsencrypt',
+      created_at: historyAt(-86_400),
+      summary: { credentials_changed: true },
+    },
+    [
+      seedSubtask(7251, {
+        ...work('provider_verify', 'provider', removedProviderId, 'letsencrypt'),
+        status: 'cancelled',
+        created_at: historyAt(-86_400),
+        finished_at: historyAt(-86_380),
       }),
-      trace: nodeApplyTrace(2, 'activate', '激活配置失败：reload 超时'),
-    }),
-    historyAttempt(1, 'completed', {
-      start: -7200,
-      duration: 1830,
-      detail: nodeApply(),
-      trace: nodeApplyTrace(1, ''),
-    }),
-  ]
-  const histories = {
-    'dns-zone:sync:qa': backup,
-    'dns-zone:sync:example': example,
-    'certificate:renew:qa': renew,
-    'website:deploy:qa': website,
-    'provider:verify:cloudflare': provider,
-    'provider:verify:zerossl': certificateProvider,
-    'node:deploy:qa-06': node,
-  }
-  return Object.fromEntries(
-    db.tasks
-      .filter((task) => histories[task.id])
-      .map((task) => [historyKey(task), histories[task.id]])
-  )
-}
-db.tasks.push({
-  id: 'provider:verify:zerossl',
-  resource_type: 'provider',
-  resource_id: certificateProviderId,
-  name: 'zerossl',
-  operation: 'verify',
-  version: 1,
-  status: 'completed',
-  error: '',
-  failures: 0,
-  updated_at: '2026-10-01T00:20:00Z',
-  next_attempt_at: '',
-})
-db.taskHistories = buildTaskHistories()
-// The retrying sync's next attempt matches its newest history record.
-{
-  const task = find(db.tasks, 'dns-zone:sync:qa')
-  const newest = db.taskHistories[historyKey(task)][0]
-  Object.assign(task, {
-    updated_at: newest.emitted_at,
-    next_attempt_at: newest.next_attempt_at,
-  })
-}
+    ]
+  ),
+]
 const seed = structuredClone(db)
 // Like the backend: `node_id` is the agent id (32 lowercase hex, not the node
 // UUID) and `secret` is 64 lowercase hex; both are regenerated on reset.
@@ -2906,12 +3555,6 @@ const issueCredentials = () => ({
 const credentials = new Map(
   db.nodes.map((node) => [node.id, issueCredentials()])
 )
-const user = {
-  id: uuid(101),
-  username: 'admin',
-  nickname: 'QA 管理员',
-  status: 'active',
-}
 const activeStreams = new Map(),
   requestCounts = new Map()
 let streamSequence = 0,
@@ -3105,6 +3748,601 @@ function validateStreamQuery(url) {
     const value = query.get('certificate_id')
     if (value !== null && !uuidPattern.test(value)) invalid('certificate_id')
   }
+  // Task center (contract §2.1, §3.1, §4): any invalid parameter is 10001.
+  const reject = (message) => fail(message, 400, 10001)
+  if (url.pathname === '/api/operations/stream') {
+    const value = (name) => query.get(name) || ''
+    if (value('page') && !/^[1-9]\d{0,8}$/.test(value('page')))
+      reject('page 必须是正整数')
+    if (
+      value('page_size') &&
+      !(/^[1-9]\d{0,2}$/.test(value('page_size')) && Number(value('page_size')) <= 100)
+    )
+      reject('page_size 必须是 1 到 100 的整数')
+    if (
+      value('status') &&
+      !operationStatuses.includes(value('status')) &&
+      !Object.hasOwn(operationGroups, value('status'))
+    )
+      reject('status 不合法')
+    if (value('target_type') && !operationTargetTypes.includes(value('target_type')))
+      reject('target_type 不合法')
+    if (value('actor') && !['me', 'system'].includes(value('actor')))
+      reject('actor 只能是 me 或 system')
+    if (value('days') && !['0', '1', '7'].includes(value('days')))
+      reject('days 只能是 0、1 或 7')
+    if (Buffer.byteLength(value('keyword').trim()) > 200)
+      reject('keyword 不能超过 200 字节')
+  }
+  const operation =
+    /^\/api\/operations\/([^/]+)\/(?:stream|attempts\/([^/]+)\/trace\/stream)$/.exec(
+      url.pathname
+    )
+  if (operation) {
+    if (!uuidPattern.test(operation[1])) reject('任务 ID 不合法')
+    const subtask = query.get('subtask_id')
+    if (subtask && !uuidPattern.test(subtask)) reject('subtask_id 不合法')
+    if (operation[2] !== undefined && !/^[1-9]\d*$/.test(operation[2]))
+      reject('attempt_id 不合法')
+  }
+}
+function findResource(type, id) {
+  const lists = {
+    website: db.websites,
+    cluster: db.clusters,
+    node: db.nodes,
+    dns_zone: db.zones,
+    certificate: db.certificates,
+    provider: [...db.dnsProviders, ...db.certificateProviders],
+  }
+  return lists[type]?.find((item) => item.id === id)
+}
+/** Name snapshot of a task target or a subtask resource; a certificate
+ * provider is named by its code (contract §2.3). */
+function resourceName(type, item) {
+  if (type === 'website') return item.config.name
+  if (type === 'dns_zone') return item.domain
+  if (type === 'certificate') return item.domains[0]
+  if (type === 'provider') return item.name ?? item.provider
+  return item.name
+}
+/** `target_kind` of a provider target: DNS account or certificate provider. */
+const providerKind = (id) =>
+  db.dnsProviders.some((provider) => provider.id === id) ? 'dns' : 'certificate'
+function findOperation(id) {
+  return (
+    db.operations.find((operation) => operation.id === id) ??
+    fail('任务不存在', 404, 16701)
+  )
+}
+const sortedSubtasks = (operation) =>
+  [...operation.subtasks].sort(
+    (a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)
+  )
+/** Task status over every subtask, children included (contract §5.2):
+ * problems first; attention counts on the success side of a partial
+ * failure; merged and cancelled count only when nothing else is left. */
+function deriveOperationStatus(statuses) {
+  for (const status of ['retrying', 'running', 'queued'])
+    if (statuses.includes(status)) return status
+  const succeeded = statuses.some(
+    (status) => status === 'completed' || status === 'attention_required'
+  )
+  if (statuses.includes('failed')) return succeeded ? 'partial_failed' : 'failed'
+  if (statuses.includes('attention_required')) return 'attention_required'
+  if (!statuses.length || statuses.includes('completed')) return 'completed'
+  return statuses.every((status) => status === 'merged') ? 'merged' : 'cancelled'
+}
+/** `operation_dto` (contract §2.3). */
+function operationDto(operation) {
+  const subtasks = sortedSubtasks(operation),
+    statuses = subtasks.map((subtask) => subtask.status),
+    settled = subtasks.filter((subtask) =>
+      settledStatuses.includes(subtask.status)
+    ),
+    problem = (subtask) =>
+      subtask.status === 'retrying' || subtask.status === 'failed'
+  const changes = [
+    operation.created_at,
+    ...subtasks.flatMap((subtask) => [
+      subtask.created_at,
+      subtask.running_since,
+      subtask.finished_at,
+      db.subtaskRecords[subtask.id]?.[0]?.emitted_at ?? '',
+    ]),
+  ]
+    .filter(Boolean)
+    .sort()
+  return {
+    id: operation.id,
+    action: operation.action,
+    target_type: operation.target_type,
+    target_id: operation.target_id,
+    target_name: operation.target_name,
+    target_deleted: !findResource(operation.target_type, operation.target_id),
+    ...(operation.target_type === 'provider'
+      ? {
+          target_kind:
+            operation.target_kind ?? providerKind(operation.target_id),
+        }
+      : {}),
+    actor_type: operation.actor_type,
+    actor_name: operation.actor_name,
+    created_at: operation.created_at,
+    updated_at: changes.at(-1),
+    finished_at:
+      settled.length === subtasks.length
+        ? (settled
+            .map((subtask) => subtask.finished_at)
+            .sort()
+            .at(-1) ?? '')
+        : '',
+    status: deriveOperationStatus(statuses),
+    subtask_count: subtasks.length,
+    settled_count: settled.length,
+    failed_count: subtasks.filter(problem).length,
+    next_attempt_at:
+      subtasks
+        .filter((subtask) => subtask.status === 'retrying')
+        .map((subtask) => subtask.next_attempt_at)
+        .filter(Boolean)
+        .sort()[0] ?? '',
+    error: subtasks.find(problem)?.error ?? '',
+    summary: operation.summary,
+  }
+}
+/** `merged_into`: the receiving subtask with its current status. */
+function mergedInto({ operation_id, subtask_id }) {
+  const owner = db.operations.find((operation) => operation.id === operation_id)
+  const receiver = owner?.subtasks.find((subtask) => subtask.id === subtask_id)
+  return (
+    receiver && {
+      operation_id,
+      subtask_id,
+      action: owner.action,
+      target_name: owner.target_name,
+      status: receiver.status,
+    }
+  )
+}
+/** `subtask_dto` (contract §3.4); optional objects omitted when absent. */
+function subtaskDto(subtask) {
+  const records = db.subtaskRecords[subtask.id] ?? []
+  const failures = records.filter((item) => item.outcome === 'failed').length,
+    settled = settledStatuses.includes(subtask.status)
+  // Offline only matters while the node still has to apply the work.
+  const node =
+    ['queued', 'retrying'].includes(subtask.status) &&
+    ['node_publish', 'node_config'].includes(subtask.kind)
+      ? db.nodes.find((value) => value.id === subtask.resource_id)
+      : undefined
+  const merged = subtask.merged_into && mergedInto(subtask.merged_into)
+  // `closed_by` only without a receiver (contract §3.4).
+  const closer =
+    !merged &&
+    subtask.closed_by &&
+    db.operations.find(
+      (operation) => operation.id === subtask.closed_by.operation_id
+    )
+  return {
+    id: subtask.id,
+    parent_id: subtask.parent_id,
+    kind: subtask.kind,
+    resource_type: subtask.resource_type,
+    resource_id: subtask.resource_id,
+    resource_name: subtask.resource_name,
+    resource_deleted: !findResource(subtask.resource_type, subtask.resource_id),
+    status: subtask.status,
+    warning: subtask.status === 'attention_required' ? subtask.warning : '',
+    node_offline: Boolean(node) && node.runtime.connection_status !== 'online',
+    created_at: subtask.created_at,
+    running_since: subtask.status === 'running' ? subtask.running_since : '',
+    finished_at: settled ? subtask.finished_at : '',
+    // Settled: from creation to settlement.
+    duration_ms: settled
+      ? Math.max(0, stampMs(subtask.finished_at) - stampMs(subtask.created_at))
+      : 0,
+    attempt_count: records.length,
+    failure_count: failures,
+    recovered: subtask.status === 'completed' && failures > 0,
+    next_attempt_at: subtask.status === 'retrying' ? subtask.next_attempt_at : '',
+    error: ['retrying', 'failed'].includes(subtask.status) ? subtask.error : '',
+    ...(merged ? { merged_into: merged } : {}),
+    ...(closer
+      ? {
+          closed_by: {
+            operation_id: closer.id,
+            action: closer.action,
+            target_name: closer.target_name,
+          },
+        }
+      : {}),
+  }
+}
+/** `operation_detail_dto` (contract §3.3). */
+function operationDetail(operation) {
+  return {
+    ...operationDto(operation),
+    subtasks: sortedSubtasks(operation).map(subtaskDto),
+  }
+}
+/** `operation_page_dto` (contract §2.2); parameters validated beforehand. */
+function operationPage(query) {
+  const param = (name) => query.get(name) || ''
+  const rows = db.operations.map((operation) => ({
+    operation,
+    dto: operationDto(operation),
+  }))
+  const status = param('status'),
+    statuses = operationGroups[status] ?? (status ? [status] : undefined),
+    actor = param('actor'),
+    days = Number(param('days') || 0),
+    since = days ? Date.now() - days * 86_400_000 : 0,
+    keyword = param('keyword').trim().toLowerCase()
+  const list =
+    query.get('qa') === 'empty'
+      ? []
+      : rows
+          .filter(
+            ({ operation, dto }) =>
+              (!statuses || statuses.includes(dto.status)) &&
+              (!param('action') || dto.action === param('action')) &&
+              (!param('target_type') ||
+                dto.target_type === param('target_type')) &&
+              (actor !== 'me' ||
+                (operation.actor_type === 'user' &&
+                  operation.actor_user_id === user.id)) &&
+              (actor !== 'system' || operation.actor_type === 'system') &&
+              (!since || stampMs(dto.created_at) >= since) &&
+              (!keyword ||
+                dto.target_name.toLowerCase().includes(keyword) ||
+                dto.target_id.toLowerCase().includes(keyword))
+          )
+          .map(({ dto }) => dto)
+          .sort(
+            (a, b) =>
+              b.created_at.localeCompare(a.created_at) ||
+              b.id.localeCompare(a.id)
+          )
+  const current = Number(param('page') || 1),
+    size = Number(param('page_size') || 20),
+    count = (group) =>
+      rows.filter(({ dto }) => operationGroups[group].includes(dto.status))
+        .length
+  return {
+    list: list.slice((current - 1) * size, current * size),
+    total: list.length,
+    page: current,
+    page_size: size,
+    total_pages: Math.ceil(list.length / size),
+    active: count('active'),
+    attention: count('attention'),
+  }
+}
+/** Background work a write starts (design §1.2), as `[kind, resource type,
+ * resource]`; two or three nodes are enough to show a publish per node. */
+function plannedSubtasks(action, target) {
+  const zoneById = (id) => db.zones.find((zone) => zone.id === id),
+    clusterZone = (id) =>
+      zoneById(db.clusters.find((cluster) => cluster.id === id)?.dns_zone_id),
+    dnsSync = (...zones) =>
+      [...new Set(zones.filter(Boolean))].map((zone) => [
+        'dns_sync',
+        'dns_zone',
+        zone,
+      ]),
+    publish = (clusterId) =>
+      db.nodes
+        .filter(
+          (node) => node.cluster_id === clusterId && node.status === 'enabled'
+        )
+        .slice(0, 3)
+        .map((node) => ['node_publish', 'node', node]),
+    websiteZones = () =>
+      target.config.domains
+        .filter((domain) => domain.dns_mode === 'managed')
+        .map((domain) => owningZone(domain.hostname))
+  switch (action) {
+    case 'website.create':
+    case 'website.update':
+    case 'website.enable':
+    case 'website.disable':
+      return [
+        ...dnsSync(...websiteZones()),
+        ...publish(target.cluster_id),
+        ['website_check', 'website', target],
+      ]
+    case 'website.delete':
+      return [...dnsSync(...websiteZones()), ...publish(target.cluster_id)]
+    case 'website.check_domains':
+      return [['website_check', 'website', target]]
+    case 'cluster.update':
+      return [...dnsSync(zoneById(target.dns_zone_id)), ...publish(target.id)]
+    case 'cluster.delete':
+    case 'certificate.delete':
+      return dnsSync(zoneById(target.dns_zone_id))
+    case 'node.create':
+    case 'node.delete':
+    case 'node.reset_credentials':
+      return dnsSync(clusterZone(target.cluster_id))
+    case 'node.update':
+      return [
+        ['node_config', 'node', target],
+        ...dnsSync(clusterZone(target.cluster_id)),
+      ]
+    case 'system.node_register':
+      return [
+        ['node_publish', 'node', target],
+        ...dnsSync(clusterZone(target.cluster_id)),
+      ]
+    case 'system.release_upgrade':
+      return publish(target.id)
+    case 'dns_zone.create':
+    case 'dns_zone.update_records':
+    case 'dns_zone.sync':
+    case 'dns_zone.sync_local':
+    case 'dns_zone.sync_remote':
+    case 'system.dns_cleanup':
+      return dnsSync(target)
+    case 'dns_zone.delete':
+      return [['dns_delete', 'dns_zone', target]]
+    case 'certificate.create':
+      return [['certificate_issue', 'certificate', target]]
+    case 'certificate.renew':
+    case 'system.certificate_auto_renew':
+      return [['certificate_renew', 'certificate', target]]
+    case 'system.certificate_expired':
+      return [
+        ...new Set(
+          db.websites
+            .filter((website) => website.config.certificate_ids.includes(target.id))
+            .map((website) => website.cluster_id)
+        ),
+      ].flatMap(publish)
+    case 'provider.update':
+    case 'provider.verify':
+      return [['provider_verify', 'provider', target]]
+  }
+  fail(`QA mock 未实现任务动作：${action}`)
+}
+// Node work merges per node and kind; other work per marker (resource).
+const carrierOf = (subtask) =>
+  ['node_publish', 'node_config'].includes(subtask.kind)
+    ? `${subtask.kind}:${subtask.resource_id}`
+    : `${subtask.resource_type}:${subtask.resource_id}`
+/** Settles another task's open subtask without running it. */
+function settleOpenSubtask(subtask, settledAt, fields) {
+  delete subtask.merged_into
+  delete subtask.closed_by
+  Object.assign(
+    subtask,
+    { running_since: '', next_attempt_at: '', error: '', finished_at: settledAt },
+    fields
+  )
+}
+/** Cancels the open work on a deleted resource. `closedBy` is the deleting
+ * task; a write without a task of its own leaves no `closed_by` (D1).
+ * Returns whether anything changed. */
+function cancelOpenWork(resourceType, resourceId, settledAt, closedBy) {
+  let changed = false
+  for (const operation of db.operations)
+    for (const subtask of operation.subtasks)
+      if (
+        operationGroups.active.includes(subtask.status) &&
+        subtask.resource_type === resourceType &&
+        subtask.resource_id === resourceId
+      ) {
+        settleOpenSubtask(subtask, settledAt, {
+          status: 'cancelled',
+          ...(closedBy ? { closed_by: { operation_id: closedBy } } : {}),
+        })
+        changed = true
+      }
+  return changed
+}
+/** Records a new task with queued subtasks (D1: none without background
+ * work). Open subtasks of other tasks on the same carrier settle as merged
+ * into the new ones (design §4); a deletion cancels the open work on the
+ * deleted resource. Callers broadcast `operations`. */
+function startOperation(action, targetType, target, summary = {}) {
+  const planned = plannedSubtasks(action, target)
+  if (!planned.length) return undefined
+  const now = Date.now(),
+    system = action.startsWith('system.')
+  const operation = {
+    id: randomUUID(),
+    action,
+    target_type: targetType,
+    target_id: target.id,
+    target_name: resourceName(targetType, target),
+    ...(targetType === 'provider' ? { target_kind: providerKind(target.id) } : {}),
+    actor_type: system ? 'system' : 'user',
+    actor_user_id: system ? '' : user.id,
+    actor_name: system ? '' : user.nickname,
+    created_at: historyStamp(now),
+    summary,
+    // One millisecond apart so the detail keeps the planned order.
+    subtasks: planned.map(([kind, resourceType, resource], index) => ({
+      id: randomUUID(),
+      parent_id: '',
+      kind,
+      resource_type: resourceType,
+      resource_id: resource.id,
+      resource_name: resourceName(resourceType, resource),
+      status: 'queued',
+      warning: '',
+      created_at: historyStamp(now + index),
+      running_since: '',
+      finished_at: '',
+      next_attempt_at: '',
+      error: '',
+    })),
+  }
+  const receivers = new Map(
+    operation.subtasks.map((subtask) => [carrierOf(subtask), subtask])
+  )
+  for (const other of db.operations)
+    for (const subtask of other.subtasks) {
+      const receiver = receivers.get(carrierOf(subtask))
+      if (receiver && operationGroups.active.includes(subtask.status))
+        settleOpenSubtask(subtask, operation.created_at, {
+          status: 'merged',
+          merged_into: { operation_id: operation.id, subtask_id: receiver.id },
+        })
+    }
+  if (action.endsWith('.delete'))
+    cancelOpenWork(targetType, target.id, operation.created_at, operation.id)
+  db.operations.push(operation)
+  return operation
+}
+const operationData = (operation) =>
+  operation ? { operation_id: operation.id } : undefined
+/** Detail, error and trace of a record appended now, by subtask kind;
+ * `final` is a node failure the node reports as not retryable. */
+function liveRecord(operation, subtask, attempt, failed, final) {
+  const { kind } = subtask
+  if (kind === 'node_publish' || kind === 'node_config') {
+    const phase = final ? 'validate' : 'activate'
+    const error = failed
+      ? final
+        ? nginxInvalid
+        : subtask.error || reloadTimeout
+      : ''
+    return {
+      error,
+      detail: nodeResult(
+        subtask.resource_id,
+        subtask.resource_name,
+        failed
+          ? {
+              result: 'failed',
+              phase,
+              error_code: final ? 'artifact_invalid' : 'apply_failed',
+              retryable: !final,
+            }
+          : {}
+      ),
+      trace: nodeApplyTrace(attempt, failed ? phase : '', error),
+    }
+  }
+  if (kind === 'website_check') {
+    const hosts =
+      findResource('website', subtask.resource_id)?.config.domains.map(
+        (domain) => domain.hostname
+      ) ?? []
+    return {
+      error: failed ? '公共 DNS 查询超时' : '',
+      detail: domainsDetail(
+        hosts.map((hostname) =>
+          failed
+            ? domainResult(hostname, 'unverified', [], '公共 DNS 查询超时')
+            : domainResult(hostname, 'verified', ['edge-qa.example.test'])
+        )
+      ),
+      trace: websiteCheckTrace(
+        hosts.map((hostname) =>
+          failed ? [hostname, '', 'timeout'] : [hostname, 'edge-qa.example.test']
+        )
+      ),
+    }
+  }
+  if (kind === 'certificate_issue' || kind === 'certificate_renew') {
+    const certificate = findResource('certificate', subtask.resource_id),
+      domains = certificate?.domains ?? [subtask.resource_name],
+      zone =
+        db.zones.find((value) => value.id === certificate?.dns_zone_id) ??
+        exampleZone,
+      children = operation.subtasks.filter(
+        (child) => child.parent_id === subtask.id
+      ),
+      stage = kind === 'certificate_renew' ? 'renew' : 'issue',
+      link = (step) =>
+        relatedDns(
+          operation.id,
+          step,
+          zone,
+          children.find((child) => child.kind === step)
+        )
+    const links = {
+      domains,
+      challenge: link('dns_challenge'),
+      cleanup: link('dns_challenge_cleanup'),
+    }
+    return failed
+      ? {
+          error: `DNS-01 验证超时：_acme-challenge.${domains[0]} 的 TXT 记录在 120 秒内未在权威服务器上生效。`,
+          detail: certificateDetail(stage, 'dns_challenge', { domains }),
+          trace: certificateRenewFailureTrace({ wait: 116_010, ...links }),
+        }
+      : {
+          error: '',
+          detail: certificateDetail(stage, 'completed', { domains }),
+          trace: certificateIssueTrace(links),
+        }
+  }
+  if (kind === 'provider_verify')
+    return {
+      error: failed ? 'Cloudflare API 返回 403：令牌缺少 Zone:Read 权限' : '',
+      detail: providerDetail(),
+      trace: cloudflareVerificationTrace(failed),
+    }
+  return {
+    error: failed ? 'Cloudflare API 连接失败' : '',
+    detail: failed ? dnsDetail({ unchanged_count: 0 }) : dnsDetail(),
+    trace: failed ? cloudflareSyncFailureTrace() : cloudflareSyncTrace(),
+  }
+}
+/** Appends a record that ended now and settles the subtask: a failure
+ * retries 15 s later (a node may report it final: failed), a success
+ * completes it. */
+function appendAttempt(operation, subtask, outcome, final = false) {
+  const records = (db.subtaskRecords[subtask.id] ??= [])
+  const failed = outcome === 'failed',
+    duration = 1200,
+    attempt = (records[0]?.attempt ?? 0) + 1
+  const { error, detail, trace } = liveRecord(
+    operation,
+    subtask,
+    attempt,
+    failed,
+    final
+  )
+  const item = historyAttempt(attempt, outcome, {
+    start: (Date.now() - historyBase - duration) / 1000,
+    duration,
+    error,
+    retry: failed && !final,
+    detail,
+    trace,
+  })
+  records.unshift(item)
+  Object.assign(subtask, {
+    status: failed ? (final ? 'failed' : 'retrying') : 'completed',
+    warning: '',
+    running_since: '',
+    finished_at: failed && !final ? '' : item.emitted_at,
+    next_attempt_at: item.next_attempt_at,
+    error,
+  })
+  return item
+}
+/** Contract §3.2 order: the changed snapshots first, then `attempt` (plain
+ * JSON) to the detail streams expanding that subtask. */
+function publishAttempt(operation, subtask, item) {
+  broadcast(['operations'])
+  for (const stream of activeStreams.values())
+    if (
+      stream.url.pathname === `/api/operations/${operation.id}/stream` &&
+      stream.url.searchParams.get('subtask_id') === subtask.id &&
+      // Only after the first `history` (contract §3.2).
+      stream.framesByEvent?.has('history')
+    )
+      emit(
+        stream,
+        'attempt',
+        { subtask_id: subtask.id, item, summary: historySummary(subtask) },
+        { force: true }
+      )
 }
 // Overview `nodes` event: same page shape as /api/nodes/stream?page=1&page_size=100.
 function overviewNodes() {
@@ -3135,22 +4373,7 @@ function overview() {
         .length,
       certificate_failed_count: db.certificates.filter(isCertificateAbnormal)
         .length,
-      active_marker_count: db.tasks.filter((task) =>
-        ['queued', 'running', 'retrying'].includes(task.status)
-      ).length,
-      retry_marker_count: db.tasks.filter((task) => task.status === 'retrying')
-        .length,
     },
-    recent_markers: db.tasks.map((task) => ({
-      id: task.id,
-      resource_type: task.resource_type,
-      resource_id: task.resource_id,
-      resource_name: task.name,
-      operation: task.operation,
-      status: task.status,
-      ...(task.error ? { last_error: task.error } : {}),
-      updated_at: task.updated_at,
-    })),
   }
 }
 function dashboard() {
@@ -3420,44 +4643,25 @@ function readStream(url) {
     if (part[3] === 'dashboard') return dashboard()
     if (part.length === 4) return website
   }
-  if (path === '/api/tasks/stream')
-    return {
-      ...page(db.tasks, query),
-      active: db.tasks.filter((task) =>
-        ['queued', 'running', 'retrying'].includes(task.status)
-      ).length,
-      failed: db.tasks.filter((task) => task.status === 'failed').length,
-    }
-  if (part[1] === 'tasks') {
-    // Publish ids are shared by every node; resource_id selects one row.
-    const id = decodeURIComponent(part[2]),
-      resourceId = query.get('resource_id')
-    if (resourceId !== null && !/^[0-9a-f-]{36}$/.test(resourceId))
-      fail('resource_id 不合法', 400, 10001)
-    const task =
-      db.tasks.find(
-        (item) =>
-          item.id === id && (!resourceId || item.resource_id === resourceId)
-      ) ?? fail('任务不存在', 404, 16701)
-    if (part[3] === 'attempts' && part[5] === 'trace') {
-      // One attempt across every resource of the task (publish ids are
-      // shared); an attempt of another task reads as not found.
-      if (!/^[1-9]\d*$/.test(part[4])) fail('attempt_id 不合法', 400, 10001)
-      if (taskTraceMode === 'error')
-        fail('QA 场景：执行详情读取失败', 500, 50001)
-      for (const owner of db.tasks.filter((item) => item.id === id)) {
-        const history = db.taskHistories[historyKey(owner)]
-        const item = Array.isArray(history)
-          ? history.find((entry) => entry.trace.attempt_id === part[4])
-          : undefined
-        if (item) return traceSnapshot(owner, item)
+  if (path === '/api/operations/stream') return operationPage(query)
+  if (part[1] === 'operations') {
+    const operation = findOperation(part[2])
+    if (part[3] === 'attempts') {
+      if (operationTraceMode === 'error')
+        fail('QA 场景：执行详情读取失败', 500, 10004)
+      // An attempt of another task reads as not found.
+      for (const subtask of operation.subtasks) {
+        const item = db.subtaskRecords[subtask.id]?.find(
+          (record) => record.trace.attempt_id === part[4]
+        )
+        if (item) return traceSnapshot(subtask, item)
       }
-      fail('任务不存在', 404, 16701)
+      fail('执行记录不存在', 404, 16706)
     }
-    if (part[3] !== 'history') return task
-    const history = db.taskHistories[historyKey(task)] ?? []
-    if (history === 'error') fail('QA 场景：执行记录读取失败', 500, 50001)
-    return historySnapshot(task, history)
+    const subtaskId = query.get('subtask_id')
+    if (subtaskId && !operation.subtasks.some((item) => item.id === subtaskId))
+      fail('子任务不存在', 404, 16705)
+    return operationDetail(operation)
   }
   fail(`QA mock 未实现流：${path}`, 404)
 }
@@ -3488,13 +4692,44 @@ function emitSnapshot(stream, force = false) {
       ? 'dashboard'
       : 'snapshot'
     emit(stream, event, envelope(readStream(stream.url)), { force })
+    // A detail stream expanding a subtask sends its `history` after the
+    // first and every recovery (forced) snapshot only; new records follow
+    // as `attempt` events.
+    const subtaskId = stream.url.searchParams.get('subtask_id')
+    if (
+      subtaskId &&
+      /^\/api\/operations\/[^/]+\/stream$/.test(stream.url.pathname) &&
+      (force || !stream.framesByEvent.has('history'))
+    )
+      emit(
+        stream,
+        'history',
+        envelope(
+          subtaskHistory(
+            findOperation(stream.url.pathname.split('/')[3]).subtasks.find(
+              (subtask) => subtask.id === subtaskId
+            )
+          )
+        ),
+        { force }
+      )
   } catch (error) {
+    const before = stream.eventCount
     emit(
       stream,
       'resource-error',
       errorEnvelope(error.message, error.code ?? 40001),
       { force }
     )
+    // 16705: both `snapshot` and `history` are answered with the error; the
+    // connection stays open (contract §3.1, §7).
+    if (error.code === 16705 && stream.eventCount > before)
+      emit(
+        stream,
+        'resource-error',
+        errorEnvelope(error.message, error.code),
+        { force: true }
+      )
   }
 }
 function openStream(req, res, url) {
@@ -3619,7 +4854,7 @@ function qaState() {
       websites: db.websites.length,
       dns_zones: db.zones.length,
       certificates: db.certificates.length,
-      tasks: db.tasks.length,
+      operations: db.operations.length,
     },
   }
 }
@@ -3653,61 +4888,141 @@ function control(query) {
     db = structuredClone(seed)
     tick = 0
     ingestedTraffic.clear()
-    taskTraceMode = 'reset'
+    operationTraceMode = 'reset'
     for (const stream of targets)
       if (!/\/(?:logs|access-logs)\/stream$/.test(stream.url.pathname))
         emitSnapshot(stream, true)
     return { reset: true }
   }
-  if (event === 'task-history') {
-    // History is a one-shot snapshot: the next read (tab open or 刷新记录)
-    // returns the new state; only `fail` pushes the changed task streams.
-    const task = find(db.tasks, query.get('id') ?? 'dns-zone:sync:qa')
-    const key = historyKey(task),
-      mode = query.get('mode') ?? 'reset'
-    if (mode === 'fail') {
-      // A new failed attempt right now that repeats the newest error (joins
-      // its collapsed run) and schedules the sync retry 15 s later.
-      const history = Array.isArray(db.taskHistories[key])
-        ? db.taskHistories[key]
-        : []
-      const now = Date.now()
-      const error = history[0]?.error || 'QA 场景：同步失败'
-      history.unshift({
-        attempt: (history[0]?.attempt ?? 0) + 1,
-        outcome: 'failed',
-        error,
-        started_at: historyStamp(now - 1200),
-        emitted_at: historyStamp(now),
-        duration_ms: 1200,
-        next_attempt_at: historyStamp(now + 15_000),
-        detail: history[0]?.detail ?? { kind: 'none', truncated: false },
-        trace: traceNone(String(++attemptSequence)),
-      })
-      db.taskHistories[key] = history
-      Object.assign(task, {
-        status: 'retrying',
-        error,
-        failures: task.failures + 1,
-        updated_at: history[0].emitted_at,
-        next_attempt_at: history[0].next_attempt_at,
-      })
-      broadcast(['tasks'])
-    } else
-      db.taskHistories[key] =
-        mode === 'error'
-          ? 'error'
-          : mode === 'empty'
-            ? []
-            : structuredClone(seed.taskHistories[key] ?? [])
-    return { id: task.id, mode }
+  // Subtask named by `operation`/`subtask`, else the default, else the first
+  // open subtask of `operation`.
+  const pickSubtask = ([defaultOperation, defaultSubtask]) => {
+    const operationId = query.get('operation')
+    const operation = findOperation(operationId ?? defaultOperation)
+    const subtaskId =
+      query.get('subtask') ?? (operationId ? undefined : defaultSubtask)
+    const subtask = subtaskId
+      ? (operation.subtasks.find((item) => item.id === subtaskId) ??
+        fail('子任务不存在', 404, 16705))
+      : (sortedSubtasks(operation).find((item) =>
+          operationGroups.active.includes(item.status)
+        ) ?? fail('任务没有进行中的子任务', 409))
+    if (!operationGroups.active.includes(subtask.status))
+      fail('子任务已结算', 409)
+    return { operation, subtask }
   }
-  if (event === 'task-trace') {
+  const nodeWork = (subtask) =>
+    subtask.kind === 'node_publish' || subtask.kind === 'node_config'
+  if (event === 'operation-claim') {
+    // A worker claims queued or retrying sync-type work (default: the
+    // backup.test sync); every claim restarts `running_since`. Node work is
+    // never running (contract §3.4).
+    const { operation, subtask } = pickSubtask([uuid(7010), uuid(7201)])
+    if (nodeWork(subtask)) fail('节点类子任务没有执行中状态', 409)
+    Object.assign(subtask, {
+      status: 'running',
+      running_since: historyStamp(Date.now()),
+      next_attempt_at: '',
+    })
+    broadcast(['operations'])
+    return {
+      operation_id: operation.id,
+      subtask_id: subtask.id,
+      running_since: subtask.running_since,
+      operation_status: operationDto(operation).status,
+    }
+  }
+  if (event === 'operation-attempt' || event === 'operation-complete') {
+    // Defaults: a failed record on the retrying QA Edge 02 publish, or the
+    // running domain check of 7007 completes. `retryable=0` makes a node
+    // failure final (failed).
+    const complete = event === 'operation-complete'
+    const { operation, subtask } = pickSubtask(
+      complete ? [uuid(7007), uuid(7175)] : [uuid(7001), uuid(7113)]
+    )
+    const outcome = complete ? 'completed' : (query.get('outcome') ?? 'failed')
+    if (outcome !== 'failed' && outcome !== 'completed')
+      fail('outcome 只能是 failed 或 completed')
+    const final = query.get('retryable') === '0'
+    if (final && !nodeWork(subtask))
+      fail('只有节点类子任务会不可重试地失败', 409)
+    const item = appendAttempt(operation, subtask, outcome, final)
+    publishAttempt(operation, subtask, item)
+    return {
+      operation_id: operation.id,
+      subtask_id: subtask.id,
+      attempt: item.attempt,
+      attempt_id: item.trace.attempt_id,
+      subtask_status: subtask.status,
+      operation_status: operationDto(operation).status,
+    }
+  }
+  if (event === 'operation-create') {
+    const action = query.get('action') ?? 'website.update'
+    const systemTargets = {
+      'system.certificate_auto_renew': 'certificate',
+      'system.certificate_expired': 'certificate',
+      'system.node_register': 'node',
+      'system.release_upgrade': 'cluster',
+      'system.dns_cleanup': 'dns_zone',
+    }
+    const defaults = {
+      website: brandWebsiteId,
+      cluster: clusterId,
+      node: nodeId,
+      dns_zone: zoneId,
+      certificate: certificateId,
+      provider: dnsProviderId,
+    }
+    const targetType = systemTargets[action] ?? action.split('.')[0]
+    if (!operationTargetTypes.includes(targetType))
+      fail(`QA mock 未实现任务动作：${action}`)
+    const target =
+      findResource(targetType, query.get('target') ?? defaults[targetType]) ??
+      fail('资源不存在', 404)
+    const operation =
+      startOperation(action, targetType, target) ??
+      fail('该操作没有后台工作，不产生任务', 409)
+    broadcast(['operations'])
+    return {
+      operation_id: operation.id,
+      action,
+      subtask_ids: operation.subtasks.map((subtask) => subtask.id),
+    }
+  }
+  if (event === 'operation-history-reset') {
+    // Retention cleanup: drops all but the newest `keep` records of one
+    // subtask (default: backup.test sync) and re-sends its `history`.
+    const operation = findOperation(query.get('operation') ?? uuid(7010))
+    const subtaskId = query.get('subtask') ?? sortedSubtasks(operation)[0].id
+    const subtask =
+      operation.subtasks.find((item) => item.id === subtaskId) ??
+      fail('子任务不存在', 404, 16705)
+    const keep = Math.max(0, Number(query.get('keep')) || 0)
+    db.subtaskRecords[subtask.id] = (
+      db.subtaskRecords[subtask.id] ?? []
+    ).slice(0, keep)
+    for (const stream of activeStreams.values())
+      if (
+        stream.url.pathname === `/api/operations/${operation.id}/stream` &&
+        stream.url.searchParams.get('subtask_id') === subtask.id
+      )
+        emit(stream, 'history', envelope(subtaskHistory(subtask)), {
+          force: true,
+        })
+    broadcast(['operations'])
+    return {
+      operation_id: operation.id,
+      subtask_id: subtask.id,
+      kept: db.subtaskRecords[subtask.id].length,
+    }
+  }
+  if (event === 'operation-trace') {
     // Traces are one-shot snapshots: `error` fails the next trace reads
     // (expand an attempt or 重试), `reset` restores them.
     const mode = query.get('mode') ?? 'reset'
-    taskTraceMode = mode === 'error' ? 'error' : 'reset'
-    return { mode: taskTraceMode }
+    operationTraceMode = mode === 'error' ? 'error' : 'reset'
+    return { mode: operationTraceMode }
   }
   if (event === 'node-runtime') {
     const node = find(db.nodes, query.get('id') ?? nodeId)
@@ -3743,13 +5058,14 @@ function control(query) {
     }
   }
   if (event === 'node-connection') {
-    // Node goes online/offline: list, detail, cluster and overview snapshots change.
+    // Node goes online/offline: list, detail, cluster, overview and task
+    // snapshots (`node_offline`) change.
     const node = find(db.nodes, query.get('id') ?? nodeId)
     const status = query.get('status') === 'online' ? 'online' : 'offline'
     node.runtime.connection_status = status
     if (status === 'online') node.runtime.last_heartbeat_at = nextTime()
     refreshRelations()
-    broadcast(['nodes', 'clusters'])
+    broadcast(['nodes', 'clusters', 'operations'])
     return { node_id: node.id, connection_status: status }
   }
   if (event === 'logs') {
@@ -3834,7 +5150,7 @@ function control(query) {
       websites: db.websites,
       'dns-zones': db.zones,
       certificates: db.certificates,
-      tasks: db.tasks,
+      operations: db.operations,
     }
     const collection = collections[resource]
     if (!collection) fail('QA resource 不支持 patch')
@@ -3853,7 +5169,8 @@ function control(query) {
     if (query.get('delete') === '1') delete target[keys.at(-1)]
     else target[keys.at(-1)] = value
     refreshRelations()
-    broadcast([resource])
+    // A node's connection status shows as `node_offline` in tasks.
+    broadcast([resource, ...(resource === 'nodes' ? ['operations'] : [])])
     return { id: item.id, path: keys.join('.'), value }
   }
   fail('QA event 不支持')
@@ -4007,6 +5324,97 @@ function createResource(resource, input, url) {
   }
   fail('QA create 不支持')
 }
+// Task targets of the write routes, and the actions without a request body
+// to inspect (contract §5.1, D1).
+const resourceTargetTypes = {
+  websites: 'website',
+  clusters: 'cluster',
+  nodes: 'node',
+  'dns-zones': 'dns_zone',
+  certificates: 'certificate',
+  'providers/dns': 'provider',
+  'providers/certificate': 'provider',
+}
+const creationActions = {
+  websites: 'website.create',
+  nodes: 'node.create',
+  'dns-zones': 'dns_zone.create',
+  certificates: 'certificate.create',
+}
+const deletionActions = {
+  websites: 'website.delete',
+  clusters: 'cluster.delete',
+  nodes: 'node.delete',
+  'dns-zones': 'dns_zone.delete',
+  certificates: 'certificate.delete',
+}
+const sectionOrder = [
+  'basic',
+  'domains',
+  'origins',
+  'health_check',
+  'access_log',
+  'https',
+  'compression',
+  'rules',
+  'cluster',
+  'dns',
+  'endpoints',
+  'status',
+]
+/** `summary.sections` (design §2.5): sections whose keys changed. */
+function changedSections(before, after, sectionOf) {
+  const sections = new Set()
+  for (const key of new Set([...Object.keys(before), ...Object.keys(after)]))
+    if (JSON.stringify(before[key]) !== JSON.stringify(after[key]))
+      sections.add(sectionOf(key))
+  return sectionOrder.filter((section) => sections.has(section))
+}
+const websiteSection = (key) =>
+  key === 'name'
+    ? 'basic'
+    : ['domains', 'cluster', 'status'].includes(key)
+      ? key
+      : key === 'route_rules'
+        ? 'rules'
+        : key.startsWith('health_check') || key.endsWith('healthy_threshold')
+          ? 'health_check'
+          : key.startsWith('access_log')
+            ? 'access_log'
+            : key.startsWith('response_compression')
+              ? 'compression'
+              : [
+                    'https_enabled',
+                    'certificate_ids',
+                    'minimum_tls_version',
+                    'force_https',
+                  ].includes(key) || key.startsWith('hsts')
+                ? 'https'
+                : 'origins'
+const nodeSection = (key) =>
+  ({ cluster_id: 'cluster', config: 'endpoints', status: 'status' })[key] ??
+  'basic'
+const clusterSection = (key) =>
+  ({ dns_zone_id: 'dns', hostname_prefix: 'dns', status: 'status' })[key] ??
+  'basic'
+const submitted = (item, input) =>
+  Object.fromEntries(Object.keys(input).map((key) => [key, item[key]]))
+/** `summary.record_counts` of a record set save, matched by record id. */
+function recordCounts(before, after) {
+  const previous = new Map(
+    before.map((record) => [record.id, JSON.stringify(record)])
+  )
+  const kept = new Set(after.map((record) => record.id))
+  return {
+    created: after.filter((record) => !previous.has(record.id)).length,
+    updated: after.filter(
+      (record) =>
+        previous.has(record.id) &&
+        previous.get(record.id) !== JSON.stringify(record)
+    ).length,
+    deleted: before.filter((record) => !kept.has(record.id)).length,
+  }
+}
 async function mutate(req, res, url) {
   const part = url.pathname.split('/').filter(Boolean),
     resource = part[1] === 'providers' ? `providers/${part[2]}` : part[1],
@@ -4026,11 +5434,13 @@ async function mutate(req, res, url) {
   const input = await body(req)
   if (resource === 'nodes' && action === 'credentials') {
     const node = find(list, id)
+    let started
     if (part[4] !== 'reveal') {
       requireRevision(req, node)
       touch(node)
       credentials.set(id, issueCredentials())
-      broadcast(['nodes'])
+      started = startOperation('node.reset_credentials', 'node', node)
+      broadcast(['nodes', ...(started ? ['operations'] : [])])
     }
     return json(
       res,
@@ -4038,6 +5448,7 @@ async function mutate(req, res, url) {
         ...(credentials.get(id) ??
           credentials.set(id, issueCredentials()).get(id)),
         revision: node.revision,
+        ...operationData(started),
       },
       '凭据已获取',
       node.revision
@@ -4047,13 +5458,25 @@ async function mutate(req, res, url) {
     const item = createResource(resource, input, url)
     list.push(item)
     refreshRelations()
-    broadcast([resource, 'clusters'])
+    const started =
+      creationActions[resource] &&
+      startOperation(
+        creationActions[resource],
+        resourceTargetTypes[resource],
+        item
+      )
+    broadcast([resource, 'clusters', ...(started ? ['operations'] : [])])
     if (resource === 'nodes') {
       const issued = issueCredentials()
       credentials.set(item.id, issued)
       return json(
         res,
-        { ...issued, id: item.id, revision: item.revision },
+        {
+          ...issued,
+          id: item.id,
+          revision: item.revision,
+          ...operationData(started),
+        },
         '节点已创建',
         item.revision
       )
@@ -4062,11 +5485,11 @@ async function mutate(req, res, url) {
     if (resource === 'websites')
       return json(
         res,
-        { id: item.id, revision: item.revision },
+        { id: item.id, revision: item.revision, ...operationData(started) },
         '资源已创建',
         item.revision
       )
-    return json(res, undefined, '资源已创建', item.revision)
+    return json(res, operationData(started), '资源已创建', item.revision)
   }
   const item = find(list, id)
   if (req.method === 'POST' && action === 'dns-probe') {
@@ -4076,27 +5499,68 @@ async function mutate(req, res, url) {
       resolution_status: 'resolved',
       last_verified_at: nextTime(),
     }))
-    broadcast(['websites'])
-    return json(res, undefined, 'DNS 检查已提交')
+    const started = startOperation('website.check_domains', 'website', item)
+    broadcast(['websites', ...(started ? ['operations'] : [])])
+    return json(res, operationData(started), 'DNS 检查已提交')
   }
   if (!(req.method === 'POST' && action === 'sync')) requireRevision(req, item)
   if (req.method === 'DELETE') {
     rejectDelete(resource, id)
     list.splice(list.indexOf(item), 1)
     refreshRelations()
-    broadcast([resource, 'clusters'])
-    return json(res, undefined, '资源已删除', item.revision + 1)
+    const started =
+      deletionActions[resource] &&
+      startOperation(
+        deletionActions[resource],
+        resourceTargetTypes[resource],
+        item
+      )
+    // Provider deletion has no task (D1) but cancels the pending checks,
+    // which then carry no `closed_by`.
+    const cancelled =
+      resource.startsWith('providers/') &&
+      cancelOpenWork('provider', item.id, historyStamp(Date.now()))
+    broadcast([
+      resource,
+      'clusters',
+      ...(started || cancelled ? ['operations'] : []),
+    ])
+    return json(res, operationData(started), '资源已删除', item.revision + 1)
   }
+  // `[action, summary]` of the task this write starts, if any.
+  let task
   if (req.method === 'PUT') {
     if (resource === 'websites') {
       const targetCluster =
         url.searchParams.get('cluster_id') ?? item.cluster_id
       find(db.clusters, targetCluster)
       validateWebsiteDomains(input.config)
+      const sections = changedSections(
+        { ...item.config, cluster: item.cluster_id, status: item.status },
+        { ...input.config, cluster: targetCluster, status: input.status },
+        websiteSection
+      )
+      task = [
+        sections.length === 1 && sections[0] === 'status'
+          ? input.status === 'enabled'
+            ? 'website.enable'
+            : 'website.disable'
+          : 'website.update',
+        sections.length ? { sections } : {},
+      ]
       item.cluster_id = targetCluster
       item.status = input.status
       item.config = input.config
     } else if (resource === 'dns-zones') {
+      task = [
+        'dns_zone.update_records',
+        {
+          record_counts: recordCounts(
+            item.config.records ?? [],
+            input.records ?? []
+          ),
+        },
+      ]
       item.config = input
       item.desired_revision = item.revision + 1
       item.synced_revision = item.revision + 1
@@ -4112,14 +5576,30 @@ async function mutate(req, res, url) {
       if (input.api_token) {
         item.token_hint = `****${input.api_token.slice(-4)}`
         item.status = 'unverified'
+        task = ['provider.update', { credentials_changed: true }]
       }
     } else if (resource === 'providers/certificate') {
+      if (
+        input.access_key ||
+        input.credential_mode !== item.credential_mode ||
+        (input.account_email && input.account_email !== item.account_email)
+      )
+        task = ['provider.update', { credentials_changed: true }]
       item.credential_mode = input.credential_mode
       if (input.account_email) item.account_email = input.account_email
       if (input.access_key)
         item.access_key_hint = `****${input.access_key.slice(-4)}`
       item.status = 'unverified'
     } else {
+      const sections = changedSections(
+        submitted(item, input),
+        input,
+        resource === 'nodes' ? nodeSection : clusterSection
+      )
+      task = [
+        resource === 'nodes' ? 'node.update' : 'cluster.update',
+        sections.length ? { sections } : {},
+      ]
       if (resource === 'clusters') find(db.zones, input.dns_zone_id)
       if (resource === 'nodes') {
         find(db.clusters, input.cluster_id)
@@ -4131,10 +5611,16 @@ async function mutate(req, res, url) {
     item.status = 'verified'
     item.last_verified_at = nextTime()
     delete item.last_error
+    task = ['provider.verify', {}]
   } else if (req.method === 'POST' && action === 'renew') {
     item.status = 'renewing'
     item.sync_status = 'queued'
+    task = ['certificate.renew', {}]
   } else if (req.method === 'POST' && action === 'sync') {
+    const policy = input.conflict_policy
+    task = ['local', 'remote'].includes(policy)
+      ? [`dns_zone.sync_${policy}`, { conflict_policy: policy }]
+      : ['dns_zone.sync', {}]
     item.sync_status = 'synced'
     item.synced_revision = item.desired_revision
     item.last_synced_at = nextTime()
@@ -4144,8 +5630,17 @@ async function mutate(req, res, url) {
   if (req.method === 'PUT') touch(item)
   else item.updated_at = nextTime()
   refreshRelations()
-  broadcast([resource, 'clusters', 'websites', 'tasks'])
-  return json(res, undefined, '资源已更新', item.revision)
+  // Certificate renewal settings (PUT) start no background work (D1).
+  const started =
+    task &&
+    startOperation(task[0], resourceTargetTypes[resource], item, task[1])
+  broadcast([
+    resource,
+    'clusters',
+    'websites',
+    ...(started ? ['operations'] : []),
+  ])
+  return json(res, operationData(started), '资源已更新', item.revision)
 }
 createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1')

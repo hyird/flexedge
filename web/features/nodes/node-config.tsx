@@ -3,9 +3,10 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import { Alert, Button, Skeleton, toast } from '@heroui/react'
+import { Alert, Button, Skeleton } from '@heroui/react'
 import { apiErrorMessage, isRevisionConflict } from '@/lib/api'
 import { SaveBar } from '@/components/save-bar'
+import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { nodeQuery, updateNode } from './data'
 import { NodeConfigFields } from './node-config-fields'
 import { NodeCredentialActions } from './node-credential-actions'
@@ -54,7 +55,7 @@ function NodeConfigEditor({
       ),
     // The page's node stream pushes the saved configuration (header included).
     onSuccess: (response, values) => {
-      toast.success(response.message)
+      toastWriteSuccess(response.message, response.data)
       form.reset(values)
     },
   })

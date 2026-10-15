@@ -158,7 +158,7 @@ load_projected_records(db_type& db, const std::string& tenant_id, const std::str
 
 inline ruvia::task<std::string>
 enqueue_zone_revision(ruvia::db_transaction& transaction, const std::string& tenant_id,
-    const std::string& zone_id, std::int64_t revision,
+    const std::string& zone_id, std::int64_t revision, service::operation::work_origin& origin,
     service::sync_runtime::marker_operation operation =
         service::sync_runtime::marker_operation::sync) {
     const auto operation_value = service::sync_runtime::marker_operation_name(operation);
@@ -171,20 +171,20 @@ enqueue_zone_revision(ruvia::db_transaction& transaction, const std::string& ten
     }
     co_return co_await service::sync_runtime::upsert_marker(
         transaction, tenant_id, service::sync_runtime::marker_resource_type::dns_zone, zone_id,
-        operation, revision);
+        operation, revision, origin);
 }
 
 inline ruvia::task<std::string> enqueue_zone_deletion(ruvia::db_transaction& transaction,
     const std::string& tenant_id,
     const std::string& zone_id,
-    std::int64_t revision) {
-    co_return co_await enqueue_zone_revision(transaction, tenant_id, zone_id, revision,
+    std::int64_t revision, service::operation::work_origin& origin) {
+    co_return co_await enqueue_zone_revision(transaction, tenant_id, zone_id, revision, origin,
         service::sync_runtime::marker_operation::remove);
 }
 
 inline ruvia::task<std::optional<std::string>>
 prune_cluster_managed_records(ruvia::db_transaction& transaction, const std::string& tenant_id,
-    const std::string& zone_id,
+    const std::string& zone_id, service::operation::work_origin& origin,
     service::sync_runtime::marker_operation operation =
         service::sync_runtime::marker_operation::sync) {
     const auto zone_rows = co_await transaction.query(
@@ -253,17 +253,17 @@ prune_cluster_managed_records(ruvia::db_transaction& transaction, const std::str
         co_return std::nullopt;
     }
     co_return co_await enqueue_zone_revision(transaction, tenant_id, zone_id,
-        updated.front()[0].as<std::int64_t>().value_or(1),
+        updated.front()[0].as<std::int64_t>().value_or(1), origin,
         operation);
 }
 
 inline ruvia::task<std::string> mark_zone_dirty(ruvia::db_transaction& transaction,
     const std::string& tenant_id,
-    const std::string& zone_id,
+    const std::string& zone_id, service::operation::work_origin& origin,
     service::sync_runtime::marker_operation operation =
         service::sync_runtime::marker_operation::sync) {
     if (const auto pruned =
-            co_await prune_cluster_managed_records(transaction, tenant_id, zone_id, operation)) {
+            co_await prune_cluster_managed_records(transaction, tenant_id, zone_id, origin, operation)) {
         co_return *pruned;
     }
     const auto rows = co_await transaction.query(
@@ -275,12 +275,12 @@ inline ruvia::task<std::string> mark_zone_dirty(ruvia::db_transaction& transacti
         throw std::runtime_error("DNS 聚合根不存在");
     }
     co_return co_await enqueue_zone_revision(
-        transaction, tenant_id, zone_id, rows.front()[0].as<std::int64_t>().value_or(1), operation);
+        transaction, tenant_id, zone_id, rows.front()[0].as<std::int64_t>().value_or(1), origin, operation);
 }
 
 inline ruvia::task<void> mark_provider_zones_dirty(ruvia::db_transaction& transaction,
     const std::string& tenant_id,
-    const std::string& provider_id) {
+    const std::string& provider_id, service::operation::work_origin& origin) {
     const auto rows = co_await transaction.query(
         "UPDATE sys_dns_zone SET desired_revision = desired_revision + 1, sync_status = "
         "'pending', last_error = NULL, updated_at = NOW() WHERE tenant_id = $1 AND "
@@ -289,7 +289,7 @@ inline ruvia::task<void> mark_provider_zones_dirty(ruvia::db_transaction& transa
     for (const auto& row : rows) {
         co_await enqueue_zone_revision(transaction, tenant_id,
             std::string(row[0].value().value_or("")),
-            row[1].as<std::int64_t>().value_or(1));
+            row[1].as<std::int64_t>().value_or(1), origin);
     }
     co_return;
 }

@@ -41,6 +41,8 @@ struct related_task final {
     std::string_view resource_type_;
     std::string_view resource_id_;
     std::string_view label_;
+    // Subtask of the same task doing the linked work, empty when unknown.
+    std::string_view subtask_id_{};
 };
 
 // One message on a node control connection, already reduced to the fields
@@ -221,7 +223,8 @@ public:
             step.related_ = related_record{.task_id_ = redactor_.text(task.task_id_, identifier_bytes),
                 .resource_type_ = redactor_.text(task.resource_type_, identifier_bytes),
                 .resource_id_ = redactor_.text(task.resource_id_, identifier_bytes),
-                .label_ = redactor_.text(task.label_, value_bytes)};
+                .label_ = redactor_.text(task.label_, value_bytes),
+                .subtask_id_ = redactor_.text(task.subtask_id_, identifier_bytes)};
             bytes_ += related_overhead;
         } catch (...) {
             degraded_ = true;
@@ -597,6 +600,7 @@ private:
         redacted_text resource_type_;
         redacted_text resource_id_;
         redacted_text label_;
+        redacted_text subtask_id_;
     };
 
     struct step_record final {
@@ -1049,6 +1053,7 @@ private:
                 related.set<"resource_type">(step.related_->resource_type_.view());
                 related.set<"resource_id">(step.related_->resource_id_.view());
                 related.set<"label">(step.related_->label_.view());
+                related.set<"subtask_id">(step.related_->subtask_id_.view());
                 item.set<"related_task">(std::move(related));
             } else {
                 item.set<"related_task">(nullptr);

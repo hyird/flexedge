@@ -89,8 +89,10 @@ RUVIA_MODEL(website_page_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
 RUVIA_MODEL(website_detail_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
     RUVIA_REQUIRED_FIELD(message, ruvia::string),
     RUVIA_REQUIRED_FIELD(data, website_dto));
+// `operation_id`: the task the creation started.
 RUVIA_MODEL(website_created_dto, RUVIA_REQUIRED_FIELD(id, ruvia::string),
-    RUVIA_REQUIRED_FIELD(revision, ruvia::int64));
+    RUVIA_REQUIRED_FIELD(revision, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD_NAME("operation_id", operation_id, ruvia::string, RUVIA_OMIT_EMPTY));
 RUVIA_MODEL(website_created_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
     RUVIA_REQUIRED_FIELD(message, ruvia::string),
     RUVIA_REQUIRED_FIELD(data, website_created_dto));

@@ -12,9 +12,8 @@ import { known, type TaskAttemptDetail as Detail } from './types'
 
 type DetailOf<K extends Detail['kind']> = Extract<Detail, { kind: K }>
 
-/** Per-kind execution detail of one attempt. `none` without truncation
- * (records written before the upgrade, or attempts without detail) renders
- * nothing; `truncated` means items beyond the size limits were omitted.
+/** Per-kind execution detail of one attempt. `none` without a generation
+ * failure (old records or attempts without detail) renders nothing.
  * `outcome` is the attempt's outcome: a failed provider verification never
  * listed zones, so its zero count means "not obtained". */
 export function TaskAttemptDetail({
@@ -41,9 +40,6 @@ export function TaskAttemptDetail({
         <ProviderDetail detail={detail} listed={outcome === 'completed'} />
       )}
       {detail.kind === 'node_apply' && <NodeApplyDetail detail={detail} />}
-      {detail.truncated && (
-        <p className='m-0 text-xs text-muted'>部分条目已省略</p>
-      )}
     </>
   )
 }

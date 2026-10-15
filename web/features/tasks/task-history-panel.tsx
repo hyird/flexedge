@@ -1,13 +1,13 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRotateLeft } from '@gravity-ui/icons'
 import { Button, Disclosure, Skeleton } from '@heroui/react'
+import { useDisplaySeconds } from '@/lib/display-clock'
 import { formatDate, parseDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { CopyButton } from '@/components/copy-button'
 import { EmptyState, QueryNotice } from '@/components/page'
 import { StatusChip } from '@/components/status-chip'
-import { taskHistoryQuery } from './data'
+import { subtaskHistoryQuery } from './data'
 import { TaskAttemptDetail } from './task-attempt-detail'
 import { AttemptTimeline, RedactedText } from './task-attempt-trace'
 import {
@@ -15,7 +15,7 @@ import {
   formatRetryCountdown,
   groupAttempts,
 } from './task-history'
-import { known, type Task, type TaskAttempt, type TaskHistory } from './types'
+import { known, type SubtaskHistory, type TaskAttempt } from './types'
 
 const outcomes = {
   completed: { label: '成功', tone: 'success' },
@@ -25,44 +25,39 @@ const outcomeLabels = [outcomes.completed.label, outcomes.failed.label]
 // One attempt (or folded run) per row, separated by a hairline.
 const attemptRow = 'flex min-w-0 flex-col gap-2 py-3 first:pt-0 last:pb-0'
 
-/** "执行记录" tab: a one-shot snapshot of the task's attempts, read when the
- * tab opens and again only on the manual refresh button. Each attempt shows
- * its execution timeline; full traces are read per attempt once on screen. */
-export function TaskHistoryPanel({ task }: { task: Task }) {
+/** 执行记录 of the expanded subtask: the `history` event of the task detail
+ * stream, kept current by its `attempt` events (no refresh button; the
+ * stream recovers by itself). Each attempt shows its execution timeline;
+ * full traces are read per attempt once on screen. `showErrors` is off while
+ * the sheet already reports the shared stream's failure. */
+export function SubtaskHistoryPanel({
+  operationId,
+  subtaskId,
+  showErrors = true,
+}: {
+  operationId: string
+  subtaskId: string
+  showErrors?: boolean
+}) {
   const history = useQuery({
-    ...taskHistoryQuery(task),
+    ...subtaskHistoryQuery(operationId, subtaskId),
     meta: { inlineError: true },
   })
   const data = history.data
   return (
-    <>
-      <QueryNotice
-        query={history}
-        title='执行记录加载失败'
-        onRetry={() => history.refetch()}
-      />
-      {data ? (
-        <HistorySummary summary={data.summary} />
-      ) : (
-        history.isPending && (
-          <Skeleton className='h-[10.125rem] w-full rounded-xl sm:h-28' />
-        )
-      )}
-      {(data || history.isPending) && (
-        <div className='flex justify-end'>
-          <Button
-            size='sm'
-            variant='tertiary'
-            isPending={history.isFetching}
-            onPress={() => void history.refetch()}
-          >
-            <ArrowRotateLeft className='size-4' />
-            刷新记录
-          </Button>
-        </div>
+    <div className='flex min-w-0 flex-col gap-3'>
+      {showErrors && (
+        <QueryNotice
+          query={history}
+          title='执行记录加载失败'
+          onRetry={() => history.refetch()}
+        />
       )}
       {data ? (
-        <AttemptList taskId={task.id} history={data} />
+        <>
+          <HistorySummary summary={data.summary} />
+          <AttemptList operationId={operationId} history={data} />
+        </>
       ) : (
         history.isPending && (
           <div
@@ -70,19 +65,20 @@ export function TaskHistoryPanel({ task }: { task: Task }) {
             aria-label='正在加载执行记录'
             className='flex flex-col gap-3'
           >
-            {Array.from({ length: 3 }, (_, index) => (
+            <Skeleton className='h-[10.125rem] w-full rounded-xl sm:h-28' />
+            {Array.from({ length: 2 }, (_, index) => (
               <Skeleton key={index} className='h-16 w-full rounded-lg' />
             ))}
           </div>
         )
       )}
-    </>
+    </div>
   )
 }
 
 const summaryValue = 'text-[13px] leading-5 font-medium tabular-nums'
 
-function HistorySummary({ summary }: { summary: TaskHistory['summary'] }) {
+function HistorySummary({ summary }: { summary: SubtaskHistory['summary'] }) {
   return (
     <dl className='grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl bg-surface-secondary p-3 sm:grid-cols-3'>
       <SummaryItem label='累计尝试'>
@@ -118,30 +114,25 @@ function HistorySummary({ summary }: { summary: TaskHistory['summary'] }) {
   )
 }
 
-/** Countdown to the scheduled retry on a local timer (1 s under a minute,
- * else 30 s). It only re-renders this label and never reads data; it stops
- * once the retry is due. */
-function RetryCountdown({
+/** Countdown to a scheduled retry on the shared 1 s display clock. It only
+ * re-renders this label and never reads data. `note` words it for a subtask
+ * row (`12 秒后重试`, `即将重试`). */
+export function RetryCountdown({
   value,
+  note = false,
   className,
 }: {
   value: string
+  note?: boolean
   className?: string
 }) {
+  const now = useDisplaySeconds()
   const at = parseDate(value)?.getTime()
-  const [now, setNow] = useState(Date.now)
-  const remaining = at === undefined ? 0 : at - now
-  useEffect(() => {
-    if (remaining <= 0) return
-    const timer = window.setTimeout(
-      () => setNow(Date.now()),
-      remaining <= 60_000 ? 1000 : 30_000
-    )
-    return () => window.clearTimeout(timer)
-  }, [remaining])
+  let label = at === undefined ? '—' : formatRetryCountdown(at, now)
+  if (note && at !== undefined) label = at <= now ? '即将重试' : `${label}重试`
   return (
     <time dateTime={value} title={formatDate(value)} className={className}>
-      {at === undefined ? '—' : formatRetryCountdown(at, now)}
+      {label}
     </time>
   )
 }
@@ -171,40 +162,36 @@ function SummaryTime({ value }: { value: string }) {
 }
 
 function AttemptList({
-  taskId,
+  operationId,
   history,
 }: {
-  taskId: string
-  history: TaskHistory
+  operationId: string
+  history: SubtaskHistory
 }) {
   if (!history.list.length) return <EmptyState size='sm' title='暂无执行记录' />
   const groups = groupAttempts(history.list)
   return (
-    <>
-      {history.truncated && (
-        <p className='m-0 text-xs text-muted'>
-          仅列出最近 {history.list.length} 次
-        </p>
-      )}
-      <ol
-        aria-label='执行记录'
-        className='m-0 flex list-none flex-col divide-y divide-border p-0'
-      >
-        {groups.map((group) =>
-          group.attempts.length > 1 ? (
-            <AttemptRun
-              key={group.key}
-              taskId={taskId}
-              attempts={group.attempts}
+    <ol
+      aria-label='执行记录'
+      className='m-0 flex list-none flex-col divide-y divide-border p-0'
+    >
+      {groups.map((group) =>
+        group.attempts.length > 1 ? (
+          <AttemptRun
+            key={group.key}
+            operationId={operationId}
+            attempts={group.attempts}
+          />
+        ) : (
+          <li key={group.key} className={attemptRow}>
+            <AttemptBody
+              operationId={operationId}
+              attempt={group.attempts[0]}
             />
-          ) : (
-            <li key={group.key} className={attemptRow}>
-              <AttemptBody taskId={taskId} attempt={group.attempts[0]} />
-            </li>
-          )
-        )}
-      </ol>
-    </>
+          </li>
+        )
+      )}
+    </ol>
   )
 }
 
@@ -260,10 +247,10 @@ function AttemptMeta({
 }
 
 function AttemptBody({
-  taskId,
+  operationId,
   attempt,
 }: {
-  taskId: string
+  operationId: string
   attempt: TaskAttempt
 }) {
   return (
@@ -275,7 +262,7 @@ function AttemptBody({
       />
       {attempt.error && <AttemptError error={attempt.error} />}
       <TaskAttemptDetail detail={attempt.detail} outcome={attempt.outcome} />
-      <AttemptTimeline taskId={taskId} trace={attempt.trace} />
+      <AttemptTimeline operationId={operationId} trace={attempt.trace} />
     </>
   )
 }
@@ -296,10 +283,10 @@ function AttemptError({ error }: { error: string }) {
  * newest attempt's detail and timeline represent the run; opening the run
  * lists every attempt, older ones with their own timeline. */
 function AttemptRun({
-  taskId,
+  operationId,
   attempts,
 }: {
-  taskId: string
+  operationId: string
   attempts: TaskAttempt[]
 }) {
   const [expanded, setExpanded] = useState(false)
@@ -316,7 +303,7 @@ function AttemptRun({
       />
       <AttemptError error={newest.error} />
       <TaskAttemptDetail detail={newest.detail} outcome={newest.outcome} />
-      <AttemptTimeline taskId={taskId} trace={newest.trace} />
+      <AttemptTimeline operationId={operationId} trace={newest.trace} />
       <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}>
         <Disclosure.Heading>
           <Button
@@ -352,7 +339,10 @@ function AttemptRun({
                       </span>
                     </div>
                     {index > 0 && (
-                      <AttemptTimeline taskId={taskId} trace={attempt.trace} />
+                      <AttemptTimeline
+                        operationId={operationId}
+                        trace={attempt.trace}
+                      />
                     )}
                   </li>
                 ))}

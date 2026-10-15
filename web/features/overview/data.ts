@@ -23,29 +23,15 @@ export const overviewSchema = z.object({
     dns_zone_issue_count: count,
     certificate_expiring_count: count,
     certificate_failed_count: count,
-    active_marker_count: count,
-    retry_marker_count: count,
   }),
-  recent_markers: z.array(
-    z.object({
-      id: z.string(),
-      resource_type: z.string(),
-      resource_id: z.string(),
-      resource_name: z.string(),
-      operation: z.string(),
-      status: z.string(),
-      last_error: z.string().optional(),
-      updated_at: z.string(),
-    })
-  ),
 })
 export type Overview = z.infer<typeof overviewSchema>
-export type OverviewMarker = Overview['recent_markers'][number]
 
 // redesign-spec §8.3: one combined SSE connection, `/api/overview/stream`,
-// pushes `snapshot` (counts, issues, recent tasks), `traffic`, `nodes` and
+// pushes `snapshot` (counts and issues), `traffic`, `nodes` and
 // `node-runtime` patches. Each event feeds its own query; all three share the
-// page's single EventSource, released when the last of them unmounts.
+// page's single EventSource, released when the last of them unmounts. Tasks
+// are a separate one-shot read (`recentOperationsQuery`).
 const overviewStream = streamPath('/overview')
 
 export const overviewQuery = queryOptions({
@@ -240,8 +226,12 @@ type AttentionItem = {
 }
 
 /** "需要关注" rows, each linking to the filtered list that shows them. Rows
- * with nothing to report are dropped. */
-export function attentionItems(overview: Overview): AttentionItem[] {
+ * with nothing to report are dropped. `attentionTasks` is the task list's
+ * `attention` count (retrying, failed, partially failed or needing action). */
+export function attentionItems(
+  overview: Overview,
+  attentionTasks: number
+): AttentionItem[] {
   const items: AttentionItem[] = [
     {
       id: 'dns',
@@ -268,11 +258,11 @@ export function attentionItems(overview: Overview): AttentionItem[] {
       tone: 'warning',
     },
     {
-      id: 'task-retry',
-      label: '等待重试的任务',
-      description: '执行失败、等待自动重试',
-      count: overview.issues.retry_marker_count,
-      href: '/tasks?status=retrying',
+      id: 'task-attention',
+      label: '需关注任务',
+      description: '重试中、失败或需处理的任务',
+      count: attentionTasks,
+      href: '/tasks?status=attention',
       tone: 'warning',
     },
     {
