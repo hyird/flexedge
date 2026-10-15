@@ -1,12 +1,23 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRotateLeft, ChevronRight, CircleCheck } from '@gravity-ui/icons'
-import { ListView, Widget, type DataGridColumn } from '@heroui-pro/react'
+import {
+  ChartTooltip,
+  ListView,
+  Widget,
+  type DataGridColumn,
+} from '@heroui-pro/react'
+import { AreaChart } from '@heroui-pro/react/area-chart'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Button, Chip, Link, Skeleton } from '@heroui/react'
-import { formatNumber, ratioOf } from '@/lib/format'
+import {
+  formatBitsPerSecond,
+  formatDate,
+  formatNumber,
+  ratioOf,
+} from '@/lib/format'
 import { DataTable } from '@/components/data-table'
 import { KpiQuantity } from '@/components/kpi-quantity'
-import { LinkButton } from '@/components/link-button'
 import { MetricMeter } from '@/components/metric-meter'
 import { EmptyState, Page, QueryNotice } from '@/components/page'
 import { RelativeTime } from '@/components/relative-time'
@@ -23,12 +34,14 @@ import {
 } from '@/features/tasks/task-display'
 import type { Operation } from '@/features/tasks/types'
 import {
+  appendBandwidthPoint,
   attentionItems,
   nodeHealth,
   overviewNodePageSize,
   overviewNodesQuery,
   overviewQuery,
   overviewTrafficQuery,
+  type BandwidthPoint,
   type Overview,
   type OverviewTraffic,
 } from './data'
@@ -52,6 +65,28 @@ export function OverviewPage() {
     meta: { inlineError: true },
   })
   const health = nodes.data ? nodeHealth(nodes.data.list) : undefined
+  const [bandwidthHistory, setBandwidthHistory] = useState<{
+    updatedAt: number
+    egressBps?: number
+    points: BandwidthPoint[]
+  }>({ updatedAt: 0, points: [] })
+  if (
+    nodes.data &&
+    (bandwidthHistory.updatedAt !== nodes.dataUpdatedAt ||
+      bandwidthHistory.egressBps !== health?.egressBps)
+  ) {
+    setBandwidthHistory({
+      updatedAt: nodes.dataUpdatedAt,
+      egressBps: health?.egressBps,
+      points:
+        health?.egressBps === undefined
+          ? bandwidthHistory.points
+          : appendBandwidthPoint(bandwidthHistory.points, {
+              timestamp: nodes.dataUpdatedAt,
+              bandwidth_bps: health.egressBps,
+            }),
+    })
+  }
   const refreshing =
     overview.isFetching ||
     traffic.isFetching ||
@@ -92,6 +127,8 @@ export function OverviewPage() {
         overview={overview.data}
         traffic={traffic.data}
         egressBps={health?.egressBps}
+        bandwidthHistory={bandwidthHistory.points}
+        isBandwidthPending={nodes.isPending}
       />
       <QueryNotice
         query={overview}
@@ -124,10 +161,14 @@ function OverviewKpis({
   overview,
   traffic,
   egressBps,
+  bandwidthHistory,
+  isBandwidthPending,
 }: {
   overview?: Overview
   traffic?: OverviewTraffic
   egressBps?: number
+  bandwidthHistory: BandwidthPoint[]
+  isBandwidthPending: boolean
 }) {
   const resources = overview?.resources
   const summary = traffic?.summary
@@ -150,12 +191,45 @@ function OverviewKpis({
           </KPI.Title>
         </KPI.Header>
         <KPI.Content className='content-start'>
-          {egressBps === undefined ? (
+          {isBandwidthPending ? (
             valueSkeleton
           ) : (
             <KpiQuantity value={egressBps} unit='bps' />
           )}
         </KPI.Content>
+        <KPI.Chart
+          data={bandwidthHistory}
+          dataKey='bandwidth_bps'
+          color='var(--color-accent)'
+          height={40}
+          strokeWidth={1.5}
+          areaProps={{ dot: bandwidthHistory.length === 1 }}
+          aria-label='当前出口带宽近期趋势'
+          title='本次打开概览后收到的最近 60 次节点上报'
+          tooltip={
+            <AreaChart.Tooltip
+              content={({ active, payload }) => {
+                const point = payload?.[0]?.payload as
+                  BandwidthPoint | undefined
+                if (!active || !point) return null
+                return (
+                  <ChartTooltip>
+                    <ChartTooltip.Header>
+                      {formatDate(new Date(point.timestamp).toISOString())}
+                    </ChartTooltip.Header>
+                    <ChartTooltip.Item>
+                      <ChartTooltip.Indicator color='var(--color-accent)' />
+                      <ChartTooltip.Label>实时出口带宽</ChartTooltip.Label>
+                      <ChartTooltip.Value>
+                        {formatBitsPerSecond(point.bandwidth_bps)}
+                      </ChartTooltip.Value>
+                    </ChartTooltip.Item>
+                  </ChartTooltip>
+                )
+              }}
+            />
+          }
+        />
       </KPI>
       <KPI className='min-w-0'>
         <KPI.Header>
@@ -417,11 +491,11 @@ function NodeHealthPanel({
     <Widget className='min-w-0'>
       <Widget.Header>
         <Widget.Title>节点健康</Widget.Title>
-        <LinkButton href='/nodes'>全部节点</LinkButton>
       </Widget.Header>
       <Widget.Content className='p-0'>
         <DataTable
           label='节点健康'
+          variant='secondary'
           columns={nodeHealthColumns}
           data={nodes?.slice(0, 6)}
           isLoading={query.isPending}
@@ -431,7 +505,6 @@ function NodeHealthPanel({
           empty={{
             title: '还没有节点',
             description: '添加节点并完成接入后，这里会显示运行状况。',
-            action: <LinkButton href='/nodes?create=1'>添加节点</LinkButton>,
           }}
         />
       </Widget.Content>
@@ -502,11 +575,11 @@ function RecentTasksPanel({
     <Widget className='min-w-0'>
       <Widget.Header>
         <Widget.Title>最近任务</Widget.Title>
-        <LinkButton href='/tasks'>任务中心</LinkButton>
       </Widget.Header>
       <Widget.Content className='p-0'>
         <DataTable
           label='最近任务'
+          variant='secondary'
           columns={taskColumns}
           data={query.data?.list}
           isLoading={query.isPending}

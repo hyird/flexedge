@@ -111,6 +111,25 @@ export const overviewNodesQuery = queryOptions({
     ),
 })
 
+export type BandwidthPoint = {
+  timestamp: number
+  bandwidth_bps: number
+}
+
+const bandwidthHistoryLimit = 60
+
+/** Keep the latest received node samples without inventing historical points. */
+export function appendBandwidthPoint(
+  history: BandwidthPoint[],
+  point: BandwidthPoint
+): BandwidthPoint[] {
+  const latest = history.at(-1)
+  if (latest && point.timestamp < latest.timestamp) return history
+  const previous =
+    latest?.timestamp === point.timestamp ? history.slice(0, -1) : history
+  return [...previous.slice(-(bandwidthHistoryLimit - 1)), point]
+}
+
 export type TrafficPoint = {
   timestamp: string
   label: string
@@ -190,8 +209,8 @@ const connectionRank: Record<string, number> = {
 /** Health of the loaded node page (first `overviewNodeParams.page_size`
  * nodes); tenant-wide node counts come from the overview stream. */
 export type NodeHealth = {
-  /** Sum of `traffic_out_bps` over online nodes, bit/s. */
-  egressBps: number
+  /** Sum of online node egress, bit/s; unknown when any sample is missing. */
+  egressBps: number | undefined
   ordered: Node[]
 }
 
@@ -201,11 +220,17 @@ export function nodeHealth(nodes: Node[]): NodeHealth {
   const online = nodes.filter(
     (node) => node.runtime.connection_status === 'online'
   )
+  let egressBps: number | undefined = 0
+  for (const node of online) {
+    const bandwidth = node.runtime.traffic_out_bps
+    if (typeof bandwidth !== 'number' || !Number.isFinite(bandwidth)) {
+      egressBps = undefined
+      break
+    }
+    egressBps += bandwidth
+  }
   return {
-    egressBps: online.reduce(
-      (sum, node) => sum + (node.runtime.traffic_out_bps ?? 0),
-      0
-    ),
+    egressBps,
     ordered: [...nodes].sort(
       (left, right) =>
         (connectionRank[left.runtime.connection_status] ?? 1) -

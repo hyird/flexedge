@@ -142,6 +142,7 @@ export function ZoneOverview() {
         >
           <DataTable
             label='同步冲突'
+            variant='secondary'
             columns={conflictColumns}
             data={zone.runtime.conflicts}
             isLoading={false}

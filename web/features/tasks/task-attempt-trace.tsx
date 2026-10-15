@@ -1,6 +1,7 @@
 import { Fragment, use, useCallback, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { EyeSlash } from '@gravity-ui/icons'
+import { EyeSlash, ListCheck } from '@gravity-ui/icons'
+import { Timeline } from '@heroui-pro/react'
 import { Button, Chip, Link, Skeleton } from '@heroui/react'
 import { ApiBusinessError } from '@/lib/api-response'
 import { cn } from '@/lib/utils'
@@ -62,24 +63,28 @@ function useFirstSight() {
 export function AttemptTimeline({
   operationId,
   trace,
+  icon = <ListCheck aria-hidden />,
 }: {
   operationId: string
   trace: TaskAttemptTraceSummary
+  icon?: ReactNode
 }) {
   if (trace === null) return null
   if (isInvalid(trace))
     return <p className='m-0 text-xs text-muted'>执行详情无法识别</p>
   if (trace.state !== 'available' || !trace.attempt_id || !trace.step_count)
     return null
-  return <TraceTimeline operationId={operationId} summary={trace} />
+  return <TraceTimeline operationId={operationId} summary={trace} icon={icon} />
 }
 
 function TraceTimeline({
   operationId,
   summary,
+  icon,
 }: {
   operationId: string
   summary: Summary
+  icon: ReactNode
 }) {
   const [ref, seen] = useFirstSight()
   const query = useQuery({
@@ -96,11 +101,12 @@ function TraceTimeline({
   return (
     <div ref={ref} className='flex min-w-0 flex-col gap-1.5'>
       {full ? (
-        <FullSteps steps={full.steps} />
+        <FullSteps steps={full.steps} icon={icon} />
       ) : (
         <SummarySteps
           summary={summary}
           loading={query.isPending && !query.isError}
+          icon={icon}
         />
       )}
       {query.isError && (
@@ -120,45 +126,6 @@ function TraceTimeline({
         </p>
       )}
     </div>
-  )
-}
-
-function Timeline({ children }: { children: ReactNode }) {
-  return (
-    <ol aria-label='执行步骤' className='m-0 flex list-none flex-col p-0'>
-      {children}
-    </ol>
-  )
-}
-
-const dotColor = {
-  completed: 'bg-success',
-  failed: 'bg-danger',
-} as const
-
-/** One timeline entry: a 6 px outcome dot on a 1 px rail, content beside. The
- * rail runs from the first dot to the last. The dot names its outcome itself
- * (no visually hidden span: those resolve against the sheet dialog and let
- * scrolling move the whole sheet). */
-function TimelineItem({
-  outcome,
-  children,
-}: {
-  outcome: string
-  children: ReactNode
-}) {
-  return (
-    <li className='relative grid min-w-0 grid-cols-[0.75rem_minmax(0,1fr)] gap-x-2 pb-3 before:absolute before:inset-y-0 before:left-[5.5px] before:w-px before:bg-border first:before:top-2.5 last:pb-0 last:before:bottom-auto last:before:h-2.5 only:before:hidden'>
-      <span
-        role='img'
-        aria-label={known(stepOutcomes, outcome)?.label ?? (outcome || '未知')}
-        className={cn(
-          'relative mt-[7px] size-1.5 justify-self-center rounded-full',
-          known(dotColor, outcome) ?? 'bg-muted'
-        )}
-      />
-      <div className='flex min-w-0 flex-col gap-1.5'>{children}</div>
-    </li>
   )
 }
 
@@ -209,47 +176,90 @@ function StepHeading({
 function SummarySteps({
   summary,
   loading,
+  icon,
 }: {
   summary: Summary
   loading: boolean
+  icon: ReactNode
 }) {
   return (
-    <Timeline>
+    <Timeline aria-label='执行步骤' size='sm' density='compact'>
       {summary.steps.map((step, position) => (
-        <TimelineItem key={position} outcome={step.outcome}>
-          <StepHeading
-            label={step.label || step.code}
-            outcome={step.outcome}
-            durationMs={step.duration_ms}
-            count={step.count}
-          />
-          {loading && (step.call_count > 0 || step.outcome === 'failed') && (
-            <Skeleton className='h-5 w-3/5 rounded-md' />
-          )}
-        </TimelineItem>
+        <Timeline.Item
+          key={position}
+          status={known(stepOutcomes, step.outcome)?.tone ?? 'muted'}
+          className='min-w-0'
+        >
+          <Timeline.Marker
+            role='img'
+            aria-hidden={false}
+            aria-label={
+              known(stepOutcomes, step.outcome)?.label ??
+              (step.outcome || '未知')
+            }
+          >
+            {icon}
+          </Timeline.Marker>
+          <Timeline.Content className='gap-1.5'>
+            <StepHeading
+              label={step.label || step.code}
+              outcome={step.outcome}
+              durationMs={step.duration_ms}
+              count={step.count}
+            />
+            {loading && (step.call_count > 0 || step.outcome === 'failed') && (
+              <Skeleton className='h-5 w-3/5 rounded-md' />
+            )}
+          </Timeline.Content>
+        </Timeline.Item>
       ))}
     </Timeline>
   )
 }
 
-function FullSteps({ steps }: { steps: TaskAttemptTrace['steps'] }) {
+function FullSteps({
+  steps,
+  icon,
+}: {
+  steps: TaskAttemptTrace['steps']
+  icon: ReactNode
+}) {
   return (
-    <Timeline>
+    <Timeline aria-label='执行步骤' size='sm' density='compact'>
       {steps.map((step, position) =>
         isInvalid(step) ? (
-          <TimelineItem key={position} outcome=''>
-            <span className='text-xs leading-5 text-muted'>无法显示</span>
-          </TimelineItem>
+          <Timeline.Item key={position} status='muted' className='min-w-0'>
+            <Timeline.Marker>{icon}</Timeline.Marker>
+            <Timeline.Content>
+              <span className='text-xs leading-5 text-muted'>无法显示</span>
+            </Timeline.Content>
+          </Timeline.Item>
         ) : (
-          <TimelineItem key={position} outcome={step.outcome}>
-            <StepHeading
-              label={step.label || step.code}
-              outcome={step.outcome}
-              durationMs={step.duration_ms}
-              subject={step.subject}
-            />
-            <StepBody step={step} />
-          </TimelineItem>
+          <Timeline.Item
+            key={position}
+            status={known(stepOutcomes, step.outcome)?.tone ?? 'muted'}
+            className='min-w-0'
+          >
+            <Timeline.Marker
+              role='img'
+              aria-hidden={false}
+              aria-label={
+                known(stepOutcomes, step.outcome)?.label ??
+                (step.outcome || '未知')
+              }
+            >
+              {icon}
+            </Timeline.Marker>
+            <Timeline.Content className='gap-1.5'>
+              <StepHeading
+                label={step.label || step.code}
+                outcome={step.outcome}
+                durationMs={step.duration_ms}
+                subject={step.subject}
+              />
+              <StepBody step={step} />
+            </Timeline.Content>
+          </Timeline.Item>
         )
       )}
     </Timeline>

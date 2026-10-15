@@ -43,11 +43,13 @@ export function WebsitesTable({
   clusterId,
   certificateId,
   snapshot = false,
+  variant = 'primary',
 }: {
   list: ListSearchState<WebsitesSearch>
   clusterId?: string
   certificateId?: string
   snapshot?: boolean
+  variant?: 'primary' | 'secondary'
 }) {
   const clusters = useQuery({ ...clusterOptionsQuery, enabled: !clusterId })
   const params: WebsitesListParams = {
@@ -252,6 +254,7 @@ export function WebsitesTable({
       />
       <DataTable
         label='网站'
+        variant={variant}
         columns={columns}
         data={query.data?.list}
         isLoading={query.isPending}

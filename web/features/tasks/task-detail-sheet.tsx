@@ -215,6 +215,7 @@ export function SubtaskList({
                   <SubtaskHistoryPanel
                     operationId={operation.id}
                     subtaskId={subtask.id}
+                    resourceType={subtask.resource_type}
                     showErrors={!streamFailed}
                   />
                 )}

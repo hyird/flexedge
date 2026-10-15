@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import { CircleExclamation, ListCheck } from '@gravity-ui/icons'
-import { KPIGroup, type DataGridColumn } from '@heroui-pro/react'
+import type { DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Button, Link as HeroLink, Skeleton } from '@heroui/react'
 import { hasListFilters, useListSearch } from '@/lib/list-search'
@@ -159,20 +159,19 @@ export function TasksPage() {
   ]
   return (
     <Page title='任务中心'>
-      <KPIGroup className='max-sm:flex-col'>
+      <div className='grid grid-cols-1 gap-3 sm:grid-cols-2'>
         <TaskKpi
           title='进行中'
           icon={<ListCheck />}
           value={query.data?.active}
         />
-        <KPIGroup.Separator />
         <TaskKpi
           title='需关注'
           icon={<CircleExclamation />}
           status='warning'
           value={query.data?.attention}
         />
-      </KPIGroup>
+      </div>
       <div className='flex flex-col gap-3'>
         <ListToolbar
           search={{
@@ -316,16 +315,25 @@ function TaskKpi({
   value: number | undefined
 }): ReactNode {
   return (
-    <KPI className='flex-1'>
-      <KPI.Header>
-        <KPI.Icon status={status}>{icon}</KPI.Icon>
-        <KPI.Title>{title}</KPI.Title>
+    <KPI className='min-w-0 flex-row items-center justify-between gap-4'>
+      <KPI.Header className='min-w-0'>
+        <KPI.Icon
+          status={status}
+          className={cn('size-7', !status && 'bg-default text-muted')}
+        >
+          {icon}
+        </KPI.Icon>
+        <KPI.Title className='whitespace-nowrap'>{title}</KPI.Title>
       </KPI.Header>
-      <KPI.Content>
+      <KPI.Content className='flex-none'>
         {value === undefined ? (
           <Skeleton className='h-7 w-16 rounded-md' />
         ) : (
-          <KPI.Value value={value} maximumFractionDigits={0} />
+          <KPI.Value
+            className={cn(status && value > 0 && 'text-warning')}
+            value={value}
+            maximumFractionDigits={0}
+          />
         )}
       </KPI.Content>
     </KPI>

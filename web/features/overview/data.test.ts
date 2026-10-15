@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { setLiveQueryQueryClient } from '@/lib/live-query'
 import type { Node } from '@/features/nodes/types'
 import {
+  appendBandwidthPoint,
   attentionItems,
   coverageState,
   overviewNodesQuery,
@@ -14,6 +15,7 @@ import {
   statusDistribution,
   topWebsiteRows,
   trafficSeries,
+  type BandwidthPoint,
   type Overview,
   type OverviewTraffic,
 } from './data'
@@ -142,6 +144,64 @@ describe('overview traffic', () => {
   })
 })
 
+describe('bandwidth history', () => {
+  test('starts with the first received sample and appends newer samples', () => {
+    const first = { timestamp: 1000, bandwidth_bps: 2000 }
+    const second = { timestamp: 2000, bandwidth_bps: 3000 }
+    const history = appendBandwidthPoint([], first)
+    expect(history).toEqual([first])
+    expect(appendBandwidthPoint(history, second)).toEqual([first, second])
+  })
+
+  test('keeps the latest 60 samples', () => {
+    const history = Array.from({ length: 60 }, (_, timestamp) => ({
+      timestamp,
+      bandwidth_bps: timestamp * 1000,
+    }))
+    const point = { timestamp: 60, bandwidth_bps: 60000 }
+    expect(appendBandwidthPoint(history, point)).toEqual([
+      ...history.slice(1),
+      point,
+    ])
+  })
+
+  test('replaces the latest timestamp without adding a duplicate', () => {
+    const history = [
+      { timestamp: 1000, bandwidth_bps: 1000 },
+      { timestamp: 2000, bandwidth_bps: 2000 },
+    ]
+    const point = { timestamp: 2000, bandwidth_bps: 4000 }
+    expect(appendBandwidthPoint(history, point)).toEqual([history[0], point])
+  })
+
+  test('ignores samples older than the latest received timestamp', () => {
+    const history = [
+      { timestamp: 1000, bandwidth_bps: 1000 },
+      { timestamp: 3000, bandwidth_bps: 3000 },
+    ]
+    expect(
+      appendBandwidthPoint(history, { timestamp: 2000, bandwidth_bps: 2000 })
+    ).toEqual(history)
+  })
+
+  test('does not mutate the history or its points when replacing or trimming', () => {
+    const history: BandwidthPoint[] = Array.from(
+      { length: 60 },
+      (_, timestamp) => Object.freeze({ timestamp, bandwidth_bps: timestamp })
+    )
+    Object.freeze(history)
+    const replacement = Object.freeze({ timestamp: 59, bandwidth_bps: 1000 })
+    const appended = Object.freeze({ timestamp: 60, bandwidth_bps: 2000 })
+    expect(appendBandwidthPoint(history, replacement).at(-1)).toEqual(
+      replacement
+    )
+    expect(appendBandwidthPoint(history, appended)).toHaveLength(60)
+    expect(history.at(-1)).toEqual({ timestamp: 59, bandwidth_bps: 59 })
+    expect(history[0]).toEqual({ timestamp: 0, bandwidth_bps: 0 })
+    expect(history).toHaveLength(60)
+  })
+})
+
 describe('node health', () => {
   test('sums online egress (bit/s) and orders offline first', () => {
     const health = nodeHealth([
@@ -157,6 +217,40 @@ describe('node health', () => {
       'busy',
       'idle',
     ])
+  })
+
+  test.each([undefined, NaN, Infinity, -Infinity])(
+    'marks current egress unknown when an online sample is %s',
+    (traffic_out_bps) => {
+      expect(
+        nodeHealth([
+          node('reported', 'online', { traffic_out_bps: 1000 }),
+          node('unknown', 'online', { traffic_out_bps }),
+        ]).egressBps
+      ).toBeUndefined()
+    }
+  )
+
+  test('ignores missing and non-finite samples of offline nodes', () => {
+    expect(
+      nodeHealth([
+        node('reported', 'online', { traffic_out_bps: 1000 }),
+        node('missing', 'offline'),
+        node('invalid', 'offline', { traffic_out_bps: Infinity }),
+        node('new', 'unregistered'),
+      ]).egressBps
+    ).toBe(1000)
+  })
+
+  test('reports zero when there are no online nodes or traffic is zero', () => {
+    expect(nodeHealth([]).egressBps).toBe(0)
+    expect(
+      nodeHealth([node('down', 'offline'), node('new', 'unregistered')])
+        .egressBps
+    ).toBe(0)
+    expect(
+      nodeHealth([node('idle', 'online', { traffic_out_bps: 0 })]).egressBps
+    ).toBe(0)
   })
 })
 

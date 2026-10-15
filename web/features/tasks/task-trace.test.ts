@@ -585,15 +585,12 @@ test('the timeline renders from the summary before the full trace arrives', () =
   ])
     expect(html).toContain(label)
   expect(html).toContain('5.01 s')
-  // One vertical list with a small labelled dot per step; the dots name
-  // their outcome themselves (visually hidden spans escape the sheet body's
-  // scroll box and let scrolling move the whole sheet).
-  expect(html).toContain('<ol aria-label="执行步骤"')
-  // Only the five stored summary steps have dots; no omission row.
+  // One accessible list with an outcome marker per stored step, including
+  // before the full trace arrives. Attribute order is owned by Pro Timeline.
+  expect(html.match(/<ol\b[^>]*aria-label="执行步骤"/g)).toHaveLength(1)
   expect(html.match(/role="img"/g)).toHaveLength(5)
   expect(html).not.toContain('另有')
   expect(html).toContain('role="img" aria-label="失败"')
-  expect(html).toContain('size-1.5')
   expect(html).not.toContain('sr-only')
   // Only the step that made a call holds a placeholder for its details.
   expect(html.match(/class="skeleton /g)).toHaveLength(1)

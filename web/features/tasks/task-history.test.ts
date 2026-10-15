@@ -41,6 +41,7 @@ const recordsKey = subtaskHistoryQuery('op-1', 'sub-1').queryKey
 const panel = createElement(SubtaskHistoryPanel, {
   operationId: 'op-1',
   subtaskId: 'sub-1',
+  resourceType: 'dns_zone',
 })
 /** Parsed like the wire `history` event so degraded shapes are the real ones. */
 const parseHistory = (value: object) =>

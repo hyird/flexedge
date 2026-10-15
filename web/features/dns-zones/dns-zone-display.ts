@@ -53,9 +53,7 @@ export const zoneSyncFilterIds = zoneSyncFilters.map(({ id }) => id) as [
   ...ZoneSyncFilter[],
 ]
 
-/** A row of the records table. `record` and `state` are the cached objects
- * themselves, so rows of records a live patch did not touch keep their props
- * and skip re-rendering. */
+/** A DataGrid row carrying the cached record and its current sync state. */
 export type ZoneRecordRow = {
   record: DnsRecord
   source: 'system' | 'custom'

@@ -11,7 +11,7 @@ export const recordTypes: DnsRecord['type'][] = [
 export const maxRecords = 10000
 const aliyunMinTtl = 600
 
-/** Inputs of one record in the inline record form; TTL and priority are kept
+/** Inputs of one record in the record sheet; TTL and priority are kept
  * as typed text so a cleared field stays empty instead of `NaN`. */
 export type RecordFormValues = {
   type: DnsRecord['type']
@@ -39,7 +39,7 @@ function integerIssue(
   if (Number(value) < min || Number(value) > max) return messages.range
 }
 
-/** One record of the inline form. Every field reports its first problem at
+/** One record of the record sheet. Every field reports its first problem at
  * once; `provider` adds the provider's own limits (Aliyun TTL ≥ 600, as the
  * backend checks). Parses to the record without its id. */
 export function recordFormSchema(provider: string) {

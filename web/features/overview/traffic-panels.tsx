@@ -11,7 +11,6 @@ import {
   formatPercent,
 } from '@/lib/format'
 import { DataTable } from '@/components/data-table'
-import { LinkButton } from '@/components/link-button'
 import { EmptyState, QueryNotice } from '@/components/page'
 import {
   coverageState,
@@ -49,7 +48,6 @@ function TrafficEmpty({
         icon={<Globe />}
         title='还没有网站'
         description='创建网站并启用访问日志后，这里会显示流量统计。'
-        action={<LinkButton href='/websites/new'>创建网站</LinkButton>}
       />
     )
   if (state === 'no_logging')
@@ -59,7 +57,6 @@ function TrafficEmpty({
         icon={<CircleInfo />}
         title='没有网站启用访问日志'
         description='流量统计来自访问日志。在网站配置的「日志」分组中启用后开始统计。'
-        action={<LinkButton href='/websites'>前往网站</LinkButton>}
       />
     )
   return (
@@ -78,6 +75,9 @@ export function BandwidthPanel({ query }: { query: TrafficQuery }) {
     <Widget className='min-w-0 lg:col-span-8'>
       <Widget.Header>
         <Widget.Title>24 小时带宽</Widget.Title>
+        <Widget.Description className='whitespace-nowrap'>
+          小时平均出口带宽
+        </Widget.Description>
       </Widget.Header>
       <Widget.Content>
         <QueryNotice query={query} onRetry={query.refetch} />
@@ -91,7 +91,7 @@ export function BandwidthPanel({ query }: { query: TrafficQuery }) {
           <AreaChart
             data={trafficSeries(traffic.hourly)}
             height={260}
-            aria-label='过去 24 小时出口带宽'
+            aria-label='过去 24 小时平均出口带宽'
           >
             <defs>
               <linearGradient
@@ -328,11 +328,11 @@ export function TopWebsitesPanel({ query }: { query: TrafficQuery }) {
     <Widget className='min-w-0 lg:col-span-7'>
       <Widget.Header>
         <Widget.Title>流量 Top 网站</Widget.Title>
-        <LinkButton href='/websites'>全部网站</LinkButton>
       </Widget.Header>
       <Widget.Content className='p-0'>
         <DataTable
           label='流量 Top 网站'
+          variant='secondary'
           columns={topWebsiteColumns}
           data={traffic ? topWebsiteRows(traffic) : undefined}
           isLoading={query.isPending}
@@ -345,9 +345,6 @@ export function TopWebsitesPanel({ query }: { query: TrafficQuery }) {
               ? {
                   title: '还没有网站',
                   description: '创建网站并启用访问日志后，这里会显示流量排行。',
-                  action: (
-                    <LinkButton href='/websites/new'>创建网站</LinkButton>
-                  ),
                 }
               : state === 'no_logging'
                 ? {

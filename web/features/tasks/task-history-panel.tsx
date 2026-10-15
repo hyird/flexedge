@@ -1,9 +1,11 @@
 import { useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { ListCheck } from '@gravity-ui/icons'
 import { Button, Disclosure, Skeleton } from '@heroui/react'
 import { useDisplaySeconds } from '@/lib/display-clock'
 import { formatDate, parseDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { navigationItemFor } from '@/components/layout/navigation'
 import { CopyButton } from '@/components/copy-button'
 import { EmptyState, QueryNotice } from '@/components/page'
 import { StatusChip } from '@/components/status-chip'
@@ -24,6 +26,13 @@ const outcomes = {
 const outcomeLabels = [outcomes.completed.label, outcomes.failed.label]
 // One attempt (or folded run) per row, separated by a hairline.
 const attemptRow = 'flex min-w-0 flex-col gap-2 py-3 first:pt-0 last:pb-0'
+const resourceMenuPaths: Record<string, string> = {
+  website: '/websites',
+  certificate: '/certificates',
+  dns_zone: '/dns-zones',
+  provider: '/providers',
+  node: '/nodes',
+}
 
 /** 执行记录 of the expanded subtask: the `history` event of the task detail
  * stream, kept current by its `attempt` events (no refresh button; the
@@ -33,12 +42,17 @@ const attemptRow = 'flex min-w-0 flex-col gap-2 py-3 first:pt-0 last:pb-0'
 export function SubtaskHistoryPanel({
   operationId,
   subtaskId,
+  resourceType,
   showErrors = true,
 }: {
   operationId: string
   subtaskId: string
+  resourceType: string
   showErrors?: boolean
 }) {
+  const Icon =
+    navigationItemFor(resourceMenuPaths[resourceType] ?? '/tasks')?.icon ??
+    ListCheck
   const history = useQuery({
     ...subtaskHistoryQuery(operationId, subtaskId),
     meta: { inlineError: true },
@@ -56,7 +70,11 @@ export function SubtaskHistoryPanel({
       {data ? (
         <>
           <HistorySummary summary={data.summary} />
-          <AttemptList operationId={operationId} history={data} />
+          <AttemptList
+            operationId={operationId}
+            history={data}
+            icon={<Icon aria-hidden />}
+          />
         </>
       ) : (
         history.isPending && (
@@ -164,9 +182,11 @@ function SummaryTime({ value }: { value: string }) {
 function AttemptList({
   operationId,
   history,
+  icon,
 }: {
   operationId: string
   history: SubtaskHistory
+  icon: ReactNode
 }) {
   if (!history.list.length) return <EmptyState size='sm' title='暂无执行记录' />
   const groups = groupAttempts(history.list)
@@ -181,12 +201,14 @@ function AttemptList({
             key={group.key}
             operationId={operationId}
             attempts={group.attempts}
+            icon={icon}
           />
         ) : (
           <li key={group.key} className={attemptRow}>
             <AttemptBody
               operationId={operationId}
               attempt={group.attempts[0]}
+              icon={icon}
             />
           </li>
         )
@@ -249,9 +271,11 @@ function AttemptMeta({
 function AttemptBody({
   operationId,
   attempt,
+  icon,
 }: {
   operationId: string
   attempt: TaskAttempt
+  icon: ReactNode
 }) {
   return (
     <>
@@ -262,7 +286,11 @@ function AttemptBody({
       />
       {attempt.error && <AttemptError error={attempt.error} />}
       <TaskAttemptDetail detail={attempt.detail} outcome={attempt.outcome} />
-      <AttemptTimeline operationId={operationId} trace={attempt.trace} />
+      <AttemptTimeline
+        operationId={operationId}
+        trace={attempt.trace}
+        icon={icon}
+      />
     </>
   )
 }
@@ -285,9 +313,11 @@ function AttemptError({ error }: { error: string }) {
 function AttemptRun({
   operationId,
   attempts,
+  icon,
 }: {
   operationId: string
   attempts: TaskAttempt[]
+  icon: ReactNode
 }) {
   const [expanded, setExpanded] = useState(false)
   const newest = attempts[0]
@@ -303,7 +333,11 @@ function AttemptRun({
       />
       <AttemptError error={newest.error} />
       <TaskAttemptDetail detail={newest.detail} outcome={newest.outcome} />
-      <AttemptTimeline operationId={operationId} trace={newest.trace} />
+      <AttemptTimeline
+        operationId={operationId}
+        trace={newest.trace}
+        icon={icon}
+      />
       <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}>
         <Disclosure.Heading>
           <Button
@@ -342,6 +376,7 @@ function AttemptRun({
                       <AttemptTimeline
                         operationId={operationId}
                         trace={attempt.trace}
+                        icon={icon}
                       />
                     )}
                   </li>

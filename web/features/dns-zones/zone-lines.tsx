@@ -58,6 +58,7 @@ export function ZoneLines() {
     >
       <DataTable
         label='解析线路'
+        variant='secondary'
         columns={columns}
         data={page.list}
         isLoading={false}

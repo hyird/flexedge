@@ -279,6 +279,7 @@ export function WebsiteOverview() {
       >
         <DataTable
           label='域名解析状态'
+          variant='secondary'
           columns={domainColumns}
           data={config.domains}
           isLoading={false}
@@ -302,6 +303,7 @@ export function WebsiteOverview() {
       <Section title='源站健康'>
         <DataTable
           label='源站健康状态'
+          variant='secondary'
           columns={originColumns}
           data={runtime.origin_states}
           getRowId={(state) => `${state.node_id}:${state.origin_id}`}

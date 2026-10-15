@@ -285,6 +285,7 @@ export function AccessLogs() {
         />
         <DataTable
           label={history ? '历史访问日志' : '实时访问日志'}
+          variant='secondary'
           columns={columns}
           data={rows}
           isLoading={history ? historyQuery.isPending : live.loading}

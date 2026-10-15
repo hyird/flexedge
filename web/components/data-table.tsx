@@ -77,6 +77,7 @@ export function DataTable<T extends object>({
   getRowId = defaultRowId,
   minWidth = 760,
   footer,
+  variant = 'primary',
 }: {
   /** Accessible table name, also used in loading announcements. */
   label: string
@@ -97,6 +98,8 @@ export function DataTable<T extends object>({
   minWidth?: number
   /** Usually a `TablePagination`. */
   footer?: ReactNode
+  /** Use `secondary` inside an existing Section or Widget surface. */
+  variant?: 'primary' | 'secondary'
 }) {
   // Tailwind cannot see runtime widths, so the class reads a CSS variable.
   const widthVariable = {
@@ -112,18 +115,26 @@ export function DataTable<T extends object>({
         <div
           role='status'
           aria-label={`正在加载${label}`}
-          className='overflow-hidden rounded-2xl bg-surface-secondary p-1'
+          className={cn(
+            'overflow-hidden',
+            variant === 'primary' && 'rounded-2xl bg-surface-secondary p-1'
+          )}
         >
-          <div className='flex gap-4 px-3 py-2.5'>
+          <div className='flex gap-4 bg-surface-secondary px-4 py-2.5'>
             {columns.map((column) => (
               <Skeleton key={column.id} className='h-3.5 flex-1 rounded-md' />
             ))}
           </div>
-          <div className='flex flex-col rounded-xl bg-surface'>
+          <div
+            className={cn(
+              'flex flex-col',
+              variant === 'primary' && 'rounded-xl bg-surface'
+            )}
+          >
             {Array.from({ length: 6 }, (_, row) => (
               <div
                 key={row}
-                className='flex h-11 items-center gap-4 border-b border-separator px-3 last:border-b-0'
+                className='flex h-11 items-center gap-4 border-b border-separator px-4 last:border-b-0'
               >
                 {columns.map((column) => (
                   <Skeleton
@@ -141,7 +152,11 @@ export function DataTable<T extends object>({
           data={data}
           columns={columns.map(withEnforcedWidth)}
           getRowId={getRowId}
-          className='min-w-0'
+          variant={variant}
+          className={cn(
+            'min-w-0',
+            variant === 'secondary' && '[&_thead_th]:rounded-none'
+          )}
           contentClassName='min-w-(--data-table-min-width)'
           renderEmptyState={() => (
             <EmptyState

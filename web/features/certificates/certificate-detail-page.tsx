@@ -370,7 +370,12 @@ function ReferencingWebsites({ certificate }: { certificate: Certificate }) {
       title={`引用网站 · ${certificate.website_count}`}
       description='在 HTTPS 配置中绑定了此证书的网站，续期后自动更新。'
     >
-      <WebsitesTable list={list} certificateId={certificate.id} snapshot />
+      <WebsitesTable
+        list={list}
+        certificateId={certificate.id}
+        snapshot
+        variant='secondary'
+      />
     </Section>
   )
 }
