@@ -111,7 +111,7 @@ function RecentTasks({ onNavigate }: { onNavigate: () => void }) {
         <Tooltip delay={300}>
           <Button
             size='sm'
-            variant='ghost'
+            variant='tertiary'
             isIconOnly
             aria-label='刷新任务'
             isPending={query.isFetching}

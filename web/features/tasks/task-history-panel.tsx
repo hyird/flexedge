@@ -322,7 +322,7 @@ function AttemptRun({
           <Button
             slot='trigger'
             size='sm'
-            variant='ghost'
+            variant='tertiary'
             className='h-7 px-1.5 text-xs'
           >
             {expanded ? '收起' : `展开 ${attempts.length} 次尝试`}

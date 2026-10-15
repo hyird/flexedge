@@ -76,7 +76,12 @@ function RefreshOptions({
   onRefresh: () => void
 }) {
   return (
-    <Button size='sm' variant='ghost' isPending={isPending} onPress={onRefresh}>
+    <Button
+      size='sm'
+      variant='tertiary'
+      isPending={isPending}
+      onPress={onRefresh}
+    >
       <ArrowRotateLeft className='size-3.5' />
       {label}
     </Button>
@@ -331,7 +336,7 @@ export function DomainsSection({
           )}
           <Button
             size='sm'
-            variant='secondary'
+            variant='tertiary'
             isDisabled={values.domains.length >= 100}
             onPress={() =>
               update('domains', [
@@ -371,7 +376,6 @@ export function DomainsSection({
               <IconAction
                 label={`移除域名 ${index + 1}`}
                 icon={<TrashBin className='size-4' />}
-                danger
                 onPress={() =>
                   update(
                     'domains',
@@ -621,7 +625,7 @@ function OriginGroupList({
               <div className='flex gap-2 sm:pt-6'>
                 <Button
                   size='sm'
-                  variant='secondary'
+                  variant='tertiary'
                   onPress={() => {
                     const result = renameOriginGroup(values, group.name, draft)
                     if (!result.ok) {
@@ -756,7 +760,7 @@ export function OriginsSection({
             </Button>
             <Button
               size='sm'
-              variant='secondary'
+              variant='tertiary'
               isDisabled={values.origins.length >= 100}
               onPress={() =>
                 update('origins', [
@@ -802,7 +806,6 @@ export function OriginsSection({
                   <IconAction
                     label={`移除源站 ${index + 1}`}
                     icon={<TrashBin className='size-4' />}
-                    danger
                     onPress={() => {
                       const removal = originRemovalError(values, index)
                       if (removal) {
@@ -1100,7 +1103,6 @@ export function CompressionSection({
                     <IconAction
                       label={`移除 ${algorithm}`}
                       icon={<TrashBin className='size-4' />}
-                      danger
                       onPress={() =>
                         update(
                           'response_compression_algorithms',

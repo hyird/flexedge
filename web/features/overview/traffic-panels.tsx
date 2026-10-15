@@ -59,11 +59,7 @@ function TrafficEmpty({
         icon={<CircleInfo />}
         title='没有网站启用访问日志'
         description='流量统计来自访问日志。在网站配置的「日志」分组中启用后开始统计。'
-        action={
-          <LinkButton variant='tertiary' href='/websites'>
-            前往网站
-          </LinkButton>
-        }
+        action={<LinkButton href='/websites'>前往网站</LinkButton>}
       />
     )
   return (
@@ -332,9 +328,7 @@ export function TopWebsitesPanel({ query }: { query: TrafficQuery }) {
     <Widget className='min-w-0 lg:col-span-7'>
       <Widget.Header>
         <Widget.Title>流量 Top 网站</Widget.Title>
-        <LinkButton variant='ghost' href='/websites'>
-          全部网站
-        </LinkButton>
+        <LinkButton href='/websites'>全部网站</LinkButton>
       </Widget.Header>
       <Widget.Content className='p-0'>
         <DataTable

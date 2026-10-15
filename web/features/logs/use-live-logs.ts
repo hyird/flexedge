@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { loadingEpoch, minimumLoadingMs } from '@/lib/minimum-loading'
 import { useTabPanelLoading } from '@/components/tab-panel-hold'
 import { recoverStreamSession } from '@/features/auth/session-expiry'
 import { registerSessionCleanup } from '@/features/auth/session-lifecycle'
@@ -14,11 +15,18 @@ export function useLiveLogs<T extends LogEntry>(
 ) {
   const client = useQueryClient()
   const store = useMemo(() => {
-    const created = createLiveLogStore(url, parseLogs, undefined, () => {
-      void recoverStreamSession(client).then((valid) => {
-        if (valid) created.reconnect()
-      })
-    })
+    const created = createLiveLogStore(
+      url,
+      parseLogs,
+      undefined,
+      () => {
+        void recoverStreamSession(client).then((valid) => {
+          if (valid) created.reconnect()
+        })
+      },
+      minimumLoadingMs,
+      loadingEpoch
+    )
     return created
   }, [client, url, parseLogs])
   const snapshot = useSyncExternalStore(

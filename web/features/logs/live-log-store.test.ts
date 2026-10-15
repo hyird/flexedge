@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { minimumLoadingMs } from '@/lib/minimum-loading'
 import {
   createLiveLogStore,
   liveLogCapacity,
@@ -184,5 +185,62 @@ describe('live log buffers', () => {
       stopA()
       stopB()
     }
+  })
+})
+
+describe('minimum loading time of the first batch', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+  const heldStore = (source: Source) =>
+    createLiveLogStore(
+      '/node/a',
+      parseLogs,
+      () => source,
+      undefined,
+      minimumLoadingMs
+    )
+
+  it('keeps the tail loading for the full minimum, then publishes every batch at once', () => {
+    vi.useFakeTimers()
+    const source = new Source()
+    const store = heldStore(source)
+    let renders = 0
+    const stop = store.subscribe(() => renders++)
+    try {
+      vi.advanceTimersByTime(40)
+      source.logs([log('one')])
+      source.logs([log('two')])
+      vi.advanceTimersByTime(minimumLoadingMs - 41)
+      expect(store.getSnapshot()).toMatchObject({ loading: true, logs: [] })
+      expect(renders).toBe(0)
+      vi.advanceTimersByTime(1)
+      expect(store.getSnapshot().loading).toBe(false)
+      expect(store.getSnapshot().logs.map((entry) => entry.id)).toEqual([
+        'two',
+        'one',
+      ])
+      expect(renders).toBe(1)
+      // Later batches and reconnects never bring the loading state back.
+      source.logs([log('three')])
+      expect(store.getSnapshot().logs).toHaveLength(3)
+      store.reconnect()
+      expect(store.getSnapshot().loading).toBe(false)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      stop()
+    }
+  })
+
+  it('drops a held first batch and its timer when the tail closes', () => {
+    vi.useFakeTimers()
+    const source = new Source()
+    const store = heldStore(source)
+    const stop = store.subscribe(() => undefined)
+    source.logs([log('one')])
+    expect(vi.getTimerCount()).toBe(1)
+    stop()
+    expect(vi.getTimerCount()).toBe(0)
+    expect(store.getSnapshot()).toMatchObject({ loading: true, logs: [] })
   })
 })

@@ -398,9 +398,7 @@ function NodeHealthPanel({
     <Widget className='min-w-0'>
       <Widget.Header>
         <Widget.Title>节点健康</Widget.Title>
-        <LinkButton variant='ghost' href='/nodes'>
-          全部节点
-        </LinkButton>
+        <LinkButton href='/nodes'>全部节点</LinkButton>
       </Widget.Header>
       <Widget.Content className='p-0'>
         <DataTable
@@ -500,9 +498,7 @@ function RecentTasksPanel({
     <Widget className='min-w-0'>
       <Widget.Header>
         <Widget.Title>最近任务</Widget.Title>
-        <LinkButton variant='ghost' href='/tasks'>
-          任务中心
-        </LinkButton>
+        <LinkButton href='/tasks'>任务中心</LinkButton>
       </Widget.Header>
       <Widget.Content className='p-0'>
         <DataTable

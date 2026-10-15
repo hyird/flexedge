@@ -194,7 +194,6 @@ export function WebsitesTable({
       cell: (website) => (
         <LinkButton
           href={`/websites/${website.id}`}
-          variant='tertiary'
           className='px-2'
           aria-label={`网站 ${websiteName(website)} 的详情`}
         >
@@ -244,7 +243,7 @@ export function WebsitesTable({
         isRefreshing={query.isFetching && !query.isPending}
         actions={
           clusterId || certificateId ? undefined : (
-            <LinkButton href='/websites/new'>
+            <LinkButton href='/websites/new' variant='primary'>
               <Plus />
               创建网站
             </LinkButton>

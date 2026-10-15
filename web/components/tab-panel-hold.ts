@@ -14,6 +14,7 @@ import {
   useQueryClient,
   type QueryCache,
 } from '@tanstack/react-query'
+import { loadingEpoch } from '@/lib/minimum-loading'
 
 /** Layout of the outgoing tab panel, read in the event that switches tabs. */
 export type TabPanelGeometry = {
@@ -212,7 +213,9 @@ function measureTabPanel(panel: HTMLElement): TabPanelGeometry {
 /** Keeps a tab panel from collapsing, growing or moving the page while tabs
  * switch (see `TabPanelHold`). Attach `ref` and `style` to the `Tabs.Panel`,
  * provide `hold` through `TabPanelHoldContext` around the panel content and
- * call `holdForSwitch()` in the same event that changes the selected tab. */
+ * call `holdForSwitch()` in the same event that changes the selected tab;
+ * it also begins the switch's loading epoch, so the incoming tab's first
+ * loads reveal together once the switch is `minimumLoadingMs` old. */
 export function useTabPanelHold() {
   const client = useQueryClient()
   const ref = useRef<HTMLDivElement>(null)
@@ -227,6 +230,7 @@ export function useTabPanelHold() {
     hold.settle()
   })
   const holdForSwitch = useCallback(() => {
+    loadingEpoch.begin()
     if (ref.current) hold.hold(measureTabPanel(ref.current))
   }, [hold])
   return { ref, style, holdForSwitch, hold }

@@ -2,6 +2,11 @@ import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { reconnectingEventSource } from '@/lib/event-stream'
 import { releaseDepartedLiveQueries } from '@/lib/live-query'
+import {
+  loadingEpoch,
+  minimumLoadingMs,
+  MinimumLoading,
+} from '@/lib/minimum-loading'
 import { queryKeys } from '@/lib/query-keys'
 import { recoverStreamSession } from '@/features/auth/session-expiry'
 import { registerSessionCleanup } from '@/features/auth/session-lifecycle'
@@ -28,9 +33,17 @@ export function useWebsiteDashboard(websiteId: string) {
     let stream: ReturnType<typeof reconnectingEventSource> | undefined
     // Without cached statistics the first frame is a real query load
     // (pending until it arrives, like any snapshot read), so the page sees
-    // this tab loading; e.g. `PageTabs` keeps its height until then.
+    // this tab loading; e.g. `PageTabs` keeps its height until then. Like
+    // live-query first loads it resolves no earlier than the minimum
+    // loading time after the tab switch or navigation that opened it.
     let deliverFirstFrame: ((data: WebsiteDashboard) => void) | null = null
-    if (client.getQueryData(queryKey) === undefined)
+    const firstFrame = new MinimumLoading<'first-frame'>(
+      minimumLoadingMs,
+      undefined,
+      loadingEpoch
+    )
+    if (client.getQueryData(queryKey) === undefined) {
+      firstFrame.start('first-frame')
       void client
         .fetchQuery<WebsiteDashboard>({
           queryKey,
@@ -41,6 +54,7 @@ export function useWebsiteDashboard(websiteId: string) {
         })
         // Cancelled below when the tab closes before the first frame.
         .catch(() => undefined)
+    }
     const connect = () => {
       stream?.close()
       // The dashboard owns its EventSource; close the previous tab's live
@@ -58,8 +72,11 @@ export function useWebsiteDashboard(websiteId: string) {
             (event as MessageEvent<string>).data
           )
           if (deliverFirstFrame) {
-            deliverFirstFrame(data)
-            deliverFirstFrame = null
+            // Frames arriving while it is held replace the waiting one.
+            firstFrame.reveal('first-frame', () => {
+              deliverFirstFrame?.(data)
+              deliverFirstFrame = null
+            })
           } else
             client.setQueryData<WebsiteDashboard>(queryKey, (previous) =>
               previous && JSON.stringify(previous) === JSON.stringify(data)
@@ -91,7 +108,8 @@ export function useWebsiteDashboard(websiteId: string) {
       active = false
       cleanup()
       stream?.close()
-      // No frame arrived: drop the pending load, the query reverts to empty.
+      firstFrame.clear()
+      // No frame shown yet: drop the pending load, the query reverts to empty.
       if (deliverFirstFrame)
         void client.cancelQueries({ queryKey, exact: true })
     }

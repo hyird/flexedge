@@ -197,7 +197,6 @@ export function NodesTable({
       cell: (node) => (
         <LinkButton
           href={`/nodes/${node.id}`}
-          variant='tertiary'
           className='px-2'
           aria-label={`节点 ${node.name} 的详情`}
         >

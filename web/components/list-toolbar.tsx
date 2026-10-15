@@ -111,7 +111,7 @@ export function ListToolbar({
       {search && <ListSearchField {...search} />}
       {filters}
       {hasFilters && onClearFilters && (
-        <Button size='sm' variant='ghost' onPress={onClearFilters}>
+        <Button size='sm' variant='tertiary' onPress={onClearFilters}>
           <Xmark className='size-3.5' />
           清除筛选
         </Button>

@@ -57,11 +57,7 @@ export function NodeDetailLayout() {
           size='lg'
           title='节点不存在'
           description='节点可能已被删除，或链接不正确。'
-          action={
-            <LinkButton href='/nodes' variant='tertiary'>
-              返回节点列表
-            </LinkButton>
-          }
+          action={<LinkButton href='/nodes'>返回节点列表</LinkButton>}
         />
       </Page>
     )
@@ -93,7 +89,7 @@ export function NodeDetailLayout() {
             />,
           ]}
           actions={
-            <LinkButton href='/nodes' variant='tertiary'>
+            <LinkButton href='/nodes'>
               <ArrowLeft />
               返回
             </LinkButton>

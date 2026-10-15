@@ -91,7 +91,7 @@ export function ZoneDetailLayout() {
           </span>,
         ]}
         actions={
-          <LinkButton href='/dns-zones' variant='tertiary'>
+          <LinkButton href='/dns-zones'>
             <ArrowLeft />
             返回
           </LinkButton>

@@ -287,6 +287,7 @@ export function WebsiteOverview() {
             action: (
               <Button
                 size='sm'
+                variant='tertiary'
                 onPress={() => openTab('settings', { section: 'domains' })}
               >
                 添加域名

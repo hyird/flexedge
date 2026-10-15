@@ -128,11 +128,7 @@ export function ClusterDetailLayout() {
           size='lg'
           title='集群不存在'
           description='集群可能已被删除，或链接不正确。'
-          action={
-            <LinkButton href='/clusters' variant='tertiary'>
-              返回集群列表
-            </LinkButton>
-          }
+          action={<LinkButton href='/clusters'>返回集群列表</LinkButton>}
         />
       </Page>
     )
@@ -152,7 +148,7 @@ export function ClusterDetailLayout() {
             </span>,
           ]}
           actions={
-            <LinkButton href='/clusters' variant='tertiary'>
+            <LinkButton href='/clusters'>
               <ArrowLeft />
               返回
             </LinkButton>

@@ -111,7 +111,6 @@ export function ClustersPage() {
       cell: (cluster) => (
         <LinkButton
           href={`/clusters/${cluster.id}`}
-          variant='tertiary'
           className='px-2'
           aria-label={`集群 ${cluster.name} 的详情`}
         >

@@ -23,7 +23,6 @@ export function FormSheet({
   children,
   onSubmit,
   submitLabel = '保存',
-  submitTone = 'primary',
   isSubmitting = false,
   isSubmitDisabled = false,
   error,
@@ -38,7 +37,6 @@ export function FormSheet({
    * directly or call `event.preventDefault()` yourself. Omit for read-only sheets. */
   onSubmit?: (event: FormEvent<HTMLFormElement>) => unknown
   submitLabel?: string
-  submitTone?: 'primary' | 'danger'
   isSubmitting?: boolean
   isSubmitDisabled?: boolean
   /** Form-level error (e.g. `apiErrorMessage(mutation.error)`). */
@@ -103,7 +101,7 @@ export function FormSheet({
                   <Button
                     size='sm'
                     type='submit'
-                    variant={submitTone}
+                    variant='primary'
                     isPending={isSubmitting}
                     isDisabled={isSubmitDisabled}
                   >

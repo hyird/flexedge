@@ -1,8 +1,11 @@
 import {
   hashKey,
+  notifyManager,
   queryOptions,
+  type Query,
   type QueryClient,
   type QueryKey,
+  type QueryObserver,
 } from '@tanstack/react-query'
 import { getData } from './api'
 import {
@@ -11,6 +14,7 @@ import {
   requireResponseData,
 } from './api-response'
 import { reconnectingEventSource, streamExhaustedEvent } from './event-stream'
+import { type LoadingEpoch, MinimumLoading } from './minimum-loading'
 
 type Source = ReturnType<typeof reconnectingEventSource>
 type Parse = (value: unknown) => unknown
@@ -61,6 +65,15 @@ function isSnapshotOnly(url: string, key: QueryKey) {
  * the first frame; subsequent frames write the same cache without refetching.
  * Definitions survive an unmount so a cached query can reopen on remount.
  *
+ * First loads that a view shows as loading (no cached data, no previous
+ * data kept as placeholder) reveal their first frame or error no earlier
+ * than `minimumLoadingMs` after that view started showing its loading state,
+ * or with an `epoch` after the route change or tab switch that started the
+ * loading sequence (`MinimumLoading`, `LoadingEpoch`), so every consumer of
+ * the query leaves its skeleton in the same render and a read that starts
+ * after an earlier step is not held again. Cached data, refetches of loaded
+ * data and live frames are never delayed.
+ *
  * Back/forward cache: each stream closes itself on `pagehide` and reconnects
  * once on restore (`reconnectingEventSource`). One-shot reads still waiting
  * for their snapshot are cancelled on `pagehide` (their query reverts) and
@@ -77,6 +90,11 @@ export class LiveQueryManager {
   private pendingRelease = new Set<Binding>()
   /** One-shot reads cancelled by `pagehide`, re-read when the page returns. */
   private cancelledSnapshots: Binding[] = []
+  private loading: MinimumLoading<Binding>
+  /** Since when each observer shows a loading state for missing data: from
+   * mounting or from switching to an uncached key, kept across further
+   * uncached keys (e.g. a list whose rows decide the next query). */
+  private loadingSince = new WeakMap<QueryObserver, number>()
   private onPageHide = () => this.cancelSnapshots()
   private onPageShow = (event: Event) => {
     if ((event as PageTransitionEvent).persisted) this.rereadSnapshots()
@@ -92,11 +110,20 @@ export class LiveQueryManager {
     private onSessionError: (error: unknown) => void = () => undefined,
     private pageLifecycle: EventTarget | null = typeof window === 'undefined'
       ? null
-      : window
+      : window,
+    minimumLoadingMs = 0,
+    epoch?: LoadingEpoch
   ) {
+    this.loading = new MinimumLoading(
+      minimumLoadingMs,
+      notifyManager.batch,
+      epoch
+    )
     pageLifecycle?.addEventListener('pagehide', this.onPageHide)
     pageLifecycle?.addEventListener('pageshow', this.onPageShow)
     this.unsubscribe = client.getQueryCache().subscribe((event) => {
+      if (event.type === 'observerAdded')
+        this.trackLoading(event.query, event.observer)
       const binding = this.definitions.get(event.query.queryHash)
       if (!binding) return
       if (event.type === 'removed') {
@@ -125,6 +152,18 @@ export class LiveQueryManager {
         }
       }
     })
+  }
+
+  private trackLoading(query: Query, observer: QueryObserver) {
+    // The observer's result still belongs to its previous key.
+    const shown = observer.getCurrentResult().data
+    if (
+      query.state.data !== undefined ||
+      (shown !== undefined && observer.options.placeholderData !== undefined)
+    )
+      this.loadingSince.delete(observer)
+    else if (shown !== undefined || !this.loadingSince.has(observer))
+      this.loadingSince.set(observer, Date.now())
   }
 
   read<T>(
@@ -221,13 +260,33 @@ export class LiveQueryManager {
       signal?.addEventListener('abort', abort, { once: true })
     })
     const hasFrame = entry.frames.has(event)
+    // A frame of the shared stream already in memory counts as cached.
+    const since = hasFrame ? undefined : this.shownLoadingSince(key)
+    if (since !== undefined) this.loading.start(binding, since)
     // A manual refetch of an attached query reconnects to await a fresh frame.
     if (!entry.source || (alreadyAttached && hasFrame)) this.connect(entry)
     else if (hasFrame) {
       this.apply(binding, entry.frames.get(event))
-      if (binding.snapshotOnly) this.detach(binding)
+      if (binding.snapshotOnly) this.unbind(binding)
     } else this.listenFrame(entry, event)
     return pending
+  }
+
+  /** Earliest time a view of the query started showing its loading state;
+   * undefined when the query has data or every view keeps showing previous
+   * data in its place (`keepPreviousData`). */
+  private shownLoadingSince(key: QueryKey) {
+    const query = this.client
+      .getQueryCache()
+      .find({ queryKey: key, exact: true })
+    if (!query || query.state.data !== undefined) return undefined
+    let since: number | undefined
+    for (const observer of query.observers) {
+      const shown = this.loadingSince.get(observer)
+      if (shown !== undefined && (since === undefined || shown < since))
+        since = shown
+    }
+    return since
   }
 
   private active(binding: Binding) {
@@ -254,11 +313,18 @@ export class LiveQueryManager {
   }
 
   private detach(binding: Binding) {
+    this.loading.cancel(binding)
     this.settle(
       binding,
       undefined,
       new DOMException('订阅已结束', 'AbortError')
     )
+    this.unbind(binding)
+  }
+
+  /** Removes the binding from its stream, closing the stream after the last
+   * one. A one-shot read whose snapshot is still held keeps its waiters. */
+  private unbind(binding: Binding) {
     const entry = this.entries.get(binding.url)
     entry?.bindings.delete(binding.hash)
     if (entry && entry.bindings.size === 0) {
@@ -277,28 +343,32 @@ export class LiveQueryManager {
   }
 
   private fail(binding: Binding, error: unknown) {
-    const query = this.client
-      .getQueryCache()
-      .find({ queryKey: binding.key, exact: true })
-    query?.setState({
-      error: error instanceof Error ? error : new ApiProtocolError(),
-      status: 'error',
-      fetchStatus: 'idle',
-      errorUpdatedAt: Date.now(),
+    this.loading.reveal(binding, () => {
+      const query = this.client
+        .getQueryCache()
+        .find({ queryKey: binding.key, exact: true })
+      query?.setState({
+        error: error instanceof Error ? error : new ApiProtocolError(),
+        status: 'error',
+        fetchStatus: 'idle',
+        errorUpdatedAt: Date.now(),
+      })
+      this.settle(binding, undefined, error)
     })
-    this.settle(binding, undefined, error)
-    if (binding.snapshotOnly) this.detach(binding)
+    if (binding.snapshotOnly) this.unbind(binding)
   }
 
   private apply(binding: Binding, value: unknown) {
-    try {
-      const parsed = binding.parse(value)
-      this.client.setQueryData(binding.key, parsed)
-      this.settle(binding, parsed)
-    } catch (error) {
-      this.fail(binding, error)
-    }
-    queueMicrotask(() => this.releaseInactive(binding))
+    this.loading.reveal(binding, () => {
+      try {
+        const parsed = binding.parse(value)
+        this.client.setQueryData(binding.key, parsed)
+        this.settle(binding, parsed)
+      } catch (error) {
+        this.fail(binding, error)
+      }
+      queueMicrotask(() => this.releaseInactive(binding))
+    })
   }
 
   private retire(entry: Entry) {
@@ -333,7 +403,7 @@ export class LiveQueryManager {
         entry.frames.set(name, data)
         for (const binding of bindings) this.apply(binding, data)
         for (const binding of bindings)
-          if (binding.snapshotOnly) this.detach(binding)
+          if (binding.snapshotOnly) this.unbind(binding)
       } catch (error) {
         for (const binding of bindings) this.fail(binding, error)
       }
@@ -458,15 +528,15 @@ export class LiveQueryManager {
   close() {
     this.epoch++
     this.recovering = undefined
-    for (const entry of this.entries.values()) {
-      this.retire(entry)
-      for (const binding of entry.bindings.values())
-        this.settle(
-          binding,
-          undefined,
-          new DOMException('会话已结束', 'AbortError')
-        )
-    }
+    this.loading.clear()
+    for (const entry of this.entries.values()) this.retire(entry)
+    // Definitions include one-shot reads whose held snapshot left the stream.
+    for (const binding of this.definitions.values())
+      this.settle(
+        binding,
+        undefined,
+        new DOMException('会话已结束', 'AbortError')
+      )
     this.entries.clear()
     this.definitions.clear()
     this.cancelledSnapshots = []
@@ -508,17 +578,25 @@ export class LiveQueryManager {
 
 let manager: LiveQueryManager | undefined
 
+/** Installs the live-query manager. The console passes `minimumLoadingMs`
+ * and its `loadingEpoch` (`web/lib/minimum-loading.ts`); tests reading fake
+ * streams omit them and receive first frames at once. */
 export function setLiveQueryQueryClient(
   client: QueryClient,
   onSessionError?: (error: unknown) => void,
-  createSource?: (url: string) => Source
+  createSource?: (url: string) => Source,
+  minimumLoadingMs = 0,
+  epoch?: LoadingEpoch
 ) {
   manager?.dispose()
   manager = new LiveQueryManager(
     client,
     createSource,
     undefined,
-    onSessionError
+    onSessionError,
+    undefined,
+    minimumLoadingMs,
+    epoch
   )
 }
 

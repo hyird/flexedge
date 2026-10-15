@@ -162,6 +162,8 @@ export function ZoneRecords() {
           <Button
             ref={addButton}
             size='sm'
+            // The open record editor's 保存 is the view's main action.
+            variant={open ? 'tertiary' : 'primary'}
             isDisabled={
               open?.kind === 'add' || zone.config.records.length >= maxRecords
             }

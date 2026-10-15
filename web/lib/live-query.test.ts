@@ -1,4 +1,5 @@
 import {
+  keepPreviousData,
   QueryClient,
   QueryObserver,
   type QueryKey,
@@ -7,6 +8,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { ApiBusinessError, ApiProtocolError } from './api-response'
 import { reconnectingEventSource } from './event-stream'
 import { LiveQueryManager } from './live-query'
+import { LoadingEpoch, minimumLoadingMs } from './minimum-loading'
 
 class Source extends EventTarget {
   closed = false
@@ -656,4 +658,260 @@ test('a one-shot read in flight is cancelled on pagehide and read once more on r
   page.dispatchEvent(pageTransition('pagehide', true))
   page.dispatchEvent(pageTransition('pageshow', true))
   await settled(() => expect(connections).toHaveLength(2))
+})
+
+describe('minimum loading time of first loads', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  // `advanceTimersByTimeAsync` is Vitest-only; `bun test` runs the same suite.
+  // Settles query-function promises around the fake clock, then runs the
+  // observer notifications they scheduled.
+  const advance = async (ms: number) => {
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve()
+    vi.advanceTimersByTime(ms)
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve()
+    vi.advanceTimersByTime(0)
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve()
+  }
+
+  /** Manager with the console's minimum loading time over fake streams. */
+  function setupHeld(epoch?: LoadingEpoch) {
+    vi.useFakeTimers()
+    // No garbage-collection timers: every pending timer is a loading hold.
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, staleTime: Infinity, gcTime: Infinity },
+      },
+    })
+    const sources: Source[] = []
+    const manager = new LiveQueryManager(
+      client,
+      () => {
+        const source = new Source()
+        sources.push(source)
+        return source
+      },
+      undefined,
+      undefined,
+      null,
+      minimumLoadingMs,
+      epoch
+    )
+    cleanups.push(() => {
+      manager.dispose()
+      client.clear()
+    })
+    const watch = (key: QueryKey = ['nodes'], url = '/api/nodes/stream') => {
+      const observer = new QueryObserver(client, {
+        queryKey: key,
+        queryFn: ({ queryKey, signal }) => manager.read(url, queryKey, signal),
+      })
+      const unsubscribe = observer.subscribe(() => undefined)
+      cleanups.push(() => {
+        unsubscribe()
+        observer.destroy()
+      })
+      return { observer, unsubscribe }
+    }
+    return { client, sources, manager, watch }
+  }
+
+  test('an early first frame keeps every observer loading for the full minimum', async () => {
+    const { sources, watch } = setupHeld()
+    const table = watch()
+    const header = watch()
+    await advance(30)
+    sources[0].snapshot({ value: 1 })
+    // A live update during the hold replaces the waiting frame.
+    sources[0].snapshot({ value: 2 })
+    // Fake-clock margins of 10 ms: `bun test` lets real milliseconds leak
+    // into the faked `Date.now()`.
+    await advance(minimumLoadingMs - 40)
+    expect(table.observer.getCurrentResult().isPending).toBe(true)
+    expect(header.observer.getCurrentResult().isPending).toBe(true)
+    await advance(10)
+    expect(table.observer.getCurrentResult().data).toEqual({ value: 2 })
+    expect(header.observer.getCurrentResult().data).toEqual({ value: 2 })
+    // Live frames after the first load are never delayed.
+    sources[0].snapshot({ value: 3 })
+    expect(table.observer.getCurrentResult().data).toEqual({ value: 3 })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  test('an early error waits for the minimum too, and a frame in time replaces it', async () => {
+    const { sources, watch } = setupHeld()
+    const { observer } = watch()
+    const failure = { code: 16501, message: '节点不存在', data: null }
+    sources[0].frame('resource-error', failure)
+    await advance(minimumLoadingMs - 10)
+    expect(observer.getCurrentResult().status).toBe('pending')
+    await advance(10)
+    expect(observer.getCurrentResult().error).toBeInstanceOf(ApiBusinessError)
+
+    const second = watch(['nodes', 'b'], '/api/nodes/b/stream')
+    sources[1].frame('error', null)
+    sources[1].snapshot({ id: 'b' })
+    await advance(minimumLoadingMs)
+    expect(second.observer.getCurrentResult().isError).toBe(false)
+    expect(second.observer.getCurrentResult().data).toEqual({ id: 'b' })
+  })
+
+  test('a revisit with cached data renders at once and never shows loading', async () => {
+    const { sources, watch } = setupHeld()
+    const first = watch()
+    sources[0].snapshot({ value: 1 })
+    await advance(minimumLoadingMs)
+    first.unsubscribe()
+    await advance(0)
+    expect(sources[0].closed).toBe(true)
+
+    const again = watch()
+    expect(again.observer.getCurrentResult().isPending).toBe(false)
+    expect(again.observer.getCurrentResult().data).toEqual({ value: 1 })
+    await advance(0)
+    // The reopened stream's snapshot applies without a hold.
+    sources[1].snapshot({ value: 2 })
+    expect(again.observer.getCurrentResult().data).toEqual({ value: 2 })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  test('a refetch of loaded data never brings the loading state back', async () => {
+    const { client, sources, watch } = setupHeld()
+    const { observer } = watch()
+    sources[0].snapshot({ value: 1 })
+    await advance(minimumLoadingMs)
+    const states: boolean[] = []
+    const stop = observer.subscribe((result) => states.push(result.isPending))
+    void client.invalidateQueries({ queryKey: ['nodes'] })
+    await advance(0)
+    sources.at(-1)?.snapshot({ value: 2 })
+    await advance(0)
+    stop()
+    expect(observer.getCurrentResult().data).toEqual({ value: 2 })
+    expect(states.every((pending) => !pending)).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  test('a page change keeping the previous rows is not held', async () => {
+    const { client, sources, manager } = setupHeld()
+    const page = (number: number) => ({
+      queryKey: ['websites', number],
+      queryFn: ({ signal }: { signal: AbortSignal }) =>
+        manager.read(
+          `/api/websites/stream?page=${number}`,
+          ['websites', number],
+          signal
+        ),
+      placeholderData: keepPreviousData,
+    })
+    const list = new QueryObserver<unknown>(client, page(1))
+    cleanups.push(list.subscribe(() => undefined))
+    sources[0].snapshot({ page: 1 })
+    await advance(minimumLoadingMs)
+    expect(list.getCurrentResult().data).toEqual({ page: 1 })
+
+    list.setOptions(page(2))
+    expect(list.getCurrentResult().isPlaceholderData).toBe(true)
+    await advance(0)
+    sources[1].snapshot({ page: 2 })
+    await advance(0)
+    expect(list.getCurrentResult().data).toEqual({ page: 2 })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  test('leaving before the minimum passed clears the hold and its timer', async () => {
+    const { client, sources, watch } = setupHeld()
+    const { unsubscribe } = watch()
+    sources[0].snapshot({ value: 1 })
+    expect(vi.getTimerCount()).toBe(1)
+    unsubscribe()
+    await advance(0)
+    expect(sources[0].closed).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+    await advance(minimumLoadingMs)
+    expect(client.getQueryData(['nodes'])).toBeUndefined()
+  })
+
+  test('the hold counts from when the view started loading, across keys it waits on', async () => {
+    const { client, sources, manager, watch } = setupHeld()
+    const count = (trigger?: string) => ({
+      queryKey: ['tasks', 'count', trigger],
+      enabled: trigger !== undefined,
+      queryFn: ({ signal }: { signal: AbortSignal }) =>
+        manager.read(
+          `/api/tasks/stream?trigger=${trigger}`,
+          ['tasks', 'count', trigger],
+          signal
+        ),
+    })
+    // The KPI shows its skeleton from mounting, waiting for the list.
+    const kpi = new QueryObserver<unknown>(client, count())
+    cleanups.push(kpi.subscribe(() => undefined))
+    await advance(300)
+    kpi.setOptions(count('list-loaded'))
+    await advance(20)
+    sources[0].snapshot({ total: 4 })
+    await advance(minimumLoadingMs - 330)
+    expect(kpi.getCurrentResult().isPending).toBe(true)
+    await advance(10)
+    expect(kpi.getCurrentResult().data).toEqual({ total: 4 })
+
+    // A view that only now starts loading keeps its own full minimum.
+    const table = watch(['nodes', 'tab'], '/api/nodes/tab/stream')
+    sources[1].snapshot({ rows: 1 })
+    await advance(minimumLoadingMs - 10)
+    expect(table.observer.getCurrentResult().isPending).toBe(true)
+    await advance(10)
+    expect(table.observer.getCurrentResult().data).toEqual({ rows: 1 })
+  })
+
+  test('a one-shot read releases its stream at once while its snapshot is held', async () => {
+    const { client, sources, watch } = setupHeld()
+    const { observer } = watch(
+      ['clusters', 'options'],
+      '/api/clusters/options/stream'
+    )
+    sources[0].snapshot([{ id: 'cluster-a' }])
+    expect(sources[0].closed).toBe(true)
+    await advance(minimumLoadingMs - 10)
+    expect(observer.getCurrentResult().isPending).toBe(true)
+    await advance(10)
+    expect(client.getQueryData(['clusters', 'options'])).toEqual([
+      { id: 'cluster-a' },
+    ])
+    expect(observer.getCurrentResult().isSuccess).toBe(true)
+  })
+
+  test('within one navigation a second-step read reveals on arrival; the next navigation is held again', async () => {
+    const epoch = new LoadingEpoch()
+    const { sources, watch } = setupHeld(epoch)
+    // Cluster detail: the header snapshot first, the tab's list after it.
+    epoch.begin()
+    await advance(30)
+    const header = watch(['clusters', 'snapshot'], '/api/clusters/c/stream')
+    sources[0].snapshot({ name: 'c' })
+    await advance(minimumLoadingMs - 40)
+    expect(header.observer.getCurrentResult().isPending).toBe(true)
+    await advance(10)
+    expect(header.observer.getCurrentResult().data).toEqual({ name: 'c' })
+    const list = watch(['nodes', 'cluster', 'c'], '/api/nodes/stream?c')
+    await advance(60)
+    sources[1].snapshot({ list: [] })
+    await advance(0)
+    // Its skeleton has been part of the page since the switch: no new hold.
+    expect(list.observer.getCurrentResult().data).toEqual({ list: [] })
+    expect(vi.getTimerCount()).toBe(0)
+
+    // A later navigation is a new epoch with its own full minimum.
+    await advance(1000)
+    epoch.begin()
+    const next = watch(['websites', 'w'], '/api/websites/w/stream')
+    sources[2].snapshot({ id: 'w' })
+    await advance(minimumLoadingMs - 10)
+    expect(next.observer.getCurrentResult().isPending).toBe(true)
+    await advance(10)
+    expect(next.observer.getCurrentResult().data).toEqual({ id: 'w' })
+  })
 })

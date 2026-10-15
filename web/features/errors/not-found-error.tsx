@@ -12,7 +12,11 @@ export function NotFoundError() {
       description='地址可能输入有误，或资源已被删除。可以返回概览，或使用 Ctrl K 搜索页面和资源。'
       actions={
         <>
-          <Button size='sm' onPress={() => void navigate({ to: '/' })}>
+          <Button
+            size='sm'
+            variant='tertiary'
+            onPress={() => void navigate({ to: '/' })}
+          >
             返回概览
           </Button>
           <Button

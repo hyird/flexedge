@@ -111,11 +111,7 @@ export function WebsiteCreatePage() {
     <Page
       title='创建网站'
       description='填写域名和源站后创建，配置会分发到所属集群的全部边缘节点。'
-      actions={
-        <LinkButton href='/websites' variant='tertiary'>
-          返回列表
-        </LinkButton>
-      }
+      actions={<LinkButton href='/websites'>返回列表</LinkButton>}
     >
       <WebsiteEditor section={section} onSectionChange={setSection} />
     </Page>

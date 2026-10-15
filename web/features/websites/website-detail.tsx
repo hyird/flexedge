@@ -161,7 +161,7 @@ export function WebsiteDetailLayout() {
           </span>,
         ]}
         actions={
-          <LinkButton href='/websites' variant='tertiary'>
+          <LinkButton href='/websites'>
             <ArrowLeft />
             返回
           </LinkButton>

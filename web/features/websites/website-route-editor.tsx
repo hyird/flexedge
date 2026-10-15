@@ -86,7 +86,7 @@ function RuleList({
       actions={
         <Button
           size='sm'
-          variant='secondary'
+          variant='tertiary'
           isDisabled={rules.length >= routeRuleLimit}
           onPress={onAdd}
         >
@@ -177,7 +177,7 @@ function RoutePreview({
           <Button
             key={index}
             size='sm'
-            variant='ghost'
+            variant='tertiary'
             className='h-6 px-1.5 text-xs'
             onPress={() => onSelectRule(index)}
           >
@@ -351,7 +351,6 @@ function RuleEditor({
           <IconAction
             label='移除规则'
             icon={<TrashBin className='size-4' />}
-            danger
             onPress={() => {
               onChange(rules.filter((item) => item.id !== rule.id))
               onSelect(null)
@@ -538,7 +537,6 @@ function RuleEditor({
                     <IconAction
                       label={`移除条件 ${conditionIndex + 1}`}
                       icon={<TrashBin className='size-4' />}
-                      danger
                       onPress={() =>
                         update({
                           conditions: rule.conditions.filter(
@@ -840,6 +838,7 @@ export function WebsiteRouteEditor({
                     action={
                       <Button
                         size='sm'
+                        variant='tertiary'
                         isDisabled={rules.length >= routeRuleLimit}
                         onPress={addRule}
                       >

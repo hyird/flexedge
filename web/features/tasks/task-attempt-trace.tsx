@@ -110,7 +110,7 @@ function TraceTimeline({
           {!notFound && (
             <Button
               size='sm'
-              variant='ghost'
+              variant='tertiary'
               className='h-6 min-w-0 px-1.5 text-xs'
               isPending={query.isFetching}
               onPress={() => void query.refetch()}

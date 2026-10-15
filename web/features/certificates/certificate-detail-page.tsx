@@ -107,7 +107,7 @@ export function CertificateDetailPage() {
           </span>,
         ]}
         actions={
-          <LinkButton href='/certificates' variant='tertiary'>
+          <LinkButton href='/certificates'>
             <ArrowLeft className='size-4' />
             返回
           </LinkButton>
@@ -137,6 +137,7 @@ export function CertificateDetailPage() {
               </Button>
               <Button
                 size='sm'
+                variant='tertiary'
                 isDisabled={busy}
                 onPress={() => commands.renew(certificate)}
               >

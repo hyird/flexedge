@@ -135,7 +135,6 @@ export function DnsZonesPage() {
       cell: (zone) => (
         <LinkButton
           href={`/dns-zones/${zone.id}`}
-          variant='tertiary'
           className='px-2'
           aria-label={`域名 ${zone.domain} 的详情`}
         >

@@ -5,6 +5,7 @@ import { createRouter, RouterProvider } from '@tanstack/react-router'
 import { toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { setLiveQueryQueryClient } from '@/lib/live-query'
+import { loadingEpoch, minimumLoadingMs } from '@/lib/minimum-loading'
 import { createAppQueryClient } from '@/lib/query-client'
 import { ThemeProvider } from '@/context/theme-provider'
 import { createSessionExpiryHandler } from '@/features/auth/session-expiry'
@@ -15,15 +16,24 @@ const queryClient = createAppQueryClient(
   (message) => toast.danger(message),
   (error) => handleSessionExpiry(error)
 )
-setLiveQueryQueryClient(queryClient, (error) => {
-  handleSessionExpiry(error)
-})
+setLiveQueryQueryClient(
+  queryClient,
+  (error) => {
+    handleSessionExpiry(error)
+  },
+  undefined,
+  minimumLoadingMs,
+  loadingEpoch
+)
 const router = createRouter({
   routeTree,
   context: { queryClient },
   defaultPreload: 'intent',
   defaultPreloadStaleTime: 0,
 })
+// Every navigation (path, search or sheet) starts a loading sequence: the
+// first loads it triggers reveal together once it is `minimumLoadingMs` old.
+router.subscribe('onBeforeNavigate', () => loadingEpoch.begin())
 const handleSessionExpiry = createSessionExpiryHandler(
   queryClient,
   () =>

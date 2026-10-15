@@ -27,6 +27,7 @@ export function GeneralError({
         <>
           <Button
             size='sm'
+            variant='tertiary'
             onPress={() => (reset ? reset() : location.reload())}
           >
             重新加载

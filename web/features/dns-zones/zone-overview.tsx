@@ -130,7 +130,11 @@ export function ZoneOverview() {
               >
                 使用服务商记录
               </Button>
-              <Button size='sm' onPress={() => commands.resolve(zone, 'local')}>
+              <Button
+                size='sm'
+                variant='tertiary'
+                onPress={() => commands.resolve(zone, 'local')}
+              >
                 使用本地记录
               </Button>
             </>

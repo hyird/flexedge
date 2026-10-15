@@ -102,21 +102,20 @@ export function NewWindowLink({
   )
 }
 
-/** Icon-only button with tooltip and accessible name. */
+/** Icon-only button inline with form rows (refresh, reorder, remove): quiet
+ * `ghost`, with tooltip and accessible name. */
 export function IconAction({
   label,
   icon,
   onPress,
   isDisabled,
   isPending,
-  danger,
 }: {
   label: string
   icon: ReactNode
   onPress: () => void
   isDisabled?: boolean
   isPending?: boolean
-  danger?: boolean
 }) {
   return (
     <Tooltip delay={300}>
@@ -128,7 +127,6 @@ export function IconAction({
         isDisabled={isDisabled}
         isPending={isPending}
         onPress={onPress}
-        className={danger ? 'text-danger' : undefined}
       >
         {icon}
       </Button>

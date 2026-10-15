@@ -153,7 +153,6 @@ export function CertificatesPage() {
       cell: (item) => (
         <LinkButton
           href={`/certificates/${item.id}`}
-          variant='tertiary'
           className='px-2'
           aria-label={`证书 ${item.domains[0] ?? ''} 的详情`}
         >
