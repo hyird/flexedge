@@ -7,14 +7,14 @@ export function DetailHeaderSkeleton() {
     <div role='status' aria-label='正在加载' className='flex items-start gap-3'>
       <Skeleton className='size-10 shrink-0 rounded-lg' />
       <div className='flex flex-col gap-2 pt-0.5'>
-        <Skeleton className='h-6 w-48 rounded-md' />
+        <Skeleton className='h-8 w-48 rounded-md' />
         <Skeleton className='h-3.5 w-72 max-w-[60vw] rounded-md' />
       </div>
     </div>
   )
 }
 
-/** Resource detail header: icon tile, visible title (20px/600), status chip,
+/** Resource detail header: icon tile, visible title, status chip,
  * a meta line of short facts or cross-resource links, and actions (only
  * `返回`; page actions live in the cards they act on). Followed by
  * `PageTabs` when the detail has tabs.
@@ -44,7 +44,7 @@ export function DetailHeader({
       <div className='flex min-w-0 items-start gap-3'>
         <span
           aria-hidden
-          className='flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-surface text-muted [&_svg]:size-5'
+          className='flex size-10 shrink-0 items-center justify-center rounded-xl bg-default text-muted [&_svg]:size-5'
         >
           {icon}
         </span>
@@ -52,14 +52,14 @@ export function DetailHeader({
           <div className='flex min-w-0 items-center gap-3'>
             <h1
               title={title}
-              className='min-w-0 truncate text-xl font-semibold tracking-tight text-foreground'
+              className='min-w-0 truncate text-2xl font-semibold tracking-tight text-foreground'
             >
               {title}
             </h1>
             {status && <span className='flex shrink-0'>{status}</span>}
           </div>
           {facts.length > 0 && (
-            <div className='flex min-w-0 [scrollbar-width:none] items-center gap-x-2 overflow-x-auto text-[13px] whitespace-nowrap text-muted'>
+            <div className='flex min-w-0 [scrollbar-width:none] items-center gap-x-2 overflow-x-auto text-sm whitespace-nowrap text-muted'>
               {facts.map((fact, index) => (
                 <Fragment key={index}>
                   {index > 0 && <span aria-hidden>·</span>}

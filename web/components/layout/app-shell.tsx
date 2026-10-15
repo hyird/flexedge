@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Outlet, useLocation } from '@tanstack/react-router'
 import { Globe } from '@gravity-ui/icons'
 import { AppLayout, Navbar, Sheet, Sidebar } from '@heroui-pro/react'
+import { Tooltip } from '@heroui/react'
 import { AccountMenu } from './account-menu'
 import { AppBreadcrumbs } from './app-breadcrumbs'
 import {
@@ -27,6 +28,7 @@ export function AppShell() {
         跳至内容
       </a>
       <AppLayout
+        sidebarVariant='inset'
         sidebarCollapsible='icon'
         sidebar={
           <>
@@ -48,7 +50,10 @@ export function AppShell() {
           >
             <Navbar.Header className='gap-2 px-3 sm:px-4'>
               <AppLayout.MenuToggle aria-label='打开导航菜单' />
-              <Sidebar.Trigger aria-label='展开或收起侧栏' />
+              <Tooltip>
+                <Sidebar.Trigger aria-label='展开或收起侧栏' />
+                <Tooltip.Content>展开或收起侧栏</Tooltip.Content>
+              </Tooltip>
               <div className='min-w-0 flex-1'>
                 <AppBreadcrumbs />
               </div>

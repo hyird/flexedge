@@ -1,6 +1,13 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRotateLeft, ChevronRight, CircleCheck } from '@gravity-ui/icons'
+import {
+  ArrowRotateLeft,
+  ChevronRight,
+  CircleCheck,
+  CircleExclamation,
+  Globe,
+  Server,
+} from '@gravity-ui/icons'
 import {
   ChartTooltip,
   ListView,
@@ -129,6 +136,8 @@ export function OverviewPage() {
         egressBps={health?.egressBps}
         bandwidthHistory={bandwidthHistory.points}
         isBandwidthPending={nodes.isPending}
+        isOverviewPending={overview.isPending}
+        isTrafficPending={traffic.isPending}
       />
       <QueryNotice
         query={overview}
@@ -155,20 +164,24 @@ export function OverviewPage() {
   )
 }
 
-/** Six KPI cards. A card shows a skeleton until its stream event arrived;
- * request and response figures carry their 24-hour sparkline. */
+/** Primary metrics follow the chart-bottom KPI layout; secondary metrics
+ * use a compact horizontal layout without inventing comparison trends. */
 function OverviewKpis({
   overview,
   traffic,
   egressBps,
   bandwidthHistory,
   isBandwidthPending,
+  isOverviewPending,
+  isTrafficPending,
 }: {
   overview?: Overview
   traffic?: OverviewTraffic
   egressBps?: number
   bandwidthHistory: BandwidthPoint[]
   isBandwidthPending: boolean
+  isOverviewPending: boolean
+  isTrafficPending: boolean
 }) {
   const resources = overview?.resources
   const summary = traffic?.summary
@@ -178,160 +191,201 @@ function OverviewKpis({
   const online = resources
     ? ratioOf(resources.online_node_count, resources.node_count)
     : 0
-  const valueSkeleton = <Skeleton className='h-7 w-24 rounded-md' />
+  const valueSkeleton = <Skeleton className='h-8 w-24 rounded-md' />
+  const compactSkeleton = <Skeleton className='h-7 w-16 rounded-md' />
+  const missingValue = <KPI.Value value={0}>{() => '—'}</KPI.Value>
   return (
-    <div className='grid grid-cols-2 gap-3 md:grid-cols-3 2xl:grid-cols-6'>
-      <KPI className='min-w-0'>
-        <KPI.Header>
-          <KPI.Title>
-            当前带宽
-            {resources &&
-              resources.node_count > overviewNodePageSize &&
-              `（前 ${overviewNodePageSize} 个节点）`}
-          </KPI.Title>
-        </KPI.Header>
-        <KPI.Content className='content-start'>
-          {isBandwidthPending ? (
-            valueSkeleton
-          ) : (
-            <KpiQuantity value={egressBps} unit='bps' />
-          )}
-        </KPI.Content>
-        <KPI.Chart
-          data={bandwidthHistory}
-          dataKey='bandwidth_bps'
-          color='var(--color-accent)'
-          height={40}
-          strokeWidth={1.5}
-          areaProps={{ dot: bandwidthHistory.length === 1 }}
-          aria-label='当前出口带宽近期趋势'
-          title='本次打开概览后收到的最近 60 次节点上报'
-          tooltip={
-            <AreaChart.Tooltip
-              content={({ active, payload }) => {
-                const point = payload?.[0]?.payload as
-                  BandwidthPoint | undefined
-                if (!active || !point) return null
-                return (
-                  <ChartTooltip>
-                    <ChartTooltip.Header>
-                      {formatDate(new Date(point.timestamp).toISOString())}
-                    </ChartTooltip.Header>
-                    <ChartTooltip.Item>
-                      <ChartTooltip.Indicator color='var(--color-accent)' />
-                      <ChartTooltip.Label>实时出口带宽</ChartTooltip.Label>
-                      <ChartTooltip.Value>
-                        {formatBitsPerSecond(point.bandwidth_bps)}
-                      </ChartTooltip.Value>
-                    </ChartTooltip.Item>
-                  </ChartTooltip>
-                )
-              }}
-            />
-          }
-        />
-      </KPI>
-      <KPI className='min-w-0'>
-        <KPI.Header>
-          <KPI.Title>24 小时请求数</KPI.Title>
-        </KPI.Header>
-        <KPI.Content className='content-start'>
-          {summary ? (
-            <KPI.Value
-              value={summary.request_count}
-              notation='compact'
-              maximumFractionDigits={1}
-              className='whitespace-nowrap'
-            />
-          ) : (
-            valueSkeleton
-          )}
-        </KPI.Content>
-        {traffic && (
+    <div className='flex flex-col gap-3'>
+      <div className='grid grid-cols-1 gap-3 lg:grid-cols-3'>
+        <KPI className='min-w-0'>
+          <KPI.Header>
+            <KPI.Title className='truncate'>
+              当前带宽
+              {resources &&
+                resources.node_count > overviewNodePageSize &&
+                `（前 ${overviewNodePageSize} 个节点）`}
+            </KPI.Title>
+            <span className='ml-auto shrink-0 text-xs text-muted'>实时</span>
+          </KPI.Header>
+          <KPI.Content className='min-h-8'>
+            {isBandwidthPending ? (
+              valueSkeleton
+            ) : (
+              <KpiQuantity value={egressBps} unit='bps' />
+            )}
+          </KPI.Content>
           <KPI.Chart
-            data={traffic.hourly}
+            data={bandwidthHistory}
+            dataKey='bandwidth_bps'
+            color='var(--color-accent)'
+            height={64}
+            strokeWidth={1.5}
+            areaProps={{ dot: bandwidthHistory.length === 1 }}
+            aria-label='当前出口带宽近期趋势'
+            title='本次打开概览后收到的最近 60 次节点上报'
+            tooltip={
+              <AreaChart.Tooltip
+                content={({ active, payload }) => {
+                  const point = payload?.[0]?.payload as
+                    BandwidthPoint | undefined
+                  if (!active || !point) return null
+                  return (
+                    <ChartTooltip>
+                      <ChartTooltip.Header>
+                        {formatDate(new Date(point.timestamp).toISOString())}
+                      </ChartTooltip.Header>
+                      <ChartTooltip.Item>
+                        <ChartTooltip.Indicator color='var(--color-accent)' />
+                        <ChartTooltip.Label>实时出口带宽</ChartTooltip.Label>
+                        <ChartTooltip.Value>
+                          {formatBitsPerSecond(point.bandwidth_bps)}
+                        </ChartTooltip.Value>
+                      </ChartTooltip.Item>
+                    </ChartTooltip>
+                  )
+                }}
+              />
+            }
+          />
+        </KPI>
+        <KPI className='min-w-0'>
+          <KPI.Header>
+            <KPI.Title>24 小时请求数</KPI.Title>
+          </KPI.Header>
+          <KPI.Content className='min-h-8'>
+            {summary ? (
+              <KPI.Value
+                value={summary.request_count}
+                notation='compact'
+                maximumFractionDigits={1}
+                className='whitespace-nowrap'
+              />
+            ) : isTrafficPending ? (
+              valueSkeleton
+            ) : (
+              missingValue
+            )}
+          </KPI.Content>
+          <KPI.Chart
+            data={traffic?.hourly ?? []}
             dataKey='request_count'
             color='var(--color-accent)'
-            height={40}
+            height={64}
             strokeWidth={1.5}
+            aria-label='过去 24 小时每小时请求数趋势'
           />
-        )}
-      </KPI>
-      <KPI className='min-w-0'>
-        <KPI.Header>
-          <KPI.Title>24 小时响应流量</KPI.Title>
-        </KPI.Header>
-        <KPI.Content className='content-start'>
-          {summary ? (
-            <KpiQuantity value={summary.response_bytes} unit='bytes' />
-          ) : (
-            valueSkeleton
-          )}
-        </KPI.Content>
-        {traffic && (
+        </KPI>
+        <KPI className='min-w-0'>
+          <KPI.Header>
+            <KPI.Title>24 小时响应流量</KPI.Title>
+          </KPI.Header>
+          <KPI.Content className='min-h-8'>
+            {summary ? (
+              <KpiQuantity value={summary.response_bytes} unit='bytes' />
+            ) : isTrafficPending ? (
+              valueSkeleton
+            ) : (
+              missingValue
+            )}
+          </KPI.Content>
           <KPI.Chart
-            data={traffic.hourly}
+            data={traffic?.hourly ?? []}
             dataKey='response_bytes'
             color='var(--color-accent)'
-            height={40}
+            height={64}
             strokeWidth={1.5}
+            aria-label='过去 24 小时每小时响应流量趋势'
           />
-        )}
-      </KPI>
-      <KPI className='min-w-0'>
-        <KPI.Header>
-          <KPI.Title>5xx 比例</KPI.Title>
-        </KPI.Header>
-        <KPI.Content className='content-start'>
-          {summary ? (
-            <KPI.Value
-              value={ratioOf(summary.status_5xx_count, summary.request_count)}
-              style='percent'
-              maximumFractionDigits={2}
-            />
-          ) : (
-            valueSkeleton
-          )}
-        </KPI.Content>
-      </KPI>
-      <KPI className='min-w-0'>
-        <KPI.Header>
-          <KPI.Title>在线节点</KPI.Title>
-        </KPI.Header>
-        <KPI.Content className='content-start'>
-          {resources ? (
-            <KPI.Value
-              value={resources.online_node_count}
-              className='whitespace-nowrap'
-            >
-              {(formatted) => `${formatted} / ${resources.node_count}`}
-            </KPI.Value>
-          ) : (
-            valueSkeleton
-          )}
-          {resources && (
-            <KPI.Progress
-              aria-label='节点在线比例'
-              value={online * 100}
+        </KPI>
+      </div>
+      <div className='grid grid-cols-1 gap-3 sm:grid-cols-3'>
+        <KPI className='min-w-0 flex-row items-center gap-3'>
+          <KPI.Header className='mb-0 min-w-0 flex-1'>
+            <KPI.Icon
               status={
-                offline === 0 ? 'success' : online === 0 ? 'danger' : 'warning'
+                summary
+                  ? summary.status_5xx_count > 0
+                    ? 'danger'
+                    : 'success'
+                  : undefined
               }
-            />
-          )}
-        </KPI.Content>
-      </KPI>
-      <KPI className='min-w-0'>
-        <KPI.Header>
-          <KPI.Title>网站</KPI.Title>
-        </KPI.Header>
-        <KPI.Content className='content-start'>
-          {resources ? (
-            <KPI.Value value={resources.website_count} />
-          ) : (
-            valueSkeleton
-          )}
-        </KPI.Content>
-      </KPI>
+            >
+              <CircleExclamation />
+            </KPI.Icon>
+            <KPI.Title className='truncate'>5xx 比例</KPI.Title>
+          </KPI.Header>
+          <KPI.Content className='min-h-8 flex-none [&_.kpi__value]:text-xl'>
+            {summary ? (
+              <KPI.Value
+                value={ratioOf(summary.status_5xx_count, summary.request_count)}
+                style='percent'
+                maximumFractionDigits={2}
+                className='whitespace-nowrap'
+              />
+            ) : isTrafficPending ? (
+              compactSkeleton
+            ) : (
+              missingValue
+            )}
+          </KPI.Content>
+        </KPI>
+        <KPI className='min-w-0 flex-row items-center gap-3'>
+          <KPI.Header className='mb-0 min-w-0 flex-1'>
+            <KPI.Icon
+              status={
+                resources
+                  ? offline === 0
+                    ? 'success'
+                    : online === 0
+                      ? 'danger'
+                      : 'warning'
+                  : undefined
+              }
+            >
+              <Server />
+            </KPI.Icon>
+            <KPI.Title className='truncate'>在线节点</KPI.Title>
+          </KPI.Header>
+          <KPI.Content className='min-h-8 flex-none [&_.kpi__value]:text-xl'>
+            {resources ? (
+              <KPI.Value
+                value={resources.online_node_count}
+                className='whitespace-nowrap'
+              >
+                {(formatted) => (
+                  <>
+                    {formatted}
+                    <span className='ms-1 text-sm font-normal text-muted'>
+                      / {formatNumber(resources.node_count)}
+                    </span>
+                  </>
+                )}
+              </KPI.Value>
+            ) : isOverviewPending ? (
+              compactSkeleton
+            ) : (
+              missingValue
+            )}
+          </KPI.Content>
+        </KPI>
+        <KPI className='min-w-0 flex-row items-center gap-3'>
+          <KPI.Header className='mb-0 min-w-0 flex-1'>
+            <KPI.Icon className='text-muted'>
+              <Globe />
+            </KPI.Icon>
+            <KPI.Title className='truncate'>网站</KPI.Title>
+          </KPI.Header>
+          <KPI.Content className='min-h-8 flex-none [&_.kpi__value]:text-xl'>
+            {resources ? (
+              <KPI.Value value={resources.website_count} />
+            ) : isOverviewPending ? (
+              compactSkeleton
+            ) : (
+              missingValue
+            )}
+          </KPI.Content>
+        </KPI>
+      </div>
     </div>
   )
 }
@@ -354,7 +408,7 @@ function AttentionPanel({
       <Widget.Header>
         <Widget.Title>需要关注</Widget.Title>
       </Widget.Header>
-      <Widget.Content className='p-1.5'>
+      <Widget.Content className='flex min-h-[292px] flex-col justify-center p-1.5'>
         {!items ? (
           isLoading && (
             <div className='flex flex-col gap-2 p-2.5'>

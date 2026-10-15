@@ -1,6 +1,6 @@
 import { type CSSProperties, type ReactNode } from 'react'
 import { DataGrid, type DataGridColumn } from '@heroui-pro/react'
-import { Skeleton } from '@heroui/react'
+import { Skeleton, Table } from '@heroui/react'
 import { cn } from '@/lib/utils'
 import { EmptyState, QueryNotice } from './page'
 
@@ -112,39 +112,42 @@ export function DataTable<T extends object>({
         onRetry={onRetry}
       />
       {isLoading && !data?.length ? (
-        <div
-          role='status'
-          aria-label={`正在加载${label}`}
-          className={cn(
-            'overflow-hidden',
-            variant === 'primary' && 'rounded-2xl bg-surface-secondary p-1'
-          )}
-        >
-          <div className='flex gap-4 bg-surface-secondary px-4 py-2.5'>
-            {columns.map((column) => (
-              <Skeleton key={column.id} className='h-3.5 flex-1 rounded-md' />
-            ))}
-          </div>
-          <div
-            className={cn(
-              'flex flex-col',
-              variant === 'primary' && 'rounded-xl bg-surface'
-            )}
-          >
-            {Array.from({ length: 6 }, (_, row) => (
-              <div
-                key={row}
-                className='flex h-11 items-center gap-4 border-b border-separator px-4 last:border-b-0'
+        <div role='status' aria-label={`正在加载${label}`}>
+          <Table variant={variant} className='data-grid'>
+            <Table.ScrollContainer>
+              <Table.Content
+                aria-label={`${label}加载中`}
+                className='min-w-(--data-table-min-width)'
               >
-                {columns.map((column) => (
-                  <Skeleton
-                    key={column.id}
-                    className='h-3.5 flex-1 rounded-md'
-                  />
-                ))}
-              </div>
-            ))}
-          </div>
+                <Table.Header>
+                  {columns.map((column, index) => (
+                    <Table.Column
+                      key={column.id}
+                      isRowHeader={index === 0}
+                      aria-label={
+                        typeof column.header === 'string'
+                          ? column.header
+                          : column.id
+                      }
+                    >
+                      <Skeleton className='h-3.5 w-20 rounded-md' />
+                    </Table.Column>
+                  ))}
+                </Table.Header>
+                <Table.Body>
+                  {Array.from({ length: 6 }, (_, row) => (
+                    <Table.Row key={row}>
+                      {columns.map((column) => (
+                        <Table.Cell key={column.id}>
+                          <Skeleton className='h-3.5 w-3/4 rounded-md' />
+                        </Table.Cell>
+                      ))}
+                    </Table.Row>
+                  ))}
+                </Table.Body>
+              </Table.Content>
+            </Table.ScrollContainer>
+          </Table>
         </div>
       ) : data && (data.length > 0 || error === undefined) ? (
         <DataGrid
@@ -153,10 +156,7 @@ export function DataTable<T extends object>({
           columns={columns.map(withEnforcedWidth)}
           getRowId={getRowId}
           variant={variant}
-          className={cn(
-            'min-w-0',
-            variant === 'secondary' && '[&_thead_th]:rounded-none'
-          )}
+          className='min-w-0'
           contentClassName='min-w-(--data-table-min-width)'
           renderEmptyState={() => (
             <EmptyState

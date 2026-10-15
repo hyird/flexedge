@@ -52,7 +52,7 @@ export function SaveBar({
         <div
           role='region'
           aria-label='保存更改'
-          className='sticky bottom-0 z-20 -mx-4 mt-auto -mb-10 border-t border-border bg-surface/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8'
+          className='sticky bottom-0 z-20 -mx-4 mt-auto -mb-10 border-t border-border bg-surface/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6'
         >
           <div className='flex flex-wrap items-center justify-between gap-3'>
             <p className='flex min-w-0 items-center gap-2 text-sm'>

@@ -315,8 +315,8 @@ function TaskKpi({
   value: number | undefined
 }): ReactNode {
   return (
-    <KPI className='min-w-0 flex-row items-center justify-between gap-4'>
-      <KPI.Header className='min-w-0'>
+    <KPI className='min-w-0 flex-row items-center justify-between gap-4 px-4 py-3'>
+      <KPI.Header className='mb-0 min-w-0'>
         <KPI.Icon
           status={status}
           className={cn('size-7', !status && 'bg-default text-muted')}
@@ -325,7 +325,7 @@ function TaskKpi({
         </KPI.Icon>
         <KPI.Title className='whitespace-nowrap'>{title}</KPI.Title>
       </KPI.Header>
-      <KPI.Content className='flex-none'>
+      <KPI.Content className='min-h-8 flex-none'>
         {value === undefined ? (
           <Skeleton className='h-7 w-16 rounded-md' />
         ) : (

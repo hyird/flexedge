@@ -79,7 +79,7 @@ export function BandwidthPanel({ query }: { query: TrafficQuery }) {
           小时平均出口带宽
         </Widget.Description>
       </Widget.Header>
-      <Widget.Content>
+      <Widget.Content className='flex min-h-[292px] flex-col justify-center'>
         <QueryNotice query={query} onRetry={query.refetch} />
         {!traffic ? (
           query.isPending && (
@@ -176,19 +176,19 @@ export function StatusClassPanel({ query }: { query: TrafficQuery }) {
     : undefined
   const slices = distribution?.items.filter((item) => item.request_count)
   return (
-    <Widget className='min-w-0 lg:col-span-5'>
+    <Widget className='@container min-w-0 lg:col-span-5'>
       <Widget.Header>
         <Widget.Title>状态码分布</Widget.Title>
       </Widget.Header>
-      <Widget.Content className='flex flex-col justify-center'>
+      <Widget.Content className='flex min-h-[372px] flex-col justify-center @sm:min-h-[208px]'>
         <QueryNotice query={query} onRetry={query.refetch} />
         {!traffic || !distribution || !slices ? (
           query.isPending && (
-            <div className='flex items-center gap-6'>
-              <Skeleton className='size-40 shrink-0 rounded-full' />
-              <div className='flex flex-1 flex-col gap-3'>
+            <div className='flex flex-col items-center gap-6 @sm:flex-row'>
+              <Skeleton className='size-44 shrink-0 rounded-full' />
+              <div className='flex w-full min-w-0 flex-1 flex-col gap-2.5'>
                 {Array.from({ length: 5 }, (_, index) => (
-                  <Skeleton key={index} className='h-4 w-full rounded-md' />
+                  <Skeleton key={index} className='h-5 w-full rounded-md' />
                 ))}
               </div>
             </div>
@@ -196,7 +196,7 @@ export function StatusClassPanel({ query }: { query: TrafficQuery }) {
         ) : distribution.total === 0 ? (
           <TrafficEmpty traffic={traffic} size='sm' />
         ) : (
-          <div className='flex flex-col items-center gap-6 sm:flex-row'>
+          <div className='flex flex-col items-center gap-6 @sm:flex-row'>
             <PieChart
               height={176}
               width={176}

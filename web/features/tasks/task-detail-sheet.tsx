@@ -194,9 +194,12 @@ export function SubtaskList({
                 depth > 0 && 'ps-6'
               )}
             >
-              <Accordion.Trigger className='min-w-0 justify-start gap-2 px-3 py-2.5 font-normal'>
+              <Accordion.Trigger className='min-w-0 flex-1 justify-start gap-2 px-3 py-2.5 font-normal'>
                 <Accordion.Indicator className='order-first ms-0 -rotate-90 data-[expanded=true]:rotate-0' />
-                <span className='min-w-0 flex-1 truncate text-start'>
+                <span
+                  title={subtaskTitle(subtask)}
+                  className='min-w-0 flex-1 truncate text-start'
+                >
                   {subtaskTitle(subtask)}
                 </span>
                 <SubtaskStatus subtask={subtask} />
@@ -239,7 +242,7 @@ function SubtaskStatus({ subtask }: { subtask: Subtask }) {
   )
 }
 
-const noteSlot = 'w-24 shrink-0 truncate text-xs leading-5 sm:w-44'
+const noteSlot = 'w-8 shrink-0 truncate text-xs leading-5 sm:w-44'
 
 /** The row's fixed extra-info slot (contract §5.2); empty but reserved when
  * nothing applies, so status changes never move the duration. */
@@ -307,7 +310,7 @@ function SubtaskNoteSlot({
 }
 
 const durationSlot =
-  'w-20 shrink-0 text-end text-xs leading-5 whitespace-nowrap text-muted tabular-nums'
+  'w-16 shrink-0 text-end text-xs leading-5 whitespace-nowrap text-muted tabular-nums sm:w-20'
 
 /** Settled: the recorded duration. Unsettled: live elapsed time on the
  * shared 1 s clock, since the current claim (`running_since`, renewed on

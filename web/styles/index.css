@@ -9,31 +9,8 @@
     'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-/* Theme tokens. Only HeroUI's documented semantic variables are overridden;
-   component code uses the matching utilities (bg-surface, border-border…). */
-:root,
-.light,
-[data-theme='light'] {
-  --background: oklch(0.975 0.0015 286.37);
-  --surface-secondary: oklch(0.965 0.0015 286.37);
-  --border: oklch(0.915 0.004 286.32);
-  --separator: oklch(0.93 0.004 286.32);
-  /* Flat surfaces: a 1px semantic edge instead of elevation. */
-  --surface-shadow: 0 0 0 1px var(--border);
-  --sidebar-edge-outline: var(--border);
-}
-.dark,
-[data-theme='dark'] {
-  --background: oklch(0.15 0.004 285.82);
-  --surface: oklch(0.19 0.005 285.89);
-  --surface-secondary: oklch(0.225 0.004 286.14);
-  --border: oklch(0.29 0.006 286.03);
-  /* `:root` above also matches in dark mode, so the separator needs its own
-     dark value (between surface and border, as in HeroUI's dark theme). */
-  --separator: oklch(0.26 0.006 286.03);
-  --surface-shadow: 0 0 0 1px var(--border);
-  --sidebar-edge-outline: var(--border);
-}
+/* HeroUI owns the light/dark palette, surface elevation and component
+   proportions. Keep application overrides limited to workspace behavior. */
 :root {
   --workspace-navbar-height: 3.5rem;
   /* Sticky save bars and table viewports subtract the shell chrome. */
@@ -76,75 +53,9 @@
   }
 }
 
-/* Density adjustments on HeroUI's documented BEM classes (36px controls). */
+/* Application behavior shared by resource grids. Component appearance uses
+   the HeroUI defaults, matching the official demos. */
 @layer components {
-  .input,
-  .select__trigger,
-  .search-field__group,
-  .input-group {
-    min-height: 2.25rem;
-    font-size: 0.875rem;
-  }
-  .button--sm {
-    font-size: 0.8125rem;
-  }
-  .sidebar__menu-item-content {
-    min-height: 2.25rem;
-  }
-  .sidebar__group-label {
-    letter-spacing: 0.02em;
-  }
-  .navbar {
-    border-bottom: 1px solid var(--border);
-  }
-  /* Compact surfaces: 12px card padding and a modest radius everywhere
-     (Section, KPI and Widget share these), so cards hug their content. */
-  .card {
-    gap: 0.75rem;
-    border-radius: calc(var(--radius) * 1.5);
-  }
-  .kpi {
-    gap: 0.25rem;
-    padding: 0.75rem;
-  }
-  .kpi__header {
-    margin-bottom: 0;
-  }
-  .kpi__value {
-    font-size: var(--text-xl);
-    line-height: var(--text-xl--line-height);
-  }
-  .kpi > .kpi__chart {
-    margin: 0.25rem -0.75rem -0.75rem;
-  }
-  .kpi > .kpi__chart:has(+ .kpi__separator, + .kpi__footer) {
-    margin-bottom: 0;
-  }
-  .kpi__separator {
-    margin-inline: -0.75rem;
-    width: calc(100% + 1.5rem);
-  }
-  .kpi__footer {
-    margin-bottom: 0;
-  }
-  .widget {
-    border-radius: calc(var(--radius) * 1.5);
-  }
-  .widget__header {
-    min-height: 2.25rem;
-    margin-top: 0;
-    padding-inline: 0.75rem;
-  }
-  .widget__content {
-    margin-inline: 0.25rem;
-    margin-bottom: 0.25rem;
-    border-radius: var(--radius);
-    padding: 0.75rem;
-  }
-  .widget__content:first-child {
-    margin-top: 0.25rem;
-  }
-
   /* Tables keep one scroll viewport so the sticky header and body columns
      stay aligned; narrow screens scroll horizontally inside it. */
   .data-grid {
@@ -161,6 +72,8 @@
     position: sticky;
     top: 0;
     z-index: 3;
+    /* A sticky cell needs its own opaque surface after the native thead
+       scrolls away; otherwise rows show through primary table headers. */
     background: var(--color-surface-secondary);
   }
   .data-grid .table__column[data-pinned] {
@@ -173,20 +86,6 @@
     height: 2.75rem;
     padding-block: 0.5rem;
     white-space: nowrap;
-  }
-
-  .command__item {
-    min-height: 2.5rem;
-  }
-
-  /* Text links (HeroUI `.link`) read as links in tables and meta lines:
-     accent color, underline on hover. Button-styled links keep button colors. */
-  .link:not(.button) {
-    color: var(--accent);
-  }
-  .link:not(.button):hover,
-  .link:not(.button)[data-hovered='true'] {
-    text-decoration-line: underline;
   }
 }
 

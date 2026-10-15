@@ -2,7 +2,7 @@ import { type ReactNode } from 'react'
 import { Card } from '@heroui/react'
 import { cn } from '@/lib/utils'
 
-/** Titled content block on a surface card (14px/600 heading, 12–16px padding).
+/** Titled content block using HeroUI's native card proportions.
  * Use for every grouped area of a detail or overview page. */
 export function Section({
   title,
@@ -22,20 +22,12 @@ export function Section({
   contentClassName?: string
 }) {
   return (
-    <Card className={cn('min-w-0 gap-3 p-3 sm:p-4', className)}>
+    <Card className={cn('min-w-0', className)}>
       {(title || actions) && (
         <Card.Header className='flex flex-row flex-wrap items-start justify-between gap-x-4 gap-y-2'>
           <div className='flex min-w-0 flex-col gap-0.5'>
-            {title && (
-              <Card.Title className='text-sm font-semibold text-foreground'>
-                {title}
-              </Card.Title>
-            )}
-            {description && (
-              <Card.Description className='text-[13px] text-muted'>
-                {description}
-              </Card.Description>
-            )}
+            {title && <Card.Title>{title}</Card.Title>}
+            {description && <Card.Description>{description}</Card.Description>}
           </div>
           {actions && (
             <div className='flex flex-wrap items-center gap-2'>{actions}</div>

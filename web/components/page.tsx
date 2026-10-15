@@ -14,12 +14,12 @@ type PageHeaderProps = {
   meta?: ReactNode
 }
 
-/** Page title block: 20px/600 visible heading, muted description, actions. */
+/** Page title block following the official dashboard's heading hierarchy. */
 function PageHeader({ title, description, actions, meta }: PageHeaderProps) {
   return (
-    <header className='flex flex-wrap items-start justify-between gap-x-6 gap-y-3'>
+    <header className='flex flex-wrap items-center justify-between gap-x-6 gap-y-3'>
       <div className='flex max-w-3xl min-w-0 flex-col gap-1'>
-        <h1 className='text-xl font-semibold tracking-tight text-foreground'>
+        <h1 className='text-2xl font-semibold tracking-tight text-foreground'>
           {title}
         </h1>
         {description && (
@@ -57,7 +57,7 @@ export function Page({
       className={cn(
         // Fills the workspace height so a trailing SaveBar (`mt-auto`) sits at
         // the viewport bottom even when the content is short.
-        'mx-auto flex min-h-[calc(100dvh-var(--workspace-content-offset))] w-full min-w-0 flex-col gap-6 px-4 pt-6 pb-10 sm:px-6 lg:px-8',
+        'mx-auto flex min-h-[calc(100dvh-var(--workspace-content-offset))] w-full min-w-0 flex-col gap-6 px-4 pt-6 pb-10 sm:px-6',
         width === 'default' && 'max-w-[1400px]'
       )}
     >
