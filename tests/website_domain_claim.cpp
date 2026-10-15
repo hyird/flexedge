@@ -1,6 +1,7 @@
 #include <array>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -48,11 +49,21 @@ int main() try {
     domains[0].hostname_ = "*.www.example.com";
     result = plan_domain_claims(domains, zones);
     require(get_claims(result) && get_claims(result)->front().dns_zone_id_ == "parent");
-    for (const auto* host : {"example.com", "*.example.com", "SUB.EXAMPLE.COM"}) {
+    // A hosted zone apex (and a wildcard directly below it) is claimed by that zone; the
+    // longest hosted zone wins, so the apex of a nested zone belongs to the nested zone.
+    const std::array<std::pair<const char*, const char*>, 4> apex_claims{{
+        {"example.com", "parent"},
+        {"*.example.com", "parent"},
+        {"SUB.EXAMPLE.COM", "specific"},
+        {"*.sub.example.com", "specific"},
+    }};
+    for (const auto& [host, zone_id] : apex_claims) {
         domains[0].hostname_ = host;
         result = plan_domain_claims(domains, zones);
-        require(failed_with(result, domain_claim_error::managed_zone_apex_unsupported));
+        require(get_claims(result) && get_claims(result)->front().dns_zone_id_ == zone_id);
     }
+    result = plan_domain_claims(domains, reversed_zones);
+    require(get_claims(result) && get_claims(result)->front().dns_zone_id_ == "specific");
     domains[0].hostname_ = "badexample.com";
     result = plan_domain_claims(domains, zones);
     require(failed_with(result, domain_claim_error::managed_zone_not_found));

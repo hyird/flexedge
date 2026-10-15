@@ -20,6 +20,15 @@ const zoneId = uuid(981),
   certificateId = uuid(991),
   dnsProviderId = uuid(801),
   certificateProviderId = uuid(811)
+// Website bound to a hosted apex, its `www` and a name in a nested zone.
+const brandWebsiteId = uuid(1501),
+  brandApexDomainId = uuid(1502),
+  brandWwwDomainId = uuid(1503),
+  brandImgDomainId = uuid(1504),
+  brandZoneId = uuid(1511),
+  cdnZoneId = uuid(1514)
+const brandApexError =
+  '主机记录 @ 已有 A 记录，不能再添加 CNAME；请删除或修改这些记录，或把该网站域名改为外部解析'
 const lines = [
   {
     code: 'default',
@@ -280,6 +289,119 @@ let db = {
       },
       last_synced_at: initialTime,
       last_error: 'QA 场景：远端记录已被手动修改',
+      ...timestamps,
+    },
+    // Website apex binding: the CNAME at `@` cannot share its name with the
+    // A record there (MX may coexist), so that record and the zone fail.
+    {
+      id: brandZoneId,
+      revision: 3,
+      dns_provider_id: dnsProviderId,
+      dns_provider: 'cloudflare',
+      dns_provider_name: 'Cloudflare 生产账号',
+      domain: 'brand.test',
+      sync_status: 'failed',
+      desired_revision: 3,
+      synced_revision: 2,
+      website_count: 1,
+      config: {
+        records: [
+          {
+            id: uuid(1512),
+            type: 'A',
+            name: '@',
+            content: '203.0.113.20',
+            ttl: 600,
+            proxied: false,
+            line_code: 'default',
+          },
+          {
+            id: uuid(1513),
+            type: 'MX',
+            name: '@',
+            content: 'mx.brand.test',
+            ttl: 600,
+            priority: 10,
+            proxied: false,
+            line_code: 'default',
+          },
+        ],
+      },
+      runtime: {
+        records_imported: true,
+        lines_synced_at: initialTime,
+        lines: structuredClone(lines),
+        projected_records: [
+          {
+            id: brandApexDomainId,
+            type: 'CNAME',
+            name: '@',
+            content: 'edge.example.test',
+            ttl: 600,
+            proxied: false,
+            line_code: 'default',
+          },
+          {
+            id: brandWwwDomainId,
+            type: 'CNAME',
+            name: 'www',
+            content: 'edge.example.test',
+            ttl: 600,
+            proxied: false,
+            line_code: 'default',
+          },
+        ],
+        record_states: [
+          { id: uuid(1512), sync_status: 'synced', synced_revision: 2 },
+          { id: uuid(1513), sync_status: 'synced', synced_revision: 2 },
+          {
+            id: brandApexDomainId,
+            sync_status: 'failed',
+            synced_revision: 2,
+            last_error: brandApexError,
+          },
+          { id: brandWwwDomainId, sync_status: 'synced', synced_revision: 3 },
+        ],
+        conflicts: [],
+      },
+      last_synced_at: initialTime,
+      last_error: `1 条记录未同步：@ CNAME：${brandApexError}`,
+      ...timestamps,
+    },
+    // Nested inside example.test: `*.cdn.example.test` names belong here.
+    {
+      id: cdnZoneId,
+      revision: 2,
+      dns_provider_id: uuid(802),
+      dns_provider: 'aliyun',
+      dns_provider_name: '阿里云备用账号',
+      domain: 'cdn.example.test',
+      sync_status: 'synced',
+      desired_revision: 2,
+      synced_revision: 2,
+      website_count: 1,
+      config: { records: [] },
+      runtime: {
+        records_imported: true,
+        lines_synced_at: initialTime,
+        lines: structuredClone(lines),
+        projected_records: [
+          {
+            id: brandImgDomainId,
+            type: 'CNAME',
+            name: 'img',
+            content: 'edge.example.test',
+            ttl: 600,
+            proxied: false,
+            line_code: 'default',
+          },
+        ],
+        record_states: [
+          { id: brandImgDomainId, sync_status: 'synced', synced_revision: 2 },
+        ],
+        conflicts: [],
+      },
+      last_synced_at: initialTime,
       ...timestamps,
     },
   ],
@@ -581,6 +703,66 @@ let db = {
         deploy_status: 'pending',
         target_node_count: 2,
         synced_node_count: 0,
+      },
+      ...timestamps,
+    },
+    {
+      id: brandWebsiteId,
+      revision: 2,
+      cluster_id: clusterId,
+      cluster_name: 'QA Cluster',
+      access_domain: 'edge.example.test',
+      status: 'enabled',
+      config: {
+        ...structuredClone(websiteConfig),
+        name: '品牌官网',
+        domains: [
+          {
+            id: brandApexDomainId,
+            hostname: 'brand.test',
+            dns_mode: 'managed',
+          },
+          {
+            id: brandWwwDomainId,
+            hostname: 'www.brand.test',
+            dns_mode: 'managed',
+          },
+          {
+            id: brandImgDomainId,
+            hostname: 'img.cdn.example.test',
+            dns_mode: 'managed',
+          },
+        ],
+        origins: [
+          {
+            ...structuredClone(websiteConfig.origins[0]),
+            id: uuid(1505),
+            host: 'brand.origin.qa.test',
+          },
+        ],
+        certificate_ids: [],
+        https_enabled: false,
+      },
+      certificates: [],
+      runtime: {
+        domain_states: [
+          {
+            id: brandApexDomainId,
+            access_protocol: 'http',
+            resolution_status: 'pending',
+          },
+          ...[brandWwwDomainId, brandImgDomainId].map((id) => ({
+            id,
+            access_protocol: 'http',
+            resolution_status: 'verified',
+            last_verified_at: initialTime,
+          })),
+        ],
+        origin_sources: [],
+        origin_states: [],
+        deploy_status: 'applied',
+        target_node_count: 2,
+        synced_node_count: 2,
       },
       ...timestamps,
     },
@@ -2627,9 +2809,7 @@ function refreshRelations() {
     zone.dns_provider_name = provider?.name ?? ''
     zone.website_count = db.websites.filter((value) =>
       value.config.domains.some(
-        (domain) =>
-          domain.hostname === zone.domain ||
-          domain.hostname.endsWith(`.${zone.domain}`)
+        (domain) => owningZone(domain.hostname)?.id === zone.id
       )
     ).length
   }
@@ -2637,6 +2817,31 @@ function refreshRelations() {
     certificate.website_count = db.websites.filter((value) =>
       value.config.certificate_ids.includes(certificate.id)
     ).length
+}
+// Backend `domain_belongs_to_zone` + longest match: the zone that receives a
+// managed website domain's CNAME (the apex included).
+function owningZone(hostname) {
+  let host = hostname.trim().toLowerCase().replace(/\.+$/, '')
+  if (host.startsWith('*.')) host = host.slice(2)
+  let owner
+  for (const zone of db.zones)
+    if (
+      (host === zone.domain || host.endsWith(`.${zone.domain}`)) &&
+      zone.domain.length > (owner?.domain.length ?? 0)
+    )
+      owner = zone
+  return owner
+}
+const websiteHostnamePattern =
+  /^(?:\*\.)?([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$/
+function validateWebsiteDomains(config) {
+  for (const domain of config?.domains ?? []) {
+    const hostname = domain.hostname ?? ''
+    if (hostname.length > 253 || !websiteHostnamePattern.test(hostname))
+      fail('域名格式不正确', 422)
+    if (domain.dns_mode === 'managed' && !owningZone(hostname))
+      fail('该域名不属于当前租户的托管域名', 422, 16611)
+  }
 }
 function filtered(list, query) {
   const keyword = query.get('keyword')?.toLowerCase()
@@ -3510,6 +3715,7 @@ function createResource(resource, input, url) {
     find(db.clusters, id)
     for (const certificate of input.config?.certificate_ids ?? [])
       find(db.certificates, certificate)
+    validateWebsiteDomains(input.config)
     return {
       ...base,
       ...input,
@@ -3681,6 +3887,7 @@ async function mutate(req, res, url) {
       const targetCluster =
         url.searchParams.get('cluster_id') ?? item.cluster_id
       find(db.clusters, targetCluster)
+      validateWebsiteDomains(input.config)
       item.cluster_id = targetCluster
       item.status = input.status
       item.config = input.config

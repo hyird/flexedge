@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -24,6 +25,8 @@ struct zone_sync_state final {
     zone_runtime_data runtime_;
     zone_config_data config_;
     zone_config_data desired_;
+    // Desired records projected from hosted website domains (their CNAMEs).
+    std::unordered_set<std::string> website_record_ids_;
     service::dns::dns_provider_config_data provider_config_;
     std::string domain_;
     std::string provider_;
@@ -89,9 +92,13 @@ load_zone_sync_state(service::background::worker_context& context, const dns_tas
     }
 
     zone_config_data desired = *config;
+    std::unordered_set<std::string> website_record_ids;
     const auto projected =
         co_await load_projected_records(db, task.tenant_id_, task.resource_id_);
     for (const auto& record : projected) {
+        if (record.source_ == snapshot_record_source::website) {
+            website_record_ids.emplace(record.id_);
+        }
         desired.records_.push_back({.id_ = record.id_,
             .type_ = record.type_,
             .name_ = record.name_,
@@ -116,6 +123,7 @@ load_zone_sync_state(service::background::worker_context& context, const dns_tas
         .runtime_ = std::move(*runtime),
         .config_ = std::move(*config),
         .desired_ = std::move(desired),
+        .website_record_ids_ = std::move(website_record_ids),
         .provider_config_ = std::move(provider_config),
         .domain_ = std::string(row[1].value().value_or("")),
         .provider_ = provider,

@@ -77,8 +77,10 @@ export function FormSheet({
               {/* `relative`: absolutely positioned descendants (sr-only text)
                   must lay out inside the scrolling body; otherwise they
                   overflow the clipped dialog, which scrollIntoView then
-                  scrolls, moving the header and footer. */}
-              <Sheet.Body className='relative flex min-h-0 flex-col gap-4 pb-6'>
+                  scrolls, moving the header and footer. The scrollbar keeps
+                  its space while the content fits, so content that grows or
+                  shrinks (tabs, validation errors) never shifts sideways. */}
+              <Sheet.Body className='relative flex min-h-0 [scrollbar-gutter:stable] flex-col gap-4 pb-6'>
                 {error && (
                   <Alert status='danger'>
                     <Alert.Indicator />

@@ -1,5 +1,11 @@
 import { z } from 'zod'
 import {
+  hostedPrefixError,
+  isWebsiteHostname,
+  splitHostedDomain,
+  type HostedZone,
+} from './hosted-domain'
+import {
   compileRoutePattern,
   validCaptureTemplate,
   validRouteCondition,
@@ -25,7 +31,14 @@ const routeConditionSchema = z
 
 const domainSchema = z.object({
   id: z.string().uuid(),
-  hostname: z.string().trim().min(1, '请输入域名').max(253),
+  hostname: z
+    .string()
+    .trim()
+    .min(1, '请输入域名')
+    .max(253)
+    .refine((hostname) => !hostname || isWebsiteHostname(hostname), {
+      message: '域名格式不正确',
+    }),
   dns_mode: z.enum(['managed', 'external']),
 })
 
@@ -419,10 +432,67 @@ export type WebsiteRouteRuleForm = z.infer<typeof routeRuleSchema>
 
 const zhCNErrors = z.locales.zhCN().localeError
 
+/** Managed-domain issues that need the hosted zone list: the hostname must
+ * fall inside a hosted zone (`domains.<i>.zone`) and the prefix in front of
+ * that zone must be a valid host prefix (`domains.<i>.hostname`). */
+function hostedDomainIssues(values: unknown, zones: readonly HostedZone[]) {
+  const issues: z.core.$ZodIssue[] = []
+  const domains = (values as { domains?: unknown } | null)?.domains
+  if (!Array.isArray(domains)) return issues
+  for (const [index, domain] of (
+    domains as Partial<WebsiteFormValues['domains'][number]>[]
+  ).entries()) {
+    if (domain?.dns_mode !== 'managed') continue
+    const hostname = domain.hostname?.trim() ?? ''
+    const split = splitHostedDomain(hostname, zones)
+    if (!split)
+      issues.push({
+        code: 'custom',
+        path: ['domains', index, 'zone'],
+        message: '请选择托管域名',
+        input: hostname,
+      })
+    // Without a zone the row keeps everything it has in the prefix.
+    const prefixError = hostedPrefixError(split ? split.prefix : hostname)
+    if (prefixError)
+      issues.push({
+        code: 'custom',
+        path: ['domains', index, 'hostname'],
+        message: prefixError,
+        input: hostname,
+      })
+  }
+  return issues
+}
+
 /** Validates a settings draft; built-in range and type messages are Chinese,
- * schema-specific messages take precedence. */
-export function validateWebsiteForm(values: unknown) {
-  return websiteFormSchema.safeParse(values, { error: zhCNErrors })
+ * schema-specific messages take precedence. With the hosted zone list,
+ * managed domains are also checked against their zone and prefix; those
+ * messages replace the full-hostname format message of the same domain. */
+export function validateWebsiteForm(
+  values: unknown,
+  hostedZones?: readonly HostedZone[]
+): z.ZodSafeParseResult<WebsiteFormValues> {
+  const result = websiteFormSchema.safeParse(values, { error: zhCNErrors })
+  const hostedIssues = hostedZones
+    ? hostedDomainIssues(values, hostedZones)
+    : []
+  if (!hostedIssues.length) return result
+  const replacedHostnames = new Set(
+    hostedIssues.map((issue) => `domains.${String(issue.path[1])}.hostname`)
+  )
+  const schemaIssues = result.success
+    ? []
+    : result.error.issues.filter(
+        (issue) => !replacedHostnames.has(issue.path.map(String).join('.'))
+      )
+  return {
+    success: false,
+    error: new z.ZodError([
+      ...hostedIssues,
+      ...schemaIssues,
+    ]) as z.ZodError<WebsiteFormValues>,
+  }
 }
 
 export function setWebsiteHttpsEnabled(

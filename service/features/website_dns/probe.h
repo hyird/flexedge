@@ -6,7 +6,10 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
+#include <iterator>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -32,6 +35,10 @@ struct probe_result final {
     // Every CNAME target in the answer, normalized, in answer order.
     std::vector<std::string> answers_;
 };
+
+inline constexpr std::int64_t dns_type_a{1};
+inline constexpr std::int64_t dns_type_cname{5};
+inline constexpr std::int64_t dns_type_aaaa{28};
 
 inline std::string normalize_dns_name(std::string_view value) {
     while (!value.empty() && value.back() == '.') {
@@ -61,14 +68,15 @@ inline std::string probe_name(std::string_view hostname, std::string_view websit
     return "flexedge-" + token + "." + std::string(hostname.substr(2));
 }
 
-inline ruvia::task<probe_result> probe_cname(service::background::worker_context& context,
-    service::attempt_trace::recorder& trace, std::string_view hostname, std::string_view expected_target,
-    std::string_view website_domain_id) {
-    const auto query_name = probe_name(hostname, website_domain_id);
+// The answer data of `answer_type` records for one DoH query of `query_name`.
+inline ruvia::task<std::vector<std::string>> resolve_answers(service::background::worker_context& context,
+    service::attempt_trace::recorder& trace, std::string_view hostname, std::string_view query_name,
+    std::string_view query_type, std::int64_t answer_type) {
     auto&& client = context.get_http_client(service::config::ali_dns_doh_origin_alias);
     std::array<ruvia::http_header_view, 1> headers{
         ruvia::http_header_view{"accept", "application/dns-json"}};
-    const auto target = "/resolve?name=" + query_name + "&type=CNAME&cd=0&do=0";
+    const auto target = "/resolve?name=" + std::string(query_name) + "&type=" + std::string(query_type) +
+                        "&cd=0&do=0";
     const auto response = co_await service::outbound_http::send_buffered(
         client,
         {.origin_alias_ = service::config::ali_dns_doh_origin_alias,
@@ -91,27 +99,42 @@ inline ruvia::task<probe_result> probe_cname(service::background::worker_context
         trace.mark_invalid_response("公共 DNS 探测响应无效");
         throw std::runtime_error("公共 DNS 探测响应无效");
     }
-
-    const auto expected = normalize_dns_name(expected_target);
-    probe_result result{.matched_ = false, .query_name_ = query_name, .observed_target_ = {}, .answers_ = {}};
+    std::vector<std::string> result;
     if (const auto& answers = parsed->get<"answer">(); answers) {
         for (const auto& answer : *answers) {
             const auto& type = answer.get<"type">();
             const auto& data = answer.get<"data">();
-            if (!type || static_cast<std::int64_t>(*type) != 5 || !data) {
-                continue;
+            if (type && static_cast<std::int64_t>(*type) == answer_type && data) {
+                result.push_back(normalize_dns_name(data->view()));
             }
-            auto answer_target = normalize_dns_name(data->view());
-            if (result.observed_target_.empty()) {
-                result.observed_target_ = answer_target;
-            }
-            if (!result.matched_ && answer_target == expected) {
-                result.matched_ = true;
-                result.observed_target_ = answer_target;
-            }
-            result.answers_.push_back(std::move(answer_target));
         }
     }
+    co_return result;
+}
+
+inline ruvia::task<probe_result> probe_cname(service::background::worker_context& context,
+    service::attempt_trace::recorder& trace, std::string_view hostname, std::string_view expected_target,
+    std::string_view website_domain_id) {
+    auto query_name = probe_name(hostname, website_domain_id);
+    auto answers = co_await resolve_answers(context, trace, hostname, query_name, "CNAME", dns_type_cname);
+    const auto expected = normalize_dns_name(expected_target);
+    probe_result result{.matched_ = false,
+        .query_name_ = std::move(query_name),
+        .observed_target_ = answers.empty() ? std::string{} : answers.front(),
+        .answers_ = std::move(answers)};
+    if (std::ranges::find(result.answers_, expected) != result.answers_.end()) {
+        result.matched_ = true;
+        result.observed_target_ = expected;
+    }
+    co_return result;
+}
+
+// The A and AAAA answers for a name whose CNAME query came back empty.
+inline ruvia::task<std::vector<std::string>> probe_addresses(service::background::worker_context& context,
+    service::attempt_trace::recorder& trace, std::string_view hostname, std::string_view query_name) {
+    auto result = co_await resolve_answers(context, trace, hostname, query_name, "A", dns_type_a);
+    auto ipv6 = co_await resolve_answers(context, trace, hostname, query_name, "AAAA", dns_type_aaaa);
+    result.insert(result.end(), std::make_move_iterator(ipv6.begin()), std::make_move_iterator(ipv6.end()));
     co_return result;
 }
 

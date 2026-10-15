@@ -4,6 +4,7 @@ import { sendData, streamPath, type PageData } from '@/lib/api'
 import { ApiBusinessError, ApiProtocolError } from '@/lib/api-response'
 import { readLiveQuery, snapshotQueryOptions } from '@/lib/live-query'
 import { queryKeys } from '@/lib/query-keys'
+import { dnsZoneOptionsQuery } from '@/features/dns-zones/data'
 import { accessLogPageSchema } from './access-log-schema'
 import type { Website, WebsiteConfig } from './types'
 
@@ -164,6 +165,16 @@ export function websiteDetailQuery(id: string | undefined) {
         patchWebsiteOriginRuntime
       )
     },
+  })
+}
+/** Hosted zones for managed domains. The domains group and the editor's
+ * validation share this snapshot, read only while some domain is managed;
+ * the domains group shows failures inline with a retry. */
+export function hostedZoneOptionsQuery(enabled: boolean) {
+  return queryOptions({
+    ...dnsZoneOptionsQuery,
+    enabled,
+    meta: { inlineError: true },
   })
 }
 /** One-shot read of the website detail stream for the detail header on tabs

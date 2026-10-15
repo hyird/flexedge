@@ -1,17 +1,23 @@
 #pragma once
 
 #include <ruvia/core/task.h>
+#include <ruvia/web/db/db_query.h>
 #include <ruvia/web/model_json.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "service/features/background/worker_pool.h"
+#include "service/features/node_config/mapper.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/website_config/mapper.h"
 #include "service/features/website_dns/attempt_detail.h"
+#include "service/features/website_dns/flattening.h"
 #include "service/features/website_dns/mapper.h"
 #include "service/features/website_dns/probe.h"
 
@@ -31,10 +37,52 @@ complete_stale_website_task(service::background::worker_context& context,
     co_return;
 }
 
+// Endpoint addresses of the cluster's published nodes: the A/AAAA records DNS sync writes at
+// the cluster access hostname (registered, enabled, not deleted).
+template <typename db_type>
+inline ruvia::task<std::vector<std::string>> load_cluster_addresses(db_type& db, std::string_view tenant_id,
+    std::string_view cluster_id) {
+    ruvia::db_query query;
+    const auto node = [&](std::string_view column) { return query.column(column, "node"); };
+    const auto equals = [&](ruvia::db_expression left, ruvia::db_expression right) {
+        return query.binary(left, ruvia::db_binary_operator::equal, right);
+    };
+    query.select({query.cast(node("config"), ruvia::db_data_type::text)})
+        .from("sys_node", "node")
+        .where(equals(node("tenant_id"), query.value(tenant_id)))
+        .and_where(equals(node("cluster_id"), query.value(cluster_id)))
+        .and_where(equals(node("registration_status"), query.value(std::string_view{"registered"})))
+        .and_where(equals(node("status"), query.value(std::string_view{"enabled"})))
+        .and_where(query.unary(ruvia::db_unary_operator::is_null, node("deleted_at")));
+    const auto rows = co_await db.query(query);
+    std::vector<std::string> result;
+    for (const auto& row : rows) {
+        const auto config = service::node_config::parse_stored(row[0].value().value_or("{}"));
+        if (!config) {
+            throw std::runtime_error("节点聚合配置损坏");
+        }
+        for (const auto& endpoint : config->endpoints_) {
+            result.push_back(endpoint.ip_address_);
+        }
+    }
+    co_return result;
+}
+
+inline std::string join_answers(const std::vector<std::string>& answers) {
+    std::string result;
+    for (const auto& answer : answers) {
+        if (!result.empty()) {
+            result += "、";
+        }
+        result += answer;
+    }
+    return result;
+}
+
 inline ruvia::task<website_runtime_data>
 probe_website_domains(service::background::worker_context& context, service::attempt_trace::recorder& trace,
     const service::website_config::website_config_data& config,
-    std::string_view expected_target, std::string_view checked_at,
+    std::string_view expected_target, std::span<const std::string> cluster_addresses, std::string_view checked_at,
     const service::sync_runtime::running_marker_lease& marker, website_domain_attempt& attempt) {
     website_runtime_data output;
     auto& domain_states = output.domain_states_;
@@ -55,17 +103,33 @@ probe_website_domains(service::background::worker_context& context, service::att
         try {
             auto result =
                 co_await probe_cname(context, trace, domain.hostname_, expected_target, domain.id_);
-            state.resolution_status_ = result.matched_ ? "verified" : "invalid";
-            if (!result.matched_) {
+            check.query_name_ = std::move(result.query_name_);
+            check.resolved_ = std::move(result.answers_);
+            if (result.matched_) {
+                state.resolution_status_ = "verified";
+                trace.log(service::attempt_trace::log_level::info, "CNAME 指向 " + result.observed_target_);
+            } else if (domain.dns_mode_ == "managed" && check.resolved_.empty()) {
+                // Hosted domains: FlexEdge wrote the CNAME itself, so a provider that flattens it
+                // (Cloudflare at the zone apex) is verified by the cluster addresses it answers.
+                auto addresses = co_await probe_addresses(context, trace, domain.hostname_, check.query_name_);
+                if (matches_flattened_cname(addresses, cluster_addresses)) {
+                    state.resolution_status_ = "verified";
+                    trace.log(service::attempt_trace::log_level::info,
+                        "CNAME 已由服务商展平，解析到集群节点 " + join_answers(addresses));
+                } else {
+                    state.resolution_status_ = "invalid";
+                    state.last_error_ = "期望 CNAME 指向 " + std::string(expected_target) + " 或展平为集群节点地址，实际 " +
+                                        (addresses.empty() ? std::string("未查询到解析") : join_answers(addresses));
+                    trace.log(service::attempt_trace::log_level::warning, *state.last_error_);
+                }
+                check.resolved_ = std::move(addresses);
+            } else {
+                state.resolution_status_ = "invalid";
                 const auto observed =
                     result.observed_target_.empty() ? "未查询到 CNAME" : result.observed_target_;
                 state.last_error_ = "期望 " + std::string(expected_target) + "，实际 " + observed;
                 trace.log(service::attempt_trace::log_level::warning, *state.last_error_);
-            } else {
-                trace.log(service::attempt_trace::log_level::info, "CNAME 指向 " + result.observed_target_);
             }
-            check.query_name_ = std::move(result.query_name_);
-            check.resolved_ = std::move(result.answers_);
             step.complete();
         } catch (const std::exception& error) {
             state.resolution_status_ = "unverified";
@@ -88,7 +152,7 @@ inline ruvia::task<void> probe_website(service::background::worker_context& cont
     const auto rows = co_await db.query(
         "SELECT website.config::text, website.runtime::text, cluster.hostname_prefix || '.' || "
         "zone.domain, website.revision, website.deleted_at IS NOT NULL, TO_CHAR(NOW(), "
-        "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') FROM sys_website website INNER JOIN sys_cluster "
+        "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), website.cluster_id FROM sys_website website INNER JOIN sys_cluster "
         "cluster ON cluster.tenant_id = website.tenant_id AND cluster.id = "
         "website.cluster_id INNER JOIN sys_dns_zone zone ON zone.tenant_id = "
         "cluster.tenant_id AND zone.id = cluster.dns_zone_id WHERE website.id = $1 AND "
@@ -123,9 +187,14 @@ inline ruvia::task<void> probe_website(service::background::worker_context& cont
     attempt.start(std::string(expected_target), config->domains_.size());
     trace.log(service::attempt_trace::log_level::info, "期望 CNAME 目标 " + std::string(expected_target) + "，域名 " +
                                                            std::to_string(config->domains_.size()) + " 个");
+    std::vector<std::string> cluster_addresses;
+    if (std::ranges::any_of(config->domains_, [](const auto& domain) { return domain.dns_mode_ == "managed"; })) {
+        cluster_addresses = co_await load_cluster_addresses(db, marker.marker_.tenant_id_,
+            rows.front()[6].value().value_or(""));
+    }
     load_step.complete();
-    auto output = co_await probe_website_domains(context, trace, *config, expected_target, checked_at, marker,
-        attempt);
+    auto output = co_await probe_website_domains(context, trace, *config, expected_target, cluster_addresses,
+        checked_at, marker, attempt);
     auto save_step = trace.begin_step(service::attempt_trace::step_code::save_runtime);
 
     const auto json = ruvia::to_json(to_output(output, {.resource_ = context.pool()}),

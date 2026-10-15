@@ -248,6 +248,45 @@ void verify_worker_error_patterns() {
     test_support::attempt_trace::require_no_canary(text, canaries, "worker error");
 }
 
+// A record whose name already holds records it cannot share (a CNAME at an apex that has an
+// A record) is a per-record rejection with a Chinese reason, distinct from a duplicate.
+void verify_record_name_conflicts() {
+    std::pmr::monotonic_buffer_resource pool;
+    for (const auto code : {81053, 81054, 81056}) {
+        const auto body = R"({"success":false,"errors":[{"code":)" + std::to_string(code) +
+                          R"(,"message":"An A, AAAA, or CNAME record with that host already exists."}]})";
+        const auto parsed = ruvia::from_json<service::dns::cloudflare_error_envelope>(body, {.resource_ = &pool});
+        auto trace = new_recorder();
+        const auto error = service::dns::detail::cloudflare_reply_error(trace, parsed,
+            service::dns::cloudflare_error_code::dns_failed, "Cloudflare DNS 记录保存失败");
+        require(error.code() == service::dns::cloudflare_error_code::record_name_conflict,
+            "cloudflare name conflict code " + std::to_string(code));
+        require(std::string_view(error.what()).starts_with("Cloudflare 拒绝该记录：同名主机记录已有") &&
+                    contains(error.what(), "（" + std::to_string(code) + "）"),
+            "cloudflare name conflict message: " + std::string(error.what()));
+    }
+    const auto duplicate = ruvia::from_json<service::dns::cloudflare_error_envelope>(
+        R"({"success":false,"errors":[{"code":81057,"message":"Record already exists."}]})", {.resource_ = &pool});
+    auto duplicate_trace = new_recorder();
+    require(service::dns::detail::cloudflare_reply_error(duplicate_trace, duplicate,
+                service::dns::cloudflare_error_code::dns_failed, "Cloudflare DNS 记录保存失败")
+                    .code() == service::dns::cloudflare_error_code::record_conflict,
+        "81057 stays a duplicate");
+
+    auto trace = new_recorder();
+    const auto error = service::dns::detail::aliyun_reply_error(trace,
+        R"({"RequestId":"7A1F-REQ","Code":"DomainRecordConflict","Message":"The DNS record conflicts with other records."})",
+        service::dns::aliyun_error_code::dns_failed, "阿里云 DNS 记录创建失败", &pool);
+    require(error.code() == service::dns::aliyun_error_code::record_name_conflict, "aliyun name conflict code");
+    require(std::string_view(error.what()) ==
+                "阿里云 DNS 拒绝该记录：同名主机记录已有冲突的解析记录（DomainRecordConflict）",
+        "aliyun name conflict message: " + std::string(error.what()));
+    const auto duplicate_error = service::dns::detail::aliyun_reply_error(trace,
+        R"({"Code":"DomainRecordDuplicate","Message":"The DNS record already exists."})",
+        service::dns::aliyun_error_code::dns_failed, "阿里云 DNS 记录创建失败", &pool);
+    require(duplicate_error.code() == service::dns::aliyun_error_code::record_conflict, "aliyun duplicate stays a duplicate");
+}
+
 }  // namespace
 
 int main() {
@@ -277,6 +316,7 @@ int main() {
         verify_credentials_beyond_observed_cap();
         verify_incomplete_credentials_fall_back();
         verify_worker_error_patterns();
+        verify_record_name_conflicts();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

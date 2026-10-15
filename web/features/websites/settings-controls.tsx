@@ -108,12 +108,14 @@ export function IconAction({
   icon,
   onPress,
   isDisabled,
+  isPending,
   danger,
 }: {
   label: string
   icon: ReactNode
   onPress: () => void
   isDisabled?: boolean
+  isPending?: boolean
   danger?: boolean
 }) {
   return (
@@ -124,6 +126,7 @@ export function IconAction({
         isIconOnly
         aria-label={label}
         isDisabled={isDisabled}
+        isPending={isPending}
         onPress={onPress}
         className={danger ? 'text-danger' : undefined}
       >

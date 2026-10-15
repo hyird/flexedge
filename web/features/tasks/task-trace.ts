@@ -1,6 +1,6 @@
 import { formatDate } from '@/lib/format'
 import type { StatusTone } from '@/lib/status'
-import type { TraceCall, TraceStep } from './types'
+import type { TraceCall } from './types'
 
 /** Fixed placeholder the backend writes for every hidden value; shown as an
  * "已隐藏" badge, never as raw text. */
@@ -50,15 +50,6 @@ export const transportErrors = {
   other: '其他错误',
 } as const
 
-export const bodyFormats = {
-  json: 'JSON',
-  jws_decoded: 'JWS 解码',
-  form: '表单',
-  text: '文本',
-  pem_summary: '证书链摘要',
-  omitted: '未保存',
-} as const
-
 /** Why a body excerpt was not stored. */
 export const omittedReasons = {
   secret_material: '含密钥材料未保存',
@@ -73,14 +64,6 @@ export const logLevels = {
   warning: { label: '警告', tone: 'warning' },
   error: { label: '错误', tone: 'danger' },
 } as const satisfies Record<string, { label: string; tone: StatusTone }>
-
-export const workerTypes = {
-  'dns-sync': 'DNS 同步 Worker',
-  certificate: '证书 Worker',
-  'website-dispatch': '网站分发 Worker',
-  'provider-verification': '供应商验证 Worker',
-  web: '节点控制连接',
-} as const
 
 /** Tone of an HTTP status: 2xx success, 4xx/5xx and transport failures
  * (status 0) danger, anything else neutral. */
@@ -98,10 +81,6 @@ export function formatTraceDuration(ms: number) {
   const seconds = Math.floor(ms / 1000)
   return `${Math.floor(seconds / 60)} min${seconds % 60 ? ` ${seconds % 60} s` : ''}`
 }
-
-/** Zone of the console time `formatDate` shows (Asia/Shanghai, no DST);
- * labelled once per trace because log-style clocks are often read as UTC. */
-export const consoleTimeZoneLabel = 'UTC+8'
 
 /** Console time with milliseconds (`2026-10-14 22:16:49.138`) of a backend
  * time (`…HH:MM:SS.ffffff+00`); '' when unknown. Same zone and layout as
@@ -132,19 +111,21 @@ export function isConfigVersionField(name: string) {
 }
 
 /** `host` + `path` of an HTTP call for its one-line row; falls back to the
- * URL when the parts are missing. Query strings stay in the expanded view. */
+ * URL when the parts are missing. The full URL is only copied. */
 export function httpTarget(http: NonNullable<TraceCall['http']>) {
   if (http.host) return `${http.host}${http.path || '/'}`
   return http.url.replace(/^[a-z]+:\/\//i, '').replace(/\?.*$/, '')
 }
 
-/** Whether a step has anything to expand. */
-export function stepHasDetail(step: TraceStep) {
-  return (
-    step.calls.length > 0 ||
-    step.logs.length > 0 ||
-    step.error !== '' ||
-    step.related_task !== null ||
-    step.omitted_calls > 0
-  )
+/** Calls `onSeen` once the element first intersects the viewport (clipped by
+ * its scrolling ancestors), then stops observing; trace reads wait for it.
+ * Returns the disconnect. */
+export function observeFirstSight(element: Element, onSeen: () => void) {
+  const observer = new IntersectionObserver((entries) => {
+    if (!entries.some((entry) => entry.isIntersecting)) return
+    observer.disconnect()
+    onSeen()
+  })
+  observer.observe(element)
+  return () => observer.disconnect()
 }

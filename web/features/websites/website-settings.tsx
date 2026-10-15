@@ -15,7 +15,13 @@ import { useArrivalState } from '@/lib/history-state'
 import { LinkButton } from '@/components/link-button'
 import { Page, QueryNotice } from '@/components/page'
 import { SaveBar } from '@/components/save-bar'
-import { createWebsite, updateWebsite, websiteDetailQuery } from './data'
+import { useTabPanelHold } from '@/components/tab-panel-hold'
+import {
+  createWebsite,
+  hostedZoneOptionsQuery,
+  updateWebsite,
+  websiteDetailQuery,
+} from './data'
 import { collectOriginGroups } from './origin-groups'
 import { initialRouteEditorView } from './route-tabs'
 import type { Website } from './types'
@@ -147,10 +153,15 @@ function SectionNav({
   children: ReactNode
 }) {
   const wide = useMediaQuery('(min-width: 1024px)')
+  // A shorter group keeps the page's scroll position (see `useTabPanelHold`).
+  const { ref: panelRef, style: panelStyle, holdForSwitch } = useTabPanelHold()
   return (
     <Tabs
       selectedKey={section}
-      onSelectionChange={(key) => onChange(key as WebsiteSectionId)}
+      onSelectionChange={(key) => {
+        holdForSwitch()
+        onChange(key as WebsiteSectionId)
+      }}
       variant='secondary'
       orientation={wide ? 'vertical' : 'horizontal'}
       align='start'
@@ -186,7 +197,12 @@ function SectionNav({
           })}
         </Tabs.List>
       </Tabs.ListContainer>
-      <Tabs.Panel id={section} className='min-w-0 flex-1'>
+      <Tabs.Panel
+        id={section}
+        ref={panelRef}
+        style={panelStyle}
+        className='min-w-0 flex-1'
+      >
         {children}
       </Tabs.Panel>
     </Tabs>
@@ -286,9 +302,17 @@ function WebsiteEditor({
   const remoteChanged =
     !!website && !!base && website.revision !== base.revision
 
+  // Managed domains are validated against their hosted zone once the list
+  // is known; until then only the hostname format is checked here.
+  const hostedZones = useQuery(
+    hostedZoneOptionsQuery(
+      values.domains.some((domain) => domain.dns_mode === 'managed')
+    )
+  ).data
+
   const errors = showErrors
     ? (() => {
-        const result = validateWebsiteForm(values)
+        const result = validateWebsiteForm(values, hostedZones)
         return result.success
           ? {}
           : collectWebsiteFormErrors(result.error.issues)
@@ -322,7 +346,7 @@ function WebsiteEditor({
   }
 
   function save() {
-    const parsed = validateWebsiteForm(values)
+    const parsed = validateWebsiteForm(values, hostedZones)
     if (!parsed.success) {
       const found = collectWebsiteFormErrors(parsed.error.issues)
       const target = firstWebsiteErrorTarget(found)

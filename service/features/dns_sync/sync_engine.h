@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <ranges>
 #include <stdexcept>
 #include <string>
@@ -123,19 +124,34 @@ inline ruvia::task<void> delete_obsolete_remote_records(
     co_return;
 }
 
-inline ruvia::task<zone_runtime_dto> reconcile_zone_records(
+// The runtime an attempt persists and the desired records it left unpushed.
+struct reconciled_zone final {
+    zone_runtime_dto runtime_;
+    std::vector<unsynced_record> unsynced_;
+};
+
+[[nodiscard]] inline std::int64_t previous_synced_revision(const zone_runtime_data& runtime,
+    std::string_view id) {
+    const auto state = std::ranges::find_if(
+        runtime.record_states_, [id](const auto& item) { return item.id_ && *item.id_ == id; });
+    return state == runtime.record_states_.end() ? 0 : state->synced_revision_.value_or(0);
+}
+
+inline ruvia::task<reconciled_zone> reconcile_zone_records(
     service::background::worker_context& context, service::attempt_trace::recorder& trace,
     const service::sync_runtime::running_marker_lease& lease,
     const service::dns::dns_provider_driver& driver, std::string_view account_id,
     std::string_view secret, std::string_view remote_zone_id, std::string_view domain,
     const zone_config_data& desired_config, const zone_runtime_data& current_runtime,
     const std::unordered_map<std::string, std::string>& known_remote_ids,
+    const std::vector<unsynced_record>& blocked,
     std::vector<service::dns::provider_record>& remote_records,
     const std::vector<service::dns::provider_line>& lines, std::int64_t revision, bool deleted,
     zone_sync_attempt& attempt) {
     auto step = trace.begin_step(service::attempt_trace::step_code::reconcile_records, domain);
     std::size_t unchanged = 0;
-    zone_runtime_dto next_runtime({.resource_ = context.pool()});
+    reconciled_zone result{.runtime_ = zone_runtime_dto({.resource_ = context.pool()}), .unsynced_ = {}};
+    auto& next_runtime = result.runtime_;
     next_runtime.set<"records_imported">(true);
     auto& runtime_lines = next_runtime.ensure<"lines">();
     for (const auto& line : lines) {
@@ -156,19 +172,59 @@ inline ruvia::task<zone_runtime_dto> reconcile_zone_records(
             }
             const auto managed = to_managed_record(record);
             const auto known = known_remote_ids.find(managed.id_);
-            const auto reconciled = co_await driver.reconcile_record(
-                context, trace, account_id, secret, remote_zone_id, domain,
-                known == known_remote_ids.end() ? std::string_view{}
-                                                : std::string_view{known->second},
-                managed.type_, managed.name_, managed.content_, managed.ttl_, managed.priority_,
-                managed.proxied_, managed.line_code_, remote_records);
-            const auto& remote_id = reconciled.remote_id_;
-            if (reconciled.action_ == service::dns::record_reconciliation_action::reuse) {
+            std::string unsynced_error;
+            std::optional<service::dns::reconciled_record> reconciled;
+            if (const auto held = std::ranges::find(blocked, managed.id_, &unsynced_record::id_);
+                held != blocked.end()) {
+                unsynced_error = held->error_;
+            } else {
+                // The provider is the final judge of which records share a name; its rejection
+                // fails this record only, so the rest of the zone still syncs.
+                try {
+                    reconciled = co_await driver.reconcile_record(
+                        context, trace, account_id, secret, remote_zone_id, domain,
+                        known == known_remote_ids.end() ? std::string_view{}
+                                                        : std::string_view{known->second},
+                        managed.type_, managed.name_, managed.content_, managed.ttl_, managed.priority_,
+                        managed.proxied_, managed.line_code_, remote_records);
+                } catch (const service::dns::cloudflare_error& error) {
+                    if (error.code() != service::dns::cloudflare_error_code::record_name_conflict) {
+                        throw;
+                    }
+                    unsynced_error = error.what();
+                } catch (const service::dns::aliyun_error& error) {
+                    if (error.code() != service::dns::aliyun_error_code::record_name_conflict) {
+                        throw;
+                    }
+                    unsynced_error = error.what();
+                }
+            }
+            if (!reconciled) {
+                const auto names = driver.record_names();
+                auto name = names.local_record_name(names.remote_record_name(managed.name_, domain), domain);
+                trace.log(service::attempt_trace::log_level::warning,
+                    "记录 " + name + " " + managed.type_ + " 未同步：" + unsynced_error);
+                auto& state = states.emplace_back(ruvia::model_options{.resource_ = context.pool()});
+                state.set<"id">(managed.id_);
+                if (known != known_remote_ids.end()) {
+                    state.set<"remote_record_id">(known->second);
+                }
+                state.set<"sync_status">("failed");
+                state.set<"synced_revision">(previous_synced_revision(current_runtime, managed.id_));
+                state.set<"last_error">(unsynced_error);
+                result.unsynced_.push_back({.id_ = managed.id_,
+                    .name_ = std::move(name),
+                    .type_ = managed.type_,
+                    .error_ = std::move(unsynced_error)});
+                continue;
+            }
+            const auto& remote_id = reconciled->remote_id_;
+            if (reconciled->action_ == service::dns::record_reconciliation_action::reuse) {
                 attempt.record_unchanged();
                 ++unchanged;
-            } else if (reconciled.action_ == service::dns::record_reconciliation_action::update &&
-                       reconciled.previous_) {
-                attempt.record_updated(to_attempt_record(*reconciled.previous_, driver.record_names(), domain),
+            } else if (reconciled->action_ == service::dns::record_reconciliation_action::update &&
+                       reconciled->previous_) {
+                attempt.record_updated(to_attempt_record(*reconciled->previous_, driver.record_names(), domain),
                     to_attempt_record(managed));
             } else {
                 attempt.record_created(to_attempt_record(managed));
@@ -196,7 +252,7 @@ inline ruvia::task<zone_runtime_dto> reconcile_zone_records(
             std::to_string(unchanged) + " 条记录与服务商一致，无需调用服务商");
     }
     step.complete();
-    co_return next_runtime;
+    co_return result;
 }
 
 inline ruvia::task<std::int64_t> sync_zone(service::background::worker_context& context,
@@ -276,13 +332,15 @@ inline ruvia::task<std::int64_t> sync_zone(service::background::worker_context& 
     const auto desired = collect_desired_record_ids(state->desired_, known_remote_ids, state->deleted_);
     co_await delete_obsolete_remote_records(context, trace, lease, driver, state->account_id_, secret.view(),
         remote.id_, state->domain_, known_remote_ids, desired, remote.records_, attempt);
-    const auto next_runtime = co_await reconcile_zone_records(
+    const auto blocked = find_blocked_website_records(state->desired_, state->website_record_ids_,
+        driver.record_names(), state->domain_);
+    const auto reconciled = co_await reconcile_zone_records(
         context, trace, lease, driver, state->account_id_, secret.view(), remote.id_, state->domain_,
-        state->desired_, state->runtime_, known_remote_ids, remote.records_, remote.lines_,
+        state->desired_, state->runtime_, known_remote_ids, blocked, remote.records_, remote.lines_,
         state->revision_, state->deleted_, attempt);
     auto persist_step = trace.begin_step(step_code::persist_result, state->domain_);
-    co_await persist_synced_zone(context, trace, task, lease, next_runtime, state->revision_,
-        attempt.to_json(context.pool()));
+    co_await persist_synced_zone(context, trace, task, lease, reconciled.runtime_, state->revision_,
+        unsynced_records_error(reconciled.unsynced_), attempt.to_json(context.pool()));
     persist_step.complete();
     co_return state->revision_;
 }

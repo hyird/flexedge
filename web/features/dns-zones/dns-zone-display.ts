@@ -58,7 +58,8 @@ export type ZoneRecordRow = DnsRecord & {
   state?: DnsZone['runtime']['record_states'][number]
 }
 
-/** System records first (read-only), then custom records with their sync state. */
+/** System records first (read-only), then custom records; both carry their
+ * `record_states` entry (a website CNAME the provider rejected shows failed). */
 export function zoneRecordRows(zone: DnsZone): ZoneRecordRow[] {
   const states = new Map(
     zone.runtime.record_states.map((state) => [state.id, state])
@@ -67,6 +68,7 @@ export function zoneRecordRows(zone: DnsZone): ZoneRecordRow[] {
     ...zone.runtime.projected_records.map((record) => ({
       ...record,
       source: 'system' as const,
+      state: states.get(record.id),
     })),
     ...zone.config.records.map((record) => ({
       ...record,

@@ -20,6 +20,11 @@
 
 namespace service::dns_sync {
 
+// Who projects a system record: the nodes of a cluster (A/AAAA at its access hostname) or a
+// hosted website domain (CNAME to its cluster's access hostname).
+enum class snapshot_record_source { cluster,
+    website };
+
 struct snapshot_record final {
     std::string id_;
     std::string type_;
@@ -29,6 +34,7 @@ struct snapshot_record final {
     std::optional<std::int64_t> priority_;
     bool proxied_;
     std::string line_code_;
+    snapshot_record_source source_;
 };
 
 inline bool is_cluster_managed_record(const zone_record_data& record,
@@ -105,6 +111,7 @@ load_projected_records_by_zone(db_type& db, const std::string& tenant_id,
                 .priority_ = std::nullopt,
                 .proxied_ = false,
                 .line_code_ = endpoint.line_code_,
+                .source_ = snapshot_record_source::cluster,
             });
         }
     }
@@ -136,6 +143,7 @@ load_projected_records_by_zone(db_type& db, const std::string& tenant_id,
                 .priority_ = std::nullopt,
                 .proxied_ = false,
                 .line_code_ = "default",
+                .source_ = snapshot_record_source::website,
             });
     }
     co_return result;

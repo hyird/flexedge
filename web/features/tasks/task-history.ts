@@ -57,29 +57,3 @@ export function formatRetryCountdown(at: number, now: number) {
   if (seconds < 60) return `${seconds} 秒后`
   return formatRelative(new Date(at).toISOString(), now)
 }
-
-/** Certificate issuance stages in execution order: `[stage, short label,
- * description]`. Successful attempts report `completed`. When every
- * authorization is already valid the worker skips `dns_challenge` through
- * `cleanup`; a failed validation still reports `validation`. */
-export const certificateStages = [
-  ['prepare', '准备', '读取证书、供应商与托管域配置'],
-  ['account', '账户', '注册或复用 ACME 账户'],
-  ['order', '订单', '创建证书订单'],
-  ['authorization', '授权', '获取域名授权'],
-  ['dns_challenge', '验证记录', '写入 DNS 验证记录并等待生效'],
-  ['validation', 'CA 验证', '证书颁发机构验证域名'],
-  ['cleanup', '清理', '清理 DNS 验证记录'],
-  ['finalize', '签发', '提交证书请求并等待签发'],
-  ['download', '下载', '下载并校验证书'],
-  ['persist', '保存', '保存证书'],
-] as const
-
-/** Stepper position of a certificate attempt: `failedAt` is the index of the
- * stage it stopped in, or -1 when it completed or the stage is unknown. */
-export function certificateProgress(stage: string) {
-  if (stage === 'completed')
-    return { current: certificateStages.length, failedAt: -1 }
-  const failedAt = certificateStages.findIndex(([id]) => id === stage)
-  return { current: Math.max(failedAt, 0), failedAt }
-}

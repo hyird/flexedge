@@ -1,16 +1,15 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRotateLeft } from '@gravity-ui/icons'
-import { Alert, Button, Disclosure, Skeleton } from '@heroui/react'
-import { formatDate, formatPercent, parseDate } from '@/lib/format'
+import { Button, Disclosure, Skeleton } from '@heroui/react'
+import { formatDate, parseDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { CopyButton } from '@/components/copy-button'
 import { EmptyState, QueryNotice } from '@/components/page'
-import { RelativeTime } from '@/components/relative-time'
 import { StatusChip } from '@/components/status-chip'
 import { taskHistoryQuery } from './data'
 import { TaskAttemptDetail } from './task-attempt-detail'
-import { AttemptTrace, RedactedText } from './task-attempt-trace'
+import { AttemptTimeline, RedactedText } from './task-attempt-trace'
 import {
   formatAttemptDuration,
   formatRetryCountdown,
@@ -27,8 +26,8 @@ const outcomeLabels = [outcomes.completed.label, outcomes.failed.label]
 const attemptRow = 'flex min-w-0 flex-col gap-2 py-3 first:pt-0 last:pb-0'
 
 /** "执行记录" tab: a one-shot snapshot of the task's attempts, read when the
- * tab opens and again only on the manual refresh button. Relative times tick
- * on the shared local display clock and never read data. */
+ * tab opens and again only on the manual refresh button. Each attempt shows
+ * its execution timeline; full traces are read per attempt once on screen. */
 export function TaskHistoryPanel({ task }: { task: Task }) {
   const history = useQuery({
     ...taskHistoryQuery(task),
@@ -43,13 +42,10 @@ export function TaskHistoryPanel({ task }: { task: Task }) {
         onRetry={() => history.refetch()}
       />
       {data ? (
-        <HistorySummary
-          summary={data.summary}
-          node={task.resource_type === 'node'}
-        />
+        <HistorySummary summary={data.summary} />
       ) : (
         history.isPending && (
-          <Skeleton className='h-[7.5rem] w-full rounded-xl sm:h-[8.25rem]' />
+          <Skeleton className='h-[10.125rem] w-full rounded-xl sm:h-28' />
         )
       )}
       {(data || history.isPending) && (
@@ -84,61 +80,39 @@ export function TaskHistoryPanel({ task }: { task: Task }) {
   )
 }
 
-function HistorySummary({
-  summary,
-  node,
-}: {
-  summary: TaskHistory['summary']
-  node: boolean
-}) {
+const summaryValue = 'text-[13px] leading-5 font-medium tabular-nums'
+
+function HistorySummary({ summary }: { summary: TaskHistory['summary'] }) {
   return (
     <dl className='grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl bg-surface-secondary p-3 sm:grid-cols-3'>
       <SummaryItem label='累计尝试'>
-        <span className='text-base font-semibold tabular-nums'>
-          {summary.attempt_count}
-        </span>
-        <span className='text-xs text-muted'>保留 7 天</span>
+        <span className={summaryValue}>{summary.attempt_count}</span>
       </SummaryItem>
       <SummaryItem label='失败次数'>
         <span
           className={cn(
-            'text-base font-semibold tabular-nums',
+            summaryValue,
             summary.failure_count > 0 && 'text-danger'
           )}
         >
           {summary.failure_count}
         </span>
-        <span className='text-xs text-muted'>
-          {summary.attempt_count
-            ? `占 ${formatPercent(summary.failure_count / summary.attempt_count, 0)}`
-            : '—'}
-        </span>
       </SummaryItem>
       <SummaryItem label='下次重试'>
         {summary.next_attempt_at ? (
-          <>
-            <RetryCountdown
-              value={summary.next_attempt_at}
-              className='text-base font-semibold text-warning'
-            />
-            <span className='text-xs text-muted'>
-              {formatDate(summary.next_attempt_at)}
-            </span>
-          </>
+          <RetryCountdown
+            value={summary.next_attempt_at}
+            className={cn(summaryValue, 'text-warning')}
+          />
         ) : (
-          <>
-            <span className='text-base font-semibold text-muted'>—</span>
-            <span className='text-xs text-muted'>
-              {node ? '由节点自行退避重试' : '没有待执行的重试'}
-            </span>
-          </>
+          <span className={cn(summaryValue, 'text-muted')}>—</span>
         )}
       </SummaryItem>
       <SummaryItem label='首次失败'>
-        <TimePair value={summary.first_failure_at} empty='没有失败' />
+        <SummaryTime value={summary.first_failure_at} />
       </SummaryItem>
       <SummaryItem label='最近成功'>
-        <TimePair value={summary.last_success_at} empty='尚未成功' />
+        <SummaryTime value={summary.last_success_at} />
       </SummaryItem>
     </dl>
   )
@@ -166,7 +140,7 @@ function RetryCountdown({
     return () => window.clearTimeout(timer)
   }, [remaining])
   return (
-    <time dateTime={value} className={className}>
+    <time dateTime={value} title={formatDate(value)} className={className}>
       {at === undefined ? '—' : formatRetryCountdown(at, now)}
     </time>
   )
@@ -182,26 +156,17 @@ function SummaryItem({
   return (
     <div className='flex min-w-0 flex-col gap-0.5'>
       <dt className='text-xs text-muted'>{label}</dt>
-      <dd className='m-0 flex min-w-0 flex-col'>{children}</dd>
+      <dd className='m-0 flex min-w-0'>{children}</dd>
     </div>
   )
 }
 
-/** Absolute time on the first line and relative time on the second; both
- * lines are always present so the summary never changes height. */
-function TimePair({ value, empty }: { value: string; empty: string }) {
-  if (!value)
-    return (
-      <>
-        <span className='text-sm text-muted'>—</span>
-        <span className='text-xs text-muted'>{empty}</span>
-      </>
-    )
+function SummaryTime({ value }: { value: string }) {
+  if (!value) return <span className={cn(summaryValue, 'text-muted')}>—</span>
   return (
-    <>
-      <span className='text-sm tabular-nums'>{formatDate(value)}</span>
-      <RelativeTime value={value} className='text-xs text-muted' />
-    </>
+    <time dateTime={value} className={cn(summaryValue, 'truncate')}>
+      {formatDate(value)}
+    </time>
   )
 }
 
@@ -212,30 +177,14 @@ function AttemptList({
   taskId: string
   history: TaskHistory
 }) {
-  if (!history.list.length)
-    return (
-      <EmptyState
-        size='sm'
-        title='暂无执行记录'
-        description='任务开始执行后，每次尝试的结果会记录在这里，保留 7 天。'
-      />
-    )
+  if (!history.list.length) return <EmptyState size='sm' title='暂无执行记录' />
   const groups = groupAttempts(history.list)
-  const omitted = history.summary.attempt_count - history.list.length
   return (
     <>
       {history.truncated && (
-        <Alert status='accent'>
-          <Alert.Indicator />
-          <Alert.Content>
-            <Alert.Title>只列出最近 {history.list.length} 次尝试</Alert.Title>
-            <Alert.Description>
-              {omitted > 0
-                ? `更早的 ${omitted} 次尝试未列出；上方统计包含全部保留记录。`
-                : '更早的尝试未列出；上方统计包含全部保留记录。'}
-            </Alert.Description>
-          </Alert.Content>
-        </Alert>
+        <p className='m-0 text-xs text-muted'>
+          仅列出最近 {history.list.length} 次
+        </p>
       )}
       <ol
         aria-label='执行记录'
@@ -275,8 +224,8 @@ function AttemptHeader({
   }
   return (
     <div className='flex min-w-0 items-center justify-between gap-3'>
-      <div className='flex min-w-0 items-center gap-2'>
-        <h3 className='m-0 truncate text-sm font-medium text-foreground'>
+      <div className='flex shrink-0 items-center gap-2'>
+        <h3 className='m-0 text-sm font-medium whitespace-nowrap text-foreground'>
           {title}
         </h3>
         <StatusChip
@@ -285,31 +234,28 @@ function AttemptHeader({
           reserve={outcomeLabels}
         />
       </div>
-      <span className='shrink-0 text-xs text-muted tabular-nums'>{aside}</span>
+      <span className='min-w-0 truncate text-xs text-muted tabular-nums'>
+        {aside}
+      </span>
     </div>
   )
 }
 
-/** Start time (absolute + relative). Without a start time (records written
- * before the upgrade, node heartbeat confirmations) the record time is shown;
- * only pre-upgrade records also lack any detail. */
-function AttemptTime({ attempt }: { attempt: TaskAttempt }) {
+/** Start time (the record time for records without one) and duration. */
+function AttemptMeta({
+  attempt,
+  extra,
+}: {
+  attempt: TaskAttempt
+  extra?: string
+}) {
   const value = attempt.started_at || attempt.emitted_at
-  const legacy =
-    !attempt.started_at &&
-    attempt.detail.kind === 'none' &&
-    !attempt.detail.truncated
   return (
-    <div className='flex flex-wrap items-center gap-x-2 text-xs text-muted'>
-      <span>
-        {attempt.started_at ? '开始于' : '记录于'}{' '}
-        <time dateTime={value} className='text-foreground tabular-nums'>
-          {formatDate(value)}
-        </time>
-      </span>
-      <RelativeTime value={value} />
-      {legacy && <span>· 升级前的记录，没有开始时间与执行明细</span>}
-    </div>
+    <>
+      <time dateTime={value}>{formatDate(value)}</time>
+      {attempt.started_at && ` · ${formatAttemptDuration(attempt)}`}
+      {extra && ` · ${extra}`}
+    </>
   )
 }
 
@@ -325,61 +271,30 @@ function AttemptBody({
       <AttemptHeader
         title={`第 ${attempt.attempt} 次`}
         outcome={attempt.outcome}
-        aside={`耗时 ${formatAttemptDuration(attempt)}`}
+        aside={<AttemptMeta attempt={attempt} />}
       />
-      <AttemptTime attempt={attempt} />
       {attempt.error && <AttemptError error={attempt.error} />}
-      {attempt.next_attempt_at && (
-        <p className='m-0 text-xs text-muted'>
-          计划于{' '}
-          <span className='text-foreground tabular-nums'>
-            {formatDate(attempt.next_attempt_at)}
-          </span>{' '}
-          重试
-        </p>
-      )}
       <TaskAttemptDetail detail={attempt.detail} outcome={attempt.outcome} />
-      <AttemptTrace taskId={taskId} trace={attempt.trace} />
+      <AttemptTimeline taskId={taskId} trace={attempt.trace} />
     </>
   )
 }
 
-/** Error text clamped to two lines, expandable and copyable. */
-function AttemptError({ error, prefix }: { error: string; prefix?: string }) {
-  const [expanded, setExpanded] = useState(false)
-  const long = error.length > 120 || error.includes('\n')
+/** Full error text (long text scrolls inside), copyable. */
+function AttemptError({ error }: { error: string }) {
   return (
     <div className='flex min-w-0 items-start gap-1 rounded-lg bg-danger-soft px-2.5 py-1.5'>
-      <div className='flex min-w-0 flex-1 flex-col items-start gap-0.5'>
-        <p
-          className={cn(
-            'm-0 text-xs leading-5 break-words whitespace-pre-wrap text-danger',
-            !expanded && 'line-clamp-2'
-          )}
-        >
-          {prefix && <span className='font-medium'>{prefix}</span>}
-          <RedactedText value={error} />
-        </p>
-        {long && (
-          <Button
-            size='sm'
-            variant='ghost'
-            className='h-6 min-w-0 px-1 text-xs'
-            aria-expanded={expanded}
-            onPress={() => setExpanded(!expanded)}
-          >
-            {expanded ? '收起错误' : '展开全文'}
-          </Button>
-        )}
-      </div>
+      <p className='m-0 max-h-32 min-w-0 flex-1 overflow-auto text-xs leading-5 break-words whitespace-pre-wrap text-danger'>
+        <RedactedText value={error} />
+      </p>
       <CopyButton value={error} label='复制错误信息' />
     </div>
   )
 }
 
-/** Consecutive failures with the same error, collapsed into one entry that
- * expands to the individual attempts (newest first). The newest attempt's
- * detail and trace represent the run; older ones keep their own trace. */
+/** Consecutive failures with the same error, folded into one entry. The
+ * newest attempt's detail and timeline represent the run; opening the run
+ * lists every attempt, older ones with their own timeline. */
 function AttemptRun({
   taskId,
   attempts,
@@ -395,32 +310,13 @@ function AttemptRun({
       <AttemptHeader
         title={`第 ${oldest.attempt}–${newest.attempt} 次`}
         outcome='failed'
-        aside={`共 ${attempts.length} 次`}
+        aside={
+          <AttemptMeta attempt={newest} extra={`共 ${attempts.length} 次`} />
+        }
       />
-      <div className='flex flex-wrap items-center gap-x-2 text-xs text-muted'>
-        <span>
-          最近一次{' '}
-          <span className='text-foreground tabular-nums'>
-            {formatDate(newest.started_at || newest.emitted_at)}
-          </span>
-        </span>
-        <RelativeTime value={newest.started_at || newest.emitted_at} />
-      </div>
-      <AttemptError
-        error={newest.error}
-        prefix={`连续 ${attempts.length} 次：`}
-      />
-      {newest.next_attempt_at && (
-        <p className='m-0 text-xs text-muted'>
-          计划于{' '}
-          <span className='text-foreground tabular-nums'>
-            {formatDate(newest.next_attempt_at)}
-          </span>{' '}
-          重试
-        </p>
-      )}
+      <AttemptError error={newest.error} />
       <TaskAttemptDetail detail={newest.detail} outcome={newest.outcome} />
-      <AttemptTrace taskId={taskId} trace={newest.trace} />
+      <AttemptTimeline taskId={taskId} trace={newest.trace} />
       <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}>
         <Disclosure.Heading>
           <Button
@@ -435,30 +331,33 @@ function AttemptRun({
         </Disclosure.Heading>
         <Disclosure.Content>
           <Disclosure.Body>
-            <ol
-              aria-label={`第 ${oldest.attempt}–${newest.attempt} 次尝试`}
-              className='m-0 mt-1 flex list-none flex-col gap-3 border-l border-border p-0 pl-3'
-            >
-              {attempts.map((attempt, index) => (
-                <li
-                  key={`${attempt.attempt}:${attempt.emitted_at}`}
-                  className='flex min-w-0 flex-col gap-1.5'
-                >
-                  <div className='flex min-w-0 items-center justify-between gap-3'>
-                    <span className='text-xs font-medium'>
-                      第 {attempt.attempt} 次
-                    </span>
-                    <span className='text-xs text-muted tabular-nums'>
-                      耗时 {formatAttemptDuration(attempt)}
-                    </span>
-                  </div>
-                  <AttemptTime attempt={attempt} />
-                  {index > 0 && (
-                    <AttemptTrace taskId={taskId} trace={attempt.trace} />
-                  )}
-                </li>
-              ))}
-            </ol>
+            {/* Older timelines mount only while open, so their traces are
+                read only once they can be seen. */}
+            {expanded && (
+              <ol
+                aria-label={`第 ${oldest.attempt}–${newest.attempt} 次尝试`}
+                className='m-0 mt-1 flex list-none flex-col gap-3 p-0 pl-3'
+              >
+                {attempts.map((attempt, index) => (
+                  <li
+                    key={`${attempt.attempt}:${attempt.emitted_at}`}
+                    className='flex min-w-0 flex-col gap-1.5'
+                  >
+                    <div className='flex min-w-0 items-center justify-between gap-3 text-xs'>
+                      <span className='font-medium'>
+                        第 {attempt.attempt} 次
+                      </span>
+                      <span className='text-muted tabular-nums'>
+                        <AttemptMeta attempt={attempt} />
+                      </span>
+                    </div>
+                    {index > 0 && (
+                      <AttemptTimeline taskId={taskId} trace={attempt.trace} />
+                    )}
+                  </li>
+                ))}
+              </ol>
+            )}
           </Disclosure.Body>
         </Disclosure.Content>
       </Disclosure>

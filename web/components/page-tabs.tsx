@@ -1,4 +1,4 @@
-import { type ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import { Tabs } from '@heroui/react'
 import {
   TabLeaveGuardContext,
@@ -6,6 +6,7 @@ import {
   type TabSwitchGuard,
 } from '@/lib/unsaved-changes'
 import { UnsavedChangesDialog } from './save-bar'
+import { useTabPanelHold } from './tab-panel-hold'
 
 export type PageTab<T extends string> = {
   id: T
@@ -20,7 +21,9 @@ export type PageTab<T extends string> = {
  * still sticks to the bottom; while that save bar is dirty, switching tabs
  * asks for confirmation first. Pass `guard` (`useTabSwitchGuard` from `@/lib/unsaved-changes`) when
  * controls outside the tabs also switch tabs, and switch through
- * `guard.request(() => …)` there. */
+ * `guard.request(() => …)` there. Every switch goes through the guard, so the
+ * panel holds its height across it (`useTabPanelHold`): a loading tab never
+ * collapses the page and the header and tab list never move. */
 export function PageTabs<T extends string>({
   label,
   items,
@@ -39,6 +42,14 @@ export function PageTabs<T extends string>({
 }) {
   const ownGuard = useTabSwitchGuard()
   const active = guard ?? ownGuard
+  const { ref: panelRef, style: panelStyle, holdForSwitch } = useTabPanelHold()
+  const { beforeSwitchRef } = active
+  useEffect(() => {
+    beforeSwitchRef.current = holdForSwitch
+    return () => {
+      beforeSwitchRef.current = null
+    }
+  }, [beforeSwitchRef, holdForSwitch])
   return (
     <Tabs
       variant='secondary'
@@ -67,6 +78,8 @@ export function PageTabs<T extends string>({
       </Tabs.ListContainer>
       <Tabs.Panel
         id={selected}
+        ref={panelRef}
+        style={panelStyle}
         className='flex min-w-0 flex-1 flex-col gap-6 p-0'
       >
         <TabLeaveGuardContext value={active.dirtyRef}>

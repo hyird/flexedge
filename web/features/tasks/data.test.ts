@@ -14,10 +14,16 @@ import type { Task } from './types'
 const clients: QueryClient[] = []
 let nextSnapshot: unknown
 const urls: string[] = []
+// While `holdFrames` is set, each stream's snapshot waits in `heldFrames`
+// until the test sends it, so reads stay open.
+let holdFrames = false
+const heldFrames: (() => void)[] = []
 class Source extends EventTarget {
   close() {}
 }
 afterEach(() => {
+  holdFrames = false
+  heldFrames.splice(0).forEach((send) => send())
   setLiveQueryQueryClient(new QueryClient())
   clients.splice(0).forEach((client) => client.clear())
 })
@@ -51,13 +57,15 @@ function setup() {
   setLiveQueryQueryClient(client, undefined, (url) => {
     urls.push(url)
     const source = new Source()
-    queueMicrotask(() =>
+    const data = nextSnapshot
+    const send = () =>
       source.dispatchEvent(
         new MessageEvent('snapshot', {
-          data: JSON.stringify({ code: 0, message: '', data: nextSnapshot }),
+          data: JSON.stringify({ code: 0, message: '', data }),
         })
       )
-    )
+    if (holdFrames) heldFrames.push(send)
+    else queueMicrotask(send)
     return source as never
   })
   return client
@@ -298,4 +306,71 @@ test('history snapshots carry trace summaries; the full trace is a separate cach
   await expect(
     client.fetchQuery(taskAttemptTraceQuery(task.id, '48214'))
   ).rejects.toBeInstanceOf(ApiProtocolError)
+})
+
+const traceUrl = (attemptId: string) =>
+  `/api/tasks/task-1/attempts/${attemptId}/trace/stream`
+const traceSnapshot = { state: 'available', capture: {}, steps: [] }
+// Runs the queued promise jobs (stream opening, frame parsing, slot
+// hand-over) without waiting on the clock.
+async function settle() {
+  for (let turn = 0; turn < 20; turn += 1) await Promise.resolve()
+}
+
+test('a trace is not read until its attempt is visible', async () => {
+  const client = setup()
+  urls.length = 0
+  respond(traceSnapshot)
+  const observer = new QueryObserver(
+    client,
+    taskAttemptTraceQuery(task.id, '48213', false)
+  )
+  const stop = observer.subscribe(() => undefined)
+  await settle()
+  expect(observer.getCurrentResult().fetchStatus).toBe('idle')
+  expect(urls).toEqual([])
+  observer.setOptions(taskAttemptTraceQuery(task.id, '48213', true))
+  await settle()
+  expect(urls).toEqual([traceUrl('48213')])
+  expect(observer.getCurrentResult().data?.state).toBe('available')
+  stop()
+})
+
+test('at most two trace reads are open at once; queued reads wait in order and cancel cleanly', async () => {
+  const client = setup()
+  urls.length = 0
+  respond(traceSnapshot)
+  holdFrames = true
+  const ids = ['1', '2', '3', '4', '5']
+  const observers = ids.map(
+    (id) => new QueryObserver(client, taskAttemptTraceQuery(task.id, id))
+  )
+  const stops = observers.map((observer) => observer.subscribe(() => undefined))
+  await settle()
+  // Every query is fetching, but only two streams are open.
+  expect(
+    observers.map((observer) => observer.getCurrentResult().fetchStatus)
+  ).toEqual(Array(5).fill('fetching'))
+  expect(urls).toEqual([traceUrl('1'), traceUrl('2')])
+
+  // Closing a queued attempt (the sheet unmounting it) never opens its read.
+  stops[2]()
+  heldFrames.shift()?.()
+  await settle()
+  expect(urls).toEqual([traceUrl('1'), traceUrl('2'), traceUrl('4')])
+  expect(observers[0].getCurrentResult().data?.state).toBe('available')
+
+  // Cancelling an open read frees its slot as well.
+  stops[1]()
+  await settle()
+  expect(urls.at(-1)).toBe(traceUrl('5'))
+  expect(urls).toHaveLength(4)
+
+  heldFrames.splice(0).forEach((send) => send())
+  await settle()
+  expect(
+    [0, 3, 4].map((index) => observers[index].getCurrentResult().status)
+  ).toEqual(['success', 'success', 'success'])
+  expect(observers[2].getCurrentResult().data).toBeUndefined()
+  stops.forEach((stop) => stop())
 })

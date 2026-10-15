@@ -92,6 +92,8 @@ enum class cloudflare_error_code {
     zone_not_found,
     dns_failed,
     record_conflict,
+    // The name already holds records the new one cannot share (81053, 81054, 81056).
+    record_name_conflict,
     record_not_found,
 };
 
@@ -136,10 +138,24 @@ namespace detail {
 
 inline constexpr std::int64_t cloudflare_record_already_exists_code{81057};
 
-// The error of a failed Cloudflare reply: the first error's message (code
-// 81057 as the duplicate-record message), else the fallback; codes 10000 and
-// 81057 refine the error code. The text passes the attempt's redaction, so a
-// token the API echoes (e.g. in an `Authorization: Bearer …` string) or any
+// Cloudflare's rejection of a record whose name already holds records it cannot share.
+[[nodiscard]] inline std::optional<std::string_view> cloudflare_name_conflict_message(std::int64_t code) {
+    switch (code) {
+        case 81053:
+            return "Cloudflare 拒绝该记录：同名主机记录已有 A、AAAA 或 CNAME 记录（81053）";
+        case 81054:
+            return "Cloudflare 拒绝该记录：同名主机记录已有 CNAME 记录（81054）";
+        case 81056:
+            return "Cloudflare 拒绝该记录：同名主机记录已有 NS 记录（81056）";
+        default:
+            return std::nullopt;
+    }
+}
+
+// The error of a failed Cloudflare reply: the first error's message (code 81057 as the
+// duplicate-record message, a name conflict as its Chinese reason), else the fallback; codes
+// 10000, 81057 and the name conflicts refine the error code. The text passes the attempt's
+// redaction, so a token the API echoes (e.g. in an `Authorization: Bearer …` string) or any
 // other credential of the attempt never reaches the task error or the log.
 template <typename envelope_type>
 [[nodiscard]] cloudflare_error cloudflare_reply_error(service::attempt_trace::recorder& trace,
@@ -153,13 +169,18 @@ template <typename envelope_type>
             const auto& api_code = first.template get<"code">();
             const auto value = api_code ? static_cast<std::int64_t>(*api_code) : std::int64_t{0};
             const auto& text = first.template get<"message">();
+            const auto name_conflict = cloudflare_name_conflict_message(value);
             if (value == 10000) {
                 resolved_code = cloudflare_error_code::authorization_failed;
             } else if (value == cloudflare_record_already_exists_code) {
                 resolved_code = cloudflare_error_code::record_conflict;
+            } else if (name_conflict) {
+                resolved_code = cloudflare_error_code::record_name_conflict;
             }
             if (value == cloudflare_record_already_exists_code) {
                 message = "Cloudflare 中已存在相同 DNS 记录";
+            } else if (name_conflict) {
+                message = *name_conflict;
             } else if (text && !text->view().empty()) {
                 message = std::string(text->view());
             }

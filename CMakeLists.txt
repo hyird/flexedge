@@ -289,6 +289,10 @@ if(BUILD_TESTING)
     flexedge_add_test(website_domain_claim
         SOURCES tests/website_domain_claim.cpp
     )
+    flexedge_add_test(website_dns_flattening
+        SOURCES tests/website_dns_flattening.cpp
+        LIBRARIES asio::asio
+    )
     set_tests_properties(flexedge_website_relations PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     flexedge_add_test(website_reference_lock
         SOURCES tests/website_reference_lock.cpp

@@ -1,13 +1,10 @@
-import { createElement, type ReactElement } from 'react'
+import { createElement } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { expect, test, vi } from 'vitest'
+import { expect, test } from 'vitest'
 import { taskAttemptTraceQuery, taskHistoryQuery } from './data'
 import { TaskAttemptDetail } from './task-attempt-detail'
-import { AttemptTraceView } from './task-attempt-trace'
 import {
-  certificateProgress,
-  certificateStages,
   formatAttemptDuration,
   formatRetryCountdown,
   groupAttempts,
@@ -19,13 +16,6 @@ import {
   type Task,
   type TaskAttempt,
 } from './types'
-
-// The shared display clock has no server snapshot; server rendering only
-// needs the label.
-vi.mock('@/components/relative-time', () => ({
-  RelativeTime: ({ value }: { value?: string }) =>
-    createElement('time', null, value),
-}))
 
 function attempt(
   number: number,
@@ -85,32 +75,6 @@ test('durations are compact and unknown for records without a start time', () =>
   expect(at(3_780_000)).toBe('1 小时 3 分')
   expect(at(7_200_000)).toBe('2 小时')
   expect(at(0, '')).toBe('—')
-})
-
-test('certificate progress stops at the failed stage in execution order', () => {
-  expect(certificateStages.map(([id]) => id)).toEqual([
-    'prepare',
-    'account',
-    'order',
-    'authorization',
-    'dns_challenge',
-    'validation',
-    'cleanup',
-    'finalize',
-    'download',
-    'persist',
-  ])
-  expect(certificateProgress('completed')).toEqual({
-    current: 10,
-    failedAt: -1,
-  })
-  expect(certificateProgress('prepare')).toEqual({ current: 0, failedAt: 0 })
-  expect(certificateProgress('validation')).toEqual({ current: 5, failedAt: 5 })
-  // Unknown stages (newer backend) show no stepper position.
-  expect(certificateProgress('future_stage')).toEqual({
-    current: 0,
-    failedAt: -1,
-  })
 })
 
 test('retry countdown ticks in seconds under a minute and never goes negative', () => {
@@ -219,16 +183,15 @@ test('unknown values and a malformed detail only affect their own attempt', () =
       createElement(TaskHistoryPanel, { task })
     )
   )
-  // Every attempt renders, in a plain list without timeline markers.
+  // Every attempt renders in one list.
   for (const number of [4, 3, 2, 1]) expect(html).toContain(`第 ${number} 次`)
   expect(html).toContain('aria-label="执行记录"')
-  expect(html).not.toContain('timeline')
   // Unknown outcome / phase / domain status show their raw values.
   expect(html).toContain('cancelled')
   expect(html).toContain('warmup')
   expect(html).toContain('pending_dns')
   // Only attempt 2 loses its detail; its error and the others stay intact.
-  expect(html.split('明细无法显示').length - 1).toBe(1)
+  expect(html.split('明细无法识别').length - 1).toBe(1)
   expect(html).toContain('broken detail')
   expect(html).toContain('edge-1')
   expect(html).toContain('www.example.com')
@@ -257,7 +220,7 @@ test('failed provider verifications show zones as not obtained, not zero', () =>
   }
 })
 
-test('history and trace show absolute times in the same console time', () => {
+test('history and timeline show absolute times in the same console time, without captions', () => {
   const task: Task = {
     id: 'task-1',
     resource_type: 'node',
@@ -273,7 +236,7 @@ test('history and trace show absolute times in the same console time', () => {
   }
   const startedAt = '2026-10-14T14:16:44.123456+00'
   const history = taskHistorySchema.parse({
-    truncated: false,
+    truncated: true,
     summary: {
       attempt_count: 1,
       failure_count: 1,
@@ -294,50 +257,109 @@ test('history and trace show absolute times in the same console time', () => {
         trace: {
           state: 'available',
           attempt_id: '48213',
-          step_count: 0,
-          call_count: 0,
-          log_count: 0,
-          truncated: false,
-          failed_step: null,
-          steps: [],
+          step_count: 1,
+          steps: [{ code: 'validate', label: '校验配置', outcome: 'failed' }],
         },
       },
     ],
   })
   const trace = taskAttemptTraceSchema.parse({
-    attempt_id: '48213',
-    task_id: task.id,
-    kind: 'node_apply',
     state: 'available',
-    attempt: 1,
-    started_at: startedAt,
-    duration_ms: 5026,
-    worker_type: 'web',
-    steps: [],
+    steps: [
+      {
+        code: 'validate',
+        label: '校验配置',
+        outcome: 'failed',
+        logs: [
+          {
+            at: '2026-10-14T14:16:49.138000+00',
+            level: 'error',
+            message: 'nginx -t failed',
+          },
+        ],
+      },
+    ],
   })
   const client = new QueryClient()
   client.setQueryData(taskHistoryQuery(task).queryKey, history)
   client.setQueryData(taskAttemptTraceQuery(task.id, '48213').queryKey, trace)
-  // RelativeTime is mocked to echo its raw value; drop those echoes and the
-  // machine-readable attributes so only formatted absolute times remain.
-  const visible = (element: ReactElement) =>
-    renderToStaticMarkup(
-      createElement(QueryClientProvider, { client }, element)
+  // Machine-readable attributes dropped: only formatted times remain.
+  const html = renderToStaticMarkup(
+    createElement(
+      QueryClientProvider,
+      { client },
+      createElement(TaskHistoryPanel, { task })
     )
-      .replace(/<time>[^<]*<\/time>/g, '')
-      .replace(/dateTime="[^"]*"/g, '')
-  const historyHtml = visible(createElement(TaskHistoryPanel, { task }))
-  const traceHtml = visible(
-    createElement(AttemptTraceView, { taskId: task.id, attemptId: '48213' })
-  )
-  // 14:16:44 UTC is 22:16:44 console time in both views.
-  expect(historyHtml).toContain('2026-10-14 22:16:44')
-  expect(historyHtml).toContain('2026-10-14 22:17:44')
-  expect(traceHtml).toContain('2026-10-14 22:16:44.123')
-  expect(traceHtml).toContain('（UTC+8）')
-  for (const html of [historyHtml, traceHtml]) {
-    expect(html).not.toContain('14:16:44')
-    expect(html).not.toMatch(/UTC(?!\+8)/)
+  ).replace(/dateTime="[^"]*"/g, '')
+  // 14:16:44 UTC is 22:16:44 console time in the history and the timeline.
+  expect(html).toContain('2026-10-14 22:16:44')
+  expect(html).toContain('22:16:49.138')
+  expect(html).toContain('nginx -t failed')
+  expect(html).not.toContain('14:16:4')
+  expect(html).not.toMatch(/UTC/)
+  // Values only: no explanatory captions, toggles or prefixes.
+  for (const caption of [
+    '保留 7 天',
+    '没有待执行的重试',
+    '没有失败',
+    '尚未成功',
+    '开始于',
+    '计划于',
+    '更早的',
+    '执行详情',
+    '展开全文',
+  ])
+    expect(html).not.toContain(caption)
+  expect(html).toContain('仅列出最近 1 次')
+  client.clear()
+})
+
+test('a folded failure run shows only its newest timeline until opened', () => {
+  const task: Task = {
+    id: 'task-1',
+    resource_type: 'dns_zone',
+    resource_id: 'zone-1',
+    name: 'example.test',
+    operation: 'sync',
+    version: 2,
+    status: 'retrying',
+    error: 'timeout',
+    failures: 3,
+    updated_at: '2026-10-14T00:03:01Z',
+    next_attempt_at: '',
   }
+  const history = taskHistorySchema.parse({
+    truncated: false,
+    summary: {
+      attempt_count: 3,
+      failure_count: 3,
+      first_failure_at: '',
+      last_success_at: '',
+      next_attempt_at: '',
+    },
+    list: [3, 2, 1].map((number) => ({
+      ...attempt(number, 'failed', 'timeout'),
+      trace: {
+        state: 'available',
+        attempt_id: String(48_000 + number),
+        step_count: 1,
+        steps: [{ code: 'find_zone', label: `查找区域 ${number}` }],
+      },
+    })),
+  })
+  const client = new QueryClient()
+  client.setQueryData(taskHistoryQuery(task).queryKey, history)
+  const html = renderToStaticMarkup(
+    createElement(
+      QueryClientProvider,
+      { client },
+      createElement(TaskHistoryPanel, { task })
+    )
+  )
+  expect(html).toContain('第 1–3 次')
+  expect(html).toContain('展开 3 次尝试')
+  expect(html).toContain('查找区域 3')
+  expect(html).not.toContain('查找区域 2')
+  expect(html).not.toContain('查找区域 1')
   client.clear()
 })

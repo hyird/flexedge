@@ -58,6 +58,9 @@ export type TabSwitchGuard = {
   request: (switchTab: () => void) => void
   /** Set by the open tab's `SaveBar` (via `useUnsavedChangesGuard`). */
   dirtyRef: RefObject<boolean>
+  /** Set by `PageTabs`: runs right before every switch, in the event that
+   * switches, so the panel can measure itself (`useTabPanelHold`). */
+  beforeSwitchRef: RefObject<(() => void) | null>
   /** A guarded switch waits for the user's decision. */
   isPending: boolean
   /** Discards the open tab's changes and runs the waiting switch. */
@@ -67,19 +70,25 @@ export type TabSwitchGuard = {
 
 export function useTabSwitchGuard(): TabSwitchGuard {
   const dirtyRef = useRef(false)
+  const beforeSwitchRef = useRef<(() => void) | null>(null)
   const [pending, setPending] = useState<{ run: () => void } | null>(null)
+  const switchNow = (switchTab: () => void) => {
+    beforeSwitchRef.current?.()
+    switchTab()
+  }
   return {
     dirtyRef,
+    beforeSwitchRef,
     isPending: pending !== null,
     confirm: () => {
       dirtyRef.current = false
       setPending(null)
-      pending?.run()
+      if (pending) switchNow(pending.run)
     },
     cancel: () => setPending(null),
     request: (switchTab) => {
       if (dirtyRef.current) setPending({ run: switchTab })
-      else switchTab()
+      else switchNow(switchTab)
     },
   }
 }

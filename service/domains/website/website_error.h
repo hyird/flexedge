@@ -14,8 +14,6 @@ struct website_error {
         16609, "所选证书不可用", 422};
     static inline constexpr service::common::app_error_def managed_zone_not_found{
         16611, "该域名不属于当前租户的托管域名", 422};
-    static inline constexpr service::common::app_error_def managed_zone_apex_unsupported{
-        16612, "托管根域名不能创建 CNAME，请绑定子域名或选择外部解析", 422};
     static inline constexpr service::common::app_error_def revision_conflict{
         16614, "配置已被其他请求修改，请刷新后重试", 412};
     static inline constexpr service::common::app_error_def https_certificate_selection_invalid{

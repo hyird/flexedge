@@ -103,7 +103,7 @@ const taskAttemptDetailSchema = z.discriminatedUnion('kind', [
     operation: open(['issue', 'renew']),
     provider: z.string(),
     domains: z.array(z.string()),
-    // `completed` or the stage the attempt failed in (see certificateStages).
+    // `completed` or the stage the attempt failed in (shown by the trace).
     stage: z.string(),
     issuer: z.string(),
     not_before: z.string(),
@@ -181,7 +181,7 @@ function lenientList<T extends z.ZodType>(item: T) {
     )
 }
 
-export const traceStepOutcome = open([
+const traceStepOutcome = open([
   'completed',
   'failed',
   'skipped',
@@ -196,29 +196,22 @@ const traceStepSummarySchema = z.object({
   // Adjacent steps with the same code merge into one summary item.
   count: z.number().int().positive().default(1),
 })
+// Only what the timeline shows before the full trace arrives; the wire
+// summary also carries totals and the first failed step.
 const traceSummarySchema = z.object({
   state: open(['available', 'none']),
   // Path parameter of the trace stream only; never shown.
   attempt_id: text,
   step_count: amount,
-  call_count: amount,
-  log_count: amount,
-  truncated: flag,
-  failed_step: z.object({ code: text, label: text }).nullable().default(null),
-  // A summary item that does not parse is left out of the step strip; the
+  // A summary item that does not parse is left out of the timeline; the
   // full trace still lists every step.
   steps: lenientList(traceStepSummarySchema).transform((steps) =>
     steps.flatMap((step) => (isInvalid(step) ? [] : [step]))
   ),
 })
 
-const tracePairSchema = z.object({
-  name: text,
-  value: text,
-  redacted: flag,
-})
+// The full trace schemas below read only the fields the timeline shows.
 const traceBodySchema = z.object({
-  content_type: text,
   format: open([
     'json',
     'jws_decoded',
@@ -227,7 +220,6 @@ const traceBodySchema = z.object({
     'pem_summary',
     'omitted',
   ]).default(''),
-  bytes: amount,
   excerpt: text,
   truncated: flag,
   omitted_reason: open([
@@ -242,21 +234,16 @@ const traceBodySchema = z.object({
 const traceHttpSchema = z.object({
   method: text,
   url: text,
-  scheme: text,
   host: text,
   path: text,
-  query: z.array(tracePairSchema).default([]),
-  request_headers: z.array(tracePairSchema).default([]),
   request_body: traceBodySchema.nullable().default(null),
   // HTTP status; 0 when the request failed in transport.
   status: amount,
   transport_error: text,
-  response_headers: z.array(tracePairSchema).default([]),
   response_body: traceBodySchema.nullable().default(null),
 })
 const traceDnsSchema = z.object({
   resolver: text,
-  transport: text,
   name: text,
   type: text,
   rcode: text,
@@ -268,18 +255,12 @@ const traceDnsSchema = z.object({
 const traceNodeMessageSchema = z.object({
   direction: open(['sent', 'received']).default(''),
   message: text,
-  request_id: text,
   object_count: amount,
-  bytes: amount,
   fields: z.array(z.object({ name: text, value: text })).default([]),
 })
 const traceCallSchema = z.object({
-  index: amount,
   kind: open(['http', 'dns', 'node_message']),
   operation: text,
-  subject: text,
-  started_at: text,
-  offset_ms: amount,
   duration_ms: amount,
   outcome: open([
     'ok',
@@ -290,8 +271,6 @@ const traceCallSchema = z.object({
   ]).default(''),
   // Identical requests within a step (ACME polling, nonces) fold into one.
   repeat_count: z.number().int().positive().default(1),
-  repeat_total_ms: amount,
-  last_started_at: text,
   provider_request_id: text,
   provider_code: text,
   error: text,
@@ -301,59 +280,36 @@ const traceCallSchema = z.object({
 })
 const traceLogSchema = z.object({
   at: text,
-  offset_ms: amount,
   level: open(['info', 'warning', 'error']).default('info'),
   message: text,
   repeat_count: z.number().int().positive().default(1),
 })
 const traceStepSchema = z.object({
-  index: amount,
   code: text,
   label: text,
   subject: text,
-  started_at: text,
-  offset_ms: amount,
   duration_ms: amount,
   outcome: traceStepOutcome,
   error: text,
   related_task: z
     .object({
       task_id: z.string(),
-      resource_type: text,
       resource_id: z.string(),
       label: text,
     })
     .nullable()
     .default(null),
-  call_count: amount,
   omitted_calls: amount,
   calls: lenientList(traceCallSchema),
   logs: lenientList(traceLogSchema),
 })
 /** Full trace of one attempt (`/tasks/:id/attempts/:attempt_id/trace/stream`). */
 export const taskAttemptTraceSchema = z.object({
-  attempt_id: text,
-  task_id: text,
-  resource_type: text,
-  resource_id: text,
-  kind: text,
   state: open(['available', 'none']),
-  attempt: amount,
-  outcome: open(['completed', 'failed']).default(''),
-  error: text,
-  started_at: text,
-  emitted_at: text,
-  duration_ms: amount,
-  worker_type: text,
   capture: z
     .object({
       truncated: flag,
       degraded: flag,
-      bytes: amount,
-      omitted_steps: amount,
-      omitted_calls: amount,
-      omitted_logs: amount,
-      omitted_body_bytes: amount,
       redactions: amount,
     })
     .prefault({}),
@@ -402,4 +358,3 @@ export type TraceLog = Exclude<TraceStep['logs'][number], InvalidItem>
 export type TraceBody = NonNullable<
   NonNullable<TraceCall['http']>['request_body']
 >
-export type TracePair = NonNullable<TraceCall['http']>['query'][number]

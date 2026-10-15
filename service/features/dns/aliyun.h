@@ -79,6 +79,8 @@ enum class aliyun_error_code {
     domain_not_found,
     dns_failed,
     record_conflict,
+    // The name already holds records the new one cannot share (DomainRecordConflict).
+    record_name_conflict,
     record_not_found,
 };
 
@@ -221,10 +223,10 @@ inline std::int64_t aliyun_page_count(const envelope_type& envelope, std::size_t
 }
 
 // The error of a failed Aliyun reply: `Code: Message` as the reply names
-// them, else the fallback. The text passes the attempt's redaction: a
-// SignatureDoesNotMatch echo of the string to sign (AccessKeyId,
-// SignatureNonce, Signature) and any credential of the attempt are replaced
-// before the text can reach the task error or the server log.
+// them (a DomainRecordConflict as its Chinese reason), else the fallback. The text
+// passes the attempt's redaction: a SignatureDoesNotMatch echo of the string to sign
+// (AccessKeyId, SignatureNonce, Signature) and any credential of the attempt are
+// replaced before the text can reach the task error or the server log.
 [[nodiscard]] inline aliyun_error aliyun_reply_error(service::attempt_trace::recorder& trace, std::string_view body,
     aliyun_error_code fallback_code, std::string_view fallback_message, std::pmr::memory_resource* resource) {
     auto code = fallback_code;
@@ -254,6 +256,9 @@ inline std::int64_t aliyun_page_count(const envelope_type& envelope, std::size_t
         } else if (code_text.find("Domain") != std::string_view::npos &&
                    code_text.find("NotFound") != std::string_view::npos) {
             code = aliyun_error_code::domain_not_found;
+        } else if (code_text == "DomainRecordConflict") {
+            code = aliyun_error_code::record_name_conflict;
+            message = "阿里云 DNS 拒绝该记录：同名主机记录已有冲突的解析记录（DomainRecordConflict）";
         } else if (code_text.find("Duplicate") != std::string_view::npos ||
                    code_text.find("RecordForbidden") != std::string_view::npos) {
             code = aliyun_error_code::record_conflict;

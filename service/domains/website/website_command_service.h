@@ -198,8 +198,6 @@ private:
             switch (*error) {
                 case domain_claim_error::managed_zone_not_found:
                     service::common::throw_app_error(website_error::managed_zone_not_found);
-                case domain_claim_error::managed_zone_apex_unsupported:
-                    service::common::throw_app_error(website_error::managed_zone_apex_unsupported);
             }
         }
         auto claims = std::get<std::vector<domain_claim>>(std::move(planned));

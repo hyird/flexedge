@@ -3,25 +3,20 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'vitest'
 import { taskAttemptTraceQuery } from './data'
-import {
-  AttemptTrace,
-  AttemptTraceView,
-  NodeMessageDetail,
-  RedactedText,
-} from './task-attempt-trace'
+import { AttemptTimeline, RedactedText } from './task-attempt-trace'
 import {
   formatTraceClock,
   formatTraceTime,
   formatTraceDuration,
   httpStatusTone,
   isConfigVersionField,
+  observeFirstSight,
   splitRedacted,
 } from './task-trace'
 import {
   invalidItem,
   taskAttemptTraceSchema,
   taskHistorySchema,
-  type TaskAttemptTrace,
   type TaskAttemptTraceSummary,
 } from './types'
 
@@ -282,11 +277,17 @@ function parseTrace(value: unknown) {
   return taskAttemptTraceSchema.parse(value)
 }
 
-test('trace schemas parse the contract samples', () => {
+test('trace schemas read the contract samples', () => {
   const history = taskHistorySchema.parse(
     historyOf({ ...attemptBase, trace: summarySample })
   )
-  expect(history.list[0].trace).toEqual(summarySample)
+  // Only what the timeline shows; totals and the failed step stay on the wire.
+  expect(history.list[0].trace).toEqual({
+    state: 'available',
+    attempt_id: '48213',
+    step_count: 6,
+    steps: summarySample.steps,
+  })
 
   const trace = parseTrace({
     ...traceSample,
@@ -308,32 +309,87 @@ test('trace schemas parse the contract samples', () => {
       abridgedStep,
     ],
   })
-  expect(trace.capture.redactions).toBe(2)
+  expect(trace.capture).toEqual({
+    truncated: false,
+    degraded: false,
+    redactions: 2,
+  })
   const [first, second, abridged] = trace.steps
-  expect(first).toEqual(stepSample)
+  expect(first).toEqual({
+    code: 'find_zone',
+    label: '查找远程托管区域',
+    subject: 'example.com',
+    duration_ms: 5012,
+    outcome: 'failed',
+    error: 'Cloudflare API 连接失败',
+    related_task: null,
+    omitted_calls: 0,
+    calls: [
+      {
+        kind: 'http',
+        operation: 'cloudflare.find_zone',
+        duration_ms: 5003,
+        outcome: 'transport_error',
+        repeat_count: 1,
+        provider_request_id: '',
+        provider_code: '',
+        error: 'connect_failed',
+        http: {
+          method: 'GET',
+          url: httpSample.url,
+          host: 'alidns.aliyuncs.com',
+          path: '/',
+          request_body: null,
+          status: 0,
+          transport_error: 'connect_failed',
+          response_body: null,
+        },
+        dns: null,
+        node_message: null,
+      },
+    ],
+    logs: [
+      {
+        at: logSample.at,
+        level: 'warning',
+        message: logSample.message,
+        repeat_count: 1,
+      },
+    ],
+  })
   expect(second).toMatchObject({
-    calls: [{ dns: dnsSample, http: httpSample }, { node_message: nodeSample }],
+    calls: [
+      {
+        dns: {
+          resolver: 'dns.alidns.com',
+          rcode: 'NOERROR',
+          answers: dnsSample.answers,
+        },
+        http: { status: 400, response_body: { format: 'json' } },
+      },
+      {
+        node_message: {
+          direction: 'received',
+          message: 'ApplyResult',
+          fields: nodeSample.fields,
+        },
+      },
+    ],
   })
   expect(abridged).toMatchObject({
     subject: '',
-    offset_ms: 0,
     related_task: null,
     logs: [],
     calls: [
       {
         repeat_count: 31,
         outcome: '',
-        http: {
-          method: 'HEAD',
-          query: [],
-          request_body: null,
-          transport_error: '',
-        },
+        http: { method: 'HEAD', request_body: null, transport_error: '' },
       },
       {
         repeat_count: 30,
         http: {
-          request_body: { format: 'jws_decoded', bytes: 0, omitted_reason: '' },
+          request_body: { format: 'jws_decoded', omitted_reason: '' },
           response_body: { format: 'json', truncated: false },
         },
       },
@@ -348,7 +404,6 @@ test('trace schemas parse the contract samples', () => {
 test('unknown values and malformed items degrade locally', () => {
   const trace = parseTrace({
     ...traceSample,
-    worker_type: 'future-worker',
     steps: [
       {
         ...stepSample,
@@ -373,7 +428,7 @@ test('unknown values and malformed items degrade locally', () => {
         ],
         logs: [
           { ...logSample, level: 'debug' },
-          { ...logSample, offset_ms: -1 },
+          { ...logSample, repeat_count: 0 },
         ],
       },
       { ...stepSample, calls: 'none' },
@@ -389,13 +444,21 @@ test('unknown values and malformed items degrade locally', () => {
   expect(step.calls[4]).toMatchObject({
     http: { response_body: { format: 'cbor', omitted_reason: 'quota' } },
   })
-  expect(step.logs).toEqual([{ ...logSample, level: 'debug' }, invalidItem])
+  expect(step.logs).toEqual([
+    {
+      at: logSample.at,
+      level: 'debug',
+      message: logSample.message,
+      repeat_count: 1,
+    },
+    invalidItem,
+  ])
   expect(broken).toEqual(invalidItem)
-  expect(intact).toEqual(stepSample)
+  expect(intact).toEqual(parseTrace(traceSample).steps[0])
 
   // History: a malformed summary hides only that attempt's trace; an absent
   // one (backend without traces) is null; summary items that do not parse
-  // drop out of the strip.
+  // drop out of the timeline.
   const history = taskHistorySchema.parse(
     historyOf(
       { ...attemptBase, trace: { ...summarySample, step_count: 'six' } },
@@ -414,7 +477,12 @@ test('unknown values and malformed items degrade locally', () => {
   expect(history.list.map((item) => item.trace)).toEqual([
     invalidItem,
     null,
-    { ...summarySample, state: 'expired', steps: [summarySample.steps[0]] },
+    {
+      state: 'expired',
+      attempt_id: '48213',
+      step_count: 6,
+      steps: [summarySample.steps[0]],
+    },
   ])
   // The attempt envelope itself stays strict.
   expect(() =>
@@ -477,88 +545,62 @@ test('trace display helpers', () => {
   ).toEqual([false, false, false, false])
 })
 
-test('node message fields never render release identifiers', () => {
-  const release = '5a1ae4e9-be8a-42dc-9285-4f7f6c68906a'
-  const html = render(
-    createElement(NodeMessageDetail, {
-      message: {
-        ...nodeSample,
-        fields: [
-          { name: 'release_id', value: release },
-          ...nodeSample.fields,
-          { name: 'manifest_digest', value: 'sha256-6727a0b3' },
-        ],
-      },
-    })
-  ).html
-  expect(html).not.toContain('release_id')
-  expect(html).not.toContain(release)
-  expect(html).not.toContain('manifest_digest')
-  expect(html).not.toContain('6727a0b3')
-  expect(html).toContain('failed_phase')
-  expect(html).toContain('validate')
-
-  // A DesiredState carries only `release_id`: no field list at all.
-  const desired = render(
-    createElement(NodeMessageDetail, {
-      message: {
-        ...nodeSample,
-        direction: 'sent',
-        message: 'DesiredState',
-        fields: [{ name: 'release_id', value: release }],
-      },
-    })
-  ).html
-  expect(desired).not.toContain(release)
-  expect(desired).not.toContain('字段')
-})
-
 function render(element: ReactElement, client = new QueryClient()) {
   const html = renderToStaticMarkup(
     createElement(QueryClientProvider, { client }, element)
   )
-  return { html, client }
+  client.clear()
+  return html
 }
 
-test('redaction markers render as badges, never as raw text', () => {
-  const { html } = render(
-    createElement(RedactedText, { value: httpSample.url })
-  )
-  expect(html).not.toContain('[REDACTED]')
-  expect(html.split('已隐藏').length - 1).toBe(3)
-  expect(html).toContain('Action=DescribeDomainRecords')
+const summary = taskHistorySchema.parse(
+  historyOf({ ...attemptBase, trace: summarySample })
+).list[0].trace
 
-  // The full trace view: redacted subject and error inside step rows, and the
-  // capture footer counts hidden values.
+/** Timeline of the sample attempt with `steps` as its cached full trace. */
+function renderTimeline(steps?: unknown[]) {
   const client = new QueryClient()
-  const trace: TaskAttemptTrace = parseTrace({
-    ...traceSample,
-    steps: [
-      {
-        ...stepSample,
-        subject: 'key=[REDACTED]',
-        error: 'token [REDACTED] rejected',
-      },
-    ],
-  })
-  client.setQueryData(taskAttemptTraceQuery('task-1', '48213').queryKey, trace)
-  const view = render(
-    createElement(AttemptTraceView, { taskId: 'task-1', attemptId: '48213' }),
+  if (steps)
+    client.setQueryData(
+      taskAttemptTraceQuery('task-1', '48213').queryKey,
+      parseTrace({ ...traceSample, steps })
+    )
+  return render(
+    createElement(AttemptTimeline, { taskId: 'task-1', trace: summary }),
     client
-  ).html
-  expect(view).not.toContain('[REDACTED]')
-  expect(view).toContain('已隐藏 2 处敏感内容')
-  expect(view).toContain('查找远程托管区域')
-  expect(view).toContain('rejected')
-  // Outcomes are labelled icons, not visually hidden absolute spans: those
-  // escape the sheet body's scroll box and let scrolling move the whole sheet.
-  expect(view).toContain('role="img" aria-label="失败"')
-  expect(view).not.toContain('sr-only')
-  client.clear()
-})
+  )
+}
 
-test('step strip shows merged steps and the failed step; the trace loads on demand only', () => {
-  const summary = taskHistorySchema.parse(
+test('the timeline renders from the summary before the full trace arrives', () => {
+  const html = renderTimeline()
+  for (const label of [
+    '加载同步状态',
+    '解密凭据',
+    '校验 TTL',
+    '查找远程托管区域',
+    '记录失败',
+  ])
+    expect(html).toContain(label)
+  expect(html).toContain('5.01 s')
+  // One vertical list with a small labelled dot per step; the dots name
+  // their outcome themselves (visually hidden spans escape the sheet body's
+  // scroll box and let scrolling move the whole sheet).
+  expect(html).toContain('<ol aria-label="执行步骤"')
+  // Five listed steps plus the one left out of the summary.
+  expect(html.match(/role="img"/g)).toHaveLength(6)
+  expect(html).toContain('另有 1 个步骤')
+  expect(html).toContain('role="img" aria-label="失败"')
+  expect(html).toContain('size-1.5')
+  expect(html).not.toContain('sr-only')
+  // Only the step that made a call holds a placeholder for its details.
+  expect(html.match(/class="skeleton /g)).toHaveLength(1)
+  // No toggles, counts or captions.
+  expect(html).not.toContain('aria-expanded')
+  expect(html).not.toContain('执行详情')
+  expect(html).not.toContain('失败步骤')
+
+  // Merged steps show their count; steps left out of the summary one line.
+  const merged = taskHistorySchema.parse(
     historyOf({
       ...attemptBase,
       trace: {
@@ -578,41 +620,177 @@ test('step strip shows merged steps and the failed step; the trace loads on dema
       },
     })
   ).list[0].trace
-  const { html, client } = render(
-    createElement(AttemptTrace, { taskId: 'task-1', trace: summary })
+  const mergedHtml = render(
+    createElement(AttemptTimeline, { taskId: 'task-1', trace: merged })
   )
-  expect(html).toContain('失败步骤：查找远程托管区域')
-  expect(html).toContain('×4')
-  expect(html).toContain('5.10 s')
-  // 8 steps in total, 7 listed (three single steps + four merged).
-  expect(html).toContain('另有 1 个步骤')
-  // The merged failed step is highlighted.
-  expect(html).toMatch(/<li class="[^"]*text-danger[^"]*">.*?检测域名解析/)
-  expect(html).toContain('查看执行详情')
-  expect(html).toContain('8 个步骤 · 3 次调用 · 4 条日志')
-  expect(html).toContain('role="img" aria-label="完成"')
-  expect(html).not.toContain('sr-only')
-  // Collapsed: no trace query exists, so nothing was requested.
-  expect(
-    client.getQueryCache().findAll({ queryKey: ['tasks', 'trace'] })
-  ).toEqual([])
+  expect(mergedHtml).toContain('×4')
+  expect(mergedHtml).toContain('5.10 s')
+  expect(mergedHtml).toContain('另有 1 个步骤')
+  expect(mergedHtml).toMatch(/text-danger[^"]*">检测域名解析/)
+})
 
+test('the full trace fills in the failed step error, calls and logs', () => {
+  const html = renderTimeline([
+    stepSample,
+    {
+      ...stepSample,
+      code: 'list_records',
+      label: '拉取远程记录',
+      outcome: 'completed',
+      error: '',
+      calls: [
+        {
+          ...callSample,
+          outcome: 'http_error',
+          provider_request_id: '5E7C-request',
+          provider_code: 'SignatureDoesNotMatch',
+          error: '',
+          http: httpSample,
+        },
+        { ...callSample, kind: 'dns', http: httpSample, dns: dnsSample },
+      ],
+      logs: [{ ...logSample, repeat_count: 3 }],
+    },
+  ])
+  expect(html).toMatch(/text-danger">Cloudflare API 连接失败<\/p>/)
+  // Transport failures read as short text instead of a status 0.
+  expect(html).toContain('无法建立连接')
+  // HTTP: method, host + path, status, provider ids, the response excerpt.
+  expect(html).toContain('alidns.aliyuncs.com/')
+  expect(html).toContain('>400<')
+  expect(html).toContain('5E7C-request')
+  expect(html).toContain('SignatureDoesNotMatch')
+  expect(html).toContain('&quot;HostId&quot;: &quot;alidns.aliyuncs.com&quot;')
+  // DNS: resolver, query, rcode and answers.
+  expect(html).toContain('dns.alidns.com · flexedge-1a2b3c4d.example.com CNAME')
+  expect(html).toContain('NOERROR')
+  expect(html).toContain('edge-hk.cdn.example.net')
+  // Logs: console clock, short level, folded repeats.
+  expect(html).toContain('22:16:49.138')
+  expect(html).toContain('警告')
+  expect(html).toContain('×3')
+  // No query/header tables, no placeholders, no toggles.
+  expect(html).not.toContain('x-acs-request-id')
+  expect(html).not.toContain('Action=DescribeDomainRecords')
+  expect(html).not.toContain('skeleton')
+  expect(html).not.toContain('aria-expanded')
+  expect(html).toContain('已隐藏 2 处')
+})
+
+test('node message fields never render release identifiers', () => {
+  const release = '5a1ae4e9-be8a-42dc-9285-4f7f6c68906a'
+  const html = renderTimeline([
+    {
+      ...stepSample,
+      calls: [
+        {
+          ...callSample,
+          kind: 'node_message',
+          http: null,
+          node_message: {
+            ...nodeSample,
+            direction: 'sent',
+            message: 'DesiredState',
+            fields: [{ name: 'release_id', value: release }],
+          },
+        },
+        {
+          ...callSample,
+          kind: 'node_message',
+          http: null,
+          node_message: {
+            ...nodeSample,
+            fields: [
+              { name: 'release_id', value: release },
+              ...nodeSample.fields,
+              { name: 'manifest_digest', value: 'sha256-6727a0b3' },
+            ],
+          },
+        },
+      ],
+    },
+  ])
+  expect(html).toContain('DesiredState')
+  expect(html).toContain('ApplyResult')
+  expect(html).not.toContain('release_id')
+  expect(html).not.toContain(release)
+  expect(html).not.toContain('manifest_digest')
+  expect(html).not.toContain('6727a0b3')
+  expect(html).toContain('failed_phase=')
+  expect(html).toContain('validate')
+})
+
+test('redaction markers render as badges, never as raw text', () => {
+  const html = render(createElement(RedactedText, { value: httpSample.url }))
+  expect(html).not.toContain('[REDACTED]')
+  expect(html.split('已隐藏').length - 1).toBe(3)
+  expect(html).toContain('Action=DescribeDomainRecords')
+
+  const timeline = renderTimeline([
+    {
+      ...stepSample,
+      subject: 'key=[REDACTED]',
+      error: 'token [REDACTED] rejected',
+      calls: [{ ...callSample, error: '', http: httpSample }],
+      logs: [{ ...logSample, message: 'nonce [REDACTED] reused' }],
+    },
+  ])
+  expect(timeline).not.toContain('[REDACTED]')
+  expect(timeline).toContain('rejected')
+  expect(timeline).toContain('reused')
+  expect(timeline).toContain('已隐藏 2 处')
+})
+
+test('attempts without a trace render nothing', () => {
   const none: TaskAttemptTraceSummary = {
-    ...summarySample,
     state: 'none',
+    attempt_id: '48213',
+    step_count: 0,
     steps: [],
   }
-  const empty = render(
-    createElement(AttemptTrace, { taskId: 'task-1', trace: none })
-  ).html
-  expect(empty).toContain('此次尝试没有执行详情')
-  expect(empty).not.toContain('查看执行详情')
-  expect(
-    render(createElement(AttemptTrace, { taskId: 'task-1', trace: null })).html
-  ).toBe('')
+  for (const trace of [none, null, { ...none, state: 'available' }])
+    expect(
+      render(createElement(AttemptTimeline, { taskId: 'task-1', trace }))
+    ).toBe('')
   expect(
     render(
-      createElement(AttemptTrace, { taskId: 'task-1', trace: invalidItem })
-    ).html
-  ).toContain('执行详情无法显示')
+      createElement(AttemptTimeline, { taskId: 'task-1', trace: invalidItem })
+    )
+  ).toContain('执行详情无法识别')
+})
+
+test('a timeline reports first sight once, then stops observing', () => {
+  const observers: {
+    notify: IntersectionObserverCallback
+    disconnected: boolean
+  }[] = []
+  const original = globalThis.IntersectionObserver
+  // Node has no IntersectionObserver; this stand-in records its callback.
+  globalThis.IntersectionObserver = class {
+    state
+    constructor(notify: IntersectionObserverCallback) {
+      this.state = { notify, disconnected: false }
+      observers.push(this.state)
+    }
+    observe() {}
+    disconnect() {
+      this.state.disconnected = true
+    }
+  } as never
+  try {
+    let seen = 0
+    const stop = observeFirstSight({} as Element, () => {
+      seen += 1
+    })
+    const [observer] = observers
+    observer.notify([{ isIntersecting: false }] as never, {} as never)
+    expect(seen).toBe(0)
+    expect(observer.disconnected).toBe(false)
+    observer.notify([{ isIntersecting: true }] as never, {} as never)
+    expect(seen).toBe(1)
+    expect(observer.disconnected).toBe(true)
+    stop()
+  } finally {
+    globalThis.IntersectionObserver = original
+  }
 })

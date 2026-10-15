@@ -163,23 +163,69 @@ export function taskHistoryQuery(task: TaskSelection | null) {
   })
 }
 
+/** Trace reads open at once; later reads wait in request order. */
+export const traceReadLimit = 2
+let openTraceReads = 0
+const queuedTraceReads = new Set<() => void>()
+
+/** Takes one of the `traceReadLimit` slots, waiting while all are taken. A
+ * read cancelled while waiting leaves the queue without opening a stream. */
+function acquireTraceRead(signal: AbortSignal) {
+  if (signal.aborted) return Promise.reject(signal.reason)
+  if (openTraceReads < traceReadLimit) {
+    openTraceReads += 1
+    return Promise.resolve()
+  }
+  return new Promise<void>((resolve, reject) => {
+    const start = () => {
+      queuedTraceReads.delete(start)
+      signal.removeEventListener('abort', cancel)
+      openTraceReads += 1
+      resolve()
+    }
+    const cancel = () => {
+      queuedTraceReads.delete(start)
+      reject(signal.reason)
+    }
+    queuedTraceReads.add(start)
+    signal.addEventListener('abort', cancel, { once: true })
+  })
+}
+
+function releaseTraceRead() {
+  openTraceReads -= 1
+  queuedTraceReads.values().next().value?.()
+}
+
 /** Full trace of one attempt: a one-shot snapshot (the stream closes after
- * its first frame) read only while the attempt's trace view is expanded,
- * never with the history itself. Stored traces never change, so the cached
- * snapshot stays fresh: re-expanding within `gcTime` reads nothing, and no
- * event or refresh invalidates it. */
-export function taskAttemptTraceQuery(taskId: string, attemptId: string) {
+ * its first frame), never part of the history itself. It is read only once
+ * the attempt is `visible`, with at most `traceReadLimit` reads open at once.
+ * Stored traces never change, so the snapshot is cached for good: no event
+ * or refresh reads it again. Unmounting the history (closing the sheet)
+ * cancels pending and queued reads. */
+export function taskAttemptTraceQuery(
+  taskId: string,
+  attemptId: string,
+  visible = true
+) {
   return queryOptions({
     retry: false,
     staleTime: Infinity,
-    gcTime: 5 * 60_000,
+    gcTime: Infinity,
+    enabled: visible,
     queryKey: [...queryKeys.tasks, 'trace', taskId, attemptId],
-    queryFn: ({ queryKey, signal }) =>
-      readLiveSnapshot(
-        streamPath(`/tasks/${taskId}/attempts/${attemptId}/trace`),
-        queryKey,
-        signal,
-        (data) => parse(taskAttemptTraceSchema, data)
-      ),
+    queryFn: async ({ queryKey, signal }) => {
+      await acquireTraceRead(signal)
+      try {
+        return await readLiveSnapshot(
+          streamPath(`/tasks/${taskId}/attempts/${attemptId}/trace`),
+          queryKey,
+          signal,
+          (data) => parse(taskAttemptTraceSchema, data)
+        )
+      } finally {
+        releaseTraceRead()
+      }
+    },
   })
 }

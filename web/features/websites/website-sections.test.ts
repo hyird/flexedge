@@ -30,6 +30,7 @@ describe('website settings sections', () => {
 
   it('maps nested error paths to their owning group', () => {
     expect(websiteSectionForPath('origins.2.host')).toBe('origins')
+    expect(websiteSectionForPath('domains.1.zone')).toBe('domains')
     expect(websiteSectionForPath('default_origin_group')).toBe('origins')
     expect(websiteSectionForPath('origin_host_header')).toBe('origin-settings')
     expect(websiteSectionForPath('route_rules.0.path')).toBe('routes')

@@ -302,18 +302,23 @@ inline ruvia::task<bool> persist_remote_merge(service::background::worker_contex
     co_return true;
 }
 
+// Records the attempt's runtime and completes the marker. Records the attempt left unpushed
+// (`unsynced_error` non-empty) mark the zone failed without a retry: nothing changes until the
+// records, the website domains or a manual sync enqueue a new revision.
 inline ruvia::task<void> persist_synced_zone(service::background::worker_context& context,
     service::attempt_trace::recorder& trace, const dns_task& task,
     const service::sync_runtime::running_marker_lease& lease,
-    const zone_runtime_dto& runtime, std::int64_t revision, std::string_view detail) {
+    const zone_runtime_dto& runtime, std::int64_t revision, std::string_view unsynced_error,
+    std::string_view detail) {
     const auto runtime_json = ruvia::to_json(runtime, {.resource_ = context.pool()});
     auto transaction = co_await context.db().begin_transaction();
     const auto updated = co_await transaction.execute(
         "UPDATE sys_dns_zone SET runtime = $2::jsonb, synced_revision = GREATEST("
-        "synced_revision, $3), sync_status = CASE WHEN desired_revision <= $3 THEN 'synced' ELSE "
-        "'pending' END, last_synced_at = NOW(), last_error = NULL, updated_at = NOW() WHERE id = "
-        "$1 AND tenant_id = $4 AND desired_revision = $3",
-        task.resource_id_, std::string_view(runtime_json), revision, task.tenant_id_);
+        "synced_revision, $3), sync_status = CASE WHEN desired_revision > $3 THEN 'pending' WHEN "
+        "$5::text = '' THEN 'synced' ELSE 'failed' END, last_synced_at = NOW(), last_error = "
+        "NULLIF($5::text, ''), updated_at = NOW() WHERE id = $1 AND tenant_id = $4 AND "
+        "desired_revision = $3",
+        task.resource_id_, std::string_view(runtime_json), revision, task.tenant_id_, unsynced_error);
     service::sync_runtime::running_result_transition result_transition;
     if (updated.affected_rows() == 0) {
         (void)co_await service::sync_runtime::release_running(transaction, lease);

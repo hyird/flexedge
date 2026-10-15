@@ -1,7 +1,5 @@
-import { useState, type ReactNode } from 'react'
-import { Xmark } from '@gravity-ui/icons'
-import { Stepper } from '@heroui-pro/react'
-import { Button, Chip, Link, Table } from '@heroui/react'
+import type { ReactNode } from 'react'
+import { Chip, Link, Table } from '@heroui/react'
 import { formatDate } from '@/lib/format'
 import type { StatusTone } from '@/lib/status'
 import { CopyButton } from '@/components/copy-button'
@@ -9,7 +7,6 @@ import { Mono } from '@/components/mono'
 import { StatusChip } from '@/components/status-chip'
 import { providerLabel } from '@/features/providers/provider-display'
 import { RedactedText } from './task-attempt-trace'
-import { certificateProgress, certificateStages } from './task-history'
 import { redactedMarker } from './task-trace'
 import { known, type TaskAttemptDetail as Detail } from './types'
 
@@ -28,12 +25,10 @@ export function TaskAttemptDetail({
   outcome: string
 }) {
   if (detail.kind === 'invalid')
-    return (
-      <p className='m-0 text-xs text-muted'>明细无法显示：数据格式无法识别。</p>
-    )
+    return <p className='m-0 text-xs text-muted'>明细无法识别</p>
   if (detail.kind === 'none')
     return detail.truncated ? (
-      <p className='m-0 text-xs text-muted'>本次尝试的明细生成失败，已丢弃。</p>
+      <p className='m-0 text-xs text-muted'>明细生成失败</p>
     ) : null
   return (
     <>
@@ -47,9 +42,7 @@ export function TaskAttemptDetail({
       )}
       {detail.kind === 'node_apply' && <NodeApplyDetail detail={detail} />}
       {detail.truncated && (
-        <p className='m-0 text-xs text-muted'>
-          明细超出大小上限，部分条目已省略；数量为真实总数。
-        </p>
+        <p className='m-0 text-xs text-muted'>部分条目已省略</p>
       )}
     </>
   )
@@ -140,9 +133,6 @@ function DnsRecordValue({ record }: { record?: DnsRecord }) {
   )
 }
 
-// Long diffs show their first rows; the rest expand on demand.
-const collapsedRows = 8
-
 function DnsSyncDetail({ detail }: { detail: DetailOf<'dns_sync'> }) {
   const rows = [
     ...detail.created.map((after) => ({
@@ -164,17 +154,15 @@ function DnsSyncDetail({ detail }: { detail: DetailOf<'dns_sync'> }) {
       after: undefined,
     })),
   ]
-  const [showAll, setShowAll] = useState(false)
-  const visible = showAll ? rows : rows.slice(0, collapsedRows)
   return (
     <>
       <DetailBlock
-        title='推送到服务商的变更'
+        title='记录变更'
         aside={`新增 ${detail.created_count} · 修改 ${detail.updated_count} · 删除 ${detail.deleted_count} · 未变化 ${detail.unchanged_count}`}
       >
-        {rows.length ? (
+        {rows.length > 0 && (
           <Table variant='secondary' className={compactTable}>
-            <Table.ScrollContainer>
+            <Table.ScrollContainer className='max-h-80 overflow-y-auto'>
               <Table.Content
                 aria-label='DNS 记录变更'
                 className='min-w-[400px]'
@@ -185,7 +173,7 @@ function DnsSyncDetail({ detail }: { detail: DetailOf<'dns_sync'> }) {
                   <Table.Column>变更后</Table.Column>
                 </Table.Header>
                 <Table.Body>
-                  {visible.map((row, index) => (
+                  {rows.map((row, index) => (
                     <Table.Row key={index}>
                       <Table.Cell>
                         <TwoLines
@@ -216,29 +204,10 @@ function DnsSyncDetail({ detail }: { detail: DetailOf<'dns_sync'> }) {
               </Table.Content>
             </Table.ScrollContainer>
           </Table>
-        ) : (
-          <p className='m-0 text-xs text-muted'>
-            {detail.conflict_count
-              ? '存在冲突，本次没有推送变更。'
-              : '没有需要推送的变更。'}
-          </p>
-        )}
-        {rows.length > collapsedRows && (
-          <Button
-            size='sm'
-            variant='ghost'
-            className='h-7 self-start px-1.5 text-xs'
-            onPress={() => setShowAll(!showAll)}
-          >
-            {showAll ? '收起' : `显示全部 ${rows.length} 条`}
-          </Button>
         )}
       </DetailBlock>
       {detail.conflict_count > 0 && (
-        <DetailBlock
-          title={`冲突 ${detail.conflict_count} 条`}
-          aside='需在 DNS 区域中选择以本地或远端为准'
-        >
+        <DetailBlock title={`冲突 ${detail.conflict_count} 条`}>
           <Table variant='secondary' className={compactTable}>
             <Table.ScrollContainer>
               <Table.Content
@@ -290,56 +259,8 @@ const certificateOperations = { issue: '签发', renew: '续期' } as const
 function CertificateDetail({ detail }: { detail: DetailOf<'certificate'> }) {
   const operation = known(certificateOperations, detail.operation)
   const completed = detail.stage === 'completed'
-  const { current, failedAt } = certificateProgress(detail.stage)
-  const failed = certificateStages[failedAt]
   return (
-    <DetailBlock
-      title={`${operation ?? '执行'}进度`}
-      aside={
-        completed
-          ? '全部阶段已完成'
-          : failed
-            ? `停在第 ${failedAt + 1} 步：${failed[2]}`
-            : `停在阶段：${detail.stage || '未知'}`
-      }
-    >
-      {(completed || failed) && (
-        <div className='overflow-x-auto pb-1'>
-          <Stepper
-            size='sm'
-            currentStep={current}
-            aria-label={`证书${operation ?? ''}阶段`}
-            // Small neutral indicators: the outcome chip already carries the
-            // result, so only the failed stage is coloured. Tracks use the
-            // themed border token.
-            className='min-w-[460px] [--separator:var(--border)] [--stepper-active-color:var(--danger)] [--stepper-complete-color:var(--color-muted)] [--stepper-complete-fg:var(--color-background)] [--stepper-indicator-size:16px]'
-          >
-            {certificateStages.map(([id, label, description], index) => (
-              <Stepper.Step
-                key={id}
-                title={description}
-                aria-current={index === failedAt ? 'step' : undefined}
-              >
-                {index === failedAt ? (
-                  <Stepper.Indicator className='border-danger text-danger'>
-                    <Stepper.Icon>
-                      <Xmark />
-                    </Stepper.Icon>
-                  </Stepper.Indicator>
-                ) : (
-                  <Stepper.Indicator />
-                )}
-                <Stepper.Content>
-                  <Stepper.Title className='text-[11px] whitespace-nowrap'>
-                    {label}
-                  </Stepper.Title>
-                </Stepper.Content>
-                <Stepper.Separator />
-              </Stepper.Step>
-            ))}
-          </Stepper>
-        </div>
-      )}
+    <DetailBlock title='证书'>
       <Facts
         items={[
           ...(operation
@@ -437,9 +358,7 @@ function WebsiteDomainsDetail({
             </Table.Header>
             <Table.Body
               renderEmptyState={() => (
-                <p className='m-0 py-2 text-center text-xs text-muted'>
-                  本次没有检查任何域名。
-                </p>
+                <p className='m-0 py-2 text-center text-xs text-muted'>无</p>
               )}
             >
               {detail.domains.map((domain) => (

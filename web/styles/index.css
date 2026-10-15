@@ -44,6 +44,10 @@
   html {
     -webkit-text-size-adjust: 100%;
     text-rendering: optimizeLegibility;
+    /* The page is the workspace scroller. Reserve the scrollbar's space even
+       when the content fits, so switching tabs or a loading skeleton never
+       toggles the scrollbar and shifts the whole page sideways. */
+    scrollbar-gutter: stable;
   }
   body {
     min-width: 320px;

@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <span>
 #include <string>
-#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -16,8 +15,7 @@
 
 namespace service::website {
 
-enum class domain_claim_error { managed_zone_not_found,
-    managed_zone_apex_unsupported };
+enum class domain_claim_error { managed_zone_not_found };
 
 inline std::variant<std::vector<domain_claim>, domain_claim_error> plan_domain_claims(
     std::span<const service::website_config::website_domain_data> domains,
@@ -45,14 +43,6 @@ inline std::variant<std::vector<domain_claim>, domain_claim_error> plan_domain_c
             }
             if (!owner) {
                 return domain_claim_error::managed_zone_not_found;
-            }
-            auto hostname = std::string_view{domain.hostname_};
-            if (hostname.starts_with("*.")) {
-                hostname.remove_prefix(2);
-            }
-            if (service::common::normalize_domain_name(hostname) ==
-                service::common::normalize_domain_name(owner->domain_)) {
-                return domain_claim_error::managed_zone_apex_unsupported;
             }
             claim.dns_zone_id_ = owner->id_;
         }

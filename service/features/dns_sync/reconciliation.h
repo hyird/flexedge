@@ -391,4 +391,84 @@ plan_remote_merge(std::string_view operation, const zone_config_data& config,
     return result;
 }
 
+// A desired record the sync leaves unpushed this attempt, with the reason shown on its record
+// state; `name_` is relative to the hosted zone ("@", "www").
+struct unsynced_record final {
+    std::string id_;
+    std::string name_;
+    std::string type_;
+    std::string error_;
+};
+
+// RFC 1034 §3.6.2: a CNAME owns its name alone. At the zone apex both providers keep MX and
+// TXT beside it (Cloudflare through CNAME flattening, Aliyun by its documented "@" exception);
+// A, AAAA and another CNAME never share the name, and below the apex no other record does.
+// Aliyun applies the rule within one resolution line; Cloudflare only has the default line.
+[[nodiscard]] inline bool coexists_with_cname(std::string_view type, bool zone_apex) {
+    return zone_apex && (type == "MX" || type == "TXT");
+}
+
+// Website CNAMEs whose owner name already carries records they cannot share. FlexEdge never
+// removes those records (they belong to the user, a cluster or a certificate challenge), so
+// the website CNAME is held back and reported instead of making the provider reject the
+// attempt over and over.
+[[nodiscard]] inline std::vector<unsynced_record> find_blocked_website_records(
+    const zone_config_data& desired, const std::unordered_set<std::string>& website_record_ids,
+    const service::dns::record_name_policy& names, std::string_view domain) {
+    std::vector<unsynced_record> result;
+    for (const auto& record : desired.records_) {
+        if (record.type_ != "CNAME" || !website_record_ids.contains(record.id_)) {
+            continue;
+        }
+        const auto remote_name = names.remote_record_name(record.name_, domain);
+        const auto owner = service::common::normalize_domain_name(remote_name);
+        auto local_name = names.local_record_name(remote_name, domain);
+        const bool zone_apex = local_name == "@";
+        std::vector<std::string_view> blocking_types;
+        for (const auto& other : desired.records_) {
+            if (other.id_ == record.id_ || other.line_code_ != record.line_code_ ||
+                service::common::normalize_domain_name(names.remote_record_name(other.name_, domain)) !=
+                    owner ||
+                coexists_with_cname(other.type_, zone_apex) ||
+                (other.type_ == "CNAME" && service::common::normalize_domain_name(other.content_) ==
+                                               service::common::normalize_domain_name(record.content_))) {
+                continue;
+            }
+            if (std::ranges::find(blocking_types, other.type_) == blocking_types.end()) {
+                blocking_types.push_back(other.type_);
+            }
+        }
+        if (blocking_types.empty()) {
+            continue;
+        }
+        std::string types;
+        for (const auto type : blocking_types) {
+            if (!types.empty()) {
+                types += "、";
+            }
+            types += type;
+        }
+        auto error = "主机记录 " + local_name + " 已有 " + types +
+                     " 记录，不能再添加 CNAME；请删除或修改这些记录，或把该网站域名改为外部解析";
+        result.push_back({.id_ = record.id_,
+            .name_ = std::move(local_name),
+            .type_ = record.type_,
+            .error_ = std::move(error)});
+    }
+    return result;
+}
+
+// The zone-level error of an attempt that left records unpushed: the count and the first reason.
+[[nodiscard]] inline std::string unsynced_records_error(const std::vector<unsynced_record>& records) {
+    if (records.empty()) {
+        return {};
+    }
+    const auto& first = records.front();
+    const auto subject = first.name_ + " " + first.type_ + "：" + first.error_;
+    if (records.size() == 1) {
+        return "1 条记录未同步：" + subject;
+    }
+    return std::to_string(records.size()) + " 条记录未同步，首条 " + subject;
+}
+
 }  // namespace service::dns_sync::detail

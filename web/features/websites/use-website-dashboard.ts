@@ -16,14 +16,31 @@ export function useWebsiteDashboard(websiteId: string) {
   const [error, setError] = useState<string | null>(null)
   const query = useQuery<WebsiteDashboard>({
     queryKey: [...queryKeys.websites, websiteId, 'dashboard'],
+    // Frames come from the stream below, never from a refetch.
     enabled: false,
     queryFn: () => {
       throw new Error('统计由实时事件提供')
     },
   })
   useEffect(() => {
+    const queryKey = [...queryKeys.websites, websiteId, 'dashboard']
     let active = true
     let stream: ReturnType<typeof reconnectingEventSource> | undefined
+    // Without cached statistics the first frame is a real query load
+    // (pending until it arrives, like any snapshot read), so the page sees
+    // this tab loading; e.g. `PageTabs` keeps its height until then.
+    let deliverFirstFrame: ((data: WebsiteDashboard) => void) | null = null
+    if (client.getQueryData(queryKey) === undefined)
+      void client
+        .fetchQuery<WebsiteDashboard>({
+          queryKey,
+          queryFn: () =>
+            new Promise((resolve) => {
+              deliverFirstFrame = resolve
+            }),
+        })
+        // Cancelled below when the tab closes before the first frame.
+        .catch(() => undefined)
     const connect = () => {
       stream?.close()
       // The dashboard owns its EventSource; close the previous tab's live
@@ -40,13 +57,15 @@ export function useWebsiteDashboard(websiteId: string) {
           const data = parseWebsiteDashboard(
             (event as MessageEvent<string>).data
           )
-          client.setQueryData<WebsiteDashboard>(
-            [...queryKeys.websites, websiteId, 'dashboard'],
-            (previous) =>
+          if (deliverFirstFrame) {
+            deliverFirstFrame(data)
+            deliverFirstFrame = null
+          } else
+            client.setQueryData<WebsiteDashboard>(queryKey, (previous) =>
               previous && JSON.stringify(previous) === JSON.stringify(data)
                 ? previous
                 : data
-          )
+            )
           setError(null)
         } catch {
           setError('统计数据格式不正确，当前数据已保留。')
@@ -72,6 +91,9 @@ export function useWebsiteDashboard(websiteId: string) {
       active = false
       cleanup()
       stream?.close()
+      // No frame arrived: drop the pending load, the query reverts to empty.
+      if (deliverFirstFrame)
+        void client.cancelQueries({ queryKey, exact: true })
     }
   }, [client, websiteId, retry])
   return {
