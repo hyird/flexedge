@@ -23,8 +23,8 @@ const policyCopy: Record<
   },
 }
 
-/** Sync, conflict resolution and removal shared by the zone list rows and the
- * zone detail header. Render `dialogs` once in the page. Live streams push the
+/** Sync, conflict resolution and removal of a zone, offered on the detail
+ * page's 概览 tab. Render `dialogs` once in the page. Live streams push the
  * resulting state; option snapshots are only marked stale. */
 export function useZoneCommands({
   onRemoved,
@@ -44,8 +44,8 @@ export function useZoneCommands({
     toast.success(response.message || '同步任务已提交')
     void markStale()
   }
-  // Header/row "立即同步" reports failures by toast; conflict resolution and
-  // removal run inside ConfirmDialog, which shows the error inline.
+  // "立即同步" reports failures by toast; conflict resolution and removal run
+  // inside ConfirmDialog, which shows the error inline.
   const sync = useMutation({ mutationFn: syncDnsZone, onSuccess: onSynced })
   const resolveConflict = useMutation({
     meta: { inlineError: true },
@@ -56,7 +56,7 @@ export function useZoneCommands({
     meta: { inlineError: true },
     mutationFn: removeDnsZone,
     onSuccess: (response) => {
-      toast.success(response.message || 'DNS 区域已移除')
+      toast.success(response.message || '域名已移除')
       void markStale()
       onRemoved?.()
     },
@@ -96,14 +96,14 @@ export function useZoneCommands({
         <ConfirmDialog
           isOpen={!!removing}
           onClose={() => setRemoving(undefined)}
-          title={`移除 DNS 区域 ${removing?.domain ?? ''}？`}
+          title={`移除域名 ${removing?.domain ?? ''}？`}
           description={
             <>
               移除后不再管理 <Mono>{removing?.domain}</Mono>{' '}
-              的记录，服务商中的区域保留不变。仍被集群、证书或网站使用的区域无法移除。
+              的记录，服务商中的域名保留不变。仍被集群、证书或网站使用的域名无法移除。
             </>
           }
-          confirmLabel='移除区域'
+          confirmLabel='移除域名'
           onConfirm={() => removing && remove.mutateAsync(removing)}
         />
       </>

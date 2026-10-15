@@ -10,7 +10,7 @@ import { login } from './data'
 const highlights = [
   { icon: Layers, text: '集群与边缘节点的接入、配置和实时运行状态' },
   { icon: Globe, text: '网站路由、回源和 HTTPS 配置分发到全部节点' },
-  { icon: Signal, text: 'DNS 区域与证书自动同步、签发和续期' },
+  { icon: Signal, text: '域名解析与证书自动同步、签发和续期' },
 ]
 
 export function SignInPage() {

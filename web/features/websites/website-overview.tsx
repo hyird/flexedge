@@ -6,6 +6,7 @@ import { KPI } from '@heroui-pro/react/kpi'
 import { Alert, Button, toast } from '@heroui/react'
 import { formatBytes, formatDate, ratioOf } from '@/lib/format'
 import { statusLabels } from '@/lib/status'
+import { cn } from '@/lib/utils'
 import { DataTable, TruncatedText } from '@/components/data-table'
 import { Mono } from '@/components/mono'
 import { EmptyState } from '@/components/page'
@@ -127,22 +128,30 @@ export function WebsiteOverview() {
       ),
     },
     {
-      id: 'origin',
-      header: '源站',
-      minWidth: 240,
+      id: 'origin-group',
+      header: '源站组',
+      minWidth: 100,
       cell: (state) => {
         const item = config.origins.find(
           (value) => value.id === state.origin_id
         )
         return (
-          <div className='flex min-w-0 flex-col gap-0.5'>
-            <span className={item ? 'truncate' : 'truncate text-muted'}>
-              {item ? item.group : '已删除的源站'}
-            </span>
-            <Mono truncate className='text-xs text-muted'>
-              {item ? originAddress(item) : state.origin_id}
-            </Mono>
-          </div>
+          <span className={cn('block truncate', !item && 'text-muted')}>
+            {item ? item.group : '已删除的源站'}
+          </span>
+        )
+      },
+    },
+    {
+      id: 'origin',
+      header: '源站地址',
+      minWidth: 220,
+      cell: (state) => {
+        const item = config.origins.find(
+          (value) => value.id === state.origin_id
+        )
+        return (
+          <Mono truncate>{item ? originAddress(item) : state.origin_id}</Mono>
         )
       },
     },

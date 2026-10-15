@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { getRouteApi, Link, useNavigate } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
@@ -7,17 +6,16 @@ import { Button } from '@heroui/react'
 import { hasListFilters, useListSearch } from '@/lib/list-search'
 import { statusLabels } from '@/lib/status'
 import { DataTable } from '@/components/data-table'
+import { LinkButton } from '@/components/link-button'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
 import { Mono } from '@/components/mono'
 import { Page } from '@/components/page'
 import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { dnsZoneOptionsQuery } from '@/features/dns-zones/data'
-import { providerLabel } from '@/features/providers/provider-display'
-import { ClusterActionMenu } from './cluster-action-menu'
 import { clusterFilterKeys, type ClustersSearch } from './cluster-search'
 import { ClusterSheet } from './cluster-sheet'
-import { clusterOptionsQuery, clustersQuery } from './data'
+import { clustersQuery } from './data'
 import type { Cluster } from './types'
 
 const route = getRouteApi('/_authenticated/clusters/')
@@ -38,25 +36,14 @@ export function ClustersPage() {
     }),
     placeholderData: keepPreviousData,
   })
-  const listed = query.data?.list.find((cluster) => cluster.id === search.edit)
-  // A deep-linked `?edit=` may point outside the current page.
-  const options = useQuery({
-    ...clusterOptionsQuery,
-    enabled: search.edit !== undefined && query.isSuccess && !listed,
-  })
-  const editing =
-    listed ?? options.data?.find((cluster) => cluster.id === search.edit)
-  // Keep the sheet's content while it animates out after `edit` is cleared.
-  const [lastEditing, setLastEditing] = useState(editing)
-  if (editing && editing !== lastEditing) setLastEditing(editing)
-  const setSheet = (patch: Pick<ClustersSearch, 'create' | 'edit'>) =>
+  const setSheet = (patch: Pick<ClustersSearch, 'create'>) =>
     navigate({
       to: '.',
       search: (previous: Record<string, unknown>) => ({
         ...previous,
         ...patch,
       }),
-      replace: patch.create === undefined && patch.edit === undefined,
+      replace: patch.create === undefined,
     })
   const filtered = hasListFilters(search, clusterFilterKeys)
   const columns: DataGridColumn<Cluster>[] = [
@@ -64,39 +51,35 @@ export function ClustersPage() {
       id: 'name',
       header: '集群',
       isRowHeader: true,
-      minWidth: 220,
+      minWidth: 180,
       cell: (cluster) => (
-        <div className='flex min-w-0 flex-col gap-0.5'>
-          <Link
-            to='/clusters/$clusterId'
-            params={{ clusterId: cluster.id }}
-            className='link truncate font-medium'
-          >
-            {cluster.name}
-          </Link>
-          <Mono truncate className='text-xs text-muted'>
-            {cluster.access_domain}
-          </Mono>
-        </div>
+        <Link
+          to='/clusters/$clusterId'
+          params={{ clusterId: cluster.id }}
+          className='link block truncate font-medium'
+        >
+          {cluster.name}
+        </Link>
       ),
+    },
+    {
+      id: 'access-domain',
+      header: '接入域名',
+      minWidth: 200,
+      cell: (cluster) => <Mono truncate>{cluster.access_domain}</Mono>,
     },
     {
       id: 'zone',
       header: '托管域名',
-      minWidth: 200,
+      minWidth: 180,
       cell: (cluster) => (
-        <div className='flex min-w-0 flex-col gap-0.5'>
-          <Link
-            to='/dns-zones/$zoneId'
-            params={{ zoneId: cluster.dns_zone_id }}
-            className='link truncate text-sm'
-          >
-            {cluster.dns_zone_domain}
-          </Link>
-          <span className='truncate text-xs text-muted'>
-            {providerLabel(cluster.dns_provider_name)}
-          </span>
-        </div>
+        <Link
+          to='/dns-zones/$zoneId'
+          params={{ zoneId: cluster.dns_zone_id }}
+          className='link block truncate text-sm'
+        >
+          {cluster.dns_zone_domain}
+        </Link>
       ),
     },
     {
@@ -124,14 +107,16 @@ export function ClustersPage() {
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      minWidth: 56,
-      align: 'end',
+      width: 72,
       cell: (cluster) => (
-        <ClusterActionMenu
-          cluster={cluster}
-          context='list'
-          onEdit={() => void setSheet({ edit: cluster.id })}
-        />
+        <LinkButton
+          href={`/clusters/${cluster.id}`}
+          variant='tertiary'
+          className='px-2'
+          aria-label={`集群 ${cluster.name} 的详情`}
+        >
+          详情
+        </LinkButton>
       ),
     },
   ]
@@ -203,7 +188,6 @@ export function ClustersPage() {
             : {
                 title: '还没有集群',
                 description: '创建集群并绑定托管域名后，即可添加边缘节点。',
-                action: createButton,
               }
         }
         footer={
@@ -219,11 +203,6 @@ export function ClustersPage() {
       <ClusterSheet
         isOpen={search.create === 1}
         onClose={() => void setSheet({ create: undefined })}
-      />
-      <ClusterSheet
-        isOpen={editing !== undefined}
-        cluster={editing ?? lastEditing}
-        onClose={() => void setSheet({ edit: undefined })}
       />
     </Page>
   )

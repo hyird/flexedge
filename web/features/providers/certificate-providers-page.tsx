@@ -4,8 +4,6 @@ import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button, Tooltip } from '@heroui/react'
 import { hasListFilters, pageLocally, useListState } from '@/lib/list-search'
-import { ActionMenu } from '@/components/action-menu'
-import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTable } from '@/components/data-table'
 import { ListToolbar } from '@/components/list-toolbar'
 import { Mono } from '@/components/mono'
@@ -14,7 +12,6 @@ import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { CertificateProviderSheet } from './certificate-provider-sheet'
 import { certificateProvidersListQuery } from './data'
-import { useProviderActions } from './provider-actions'
 import { providerLabel, providerStatusLabels } from './provider-display'
 import type { CertificateProvider } from './types'
 
@@ -30,8 +27,6 @@ export function CertificateProvidersPage({
   const list = useListState<{ q?: string }>({ q: initialQuery })
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<CertificateProvider | null>(null)
-  const [removing, setRemoving] = useState<CertificateProvider | null>(null)
-  const actions = useProviderActions()
   const query = useQuery(certificateProvidersListQuery)
   const keyword = list.keyword.toLowerCase()
   const matches = query.data?.filter((item) =>
@@ -103,33 +98,17 @@ export function CertificateProvidersPage({
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      width: 56,
-      align: 'end',
+      width: 72,
       cell: (item) => (
-        <ActionMenu
-          label={`证书供应商 ${providerLabel(item.provider)} 的操作`}
-          items={[
-            {
-              id: 'verify',
-              label: actions.isVerifying(item.id) ? '正在验证…' : '验证凭据',
-              disabled: actions.isVerifying(item.id),
-              onAction: () =>
-                actions.verify({
-                  kind: 'certificate',
-                  id: item.id,
-                  revision: item.revision,
-                }),
-            },
-            { id: 'edit', label: '编辑', onAction: () => setEditing(item) },
-            {
-              id: 'delete',
-              label: '删除供应商',
-              danger: true,
-              separated: true,
-              onAction: () => setRemoving(item),
-            },
-          ]}
-        />
+        <Button
+          size='sm'
+          variant='tertiary'
+          className='px-2'
+          aria-label={`编辑证书供应商 ${providerLabel(item.provider)}`}
+          onPress={() => setEditing(item)}
+        >
+          编辑
+        </Button>
       ),
     },
   ]
@@ -171,7 +150,6 @@ export function CertificateProvidersPage({
                 title: '还没有证书供应商',
                 description:
                   "添加 Let's Encrypt 或 ZeroSSL 凭据后，即可为网站申请受信任证书。",
-                action: createButton,
               }
         }
         footer={
@@ -196,21 +174,6 @@ export function CertificateProvidersPage({
           onClose={() => setEditing(null)}
         />
       )}
-      <ConfirmDialog
-        isOpen={!!removing}
-        onClose={() => setRemoving(null)}
-        title={`删除证书供应商 ${removing ? providerLabel(removing.provider) : ''}？`}
-        description='删除后无法再用该凭据签发或续期证书。仍有证书使用它时，删除会被拒绝。'
-        confirmLabel='删除供应商'
-        onConfirm={() =>
-          removing &&
-          actions.remove({
-            kind: 'certificate',
-            id: removing.id,
-            revision: removing.revision,
-          })
-        }
-      />
     </div>
   )
 }

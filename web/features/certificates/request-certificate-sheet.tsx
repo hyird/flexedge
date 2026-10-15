@@ -157,10 +157,10 @@ export function RequestCertificateSheet({
       <QueryNotice
         query={zones}
         onRetry={() => void zones.refetch()}
-        title='DNS 区域加载失败'
+        title='托管域名加载失败'
       />
       <Choice
-        label='DNS 验证区域'
+        label='托管域名'
         required
         value={values.dns_zone_id}
         onChange={(dns_zone_id) =>
@@ -170,14 +170,14 @@ export function RequestCertificateSheet({
           id: item.id,
           label: `${item.domain} · ${item.dns_provider_name}`,
         }))}
-        hint='证书域名必须属于该区域，签发时在其中写入 _acme-challenge 记录。'
+        hint='证书域名必须属于该托管域名，签发时在其中写入 _acme-challenge 记录。'
         disabled={zones.isPending || mutation.isPending}
         error={errors.dns_zone_id}
       />
       {zones.isSuccess && !availableZones.length && (
         <Notice>
-          没有可用的 DNS 区域，请先
-          <Link href='/dns-zones?create=1'>添加 DNS 区域</Link>
+          没有可用的托管域名，请先
+          <Link href='/dns-zones?create=1'>添加域名</Link>
           并完成同步。
         </Notice>
       )}

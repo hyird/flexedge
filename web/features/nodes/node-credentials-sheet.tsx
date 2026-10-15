@@ -1,5 +1,4 @@
-import { type ReactNode } from 'react'
-import { Alert, Button } from '@heroui/react'
+import { Alert } from '@heroui/react'
 import { CopyButton } from '@/components/copy-button'
 import { FormSheet } from '@/components/form-sheet'
 import { Mono } from '@/components/mono'
@@ -26,20 +25,17 @@ function SecretValue({
   )
 }
 
-/** Shows freshly issued or revealed agent credentials with the install
- * command. Credentials only live in component state, never in the URL or the
- * query cache. */
+/** Read-only sheet with freshly issued or revealed agent credentials and the
+ * install command. Credentials only live in component state, never in the URL
+ * or the query cache. */
 export function NodeCredentialsSheet({
   credentials,
   nodeName,
   onClose,
-  footer,
 }: {
   credentials: NodeCredentials | null
   nodeName?: string
   onClose: () => void
-  /** Replaces the default `完成` button. */
-  footer?: ReactNode
 }) {
   const command = credentials
     ? nodeInstallCommand(window.location.origin, credentials)
@@ -53,13 +49,6 @@ export function NodeCredentialsSheet({
         nodeName
           ? `在节点 ${nodeName} 的服务器上以 root 运行安装命令，节点将使用以下凭据接入控制面。`
           : '在节点服务器上以 root 运行安装命令，节点将使用以下凭据接入控制面。'
-      }
-      footer={
-        footer ?? (
-          <Button size='sm' onPress={onClose}>
-            完成
-          </Button>
-        )
       }
     >
       {credentials && (

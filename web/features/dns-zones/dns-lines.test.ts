@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { DnsLine } from '@/features/dns-zones/types'
-import { buildDnsLineTree, dnsLinePath, flattenDnsLineTree } from './dns-lines'
+import {
+  buildDnsLineTree,
+  dnsLineIndex,
+  dnsLinePath,
+  flattenDnsLineTree,
+} from './dns-lines'
 
 const lines: DnsLine[] = [
   { code: 'default', name: 'default', display_name: '默认', status: 'enabled' },
@@ -30,5 +35,24 @@ describe('DNS line tree', () => {
     expect(flattenDnsLineTree(buildDnsLineTree(lines))).toHaveLength(3)
     expect(dnsLinePath(lines, 'cn_mobile_beijing')).toBe('中国移动 / 北京')
     expect(dnsLinePath(lines, 'unknown')).toBe('unknown')
+  })
+
+  it('builds one index per line snapshot, whatever the number of lookups', () => {
+    // An Aliyun-sized list: label lookups for every row and option of the
+    // records tab must not rebuild the tree (it was O(rows × lines²)).
+    const many: DnsLine[] = Array.from({ length: 500 }, (_, index) => ({
+      code: `line_${index}`,
+      name: `name_${index}`,
+      display_name: `中国地区_运营商${index % 8}_${index}`,
+      status: 'enabled',
+    }))
+    const index = dnsLineIndex(many)
+    expect(index.options).toHaveLength(500)
+    for (let lookup = 0; lookup < 300 * 500; lookup++)
+      dnsLinePath(many, `line_${lookup % 500}`)
+    expect(dnsLineIndex(many)).toBe(index)
+    expect(dnsLinePath(many, 'line_9')).toBe('中国地区 / 运营商1 / 9')
+    // A new snapshot (another line list) gets its own index.
+    expect(dnsLineIndex([...many])).not.toBe(index)
   })
 })

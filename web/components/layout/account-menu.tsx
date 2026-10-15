@@ -28,11 +28,11 @@ export function AccountMenu() {
               {(name || 'FE').slice(0, 2).toUpperCase()}
             </Avatar.Fallback>
           </Avatar>
-          <span className='min-w-0 flex-1 text-left' data-sidebar='label'>
-            <span className='block truncate text-sm font-medium'>{name}</span>
-            <span className='block truncate text-xs text-muted'>
-              {user?.username}
-            </span>
+          <span
+            className='min-w-0 flex-1 truncate text-left text-sm font-medium'
+            data-sidebar='label'
+          >
+            {name}
           </span>
           <ChevronsExpandUpRight
             className='size-4 shrink-0 text-muted'
@@ -47,12 +47,10 @@ export function AccountMenu() {
             }}
           >
             <Dropdown.Item id='identity' textValue={name} isDisabled>
-              <span className='flex min-w-0 flex-col'>
-                <Label className='truncate'>{name}</Label>
-                <span className='truncate text-xs text-muted'>
-                  {user?.username}
-                </span>
-              </span>
+              <Label>{name}</Label>
+              {user?.nickname && user.nickname !== user.username && (
+                <span className='ml-auto text-muted'>{user.username}</span>
+              )}
             </Dropdown.Item>
             <Separator />
             <Dropdown.SubmenuTrigger>

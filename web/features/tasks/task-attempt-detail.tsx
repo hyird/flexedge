@@ -91,15 +91,17 @@ function Facts({ items }: { items: [string, ReactNode][] }) {
   )
 }
 
-// Detail tables sit inside the history list in a sheet: tighter cells than lists.
+// Detail tables sit inside the history list in a sheet: tighter cells than
+// lists, 13px text. A cell's second line holds short facts (type, line, TTL)
+// at the same size and never truncates; long values truncate with a title.
 const compactTable =
-  '[&_td]:px-2.5 [&_td]:py-2 [&_td]:text-xs [&_th]:px-2.5 [&_th]:py-2'
+  '[&_td]:px-2.5 [&_td]:py-2 [&_td]:text-[13px] [&_th]:px-2.5 [&_th]:py-2'
 
 function TwoLines({ first, second }: { first: ReactNode; second: ReactNode }) {
   return (
     <span className='flex min-w-0 flex-col'>
       {first}
-      <span className='max-w-48 truncate text-[11px] text-muted'>{second}</span>
+      <span className='whitespace-nowrap text-muted'>{second}</span>
     </span>
   )
 }
@@ -118,7 +120,7 @@ function DnsRecordValue({ record }: { record?: DnsRecord }) {
   return (
     <TwoLines
       first={
-        <Mono truncate className='max-w-48 text-xs'>
+        <Mono truncate className='max-w-48'>
           {record.content}
         </Mono>
       }
@@ -184,7 +186,7 @@ function DnsSyncDetail({ detail }: { detail: DetailOf<'dns_sync'> }) {
                                 tone={dnsChanges[row.change].tone}
                                 reserve={dnsChangeLabels}
                               />
-                              <Mono truncate className='max-w-36 text-xs'>
+                              <Mono truncate className='max-w-36'>
                                 {row.record.name}
                               </Mono>
                             </span>
@@ -225,7 +227,7 @@ function DnsSyncDetail({ detail }: { detail: DetailOf<'dns_sync'> }) {
                       <Table.Cell>
                         <TwoLines
                           first={
-                            <Mono truncate className='max-w-36 text-xs'>
+                            <Mono truncate className='max-w-36'>
                               {conflict.name}
                             </Mono>
                           }
@@ -233,12 +235,12 @@ function DnsSyncDetail({ detail }: { detail: DetailOf<'dns_sync'> }) {
                         />
                       </Table.Cell>
                       <Table.Cell>
-                        <Mono truncate className='max-w-48 text-xs'>
+                        <Mono truncate className='max-w-48'>
                           {conflict.local_content}
                         </Mono>
                       </Table.Cell>
                       <Table.Cell>
-                        <Mono truncate className='max-w-48 text-xs'>
+                        <Mono truncate className='max-w-48'>
                           {conflict.remote_content}
                         </Mono>
                       </Table.Cell>
@@ -305,7 +307,7 @@ function CertificateDetail({ detail }: { detail: DetailOf<'certificate'> }) {
                       key='fingerprint'
                       className='flex min-w-0 items-center gap-1'
                     >
-                      <Mono truncate className='text-xs'>
+                      <Mono className='min-w-0 text-xs break-all'>
                         {detail.fingerprint_sha256}
                       </Mono>
                       <CopyButton
@@ -364,45 +366,36 @@ function WebsiteDomainsDetail({
               {detail.domains.map((domain) => (
                 <Table.Row key={domain.hostname}>
                   <Table.Cell>
-                    <TwoLines
-                      first={
-                        <Mono truncate className='max-w-40 text-xs'>
-                          {domain.hostname}
-                        </Mono>
-                      }
-                      second={
-                        domain.query_name !== domain.hostname
-                          ? `查询 ${domain.query_name}`
-                          : '—'
-                      }
-                    />
+                    <Mono truncate className='max-w-40'>
+                      {domain.hostname}
+                    </Mono>
+                    <Mono truncate className='max-w-40 text-muted'>
+                      {domain.query_name !== domain.hostname
+                        ? `查询 ${domain.query_name}`
+                        : '—'}
+                    </Mono>
                   </Table.Cell>
                   <Table.Cell>
-                    <Mono truncate className='max-w-40 text-xs'>
+                    <Mono truncate className='max-w-40'>
                       {domain.expected || detail.expected_target || '—'}
                     </Mono>
                   </Table.Cell>
                   <Table.Cell>
+                    <Mono truncate className='max-w-40'>
+                      {domain.resolved.join(', ') || '—'}
+                    </Mono>
                     <span
+                      className='block max-w-40 truncate text-muted'
                       title={
                         domain.error.replaceAll(redactedMarker, '（已隐藏）') ||
                         undefined
                       }
                     >
-                      <TwoLines
-                        first={
-                          <Mono truncate className='max-w-40 text-xs'>
-                            {domain.resolved.join(', ') || '—'}
-                          </Mono>
-                        }
-                        second={
-                          domain.error ? (
-                            <RedactedText value={domain.error} />
-                          ) : (
-                            '—'
-                          )
-                        }
-                      />
+                      {domain.error ? (
+                        <RedactedText value={domain.error} />
+                      ) : (
+                        '—'
+                      )}
                     </span>
                   </Table.Cell>
                   <Table.Cell>

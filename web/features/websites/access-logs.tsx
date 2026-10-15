@@ -16,7 +16,7 @@ import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { useLiveLogs } from '@/features/logs/use-live-logs'
-import { AccessLogAsnDetail, AccessLogClientOrigin } from './access-log-asn'
+import { AccessLogAsnCell, AccessLogAsnDetail } from './access-log-asn'
 import { accessLogStatusTone, filterAccessLogs } from './access-log-filter'
 import { parseAccessLogs, type AccessLog } from './access-log-schema'
 import {
@@ -90,26 +90,32 @@ export function AccessLogs() {
       id: 'request',
       header: '请求',
       isRowHeader: true,
-      minWidth: 300,
-      cell: (log) => (
-        <Button
-          size='sm'
-          variant='ghost'
-          className='h-auto max-w-full min-w-0 justify-start gap-2 px-1 py-0.5 text-left'
-          aria-label={`查看请求 ${log.method} ${log.host}${log.target}`}
-          onPress={() => setOpenLogId(log.id)}
-        >
-          <span className='shrink-0 text-xs font-semibold'>{log.method}</span>
-          <Mono truncate className='min-w-0 text-accent'>
-            {log.host + log.target}
-          </Mono>
-        </Button>
-      ),
+      minWidth: 220,
+      cell: (log) => {
+        const url = log.host + log.target
+        return (
+          <Tooltip delay={300}>
+            <Button
+              size='sm'
+              variant='ghost'
+              className='h-auto w-0 min-w-full justify-start gap-2 px-1 py-0.5 text-left'
+              aria-label={`查看请求 ${log.method} ${url}`}
+              onPress={() => setOpenLogId(log.id)}
+            >
+              <span className='shrink-0 font-semibold'>{log.method}</span>
+              <Mono className='min-w-0 truncate text-accent'>{url}</Mono>
+            </Button>
+            <Tooltip.Content className='max-w-120 break-all'>
+              {log.method} {url}
+            </Tooltip.Content>
+          </Tooltip>
+        )
+      },
     },
     {
       id: 'status',
       header: '状态',
-      minWidth: 80,
+      minWidth: 70,
       cell: (log) => (
         <StatusChip
           label={String(log.status_code)}
@@ -120,23 +126,25 @@ export function AccessLogs() {
     {
       id: 'client',
       header: '客户端',
-      minWidth: 160,
-      cell: (log) => (
-        <div className='flex min-w-0 flex-col gap-0.5'>
-          <Mono>{log.client_ip || '—'}</Mono>
-          <AccessLogClientOrigin log={log} />
-        </div>
-      ),
+      minWidth: 130,
+      cell: (log) => <Mono>{log.client_ip || '—'}</Mono>,
+    },
+    {
+      id: 'asn',
+      header: 'ASN',
+      minWidth: 170,
+      cell: (log) => <AccessLogAsnCell log={log} />,
     },
     {
       id: 'node',
       header: '节点',
-      minWidth: 130,
+      minWidth: 120,
       cell: (log) => (
         <Link
           to='/nodes/$nodeId'
           params={{ nodeId: log.node_id }}
-          className='link truncate'
+          title={log.node_name}
+          className='link block w-0 min-w-full truncate'
         >
           {log.node_name}
         </Link>
@@ -145,13 +153,13 @@ export function AccessLogs() {
     {
       id: 'duration',
       header: '耗时',
-      minWidth: 80,
+      minWidth: 70,
       cell: (log) => <span className='tabular-nums'>{log.duration_ms} ms</span>,
     },
     {
       id: 'bytes',
       header: '响应',
-      minWidth: 90,
+      minWidth: 80,
       cell: (log) => (
         <span className='tabular-nums'>{formatBytes(log.response_bytes)}</span>
       ),
@@ -292,7 +300,7 @@ export function AccessLogs() {
           onRetry={() =>
             history ? void historyQuery.refetch() : live.reconnect()
           }
-          minWidth={1060}
+          minWidth={1040}
           empty={
             filtered
               ? {
@@ -327,15 +335,6 @@ export function AccessLogs() {
         onClose={() => setOpenLogId(undefined)}
         title='请求详情'
         size='lg'
-        footer={
-          <Button
-            size='sm'
-            variant='tertiary'
-            onPress={() => setOpenLogId(undefined)}
-          >
-            关闭
-          </Button>
-        }
       >
         {selected ? (
           <AccessLogDetail log={selected} />

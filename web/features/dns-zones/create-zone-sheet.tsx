@@ -11,7 +11,7 @@ import { dnsProviderOptionsQuery } from '@/features/providers/data'
 import { providerLabel } from '@/features/providers/provider-display'
 import { availableDnsZonesQuery, createDnsZone } from './data'
 
-/** "添加 DNS 区域": pick a DNS account, then one of its not-yet-managed zones. */
+/** "添加域名": pick a DNS account, then one of its not-yet-managed zones. */
 export function CreateZoneSheet({
   isOpen,
   onClose,
@@ -44,7 +44,7 @@ export function CreateZoneSheet({
     meta: { inlineError: true },
     mutationFn: createDnsZone,
     onSuccess: (response) => {
-      toast.success(response.message || 'DNS 区域已添加，正在同步')
+      toast.success(response.message || '域名已添加，正在同步')
       void client.invalidateQueries({
         queryKey: queryKeys.dnsZones,
         refetchType: 'none',
@@ -79,8 +79,8 @@ export function CreateZoneSheet({
     <FormSheet
       isOpen={isOpen}
       onClose={close}
-      title='添加 DNS 区域'
-      description='从 DNS 账号导入尚未托管的区域，添加后立即同步记录与解析线路。'
+      title='添加域名'
+      description='从 DNS 账号导入尚未托管的域名，添加后立即同步记录与解析线路。'
       onSubmit={submit}
       submitLabel='添加并同步'
       isSubmitting={mutation.isPending}
@@ -153,7 +153,7 @@ export function CreateZoneSheet({
         title='可用域名查询失败'
       />
       {provider && available.isSuccess && !available.data.length && (
-        <Notice>此账号下没有可导入的域名，请确认已在服务商中创建区域。</Notice>
+        <Notice>此账号下没有可导入的域名，请先在服务商中添加域名。</Notice>
       )}
     </FormSheet>
   )

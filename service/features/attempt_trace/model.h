@@ -119,7 +119,7 @@ inline constexpr std::array step_descriptors{
     step_descriptor{step_code::load_state, "load_state", "加载同步状态"},
     step_descriptor{step_code::open_credential, "open_credential", "解密凭据"},
     step_descriptor{step_code::validate_ttl, "validate_ttl", "校验 TTL"},
-    step_descriptor{step_code::find_zone, "find_zone", "查找远程托管区域"},
+    step_descriptor{step_code::find_zone, "find_zone", "查找远程托管域名"},
     step_descriptor{step_code::list_records, "list_records", "拉取远程记录"},
     step_descriptor{step_code::list_lines, "list_lines", "拉取解析线路"},
     step_descriptor{step_code::import_remote, "import_remote", "导入远程记录"},

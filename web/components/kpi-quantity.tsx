@@ -26,7 +26,7 @@ export function KpiQuantity({
       {(formatted) => (
         <>
           {formatted}
-          <NumberValue.Suffix className='ms-1 text-base font-medium text-muted'>
+          <NumberValue.Suffix className='ms-1 text-sm font-medium text-muted'>
             {scaled.unit}
           </NumberValue.Suffix>
         </>

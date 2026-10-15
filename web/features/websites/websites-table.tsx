@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import type { ListSearchState } from '@/lib/list-search'
+import { cn } from '@/lib/utils'
 import { DataTable } from '@/components/data-table'
 import { LinkButton } from '@/components/link-button'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
@@ -19,7 +20,6 @@ import type { Website } from './types'
 import {
   defaultOrigin,
   deployStatusReserve,
-  originAddress,
   websiteName,
   websiteStatusReserve,
 } from './website-display'
@@ -78,36 +78,39 @@ export function WebsitesTable({
       id: 'name',
       header: '网站',
       isRowHeader: true,
-      minWidth: 220,
+      minWidth: 150,
+      cell: (website) => (
+        <Link
+          to='/websites/$websiteId'
+          params={{ websiteId: website.id }}
+          className='link block truncate font-medium'
+        >
+          {websiteName(website)}
+        </Link>
+      ),
+    },
+    {
+      id: 'domains',
+      header: '域名',
+      minWidth: 200,
       cell: (website) => {
         const [primary, ...others] = website.config.domains
-        return (
-          <div className='flex min-w-0 flex-col gap-0.5'>
-            <Link
-              to='/websites/$websiteId'
-              params={{ websiteId: website.id }}
-              className='link truncate font-medium'
-            >
-              {websiteName(website)}
-            </Link>
-            <span className='flex min-w-0 items-center gap-1.5 text-xs text-muted'>
-              {primary ? (
-                <Mono truncate className='text-xs'>
-                  {primary.hostname}
-                </Mono>
-              ) : (
-                '未绑定域名'
-              )}
-              {others.length > 0 && (
-                <span
-                  className='shrink-0'
-                  title={others.map((domain) => domain.hostname).join('\n')}
-                >
-                  +{others.length} 个
-                </span>
-              )}
-            </span>
-          </div>
+        return primary ? (
+          <span className='flex min-w-0 items-center gap-1.5'>
+            <Mono truncate className='min-w-0'>
+              {primary.hostname}
+            </Mono>
+            {others.length > 0 && (
+              <span
+                className='shrink-0 text-muted'
+                title={others.map((domain) => domain.hostname).join('\n')}
+              >
+                +{others.length} 个
+              </span>
+            )}
+          </span>
+        ) : (
+          <span className='text-muted'>未绑定域名</span>
         )
       },
     },
@@ -117,38 +120,30 @@ export function WebsitesTable({
           {
             id: 'cluster',
             header: '集群',
-            minWidth: 170,
+            minWidth: 130,
             cell: (website: Website) => (
-              <div className='flex min-w-0 flex-col gap-0.5'>
-                <Link
-                  to='/clusters/$clusterId'
-                  params={{ clusterId: website.cluster_id }}
-                  className='link truncate'
-                >
-                  {website.cluster_name || '未知集群'}
-                </Link>
-                <Mono truncate className='text-xs text-muted'>
-                  {website.access_domain || '—'}
-                </Mono>
-              </div>
+              <Link
+                to='/clusters/$clusterId'
+                params={{ clusterId: website.cluster_id }}
+                className='link block truncate'
+              >
+                {website.cluster_name || '未知集群'}
+              </Link>
             ),
           } satisfies DataGridColumn<Website>,
         ]),
     {
       id: 'origin',
       header: '默认源站',
-      minWidth: 190,
+      minWidth: 120,
       cell: (website) => {
         const origin = defaultOrigin(website)
         return (
-          <div className='flex max-w-52 min-w-0 flex-col gap-0.5'>
-            <span className={origin ? 'truncate' : 'truncate text-muted'}>
-              {origin ? origin.group : '未配置'}
-            </span>
-            <Mono truncate className='text-xs text-muted'>
-              {origin ? originAddress(origin) : '—'}
-            </Mono>
-          </div>
+          <span
+            className={cn('block max-w-52 truncate', !origin && 'text-muted')}
+          >
+            {origin ? origin.group : '未配置'}
+          </span>
         )
       },
     },
@@ -281,12 +276,6 @@ export function WebsitesTable({
                   description: clusterId
                     ? '这个集群还没有承载网站。创建网站时选择此集群即可。'
                     : '创建网站，把域名接入边缘节点并配置源站。',
-                  action: (
-                    <LinkButton href='/websites/new'>
-                      <Plus />
-                      创建网站
-                    </LinkButton>
-                  ),
                 }
         }
         footer={

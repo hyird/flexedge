@@ -4,7 +4,7 @@ import { useLocation, type HistoryState } from '@tanstack/react-router'
 /** Arrival requests carried in history state, never in the URL: a link that
  * opens a page on a specific in-page tab (and that tab's starting values)
  * passes them as `state` (`navigate({ to, state })`, `<Link state>`, or
- * `state` on `LinkButton`/`ActionMenu` items). Values read back after a
+ * `state` on `LinkButton`). Values read back after a
  * reload may be stale; pages fall back to their defaults for unknown ones. */
 declare module '@tanstack/history' {
   interface HistoryState {
@@ -13,12 +13,6 @@ declare module '@tanstack/history' {
       /** Settings group (`websiteSectionIds`). */
       section?: string
     }
-    /** `/nodes/$nodeId`. */
-    node?: { tab?: 'overview' | 'logs' | 'config' }
-    /** `/clusters/$clusterId`; `createNode` opens the add-node sheet. */
-    cluster?: { tab?: 'nodes' | 'websites'; createNode?: boolean }
-    /** `/dns-zones/$zoneId`; `editRecords` opens the records editor. */
-    dnsZone?: { tab?: 'overview' | 'records' | 'lines'; editRecords?: boolean }
     /** `/providers`; `q` filters the opened tab's list. */
     providers?: { tab?: 'dns' | 'certificate'; q?: string }
   }

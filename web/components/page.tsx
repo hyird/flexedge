@@ -67,7 +67,8 @@ export function Page({
   )
 }
 
-/** Empty or not-found state: one sentence of explanation and a primary action. */
+/** Empty or not-found state: one sentence of explanation and a primary action.
+ * `sm` sits inside cards and widgets, so it keeps a shorter minimum height. */
 export function EmptyState({
   title,
   description,
@@ -82,7 +83,10 @@ export function EmptyState({
   size?: 'sm' | 'md' | 'lg'
 }) {
   return (
-    <HeroEmptyState size={size} className='min-h-48'>
+    <HeroEmptyState
+      size={size}
+      className={size === 'sm' ? 'min-h-28 py-4' : 'min-h-48'}
+    >
       <HeroEmptyState.Header>
         <HeroEmptyState.Media variant='icon'>{icon}</HeroEmptyState.Media>
         <HeroEmptyState.Title>{title}</HeroEmptyState.Title>

@@ -195,7 +195,7 @@ function StepHeading({
         </span>
       )}
       {subject && (
-        <span className='max-w-[45%] min-w-0 shrink-[2] truncate font-mono text-xs text-muted'>
+        <span className='max-w-[45%] min-w-0 shrink-[2] truncate font-mono text-muted'>
           <RedactedText value={subject} />
         </span>
       )}
@@ -392,25 +392,9 @@ function TraceCallItem({ call }: { call: TraceCall }) {
   const responseBody = (!dns && http?.response_body) || null
   return (
     <>
-      <div className='flex min-h-7 min-w-0 items-center gap-2 text-xs'>
+      <div className='flex min-h-7 min-w-0 items-center gap-2 text-[13px]'>
         <KindChip>{kind}</KindChip>
         <span className='min-w-0 flex-1 truncate font-mono'>{target}</span>
-        {call.provider_request_id && (
-          <span
-            className='hidden max-w-32 shrink-0 truncate font-mono text-muted sm:inline'
-            title={call.provider_request_id}
-          >
-            {call.provider_request_id}
-          </span>
-        )}
-        {call.provider_code && (
-          <span
-            className='hidden max-w-28 shrink-0 truncate font-mono text-danger sm:inline'
-            title={call.provider_code}
-          >
-            {call.provider_code}
-          </span>
-        )}
         {result && (
           <span className='shrink-0 whitespace-nowrap tabular-nums'>
             {result}
@@ -426,6 +410,16 @@ function TraceCallItem({ call }: { call: TraceCall }) {
         )}
         {http?.url && <CopyButton value={http.url} label='复制请求地址' />}
       </div>
+      {(call.provider_request_id || call.provider_code) && (
+        <p className='m-0 flex min-w-0 flex-wrap gap-x-3 font-mono text-[13px] text-muted'>
+          {call.provider_request_id && (
+            <span className='break-all'>{call.provider_request_id}</span>
+          )}
+          {call.provider_code && (
+            <span className='break-all text-danger'>{call.provider_code}</span>
+          )}
+        </p>
+      )}
       {requestBody && <BodyExcerpt label='请求' body={requestBody} />}
       {responseBody && (
         <BodyExcerpt label={requestBody ? '响应' : ''} body={responseBody} />

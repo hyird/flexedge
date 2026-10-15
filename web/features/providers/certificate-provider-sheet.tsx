@@ -5,13 +5,17 @@ import { apiErrorMessage } from '@/lib/api'
 import { fieldErrors } from '@/lib/form-errors'
 import { queryKeys } from '@/lib/query-keys'
 import { FormSheet } from '@/components/form-sheet'
-import { Choice, Field, Notice } from '@/components/forms'
+import { Choice, Field } from '@/components/forms'
 import {
   certificateProviderFormSchema,
   type CertificateProviderFormValues,
 } from './certificate-provider-form'
 import { saveCertificateProvider } from './data'
 import { providerLabel } from './provider-display'
+import {
+  ProviderRemoval,
+  ProviderVerification,
+} from './provider-sheet-sections'
 import type { CertificateProvider } from './types'
 
 /** Create (no `provider`) or edit certificate issuance credentials. The CA is
@@ -24,13 +28,17 @@ export function CertificateProviderSheet({
   onClose: () => void
 }) {
   const client = useQueryClient()
-  const [values, setValues] = useState<CertificateProviderFormValues>({
+  const [initial] = useState<CertificateProviderFormValues>(() => ({
     provider: provider?.provider === 'zerossl' ? 'zerossl' : 'letsencrypt',
     credential_mode:
       provider?.credential_mode === 'access_key' ? 'access_key' : 'email',
     account_email: provider?.account_email ?? '',
     access_key: '',
-  })
+  }))
+  const [values, setValues] = useState(initial)
+  const isDirty = (
+    Object.keys(initial) as (keyof CertificateProviderFormValues)[]
+  ).some((key) => values[key] !== initial[key])
   const [errors, setErrors] = useState<Record<string, string>>({})
   const update = (patch: Partial<CertificateProviderFormValues>) =>
     setValues((current) => ({ ...current, ...patch }))
@@ -66,7 +74,7 @@ export function CertificateProviderSheet({
           ? `编辑证书供应商 ${providerLabel(provider.provider)}`
           : '添加证书供应商'
       }
-      description='用于 ACME 签发与续期证书；保存后在行菜单中“验证凭据”，验证通过才能申请证书。'
+      description='用于 ACME 签发与续期证书；保存后在编辑中“验证凭据”，验证通过才能申请证书。'
       onSubmit={submit}
       submitLabel={provider ? '保存' : '添加供应商'}
       isSubmitting={mutation.isPending}
@@ -135,8 +143,23 @@ export function CertificateProviderSheet({
           autoComplete='new-password'
         />
       )}
-      {provider?.last_error && (
-        <Notice>最近一次验证失败：{provider.last_error}</Notice>
+      {provider && (
+        <>
+          <ProviderVerification
+            kind='certificate'
+            provider={provider}
+            isDirty={isDirty}
+          />
+          <ProviderRemoval
+            kind='certificate'
+            provider={provider}
+            label='删除供应商'
+            title={`删除证书供应商 ${providerLabel(provider.provider)}？`}
+            description='删除后无法再用该凭据签发或续期证书。仍有证书使用它时，删除会被拒绝。'
+            isDisabled={mutation.isPending}
+            onRemoved={onClose}
+          />
+        </>
       )}
     </FormSheet>
   )

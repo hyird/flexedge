@@ -1,7 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
-import { ChartLine, FileText, Gear, Server } from '@gravity-ui/icons'
-import { Button } from '@heroui/react'
+import { ArrowLeft, ChartLine, FileText, Gear, Server } from '@gravity-ui/icons'
 import { ApiBusinessError } from '@/lib/api-response'
 import { useArrivalState } from '@/lib/history-state'
 import { useTabSwitchGuard } from '@/lib/unsaved-changes'
@@ -13,7 +12,6 @@ import { EmptyState, Page, QueryNotice } from '@/components/page'
 import { PageTabs } from '@/components/page-tabs'
 import { StatusChip } from '@/components/status-chip'
 import { nodeQuery, nodeSnapshotQuery } from './data'
-import { NodeActionMenu } from './node-action-menu'
 import { NodeConfig } from './node-config'
 import { NodeConnectionChip } from './node-connection-chip'
 import { NodeLogs } from './node-logs'
@@ -32,15 +30,15 @@ const tabs = [
 type Tab = (typeof tabs)[number]['id']
 
 /** `/nodes/$nodeId` with in-page tabs held in component state (the URL never
- * changes); links open a tab with history state `{ node: { tab } }`,
- * overview by default. One live stream per page: the overview and config tabs
- * share `/api/nodes/:id/stream` with this header, while the logs tab owns the
- * log stream and the header reads the node once (re-read after writes). */
+ * changes), overview first. The header's only action leads back to the list;
+ * credentials and deletion live in the config tab. One live stream per page:
+ * the overview and config tabs share `/api/nodes/:id/stream` with this header,
+ * while the logs tab owns the log stream and the header reads the node once
+ * (re-read after writes). */
 export function NodeDetailLayout() {
   const { nodeId } = route.useParams()
-  const [tab, setTab, arrivalKey] = useArrivalState<Tab>(
-    (state) => state.node?.tab ?? 'overview'
-  )
+  // Each navigation to a node (even node to node) starts on the overview.
+  const [tab, setTab, arrivalKey] = useArrivalState<Tab>(() => 'overview')
   const tabGuard = useTabSwitchGuard()
   const onLogs = tab === 'logs'
   const live = useQuery({ ...nodeQuery(nodeId), enabled: !onLogs })
@@ -95,16 +93,11 @@ export function NodeDetailLayout() {
             />,
           ]}
           actions={
-            <Button
-              size='sm'
-              variant='tertiary'
-              onPress={() => tabGuard.request(() => setTab('config'))}
-            >
-              <Gear className='size-4' />
-              编辑配置
-            </Button>
+            <LinkButton href='/nodes' variant='tertiary'>
+              <ArrowLeft />
+              返回
+            </LinkButton>
           }
-          menu={<NodeActionMenu node={node} context='detail' />}
         />
       ) : (
         <DetailHeaderSkeleton />

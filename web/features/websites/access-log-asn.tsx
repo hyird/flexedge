@@ -5,45 +5,32 @@ import type { AccessLog } from './access-log-schema'
 
 type AccessLogAsnFields = Pick<AccessLog, 'client_ip_asn' | 'client_ip_as_name'>
 
-function AsnText({
-  log,
-  className,
-}: {
-  log: AccessLogAsnFields
-  className?: string
-}) {
+function AsnText({ log }: { log: AccessLogAsnFields }) {
   return (
     <>
-      {log.client_ip_asn && (
-        <Mono className={className}>{log.client_ip_asn}</Mono>
-      )}
+      {log.client_ip_asn && <Mono>{log.client_ip_asn}</Mono>}
       {log.client_ip_asn && log.client_ip_as_name && ' '}
       {log.client_ip_as_name}
     </>
   )
 }
 
-/** Second line of the 客户端 cell: `台湾 · AS4134 Chinanet`, one line
- * truncated within the column's original width, full text in the tooltip. */
-export function AccessLogClientOrigin({
-  log,
-}: {
-  log: AccessLogAsnFields & Pick<AccessLog, 'client_ip_location'>
-}) {
-  const asn = accessLogAsnLabel(log)
-  const label = [log.client_ip_location, asn].filter(Boolean).join(' · ')
-  if (!label) return <span className='text-xs text-muted'>—</span>
+/** ASN column cell: `AS4134 Chinanet` on one line, truncated at the column
+ * width with the full text in the tooltip; a dash without AS data. */
+export function AccessLogAsnCell({ log }: { log: AccessLogAsnFields }) {
+  const label = accessLogAsnLabel(log)
+  if (!label) return <span className='text-muted'>—</span>
   return (
     <Tooltip delay={300}>
       <Tooltip.Trigger
         aria-label={label}
-        className='block max-w-32 truncate text-xs text-muted'
+        className='block w-0 min-w-full truncate'
       >
-        {log.client_ip_location}
-        {log.client_ip_location && asn && ' · '}
-        <AsnText log={log} className='text-xs' />
+        <AsnText log={log} />
       </Tooltip.Trigger>
-      <Tooltip.Content className='max-w-80'>{label}</Tooltip.Content>
+      <Tooltip.Content className='max-w-80 break-normal wrap-break-word'>
+        {label}
+      </Tooltip.Content>
     </Tooltip>
   )
 }

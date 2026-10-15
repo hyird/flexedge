@@ -62,12 +62,15 @@ export function NodeConfigFields({
   variant,
   disabled,
   lockCluster = false,
+  basicFooter,
 }: {
   form: UseFormReturn<NodeFormValues>
   variant: 'page' | 'sheet'
   disabled: boolean
   /** Hide the cluster choice when the cluster is fixed by the context. */
   lockCluster?: boolean
+  /** Page only: rendered under the basic fields (e.g. `删除节点`). */
+  basicFooter?: ReactNode
 }) {
   const clusters = useQuery(clusterOptionsQuery)
   const clusterId = useWatch({ control: form.control, name: 'cluster_id' })
@@ -243,7 +246,14 @@ export function NodeConfigFields({
   return (
     <>
       <Group variant={variant} title='基本信息'>
-        {basics}
+        {variant === 'page' && basicFooter ? (
+          <div className='flex flex-col gap-4'>
+            {basics}
+            {basicFooter}
+          </div>
+        ) : (
+          basics
+        )}
       </Group>
       <Group
         variant={variant}

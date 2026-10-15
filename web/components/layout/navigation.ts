@@ -72,7 +72,7 @@ export const navigation: NavigationItem[] = [
   },
   {
     href: '/dns-zones',
-    label: 'DNS 区域',
+    label: '域名管理',
     icon: Signal,
     group: '基础设施',
     keywords: 'dns zones',

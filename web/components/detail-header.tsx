@@ -15,8 +15,9 @@ export function DetailHeaderSkeleton() {
 }
 
 /** Resource detail header: icon tile, visible title (20px/600), status chip,
- * a meta line of short facts or cross-resource links, actions and an overflow
- * menu (`ActionMenu`). Followed by `PageTabs` when the detail has tabs.
+ * a meta line of short facts or cross-resource links, and actions (only
+ * `返回`; page actions live in the cards they act on). Followed by
+ * `PageTabs` when the detail has tabs.
  *
  * The layout never depends on the current state: title and status share one
  * line (the title truncates), the meta line never wraps (it scrolls
@@ -29,7 +30,6 @@ export function DetailHeader({
   status,
   meta = [],
   actions,
-  menu,
 }: {
   icon: ReactNode
   title: string
@@ -37,7 +37,6 @@ export function DetailHeader({
   /** Rendered in order, separated by a dot; falsy entries are skipped. */
   meta?: ReactNode[]
   actions?: ReactNode
-  menu?: ReactNode
 }) {
   const facts = meta.filter(Boolean)
   return (
@@ -73,11 +72,8 @@ export function DetailHeader({
           )}
         </div>
       </div>
-      {(actions || menu) && (
-        <div className='flex flex-wrap items-center gap-2'>
-          {actions}
-          {menu}
-        </div>
+      {actions && (
+        <div className='flex flex-wrap items-center gap-2'>{actions}</div>
       )}
     </header>
   )

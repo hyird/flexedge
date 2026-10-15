@@ -50,6 +50,132 @@ const lines = [
   },
   { code: 'oversea', name: '境外', display_name: '境外', status: 'enabled' },
 ]
+// Aliyun-sized line list (several hundred lines: ISP × province, regions,
+// overseas countries) and large zones for records-editor performance QA.
+const aliyunIsps = [
+  ['telecom', '电信'],
+  ['unicom', '联通'],
+  ['mobile', '移动'],
+  ['edu', '教育网'],
+  ['drpeng', '鹏博士'],
+  ['btvn', '广电网'],
+  ['cstnet', '科技网'],
+  ['aliyun', '阿里云'],
+]
+const aliyunProvinces = (
+  '北京 天津 河北 山西 内蒙古 辽宁 吉林 黑龙江 上海 江苏 浙江 安徽 福建 江西 ' +
+  '山东 河南 湖北 湖南 广东 广西 海南 重庆 四川 贵州 云南 西藏 陕西 甘肃 青海 ' +
+  '宁夏 新疆 香港 澳门 台湾'
+).split(' ')
+const aliyunCountries = {
+  亚洲: '日本 韩国 新加坡 马来西亚 泰国 越南 菲律宾 印度尼西亚 印度 巴基斯坦 孟加拉 斯里兰卡 尼泊尔 缅甸 柬埔寨 老挝 蒙古 哈萨克斯坦 乌兹别克斯坦 阿联酋 沙特阿拉伯 以色列 土耳其 伊朗 伊拉克 卡塔尔 科威特 阿曼 约旦 黎巴嫩'.split(
+    ' '
+  ),
+  欧洲: '英国 法国 德国 意大利 西班牙 葡萄牙 荷兰 比利时 瑞士 奥地利 瑞典 挪威 丹麦 芬兰 冰岛 爱尔兰 波兰 捷克 斯洛伐克 匈牙利 罗马尼亚 保加利亚 希腊 乌克兰 俄罗斯 白俄罗斯 立陶宛 拉脱维亚 爱沙尼亚 塞尔维亚 克罗地亚 斯洛文尼亚'.split(
+    ' '
+  ),
+  北美洲: '美国 加拿大 墨西哥 古巴 牙买加 巴拿马 哥斯达黎加 危地马拉 洪都拉斯 多米尼加'.split(
+    ' '
+  ),
+  南美洲: '巴西 阿根廷 智利 秘鲁 哥伦比亚 委内瑞拉 厄瓜多尔 乌拉圭 巴拉圭 玻利维亚'.split(
+    ' '
+  ),
+  非洲: '埃及 南非 尼日利亚 肯尼亚 埃塞俄比亚 摩洛哥 阿尔及利亚 突尼斯 加纳 坦桑尼亚 安哥拉 苏丹'.split(
+    ' '
+  ),
+  大洋洲: '澳大利亚 新西兰 斐济 巴布亚新几内亚'.split(' '),
+}
+const aliyunLines = [
+  structuredClone(lines[0]),
+  ...aliyunIsps.flatMap(([code, name]) => [
+    { code, name, display_name: `中国地区_${name}`, status: 'enabled' },
+    ...aliyunProvinces.map((province, index) => ({
+      code: `cn_${code}_${index}`,
+      name: `${name}_${province}`,
+      display_name: `中国地区_${name}_${province}`,
+      status: 'enabled',
+    })),
+  ]),
+  ...aliyunProvinces.map((province, index) => ({
+    code: `cn_region_${index}`,
+    name: province,
+    display_name: `中国地区_${province}`,
+    status: 'enabled',
+  })),
+  { code: 'oversea', name: '境外', display_name: '境外', status: 'enabled' },
+  ...Object.entries(aliyunCountries).flatMap(([continent, countries], c) => [
+    {
+      code: `os_${c}`,
+      name: continent,
+      display_name: `境外_${continent}`,
+      status: 'enabled',
+    },
+    ...countries.map((country, index) => ({
+      code: `os_${c}_${index}`,
+      name: country,
+      display_name: `境外_${continent}_${country}`,
+      status: 'enabled',
+    })),
+  ]),
+  ...['百度', '谷歌', '必应', '搜狗', '360', '有道'].map((engine, index) => ({
+    code: `search_${index}`,
+    name: engine,
+    display_name: `搜索引擎_${engine}`,
+    status: index < 5 ? 'enabled' : 'disabled',
+  })),
+]
+const bulkRecordTypes = ['A', 'A', 'A', 'AAAA', 'CNAME', 'TXT', 'MX']
+function bulkRecords(first, count, lineCodes) {
+  return Array.from({ length: count }, (_, index) => {
+    const type = bulkRecordTypes[index % bulkRecordTypes.length]
+    return {
+      id: uuid(first + index),
+      type,
+      name: `host-${String(index + 1).padStart(3, '0')}`,
+      content:
+        type === 'A'
+          ? `198.51.100.${(index % 250) + 1}`
+          : type === 'AAAA'
+            ? `2001:db8::${(index + 1).toString(16)}`
+            : type === 'TXT'
+              ? `v=spf1 include:_spf.bulk.test ~all ${index}`
+              : `edge-${index}.bulk.test`,
+      ttl: 600,
+      ...(type === 'MX' ? { priority: 10 } : {}),
+      proxied: false,
+      line_code: lineCodes[(index * 7) % lineCodes.length],
+    }
+  })
+}
+function bulkZone({ id, domain, providerId, provider, providerName, records, zoneLines }) {
+  return {
+    id,
+    revision: 2,
+    dns_provider_id: providerId,
+    dns_provider: provider,
+    dns_provider_name: providerName,
+    domain,
+    sync_status: 'synced',
+    desired_revision: 2,
+    synced_revision: 2,
+    website_count: 0,
+    config: { records },
+    runtime: {
+      records_imported: true,
+      lines_synced_at: initialTime,
+      lines: structuredClone(zoneLines),
+      projected_records: [],
+      record_states: records.map((record) => ({
+        id: record.id,
+        sync_status: 'synced',
+        synced_revision: 2,
+      })),
+      conflicts: [],
+    },
+    last_synced_at: initialTime,
+    ...timestamps,
+  }
+}
 const websiteConfig = {
   name: 'QA 网站',
   domains: [
@@ -404,6 +530,30 @@ let db = {
       last_synced_at: initialTime,
       ...timestamps,
     },
+    // Records-editor performance QA: 300 records on an Aliyun-sized line list
+    // and 50 Cloudflare records (default line only).
+    bulkZone({
+      id: uuid(20000),
+      domain: 'bulk-aliyun.test',
+      providerId: uuid(802),
+      provider: 'aliyun',
+      providerName: '阿里云备用账号',
+      records: bulkRecords(
+        20001,
+        300,
+        aliyunLines.map(({ code }) => code)
+      ),
+      zoneLines: aliyunLines,
+    }),
+    bulkZone({
+      id: uuid(21000),
+      domain: 'bulk-cloudflare.test',
+      providerId: dnsProviderId,
+      provider: 'cloudflare',
+      providerName: 'Cloudflare 生产账号',
+      records: bulkRecords(21001, 50, ['default']),
+      zoneLines: lines,
+    }),
   ],
   clusters: [
     {
@@ -1597,7 +1747,7 @@ function cloudflareSyncFailureTrace() {
     worker_type: 'dns-sync',
     steps: [
       ...syncPreamble(),
-      traceStep('find_zone', '查找远程托管区域', 5012, {
+      traceStep('find_zone', '查找远程托管域名', 5012, {
         subject: 'example.test',
         outcome: 'failed',
         error: 'Cloudflare API 连接失败',
@@ -1662,7 +1812,7 @@ function cloudflareSyncTrace() {
     capture: { truncated: true, omitted_calls: 56 },
     steps: [
       ...syncPreamble(),
-      traceStep('find_zone', '查找远程托管区域', 212, {
+      traceStep('find_zone', '查找远程托管域名', 212, {
         subject: 'example.test',
         calls: [
           findCloudflareZone('example.test', {
@@ -1733,7 +1883,7 @@ function aliyunSyncFailureTrace() {
     worker_type: 'dns-sync',
     steps: [
       ...syncPreamble(),
-      traceStep('find_zone', '查找远程托管区域', 186, {
+      traceStep('find_zone', '查找远程托管域名', 186, {
         subject: 'backup.test',
         outcome: 'failed',
         error:

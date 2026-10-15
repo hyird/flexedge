@@ -4,8 +4,8 @@ import { queryKeys } from '@/lib/query-keys'
 import { removeProvider, verifyProvider } from './data'
 import type { ProviderTarget } from './types'
 
-/** Row actions shared by both provider tabs. `remove` is awaited by
- * `ConfirmDialog`, which shows failures inline. */
+/** Verify and delete actions of both providers' edit sheets. `remove` is
+ * awaited by `ConfirmDialog`, which shows failures inline. */
 export function useProviderActions() {
   const client = useQueryClient()
   // Active list streams receive the change; inactive views refetch when shown.

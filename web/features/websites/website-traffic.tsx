@@ -486,7 +486,9 @@ function Ranking({
                   className='grid-cols-[minmax(0,1fr)_auto] gap-x-3'
                 >
                   <Label
-                    title={item.label}
+                    title={[item.label, item.asn, item.as_name]
+                      .filter(Boolean)
+                      .join(' ')}
                     className={cn(
                       'max-w-full min-w-0 truncate font-normal',
                       mono && 'font-mono text-[13px]'
@@ -494,9 +496,7 @@ function Ranking({
                   >
                     {item.label || '—'}
                     {item.asn && (
-                      <span className='ml-2 font-sans text-xs text-muted'>
-                        {item.asn} {item.as_name}
-                      </span>
+                      <span className='ml-2 text-muted'>{item.asn}</span>
                     )}
                   </Label>
                   <Meter.Output className='text-xs font-normal text-muted' />

@@ -246,7 +246,7 @@ export function attentionItems(overview: Overview): AttentionItem[] {
     {
       id: 'dns',
       label: 'DNS 同步异常',
-      description: '同步失败或存在冲突的区域',
+      description: '同步失败或存在冲突的域名',
       count: overview.issues.dns_zone_issue_count,
       href: '/dns-zones?sync_status=issue',
       tone: 'danger',

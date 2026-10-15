@@ -1,11 +1,10 @@
 import { useEffect, useEffectEvent, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Alert, Button, Link, Skeleton, Tabs } from '@heroui/react'
+import { Alert, Link, Skeleton, Tabs } from '@heroui/react'
 import { ApiBusinessError } from '@/lib/api-response'
 import { formatDate } from '@/lib/format'
 import { CopyButton } from '@/components/copy-button'
 import { FormSheet } from '@/components/form-sheet'
-import { LinkButton } from '@/components/link-button'
 import { Mono } from '@/components/mono'
 import { EmptyState, QueryNotice } from '@/components/page'
 import { RelativeTime } from '@/components/relative-time'
@@ -85,16 +84,6 @@ export function TaskDetailSheet({
             reserve={taskStatusLabels}
           />
         )
-      }
-      footer={
-        <>
-          <Button size='sm' variant='tertiary' onPress={onClose}>
-            关闭
-          </Button>
-          {task && (
-            <LinkButton {...taskResourceTarget(task)}>前往关联资源</LinkButton>
-          )}
-        </>
       }
     >
       {missing ? (

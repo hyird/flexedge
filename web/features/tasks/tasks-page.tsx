@@ -4,9 +4,8 @@ import { getRouteApi, Link } from '@tanstack/react-router'
 import { CircleCheck, CircleXmark, ListCheck } from '@gravity-ui/icons'
 import { KPIGroup, type DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
-import { Link as HeroLink, Skeleton, Tooltip } from '@heroui/react'
+import { Button, Link as HeroLink, Skeleton, Tooltip } from '@heroui/react'
 import { hasListFilters, useListSearch } from '@/lib/list-search'
-import { ActionMenu } from '@/components/action-menu'
 import { DataTable } from '@/components/data-table'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
 import { Page } from '@/components/page'
@@ -108,18 +107,13 @@ export function TasksPage() {
       cell: (task) => {
         const target = taskResourceTarget(task)
         return (
-          <div className='flex min-w-0 flex-col'>
-            <HeroLink
-              href={target.href}
-              routerOptions={target.state && { state: target.state }}
-              className='truncate text-sm no-underline hover:underline'
-            >
-              {task.name}
-            </HeroLink>
-            <span className='text-xs text-muted'>
-              {taskTypes[task.resource_type]}
-            </span>
-          </div>
+          <HeroLink
+            href={target.href}
+            routerOptions={target.state && { state: target.state }}
+            className='block truncate text-sm no-underline hover:underline'
+          >
+            {task.name}
+          </HeroLink>
         )
       },
     },
@@ -184,24 +178,17 @@ export function TasksPage() {
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      width: 56,
-      align: 'end',
+      width: 72,
       cell: (task) => (
-        <ActionMenu
-          label={`任务 ${taskTitle(task)} · ${task.name} 的操作`}
-          items={[
-            {
-              id: 'detail',
-              label: '查看详情',
-              onAction: () => void updateSheet(sheetSearch(task), false),
-            },
-            {
-              id: 'resource',
-              label: '前往关联资源',
-              ...taskResourceTarget(task),
-            },
-          ]}
-        />
+        <Button
+          size='sm'
+          variant='tertiary'
+          className='px-2'
+          aria-label={`任务 ${taskTitle(task)} · ${task.name} 的详情`}
+          onPress={() => void updateSheet(sheetSearch(task), false)}
+        >
+          详情
+        </Button>
       ),
     },
   ]
@@ -305,7 +292,7 @@ export function TasksPage() {
               : {
                   title: '暂无任务',
                   description:
-                    '在网站、证书、DNS 区域或节点上提交操作后，执行结果会显示在这里。',
+                    '在网站、证书、域名或节点上提交操作后，执行结果会显示在这里。',
                 }
           }
           footer={
@@ -351,7 +338,7 @@ function TaskKpi({
       </KPI.Header>
       <KPI.Content>
         {value === undefined ? (
-          <Skeleton className='h-8 w-16 rounded-md' />
+          <Skeleton className='h-7 w-16 rounded-md' />
         ) : (
           <KPI.Value value={value} maximumFractionDigits={0} />
         )}

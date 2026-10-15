@@ -1,7 +1,9 @@
+import type { ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import {
   ArrowDownToLine,
+  ArrowLeft,
   ArrowsRotateRight,
   Gear,
   ShieldCheck,
@@ -11,7 +13,6 @@ import { Alert, Button, Label, Link, ProgressBar } from '@heroui/react'
 import { formatDate } from '@/lib/format'
 import { useListSearch } from '@/lib/list-search'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
-import { ActionMenu } from '@/components/action-menu'
 import { CopyButton } from '@/components/copy-button'
 import { DetailHeader, DetailHeaderSkeleton } from '@/components/detail-header'
 import { LinkButton } from '@/components/link-button'
@@ -44,7 +45,7 @@ export function CertificateDetailPage() {
   const certificate = query.data
   useBreadcrumbLabel(certificate?.domains[0])
   const commands = useCertificateCommands({
-    onRemoved: () => void navigate({ to: '/certificates' }),
+    onRemoved: () => void navigate({ to: '/certificates', replace: true }),
   })
   if (!certificate) {
     if (query.isError && isCertificateNotFound(query.error))
@@ -106,48 +107,10 @@ export function CertificateDetailPage() {
           </span>,
         ]}
         actions={
-          <>
-            <Button
-              size='sm'
-              variant='tertiary'
-              isDisabled={!certificate.usable}
-              isPending={commands.downloadingId === certificate.id}
-              onPress={() => commands.download(certificate)}
-            >
-              <ArrowDownToLine className='size-4' />
-              下载
-            </Button>
-            <Button
-              size='sm'
-              variant='tertiary'
-              onPress={() => setRenewalOpen(true)}
-            >
-              <Gear className='size-4' />
-              续期设置
-            </Button>
-            <Button
-              size='sm'
-              isDisabled={busy}
-              onPress={() => commands.renew(certificate)}
-            >
-              <ArrowsRotateRight className='size-4' />
-              立即续期
-            </Button>
-          </>
-        }
-        menu={
-          <ActionMenu
-            label={`证书 ${certificate.domains[0] ?? ''} 的更多操作`}
-            items={[
-              {
-                id: 'remove',
-                label: '删除证书',
-                icon: <TrashBin />,
-                danger: true,
-                onAction: () => commands.remove(certificate),
-              },
-            ]}
-          />
+          <LinkButton href='/certificates' variant='tertiary'>
+            <ArrowLeft className='size-4' />
+            返回
+          </LinkButton>
         }
       />
       {certificate.last_error && (
@@ -160,7 +123,29 @@ export function CertificateDetailPage() {
         </Alert>
       )}
       <div className='grid gap-6 lg:grid-cols-3'>
-        <ValiditySection certificate={certificate} />
+        <ValiditySection
+          certificate={certificate}
+          actions={
+            <>
+              <Button
+                size='sm'
+                variant='tertiary'
+                onPress={() => setRenewalOpen(true)}
+              >
+                <Gear className='size-4' />
+                续期设置
+              </Button>
+              <Button
+                size='sm'
+                isDisabled={busy}
+                onPress={() => commands.renew(certificate)}
+              >
+                <ArrowsRotateRight className='size-4' />
+                立即续期
+              </Button>
+            </>
+          }
+        />
         <Section title='分发状态' description='证书文件下发到边缘节点的进度。'>
           <DescriptionList
             columns={1}
@@ -212,7 +197,23 @@ export function CertificateDetailPage() {
             ))}
           </ul>
         </Section>
-        <Section title='签发信息' className='lg:col-span-2'>
+        <Section
+          title='签发信息'
+          className='lg:col-span-2'
+          contentClassName='flex flex-col gap-4'
+          actions={
+            <Button
+              size='sm'
+              variant='tertiary'
+              isDisabled={!certificate.usable}
+              isPending={commands.downloadingId === certificate.id}
+              onPress={() => commands.download(certificate)}
+            >
+              <ArrowDownToLine className='size-4' />
+              下载
+            </Button>
+          }
+        >
           <DescriptionList
             items={[
               {
@@ -235,7 +236,7 @@ export function CertificateDetailPage() {
                 ),
               },
               {
-                label: 'DNS 验证区域',
+                label: '托管域名',
                 value: (
                   <Link href={`/dns-zones/${certificate.dns_zone_id}`}>
                     <Mono>{certificate.dns_zone_domain}</Mono>
@@ -282,6 +283,15 @@ export function CertificateDetailPage() {
               },
             ]}
           />
+          <Button
+            size='sm'
+            variant='danger-soft'
+            className='self-start'
+            onPress={() => commands.remove(certificate)}
+          >
+            <TrashBin />
+            删除证书
+          </Button>
         </Section>
       </div>
       <ReferencingWebsites certificate={certificate} />
@@ -295,10 +305,16 @@ export function CertificateDetailPage() {
   )
 }
 
-function ValiditySection({ certificate }: { certificate: Certificate }) {
+function ValiditySection({
+  certificate,
+  actions,
+}: {
+  certificate: Certificate
+  actions: ReactNode
+}) {
   const progress = validityProgress(certificate)
   return (
-    <Section title='有效期' className='lg:col-span-2'>
+    <Section title='有效期' className='lg:col-span-2' actions={actions}>
       <div className='flex flex-col gap-5'>
         {/* Always rendered so the card keeps its height while the
          * certificate is issued, renewed or expires. */}

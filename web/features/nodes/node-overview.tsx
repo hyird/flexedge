@@ -152,7 +152,7 @@ export function NodeOverview() {
           <Alert.Content>
             <Alert.Title>节点尚未接入</Alert.Title>
             <Alert.Description>
-              在服务器上运行安装命令后，节点会自动注册并开始上报运行指标。可在右上角“更多操作”中查看接入凭据。
+              安装命令与接入凭据在“配置 → 接入凭据”中查看。
             </Alert.Description>
           </Alert.Content>
         </Alert>

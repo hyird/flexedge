@@ -356,7 +356,7 @@ export function DomainsSection({
             />
             {zones.isSuccess && zones.data.length === 0 && (
               <p className='text-[13px] text-muted'>
-                还没有托管域名，请先在“DNS 区域”中添加
+                还没有托管域名，请先在“域名管理”中添加
               </p>
             )}
           </>

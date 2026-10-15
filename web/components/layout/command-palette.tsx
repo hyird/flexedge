@@ -25,7 +25,7 @@ const quickActions = [
   { href: '/nodes?create=1', label: '添加节点', icon: Server },
   { href: '/clusters?create=1', label: '创建集群', icon: Layers },
   { href: '/certificates?create=1', label: '申请证书', icon: ShieldCheck },
-  { href: '/dns-zones?create=1', label: '添加 DNS 区域', icon: Signal },
+  { href: '/dns-zones?create=1', label: '添加域名', icon: Signal },
 ]
 
 const keywordDebounceMs = 250
@@ -188,15 +188,10 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
                 id={hit.key}
                 // The server already matched these rows (possibly on fields not
                 // shown); the keyword keeps them past the palette's text filter.
-                textValue={`${hit.label} ${hit.detail} ${keyword}`}
+                textValue={`${hit.label} ${keyword}`}
               >
                 <hit.source.icon className='size-4 shrink-0 text-muted' />
                 <span className='min-w-0 truncate'>{hit.label}</span>
-                {hit.detail && (
-                  <span className='min-w-0 flex-1 truncate font-mono text-xs text-muted'>
-                    {hit.detail}
-                  </span>
-                )}
                 <span className='ml-auto shrink-0 text-xs text-muted'>
                   {hit.source.label}
                 </span>

@@ -3,7 +3,7 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { Button, toast } from '@heroui/react'
+import { toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { FormSheet } from '@/components/form-sheet'
 import { clusterSnapshotKey } from '@/features/clusters/data'
@@ -86,11 +86,6 @@ export function NodeCreateSheet({
         credentials={created?.node ?? null}
         nodeName={created?.name}
         onClose={finish}
-        footer={
-          <Button size='sm' onPress={finish}>
-            完成，查看节点
-          </Button>
-        }
       />
     </>
   )

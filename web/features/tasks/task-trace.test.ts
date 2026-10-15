@@ -28,7 +28,7 @@ const summarySample = {
   call_count: 3,
   log_count: 4,
   truncated: false,
-  failed_step: { code: 'find_zone', label: '查找远程托管区域' },
+  failed_step: { code: 'find_zone', label: '查找远程托管域名' },
   steps: [
     {
       code: 'load_state',
@@ -56,7 +56,7 @@ const summarySample = {
     },
     {
       code: 'find_zone',
-      label: '查找远程托管区域',
+      label: '查找远程托管域名',
       outcome: 'failed',
       duration_ms: 5012,
       call_count: 1,
@@ -170,7 +170,7 @@ const callSample = {
 const stepSample = {
   index: 3,
   code: 'find_zone',
-  label: '查找远程托管区域',
+  label: '查找远程托管域名',
   subject: 'example.com',
   started_at: '2026-10-14T14:16:44.135001+00',
   offset_ms: 12,
@@ -317,7 +317,7 @@ test('trace schemas read the contract samples', () => {
   const [first, second, abridged] = trace.steps
   expect(first).toEqual({
     code: 'find_zone',
-    label: '查找远程托管区域',
+    label: '查找远程托管域名',
     subject: 'example.com',
     duration_ms: 5012,
     outcome: 'failed',
@@ -577,7 +577,7 @@ test('the timeline renders from the summary before the full trace arrives', () =
     '加载同步状态',
     '解密凭据',
     '校验 TTL',
-    '查找远程托管区域',
+    '查找远程托管域名',
     '记录失败',
   ])
     expect(html).toContain(label)

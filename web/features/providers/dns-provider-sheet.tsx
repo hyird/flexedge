@@ -5,13 +5,17 @@ import { apiErrorMessage } from '@/lib/api'
 import { fieldErrors } from '@/lib/form-errors'
 import { queryKeys } from '@/lib/query-keys'
 import { FormSheet } from '@/components/form-sheet'
-import { Choice, Field, Notice } from '@/components/forms'
+import { Choice, Field } from '@/components/forms'
 import { saveDnsProvider } from './data'
 import {
   dnsProviderFormSchema,
   dnsProviderTokenLength,
   type DnsProviderFormValues,
 } from './dns-provider-form'
+import {
+  ProviderRemoval,
+  ProviderVerification,
+} from './provider-sheet-sections'
 import type { DnsProvider } from './types'
 
 /** Create (no `provider`) or edit a DNS account. Platform and account id are
@@ -24,12 +28,16 @@ export function DnsProviderSheet({
   onClose: () => void
 }) {
   const client = useQueryClient()
-  const [values, setValues] = useState<DnsProviderFormValues>({
+  const [initial] = useState<DnsProviderFormValues>(() => ({
     name: provider?.name ?? '',
     provider: provider?.provider === 'aliyun' ? 'aliyun' : 'cloudflare',
     account_id: provider?.account_id ?? '',
     api_token: '',
-  })
+  }))
+  const [values, setValues] = useState(initial)
+  const isDirty = (
+    Object.keys(initial) as (keyof DnsProviderFormValues)[]
+  ).some((key) => values[key] !== initial[key])
   const [errors, setErrors] = useState<Record<string, string>>({})
   const update = (name: keyof DnsProviderFormValues, value: string) =>
     setValues((current) => ({ ...current, [name]: value }))
@@ -65,7 +73,7 @@ export function DnsProviderSheet({
       description={
         provider
           ? '可修改账号名称或轮换访问密钥；平台和账户标识创建后不可修改。'
-          : '凭据用于读取和同步托管域名的解析记录；保存后在行菜单中“验证凭据”，验证通过才能添加 DNS 区域。'
+          : '凭据用于读取和同步托管域名的解析记录；保存后在编辑中“验证凭据”，验证通过才能添加域名。'
       }
       onSubmit={submit}
       submitLabel={provider ? '保存' : '添加账号'}
@@ -114,8 +122,23 @@ export function DnsProviderSheet({
         }
         autoComplete='new-password'
       />
-      {provider?.last_error && (
-        <Notice>最近一次验证失败：{provider.last_error}</Notice>
+      {provider && (
+        <>
+          <ProviderVerification
+            kind='dns'
+            provider={provider}
+            isDirty={isDirty}
+          />
+          <ProviderRemoval
+            kind='dns'
+            provider={provider}
+            label='删除账号'
+            title={`删除 DNS 账号 ${provider.name}？`}
+            description='删除后将无法再用该账号同步解析记录。仍有托管域名时，删除会被拒绝。'
+            isDisabled={mutation.isPending}
+            onRemoved={onClose}
+          />
+        </>
       )}
     </FormSheet>
   )

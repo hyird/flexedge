@@ -11,7 +11,9 @@ const sheetWidths = {
 
 /** Right-side sheet for creation and small edits. The body is a `<form>`:
  * Enter submits, the footer holds Cancel + submit, and while `isSubmitting`
- * the sheet cannot be dismissed. Submission errors render inside the form. */
+ * the sheet cannot be dismissed. Submission errors render inside the form.
+ * Read-only sheets (no `onSubmit`) have no footer: the close button in the
+ * corner is their only exit. */
 export function FormSheet({
   isOpen,
   onClose,
@@ -25,7 +27,6 @@ export function FormSheet({
   isSubmitting = false,
   isSubmitDisabled = false,
   error,
-  footer,
 }: {
   isOpen: boolean
   onClose: () => void
@@ -42,8 +43,6 @@ export function FormSheet({
   isSubmitDisabled?: boolean
   /** Form-level error (e.g. `apiErrorMessage(mutation.error)`). */
   error?: ReactNode
-  /** Replaces the default footer buttons, e.g. `完成` for result sheets. */
-  footer?: ReactNode
 }) {
   return (
     <Sheet
@@ -91,31 +90,27 @@ export function FormSheet({
                 )}
                 {children}
               </Sheet.Body>
-              <Sheet.Footer className='justify-end gap-2 border-t border-border'>
-                {footer ?? (
-                  <>
-                    <Button
-                      size='sm'
-                      variant='tertiary'
-                      isDisabled={isSubmitting}
-                      onPress={onClose}
-                    >
-                      取消
-                    </Button>
-                    {onSubmit && (
-                      <Button
-                        size='sm'
-                        type='submit'
-                        variant={submitTone}
-                        isPending={isSubmitting}
-                        isDisabled={isSubmitDisabled}
-                      >
-                        {submitLabel}
-                      </Button>
-                    )}
-                  </>
-                )}
-              </Sheet.Footer>
+              {onSubmit && (
+                <Sheet.Footer className='justify-end gap-2 border-t border-border'>
+                  <Button
+                    size='sm'
+                    variant='tertiary'
+                    isDisabled={isSubmitting}
+                    onPress={onClose}
+                  >
+                    取消
+                  </Button>
+                  <Button
+                    size='sm'
+                    type='submit'
+                    variant={submitTone}
+                    isPending={isSubmitting}
+                    isDisabled={isSubmitDisabled}
+                  >
+                    {submitLabel}
+                  </Button>
+                </Sheet.Footer>
+              )}
             </form>
           </Sheet.Dialog>
         </Sheet.Content>

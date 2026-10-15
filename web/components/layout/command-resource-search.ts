@@ -8,10 +8,9 @@ import { readLiveSnapshot } from '@/lib/live-query'
 type ResourceSearchHit = {
   key: string
   label: string
-  detail: string
   href: string
 }
-type HitFields = { id: string; label: string; detail: string }
+type HitFields = { id: string; label: string }
 
 type ResourceSearchSource = {
   label: string
@@ -59,48 +58,21 @@ export const resourceSearchSources: ResourceSearchSource[] = [
         website.config.name ||
         website.config.domains[0]?.hostname ||
         website.id,
-      detail: website.config.domains
-        .map((domain) => domain.hostname)
-        .join(', '),
     }),
   }),
   defineSource({
     label: '节点',
     icon: Server,
     path: '/nodes',
-    item: z.object({
-      id: z.string(),
-      name: z.string(),
-      cluster_name: z.string(),
-      config: z.object({
-        endpoints: z.array(z.object({ ip_address: z.string() })),
-      }),
-    }),
-    toHit: (node) => ({
-      id: node.id,
-      label: node.name,
-      detail: [
-        node.cluster_name,
-        ...node.config.endpoints.map((endpoint) => endpoint.ip_address),
-      ]
-        .filter(Boolean)
-        .join(' · '),
-    }),
+    item: z.object({ id: z.string(), name: z.string() }),
+    toHit: (node) => ({ id: node.id, label: node.name }),
   }),
   defineSource({
     label: '集群',
     icon: Layers,
     path: '/clusters',
-    item: z.object({
-      id: z.string(),
-      name: z.string(),
-      access_domain: z.string(),
-    }),
-    toHit: (cluster) => ({
-      id: cluster.id,
-      label: cluster.name,
-      detail: cluster.access_domain,
-    }),
+    item: z.object({ id: z.string(), name: z.string() }),
+    toHit: (cluster) => ({ id: cluster.id, label: cluster.name }),
   }),
   defineSource({
     label: '证书',
@@ -110,23 +82,14 @@ export const resourceSearchSources: ResourceSearchSource[] = [
     toHit: (certificate) => ({
       id: certificate.id,
       label: certificate.domains[0] ?? certificate.id,
-      detail: certificate.domains.slice(1).join(', '),
     }),
   }),
   defineSource({
-    label: 'DNS 区域',
+    label: '域名',
     icon: Signal,
     path: '/dns-zones',
-    item: z.object({
-      id: z.string(),
-      domain: z.string(),
-      dns_provider_name: z.string(),
-    }),
-    toHit: (zone) => ({
-      id: zone.id,
-      label: zone.domain,
-      detail: zone.dns_provider_name,
-    }),
+    item: z.object({ id: z.string(), domain: z.string() }),
+    toHit: (zone) => ({ id: zone.id, label: zone.domain }),
   }),
 ]
 
@@ -152,7 +115,6 @@ export function resourceSearchQuery(
           source.parse(value).map((hit) => ({
             key: `${source.path}/${hit.id}`,
             label: hit.label,
-            detail: hit.detail,
             href: `${source.path}/${hit.id}`,
           }))
       ),

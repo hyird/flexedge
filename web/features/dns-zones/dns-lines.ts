@@ -78,9 +78,33 @@ export function flattenDnsLineTree(
   ])
 }
 
+export type DnsLineIndex = {
+  /** Selectable lines in hierarchy order. */
+  options: DnsLineTreeOption[]
+  /** Line code → readable path (`中国地区 / 电信 / 北京`). */
+  labels: Map<string, string>
+}
+
+// One index per line snapshot: live zone patches keep `runtime.lines` by
+// reference (structural sharing), so table cells, the line picker and the
+// lines tab share one tree build instead of rebuilding it per cell or option.
+const lineIndexes = new WeakMap<DnsLine[], DnsLineIndex>()
+
+export function dnsLineIndex(lines: DnsLine[]): DnsLineIndex {
+  let index = lineIndexes.get(lines)
+  if (!index) {
+    const options = flattenDnsLineTree(buildDnsLineTree(lines))
+    index = {
+      options,
+      labels: new Map(
+        options.map(({ line, path }) => [line.code, path.join(' / ')])
+      ),
+    }
+    lineIndexes.set(lines, index)
+  }
+  return index
+}
+
 export function dnsLinePath(lines: DnsLine[], code: string) {
-  const option = flattenDnsLineTree(buildDnsLineTree(lines)).find(
-    ({ line }) => line.code === code
-  )
-  return option?.path.join(' / ') ?? code
+  return dnsLineIndex(lines).labels.get(code) ?? code
 }

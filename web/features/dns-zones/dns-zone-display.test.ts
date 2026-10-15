@@ -1,3 +1,4 @@
+import { replaceEqualDeep } from '@tanstack/react-query'
 import { expect, test } from 'vitest'
 import { ApiBusinessError } from '@/lib/api-response'
 import {
@@ -53,7 +54,7 @@ test('a conflict status without remaining conflicts displays as consistent', () 
 
 test('record rows list system records first and attach their sync state', () => {
   const rows = zoneRecordRows(zone())
-  expect(rows.map((row) => [row.id, row.source])).toEqual([
+  expect(rows.map((row) => [row.record.id, row.source])).toEqual([
     ['system', 'system'],
     ['custom', 'custom'],
   ])
@@ -81,6 +82,26 @@ test('a rejected website CNAME keeps its failed state on the system row', () => 
     source: 'system',
     state: { sync_status: 'failed', last_error: lastError },
   })
+})
+
+test('a live patch of one record keeps every other row’s props by reference', () => {
+  // The records table memoises rows on `record` and `state`; the query cache
+  // structurally shares a patched snapshot, so only the changed row re-renders.
+  const records = Array.from({ length: 300 }, (_, index) => record(`r${index}`))
+  const before = zone({ config: { records } })
+  const patched = structuredClone(before)
+  patched.revision = 2
+  patched.config.records[150].content = '192.0.2.150'
+  const after = replaceEqualDeep(before, patched)
+  const previous = zoneRecordRows(before)
+  const next = zoneRecordRows(after)
+  const changed = next.filter(
+    (row, index) =>
+      row.record !== previous[index].record ||
+      row.state !== previous[index].state
+  )
+  expect(changed.map((row) => row.record.id)).toEqual(['r150'])
+  expect(after.runtime.lines).toBe(before.runtime.lines)
 })
 
 test('only the zone not-found business code means the zone is gone', () => {

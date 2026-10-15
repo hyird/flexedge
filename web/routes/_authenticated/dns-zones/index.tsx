@@ -10,6 +10,6 @@ export const Route = createFileRoute('/_authenticated/dns-zones/')({
     sync_status: optionalSearchValue(z.enum(zoneSyncFilterIds)),
     create: optionalSearchValue(z.literal(1)),
   }),
-  staticData: { breadcrumb: 'DNS 区域' },
+  staticData: { breadcrumb: '域名管理' },
   component: DnsZonesPage,
 })

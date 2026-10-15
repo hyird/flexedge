@@ -1,14 +1,6 @@
 import { type Key } from 'react'
 import { ArrowDown, ArrowUp, Copy, Plus, TrashBin } from '@gravity-ui/icons'
-import {
-  Alert,
-  Button,
-  Chip,
-  Description,
-  Label,
-  ListBox,
-  Tabs,
-} from '@heroui/react'
+import { Alert, Button, Chip, Label, ListBox, Tabs } from '@heroui/react'
 import {
   Choice,
   Field,
@@ -126,15 +118,15 @@ function RuleList({
                 id={rule.id}
                 textValue={rule.name || rule.path}
               >
-                <span className='w-5 shrink-0 self-start pt-0.5 text-xs text-muted tabular-nums'>
+                <span className='w-5 shrink-0 text-xs text-muted tabular-nums'>
                   {position + 1}
                 </span>
-                <div className='flex min-w-0 flex-1 flex-col'>
-                  <Label className='truncate'>{rule.name || rule.path}</Label>
-                  <Description className='truncate font-mono text-xs'>
-                    {matchTypeLabels[rule.match_type]} {rule.path}
-                  </Description>
-                </div>
+                <Label
+                  title={`${matchTypeLabels[rule.match_type]} ${rule.path}`}
+                  className='min-w-0 flex-1 truncate'
+                >
+                  {rule.name || rule.path}
+                </Label>
                 {invalid > 0 && (
                   <Chip size='sm' variant='soft' color='danger'>
                     {invalid} 处错误

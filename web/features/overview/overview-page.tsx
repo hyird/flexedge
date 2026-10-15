@@ -3,7 +3,7 @@ import { ArrowRotateLeft, ChevronRight, CircleCheck } from '@gravity-ui/icons'
 import { ListView, Widget, type DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Button, Chip, Link, Skeleton } from '@heroui/react'
-import { formatBitsPerSecond, formatNumber, ratioOf } from '@/lib/format'
+import { formatNumber, ratioOf } from '@/lib/format'
 import { DataTable, TruncatedText } from '@/components/data-table'
 import { KpiQuantity } from '@/components/kpi-quantity'
 import { LinkButton } from '@/components/link-button'
@@ -123,12 +123,17 @@ function OverviewKpis({
   const online = resources
     ? ratioOf(resources.online_node_count, resources.node_count)
     : 0
-  const valueSkeleton = <Skeleton className='h-8 w-24 rounded-md' />
+  const valueSkeleton = <Skeleton className='h-7 w-24 rounded-md' />
   return (
     <div className='grid grid-cols-2 gap-3 md:grid-cols-3 2xl:grid-cols-6'>
       <KPI className='min-w-0'>
         <KPI.Header>
-          <KPI.Title>当前带宽</KPI.Title>
+          <KPI.Title>
+            当前带宽
+            {resources &&
+              resources.node_count > overviewNodePageSize &&
+              `（前 ${overviewNodePageSize} 个节点）`}
+          </KPI.Title>
         </KPI.Header>
         <KPI.Content className='content-start'>
           {egressBps === undefined ? (
@@ -137,11 +142,6 @@ function OverviewKpis({
             <KpiQuantity value={egressBps} unit='bps' />
           )}
         </KPI.Content>
-        {resources && resources.node_count > overviewNodePageSize && (
-          <KPI.Footer className='truncate text-xs text-muted'>
-            按前 {overviewNodePageSize} 个节点统计
-          </KPI.Footer>
-        )}
       </KPI>
       <KPI className='min-w-0'>
         <KPI.Header>
@@ -168,11 +168,6 @@ function OverviewKpis({
             strokeWidth={1.5}
           />
         )}
-        {summary && (
-          <KPI.Footer className='truncate text-xs text-muted'>
-            独立 IP {formatNumber(summary.unique_client_ips)}
-          </KPI.Footer>
-        )}
       </KPI>
       <KPI className='min-w-0'>
         <KPI.Header>
@@ -194,11 +189,6 @@ function OverviewKpis({
             strokeWidth={1.5}
           />
         )}
-        {summary && (
-          <KPI.Footer className='truncate text-xs text-muted'>
-            峰值带宽 {formatBitsPerSecond(summary.peak_bandwidth_bps)}
-          </KPI.Footer>
-        )}
       </KPI>
       <KPI className='min-w-0'>
         <KPI.Header>
@@ -215,11 +205,6 @@ function OverviewKpis({
             valueSkeleton
           )}
         </KPI.Content>
-        {summary && (
-          <KPI.Footer className='truncate text-xs text-muted'>
-            {formatNumber(summary.status_5xx_count)} 次 5xx 响应
-          </KPI.Footer>
-        )}
       </KPI>
       <KPI className='min-w-0'>
         <KPI.Header>
@@ -246,15 +231,6 @@ function OverviewKpis({
             />
           )}
         </KPI.Content>
-        {resources && (
-          <KPI.Footer className='truncate text-xs text-muted'>
-            {resources.node_count === 0
-              ? '还没有节点'
-              : offline === 0
-                ? '全部在线'
-                : `${offline} 个未在线`}
-          </KPI.Footer>
-        )}
       </KPI>
       <KPI className='min-w-0'>
         <KPI.Header>
@@ -267,12 +243,6 @@ function OverviewKpis({
             valueSkeleton
           )}
         </KPI.Content>
-        {resources && (
-          <KPI.Footer className='truncate text-xs text-muted'>
-            {resources.cluster_count} 个集群 · {resources.certificate_count}{' '}
-            张证书
-          </KPI.Footer>
-        )}
       </KPI>
     </div>
   )
@@ -356,14 +326,17 @@ const nodeHealthColumns: DataGridColumn<Node>[] = [
     isRowHeader: true,
     minWidth: 180,
     cell: (node) => (
-      <div className='flex min-w-0 flex-col'>
-        <Link href={`/nodes/${node.id}`} className='truncate font-medium'>
-          {node.name}
-        </Link>
-        <span className='truncate text-xs text-muted'>
-          {node.cluster_name || '—'}
-        </span>
-      </div>
+      <Link href={`/nodes/${node.id}`} className='truncate font-medium'>
+        {node.name}
+      </Link>
+    ),
+  },
+  {
+    id: 'cluster',
+    header: '集群',
+    minWidth: 140,
+    cell: (node) => (
+      <span className='truncate'>{node.cluster_name || '—'}</span>
     ),
   },
   {
@@ -500,10 +473,7 @@ const markerColumns: DataGridColumn<OverviewMarker>[] = [
     header: '最近错误',
     minWidth: 200,
     cell: (marker) => (
-      <TruncatedText
-        text={marker.last_error}
-        className='max-w-72 text-xs text-muted'
-      />
+      <TruncatedText text={marker.last_error} className='max-w-72 text-muted' />
     ),
   },
   {

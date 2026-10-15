@@ -1,27 +1,19 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Link, getRouteApi } from '@tanstack/react-router'
-import {
-  ArrowDownToLine,
-  ArrowsRotateRight,
-  Eye,
-  Gear,
-  Plus,
-  TrashBin,
-} from '@gravity-ui/icons'
+import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button } from '@heroui/react'
 import { formatDate } from '@/lib/format'
 import { hasListFilters, useListSearch } from '@/lib/list-search'
 import { cn } from '@/lib/utils'
-import { ActionMenu } from '@/components/action-menu'
 import { DataTable } from '@/components/data-table'
+import { LinkButton } from '@/components/link-button'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
 import { Mono } from '@/components/mono'
 import { Page } from '@/components/page'
 import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { providerLabel } from '@/features/providers/provider-display'
-import { useCertificateCommands } from './certificate-commands'
 import {
   certificateStatusLabels,
   certificateStatuses,
@@ -38,7 +30,6 @@ export function CertificatesPage() {
   const list = useListSearch(route)
   const navigate = route.useNavigate()
   const { status, expiring, abnormal } = list.search
-  const commands = useCertificateCommands()
   const query = useQuery({
     ...certificatesQuery({
       page: list.page,
@@ -157,49 +148,17 @@ export function CertificatesPage() {
     },
     {
       id: 'actions',
-      header: '',
-      align: 'end',
-      width: 56,
+      header: <span className='sr-only'>操作</span>,
+      width: 72,
       cell: (item) => (
-        <ActionMenu
-          label={`证书 ${item.domains[0] ?? ''} 的操作`}
-          items={[
-            {
-              id: 'detail',
-              label: '查看详情',
-              icon: <Eye />,
-              href: `/certificates/${item.id}`,
-            },
-            {
-              id: 'settings',
-              label: '续期设置',
-              icon: <Gear />,
-              href: `/certificates/${item.id}?renewal=1`,
-            },
-            {
-              id: 'renew',
-              label: '立即续期',
-              icon: <ArrowsRotateRight />,
-              disabled: item.status === 'issuing' || item.status === 'renewing',
-              onAction: () => commands.renew(item),
-            },
-            {
-              id: 'download',
-              label: '下载证书',
-              icon: <ArrowDownToLine />,
-              disabled: !item.usable || commands.downloadingId === item.id,
-              onAction: () => commands.download(item),
-            },
-            {
-              id: 'remove',
-              label: '删除证书',
-              icon: <TrashBin />,
-              danger: true,
-              separated: true,
-              onAction: () => commands.remove(item),
-            },
-          ]}
-        />
+        <LinkButton
+          href={`/certificates/${item.id}`}
+          variant='tertiary'
+          className='px-2'
+          aria-label={`证书 ${item.domains[0] ?? ''} 的详情`}
+        >
+          详情
+        </LinkButton>
       ),
     },
   ]
@@ -265,7 +224,6 @@ export function CertificatesPage() {
             : {
                 title: '还没有证书',
                 description: '申请证书后即可在网站 HTTPS 配置中绑定。',
-                action: createAction,
               }
         }
         footer={
@@ -282,7 +240,6 @@ export function CertificatesPage() {
         isOpen={list.search.create === 1}
         onClose={() => setCreateOpen(false)}
       />
-      {commands.dialogs}
     </Page>
   )
 }

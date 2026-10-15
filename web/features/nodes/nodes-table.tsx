@@ -6,6 +6,7 @@ import { Button } from '@heroui/react'
 import { formatBitsPerSecond, formatNumber } from '@/lib/format'
 import { hasListFilters, type ListSearchState } from '@/lib/list-search'
 import { DataTable } from '@/components/data-table'
+import { LinkButton } from '@/components/link-button'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
 import { MetricMeter } from '@/components/metric-meter'
 import { Mono } from '@/components/mono'
@@ -13,7 +14,6 @@ import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { clusterOptionsQuery } from '@/features/clusters/data'
 import { nodesQuery } from './data'
-import { NodeActionMenu } from './node-action-menu'
 import { NodeConnectionChip } from './node-connection-chip'
 import { NodeCreateSheet } from './node-create-sheet'
 import { nodeFilterKeys, type NodeListSearch } from './node-search'
@@ -70,39 +70,43 @@ export function NodesTable({
       id: 'name',
       header: '节点',
       isRowHeader: true,
-      minWidth: 180,
+      minWidth: 130,
       cell: (node) => (
-        <div className='flex min-w-0 flex-col gap-0.5'>
-          <Link
-            to='/nodes/$nodeId'
-            params={{ nodeId: node.id }}
-            className='link truncate font-medium'
-          >
-            {node.name}
-          </Link>
-          <span className='flex min-w-0 items-center gap-1.5 text-xs text-muted'>
-            {node.config.endpoints[0] ? (
-              <Mono truncate className='min-w-0 text-xs'>
-                {node.config.endpoints[0].ip_address}
-              </Mono>
-            ) : (
-              <span>—</span>
-            )}
+        <Link
+          to='/nodes/$nodeId'
+          params={{ nodeId: node.id }}
+          className='link block truncate font-medium'
+        >
+          {node.name}
+        </Link>
+      ),
+    },
+    {
+      id: 'ip',
+      header: 'IP',
+      minWidth: 136,
+      cell: (node) =>
+        node.config.endpoints[0] ? (
+          <span className='flex min-w-0 items-center gap-1.5'>
+            <Mono truncate className='min-w-0'>
+              {node.config.endpoints[0].ip_address}
+            </Mono>
             {node.config.endpoints.length > 1 && (
-              <span className='shrink-0'>
+              <span className='shrink-0 text-muted'>
                 +{node.config.endpoints.length - 1}
               </span>
             )}
           </span>
-        </div>
-      ),
+        ) : (
+          <span className='text-muted'>—</span>
+        ),
     },
     ...(clusterId === undefined
       ? [
           {
             id: 'cluster',
             header: '集群',
-            minWidth: 120,
+            minWidth: 110,
             cell: (node: Node) => (
               <Link
                 to='/clusters/$clusterId'
@@ -124,24 +128,24 @@ export function NodesTable({
     {
       id: 'cpu',
       header: 'CPU',
-      minWidth: 128,
+      minWidth: 96,
       cell: (node) => (
         <MetricMeter
           label={`${node.name} CPU`}
           value={liveMetrics(node.runtime).cpu_usage}
-          className='w-24'
+          className='w-16'
         />
       ),
     },
     {
       id: 'memory',
       header: '内存',
-      minWidth: 128,
+      minWidth: 96,
       cell: (node) => (
         <MetricMeter
           label={`${node.name} 内存`}
           value={liveMetrics(node.runtime).memory_usage}
-          className='w-24'
+          className='w-16'
         />
       ),
     },
@@ -189,17 +193,19 @@ export function NodesTable({
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      minWidth: 56,
-      align: 'end',
-      cell: (node) => <NodeActionMenu node={node} context='list' />,
+      width: 72,
+      cell: (node) => (
+        <LinkButton
+          href={`/nodes/${node.id}`}
+          variant='tertiary'
+          className='px-2'
+          aria-label={`节点 ${node.name} 的详情`}
+        >
+          详情
+        </LinkButton>
+      ),
     },
   ]
-  const createButton = (
-    <Button size='sm' onPress={() => onCreatingChange(true)}>
-      <Plus className='size-4' />
-      添加节点
-    </Button>
-  )
   return (
     <div className='flex flex-col gap-4'>
       <ListToolbar
@@ -250,6 +256,14 @@ export function NodesTable({
         onClearFilters={() => void list.clearFilters(filterKeys)}
         onRefresh={() => query.refetch()}
         isRefreshing={query.isFetching && !query.isPending}
+        actions={
+          clusterId === undefined ? undefined : (
+            <Button size='sm' onPress={() => onCreatingChange(true)}>
+              <Plus className='size-4' />
+              添加节点
+            </Button>
+          )
+        }
       />
       <DataTable
         label='节点列表'
@@ -268,7 +282,6 @@ export function NodesTable({
             : {
                 title: '还没有边缘节点',
                 description: '添加节点后，用接入凭据在服务器上启动节点程序。',
-                action: createButton,
               }
         }
         footer={

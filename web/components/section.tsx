@@ -2,7 +2,7 @@ import { type ReactNode } from 'react'
 import { Card } from '@heroui/react'
 import { cn } from '@/lib/utils'
 
-/** Titled content block on a surface card (14px/600 heading, 16–20px padding).
+/** Titled content block on a surface card (14px/600 heading, 12–16px padding).
  * Use for every grouped area of a detail or overview page. */
 export function Section({
   title,
@@ -15,13 +15,14 @@ export function Section({
   title?: ReactNode
   description?: ReactNode
   actions?: ReactNode
-  children: ReactNode
+  /** Omit for a header-only card (title and actions). */
+  children?: ReactNode
   className?: string
   /** E.g. `p-0` when the content is a full-bleed table. */
   contentClassName?: string
 }) {
   return (
-    <Card className={cn('min-w-0 gap-4 p-4 sm:p-5', className)}>
+    <Card className={cn('min-w-0 gap-3 p-3 sm:p-4', className)}>
       {(title || actions) && (
         <Card.Header className='flex flex-row flex-wrap items-start justify-between gap-x-4 gap-y-2'>
           <div className='flex min-w-0 flex-col gap-0.5'>
@@ -41,9 +42,11 @@ export function Section({
           )}
         </Card.Header>
       )}
-      <Card.Content className={cn('min-w-0', contentClassName)}>
-        {children}
-      </Card.Content>
+      {children != null && (
+        <Card.Content className={cn('min-w-0', contentClassName)}>
+          {children}
+        </Card.Content>
+      )}
     </Card>
   )
 }
@@ -67,7 +70,7 @@ export function DescriptionList({
   return (
     <dl
       className={cn(
-        'grid grid-cols-1 gap-x-8 gap-y-4',
+        'grid grid-cols-1 gap-x-8 gap-y-3',
         columns >= 2 && 'sm:grid-cols-2',
         columns === 3 && 'xl:grid-cols-3'
       )}
@@ -76,7 +79,7 @@ export function DescriptionList({
         <div
           key={index}
           className={cn(
-            'flex min-w-0 flex-col gap-1',
+            'flex min-w-0 flex-col gap-0.5',
             item.wide && 'sm:col-span-full'
           )}
         >

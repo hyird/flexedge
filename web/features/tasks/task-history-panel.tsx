@@ -223,7 +223,7 @@ function AttemptHeader({
     tone: 'default' as const,
   }
   return (
-    <div className='flex min-w-0 items-center justify-between gap-3'>
+    <div className='flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1'>
       <div className='flex shrink-0 items-center gap-2'>
         <h3 className='m-0 text-sm font-medium whitespace-nowrap text-foreground'>
           {title}
@@ -234,7 +234,7 @@ function AttemptHeader({
           reserve={outcomeLabels}
         />
       </div>
-      <span className='min-w-0 truncate text-xs text-muted tabular-nums'>
+      <span className='text-sm whitespace-nowrap text-muted tabular-nums'>
         {aside}
       </span>
     </div>

@@ -1,3 +1,5 @@
+import { useNavigate } from '@tanstack/react-router'
+import { ArrowsRotateRight, TrashBin } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Alert, Button, Link } from '@heroui/react'
@@ -17,9 +19,16 @@ import { useZoneCommands } from './zone-commands'
 
 type Conflict = DnsZone['runtime']['conflicts'][number]
 
+/** The 概览 tab: sync state, conflicts (the only place to resolve them),
+ * 立即同步 next to the sync details and 移除域名 at the bottom of them. */
 export function ZoneOverview() {
   const zone = useZoneDetail().data
-  const commands = useZoneCommands()
+  const navigate = useNavigate()
+  const commands = useZoneCommands({
+    // The zone is gone, so a pending guard has nothing left to protect.
+    onRemoved: () =>
+      void navigate({ to: '/dns-zones', replace: true, ignoreBlocker: true }),
+  })
   if (!zone) return null
   const failedRecords = zone.runtime.record_states.filter(
     (state) => state.sync_status === 'failed'
@@ -137,7 +146,21 @@ export function ZoneOverview() {
           />
         </Section>
       )}
-      <Section title='同步信息'>
+      <Section
+        title='同步信息'
+        contentClassName='flex flex-col gap-4'
+        actions={
+          <Button
+            size='sm'
+            variant='tertiary'
+            isPending={commands.syncingId === zone.id}
+            onPress={() => commands.sync(zone)}
+          >
+            <ArrowsRotateRight className='size-4' />
+            立即同步
+          </Button>
+        }
+      >
         <DescriptionList
           columns={3}
           items={[
@@ -189,9 +212,18 @@ export function ZoneOverview() {
               value: zone.runtime.records_imported ? '已导入' : '尚未导入',
             },
             { label: '添加时间', value: formatDate(zone.created_at) },
-            { label: '区域 ID', value: <Mono>{zone.id}</Mono> },
+            { label: '域名 ID', value: <Mono>{zone.id}</Mono> },
           ]}
         />
+        <Button
+          size='sm'
+          variant='danger-soft'
+          className='self-start'
+          onPress={() => commands.remove(zone)}
+        >
+          <TrashBin className='size-4' />
+          移除域名
+        </Button>
       </Section>
       {commands.dialogs}
     </>

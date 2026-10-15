@@ -4,8 +4,6 @@ import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button, Link, Tooltip } from '@heroui/react'
 import { hasListFilters, useListState } from '@/lib/list-search'
-import { ActionMenu } from '@/components/action-menu'
-import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTable } from '@/components/data-table'
 import { ListToolbar } from '@/components/list-toolbar'
 import { Mono } from '@/components/mono'
@@ -14,7 +12,6 @@ import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { dnsProvidersQuery } from './data'
 import { DnsProviderSheet } from './dns-provider-sheet'
-import { useProviderActions } from './provider-actions'
 import { providerLabel, providerStatusLabels } from './provider-display'
 import type { DnsProvider } from './types'
 
@@ -24,8 +21,6 @@ export function DnsProvidersPage({ initialQuery }: { initialQuery?: string }) {
   const list = useListState<{ q?: string }>({ q: initialQuery })
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<DnsProvider | null>(null)
-  const [removing, setRemoving] = useState<DnsProvider | null>(null)
-  const actions = useProviderActions()
   const query = useQuery({
     ...dnsProvidersQuery({
       page: list.page,
@@ -40,15 +35,16 @@ export function DnsProvidersPage({ initialQuery }: { initialQuery?: string }) {
       id: 'name',
       header: '账号',
       isRowHeader: true,
-      minWidth: 220,
+      minWidth: 180,
       cell: (item) => (
-        <div className='flex min-w-0 flex-col'>
-          <span className='truncate font-medium'>{item.name}</span>
-          <span className='text-xs text-muted'>
-            {providerLabel(item.provider)}
-          </span>
-        </div>
+        <span className='block truncate font-medium'>{item.name}</span>
       ),
+    },
+    {
+      id: 'provider',
+      header: '服务商',
+      minWidth: 110,
+      cell: (item) => providerLabel(item.provider),
     },
     {
       id: 'account',
@@ -113,33 +109,17 @@ export function DnsProvidersPage({ initialQuery }: { initialQuery?: string }) {
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      width: 56,
-      align: 'end',
+      width: 72,
       cell: (item) => (
-        <ActionMenu
-          label={`DNS 账号 ${item.name} 的操作`}
-          items={[
-            {
-              id: 'verify',
-              label: actions.isVerifying(item.id) ? '正在验证…' : '验证凭据',
-              disabled: actions.isVerifying(item.id),
-              onAction: () =>
-                actions.verify({
-                  kind: 'dns',
-                  id: item.id,
-                  revision: item.revision,
-                }),
-            },
-            { id: 'edit', label: '编辑', onAction: () => setEditing(item) },
-            {
-              id: 'delete',
-              label: '删除账号',
-              danger: true,
-              separated: true,
-              onAction: () => setRemoving(item),
-            },
-          ]}
-        />
+        <Button
+          size='sm'
+          variant='tertiary'
+          className='px-2'
+          aria-label={`编辑 DNS 账号 ${item.name}`}
+          onPress={() => setEditing(item)}
+        >
+          编辑
+        </Button>
       ),
     },
   ]
@@ -180,8 +160,7 @@ export function DnsProvidersPage({ initialQuery }: { initialQuery?: string }) {
             : {
                 title: '还没有 DNS 账号',
                 description:
-                  '添加 Cloudflare 或阿里云账号后，即可托管 DNS 区域并自动同步解析记录。',
-                action: createButton,
+                  '添加 Cloudflare 或阿里云账号后，即可托管域名并自动同步解析记录。',
               }
         }
         footer={
@@ -204,21 +183,6 @@ export function DnsProvidersPage({ initialQuery }: { initialQuery?: string }) {
           onClose={() => setEditing(null)}
         />
       )}
-      <ConfirmDialog
-        isOpen={!!removing}
-        onClose={() => setRemoving(null)}
-        title={`删除 DNS 账号 ${removing?.name ?? ''}？`}
-        description='删除后将无法再用该账号同步解析记录。仍有托管 DNS 区域时，删除会被拒绝。'
-        confirmLabel='删除账号'
-        onConfirm={() =>
-          removing &&
-          actions.remove({
-            kind: 'dns',
-            id: removing.id,
-            revision: removing.revision,
-          })
-        }
-      />
     </div>
   )
 }

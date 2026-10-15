@@ -28,7 +28,7 @@ export function ProvidersLayout() {
   return (
     <Page
       title='供应商账号'
-      description='管理托管 DNS 区域所用的 DNS 账号，以及签发证书所用的证书供应商凭据。'
+      description='管理托管域名所用的 DNS 账号，以及签发证书所用的证书供应商凭据。'
     >
       <PageTabs
         label='供应商类型'

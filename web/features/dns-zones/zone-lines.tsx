@@ -1,14 +1,12 @@
 import type { DataGridColumn } from '@heroui-pro/react'
 import { formatDate } from '@/lib/format'
+import { pageLocally, useListState } from '@/lib/list-search'
 import { DataTable } from '@/components/data-table'
 import { Mono } from '@/components/mono'
 import { Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
-import {
-  buildDnsLineTree,
-  flattenDnsLineTree,
-  type DnsLineTreeOption,
-} from './dns-lines'
+import { TablePagination } from '@/components/table-pagination'
+import { type DnsLineTreeOption, dnsLineIndex } from './dns-lines'
 import { lineStatusLabels } from './dns-zone-display'
 import { useZoneDetail } from './use-zone-detail'
 
@@ -45,10 +43,14 @@ const columns: DataGridColumn<DnsLineTreeOption>[] = [
   },
 ]
 
+/** Provider lines from the zone snapshot's shared line index, paged on the
+ * client (Aliyun lists hundreds); page and page size are component state. */
 export function ZoneLines() {
   const zone = useZoneDetail().data
+  const list = useListState()
   if (!zone) return null
-  const options = flattenDnsLineTree(buildDnsLineTree(zone.runtime.lines))
+  const { options } = dnsLineIndex(zone.runtime.lines)
+  const page = pageLocally(options, list.page, list.pageSize)
   return (
     <Section
       title={`解析线路 · ${options.length}`}
@@ -57,7 +59,7 @@ export function ZoneLines() {
       <DataTable
         label='解析线路'
         columns={columns}
-        data={options}
+        data={page.list}
         isLoading={false}
         getRowId={({ line }) => line.code}
         minWidth={560}
@@ -65,6 +67,15 @@ export function ZoneLines() {
           title: '暂无解析线路',
           description: '执行一次同步后会从服务商读取可用线路。',
         }}
+        footer={
+          <TablePagination
+            page={list.page}
+            pageSize={list.pageSize}
+            total={page.total}
+            onPageChange={list.setPage}
+            onPageSizeChange={list.setPageSize}
+          />
+        }
       />
     </Section>
   )

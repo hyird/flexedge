@@ -1,17 +1,11 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Link, getRouteApi } from '@tanstack/react-router'
-import {
-  ArrowsRotateRight,
-  Eye,
-  PencilToSquare,
-  Plus,
-  TrashBin,
-} from '@gravity-ui/icons'
+import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button } from '@heroui/react'
 import { hasListFilters, useListSearch } from '@/lib/list-search'
-import { ActionMenu, type ActionMenuItem } from '@/components/action-menu'
 import { DataTable } from '@/components/data-table'
+import { LinkButton } from '@/components/link-button'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
 import { Mono } from '@/components/mono'
 import { Page } from '@/components/page'
@@ -24,12 +18,10 @@ import { CreateZoneSheet } from './create-zone-sheet'
 import { dnsZonesQuery } from './data'
 import {
   displaySyncStatus,
-  hasMeaningfulConflicts,
   zoneSyncFilters,
   zoneSyncStatusLabels,
 } from './dns-zone-display'
 import type { DnsZone } from './types'
-import { useZoneCommands } from './zone-commands'
 
 const route = getRouteApi('/_authenticated/dns-zones/')
 const filterKeys = ['dns_provider_id', 'sync_status'] as const
@@ -37,7 +29,6 @@ const filterKeys = ['dns_provider_id', 'sync_status'] as const
 export function DnsZonesPage() {
   const list = useListSearch(route)
   const { sync_status: syncFilter, dns_provider_id: providerId } = list.search
-  const commands = useZoneCommands()
   // The provider filter only needs the account names once.
   const providers = useQuery({ ...dnsProviderOptionsQuery, gcTime: 0 })
   const query = useQuery({
@@ -62,54 +53,9 @@ export function DnsZonesPage() {
   const createAction = (
     <Button size='sm' onPress={() => setCreateOpen(true)}>
       <Plus className='size-4' />
-      添加 DNS 区域
+      添加域名
     </Button>
   )
-  const rowActions = (zone: DnsZone): ActionMenuItem[] => [
-    {
-      id: 'detail',
-      label: '查看详情',
-      icon: <Eye />,
-      href: `/dns-zones/${zone.id}`,
-    },
-    {
-      id: 'records',
-      label: '编辑记录',
-      icon: <PencilToSquare />,
-      href: `/dns-zones/${zone.id}`,
-      state: { dnsZone: { tab: 'records', editRecords: true } },
-    },
-    {
-      id: 'sync',
-      label: '立即同步',
-      icon: <ArrowsRotateRight />,
-      disabled: commands.syncingId === zone.id,
-      onAction: () => commands.sync(zone),
-    },
-    ...(hasMeaningfulConflicts(zone)
-      ? [
-          {
-            id: 'local',
-            label: '冲突处理：使用本地记录',
-            separated: true,
-            onAction: () => commands.resolve(zone, 'local'),
-          },
-          {
-            id: 'remote',
-            label: '冲突处理：使用远端记录',
-            onAction: () => commands.resolve(zone, 'remote'),
-          },
-        ]
-      : []),
-    {
-      id: 'remove',
-      label: '移除区域',
-      icon: <TrashBin />,
-      danger: true,
-      separated: true,
-      onAction: () => commands.remove(zone),
-    },
-  ]
   const columns: DataGridColumn<DnsZone>[] = [
     {
       id: 'domain',
@@ -131,13 +77,14 @@ export function DnsZonesPage() {
       header: 'DNS 账号',
       minWidth: 180,
       cell: (zone) => (
-        <div className='flex min-w-0 flex-col'>
-          <span className='truncate'>{zone.dns_provider_name}</span>
-          <span className='text-xs text-muted'>
-            {providerLabel(zone.dns_provider)}
-          </span>
-        </div>
+        <span className='block truncate'>{zone.dns_provider_name}</span>
       ),
+    },
+    {
+      id: 'provider-type',
+      header: '服务商',
+      minWidth: 110,
+      cell: (zone) => providerLabel(zone.dns_provider),
     },
     {
       id: 'records',
@@ -183,20 +130,23 @@ export function DnsZonesPage() {
     },
     {
       id: 'actions',
-      header: '',
-      align: 'end',
-      width: 56,
+      header: <span className='sr-only'>操作</span>,
+      width: 72,
       cell: (zone) => (
-        <ActionMenu
-          label={`DNS 区域 ${zone.domain} 的操作`}
-          items={rowActions(zone)}
-        />
+        <LinkButton
+          href={`/dns-zones/${zone.id}`}
+          variant='tertiary'
+          className='px-2'
+          aria-label={`域名 ${zone.domain} 的详情`}
+        >
+          详情
+        </LinkButton>
       ),
     },
   ]
   return (
     <Page
-      title='DNS 区域'
+      title='域名管理'
       description='托管在 DNS 账号中的域名：自定义记录、系统自动记录与解析线路的同步状态。'
       actions={createAction}
     >
@@ -237,7 +187,7 @@ export function DnsZonesPage() {
         isRefreshing={query.isRefetching}
       />
       <DataTable
-        label='DNS 区域'
+        label='域名管理'
         columns={columns}
         data={query.data?.list}
         isLoading={query.isPending}
@@ -247,14 +197,13 @@ export function DnsZonesPage() {
         empty={
           filtered
             ? {
-                title: '没有匹配的 DNS 区域',
+                title: '没有匹配的域名',
                 description: '调整搜索词或筛选条件后重试。',
               }
             : {
-                title: '还没有 DNS 区域',
+                title: '还没有域名',
                 description:
                   '从 DNS 账号导入域名后，即可为集群、证书和网站自动维护解析记录。',
-                action: createAction,
               }
         }
         footer={
@@ -271,7 +220,6 @@ export function DnsZonesPage() {
         isOpen={list.search.create === 1}
         onClose={() => setCreateOpen(false)}
       />
-      {commands.dialogs}
     </Page>
   )
 }

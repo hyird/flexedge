@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { AccessLogAsnDetail, AccessLogClientOrigin } from './access-log-asn'
+import { AccessLogAsnCell, AccessLogAsnDetail } from './access-log-asn'
 import { accessLogAsnLabel } from './access-log-filter'
 
 const chinanet = { client_ip_asn: 'AS4134', client_ip_as_name: 'Chinanet' }
@@ -9,8 +9,8 @@ const longName = {
   client_ip_asn: 'AS4294967295',
   client_ip_as_name: 'Very Long Autonomous System Name '.repeat(8).trim(),
 }
-const origin = (log: Parameters<typeof AccessLogClientOrigin>[0]['log']) =>
-  renderToStaticMarkup(createElement(AccessLogClientOrigin, { log }))
+const cell = (log: Parameters<typeof AccessLogAsnCell>[0]['log']) =>
+  renderToStaticMarkup(createElement(AccessLogAsnCell, { log }))
 
 describe('access log ASN', () => {
   it('labels the AS number and name and stays empty without AS data', () => {
@@ -22,31 +22,32 @@ describe('access log ASN', () => {
     expect(accessLogAsnLabel({})).toBe('')
   })
 
-  it('shows location and ASN on one truncated line with the full text as accessible name', () => {
-    const html = origin({ client_ip_location: '台湾', ...chinanet })
-    expect(html).toContain('aria-label="台湾 · AS4134 Chinanet"')
+  it('renders the cell as one normal-size line with the AS number in mono', () => {
+    const html = cell(chinanet)
+    expect(html).toContain('aria-label="AS4134 Chinanet"')
     expect(html).toContain('truncate')
-    expect(html).toContain('台湾 · <span')
+    expect(html).toContain('font-mono')
     expect(html).toContain('>AS4134</span> Chinanet')
+    expect(html).not.toContain('text-xs')
+    expect(html).not.toContain('<br')
+  })
 
-    const long = origin({ client_ip_location: '未知地区', ...longName })
-    expect(long).toContain(
-      `aria-label="未知地区 · ${accessLogAsnLabel(longName)}"`
-    )
-    expect(long).toContain('truncate')
+  it('truncates a long AS name with the full text as tooltip trigger label', () => {
+    const html = cell(longName)
+    expect(html).toContain(`aria-label="${accessLogAsnLabel(longName)}"`)
+    expect(html).toContain('truncate')
+    expect(html).toContain(longName.client_ip_as_name)
   })
 
   it('shows only the part that exists', () => {
-    const asnOnly = origin(chinanet)
-    expect(asnOnly).toContain('aria-label="AS4134 Chinanet"')
-    expect(asnOnly).not.toContain(' · ')
-    const locationOnly = origin({ client_ip_location: '台湾' })
-    expect(locationOnly).toContain('aria-label="台湾"')
-    expect(locationOnly).not.toContain('AS')
+    expect(cell({ client_ip_asn: 'AS4134' })).toContain('aria-label="AS4134"')
+    const nameOnly = cell({ client_ip_as_name: 'Chinanet' })
+    expect(nameOnly).toContain('aria-label="Chinanet"')
+    expect(nameOnly).not.toContain('font-mono')
   })
 
-  it('renders a dash when location and ASN are both absent', () => {
-    expect(origin({})).toBe('<span class="text-xs text-muted">—</span>')
+  it('renders a dash without AS data', () => {
+    expect(cell({})).toBe('<span class="text-muted">—</span>')
     expect(
       renderToStaticMarkup(createElement(AccessLogAsnDetail, { log: {} }))
     ).toBe('—')

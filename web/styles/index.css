@@ -97,8 +97,52 @@
   .navbar {
     border-bottom: 1px solid var(--border);
   }
+  /* Compact surfaces: 12px card padding and a modest radius everywhere
+     (Section, KPI and Widget share these), so cards hug their content. */
   .card {
     gap: 0.75rem;
+    border-radius: calc(var(--radius) * 1.5);
+  }
+  .kpi {
+    gap: 0.25rem;
+    padding: 0.75rem;
+  }
+  .kpi__header {
+    margin-bottom: 0;
+  }
+  .kpi__value {
+    font-size: var(--text-xl);
+    line-height: var(--text-xl--line-height);
+  }
+  .kpi > .kpi__chart {
+    margin: 0.25rem -0.75rem -0.75rem;
+  }
+  .kpi > .kpi__chart:has(+ .kpi__separator, + .kpi__footer) {
+    margin-bottom: 0;
+  }
+  .kpi__separator {
+    margin-inline: -0.75rem;
+    width: calc(100% + 1.5rem);
+  }
+  .kpi__footer {
+    margin-bottom: 0;
+  }
+  .widget {
+    border-radius: calc(var(--radius) * 1.5);
+  }
+  .widget__header {
+    min-height: 2.25rem;
+    margin-top: 0;
+    padding-inline: 0.75rem;
+  }
+  .widget__content {
+    margin-inline: 0.25rem;
+    margin-bottom: 0.25rem;
+    border-radius: var(--radius);
+    padding: 0.75rem;
+  }
+  .widget__content:first-child {
+    margin-top: 0.25rem;
   }
 
   /* Tables keep one scroll viewport so the sticky header and body columns
@@ -122,9 +166,9 @@
   .data-grid .table__column[data-pinned] {
     z-index: 4;
   }
-  /* Rows stay one height whatever their state: cells never wrap. Columns
-     that are two lines by design (name + domain) stack separate lines and
-     show both lines in every row; long free text truncates with a title. */
+  /* Rows stay one height whatever their state: cells are one line and never
+     wrap (secondary facts get their own column); long free text truncates
+     with a title. */
   .data-grid .table__cell {
     height: 2.75rem;
     padding-block: 0.5rem;

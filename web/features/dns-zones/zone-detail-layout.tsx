@@ -1,15 +1,8 @@
-import { useNavigate } from '@tanstack/react-router'
-import {
-  ArrowsRotateRight,
-  Globe,
-  PencilToSquare,
-  TrashBin,
-} from '@gravity-ui/icons'
-import { Button, Link } from '@heroui/react'
+import { ArrowLeft, Globe } from '@gravity-ui/icons'
+import { Link } from '@heroui/react'
 import { useArrivalState } from '@/lib/history-state'
 import { useTabSwitchGuard } from '@/lib/unsaved-changes'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
-import { ActionMenu, type ActionMenuItem } from '@/components/action-menu'
 import { DetailHeader, DetailHeaderSkeleton } from '@/components/detail-header'
 import { LinkButton } from '@/components/link-button'
 import { EmptyState, Page, QueryNotice } from '@/components/page'
@@ -19,12 +12,10 @@ import { StatusChip } from '@/components/status-chip'
 import { providerLabel } from '@/features/providers/provider-display'
 import {
   displaySyncStatus,
-  hasMeaningfulConflicts,
   isZoneNotFound,
   zoneSyncStatusLabels,
 } from './dns-zone-display'
 import { useZoneDetail } from './use-zone-detail'
-import { useZoneCommands } from './zone-commands'
 import { ZoneLines } from './zone-lines'
 import { ZoneOverview } from './zone-overview'
 import { ZoneRecords } from './zone-records'
@@ -36,37 +27,25 @@ const tabs = [
   { id: 'lines', label: '解析线路' },
 ] as const
 
-/** `/dns-zones/$zoneId` with in-page tabs kept in component state (概览 by
- * default). Links open a tab, or the records editor, through the `dnsZone`
- * history state; switching tabs never touches the URL. */
+/** `/dns-zones/$zoneId` with in-page tabs kept in component state; every
+ * arrival starts on 概览 and switching tabs never touches the URL. Sync,
+ * conflicts and removal live on 概览; records are edited on 记录. */
 export function ZoneDetailLayout() {
-  const navigate = useNavigate()
-  // The header's 编辑记录 switches tabs too, so it shares the tabs' guard.
   const tabGuard = useTabSwitchGuard()
-  const [view, setView, arrivalKey] = useArrivalState((state) => {
-    const requested = tabs.find(({ id }) => id === state.dnsZone?.tab)
-    const tab: ZoneTab = requested?.id ?? 'overview'
-    return {
-      tab,
-      editRecords: tab === 'records' && state.dnsZone?.editRecords === true,
-    }
-  })
+  const [tab, setTab, arrivalKey] = useArrivalState<ZoneTab>(() => 'overview')
   // The layout's query is the zone's live detail stream; every tab reads the
   // same query key, so the page keeps exactly one connection.
   const query = useZoneDetail()
   const zone = query.data
   useBreadcrumbLabel(zone?.domain)
-  const commands = useZoneCommands({
-    onRemoved: () => void navigate({ to: '/dns-zones' }),
-  })
   if (!zone) {
     if (query.isError && isZoneNotFound(query.error))
       return (
         <Page>
           <EmptyState
-            title='DNS 区域不存在'
-            description='该区域可能已被移除，或链接有误。'
-            action={<LinkButton href='/dns-zones'>返回 DNS 区域</LinkButton>}
+            title='域名不存在'
+            description='该域名可能已被移除，或链接有误。'
+            action={<LinkButton href='/dns-zones'>返回域名管理</LinkButton>}
           />
         </Page>
       )
@@ -75,29 +54,12 @@ export function ZoneDetailLayout() {
         <QueryNotice
           query={query}
           onRetry={() => void query.refetch()}
-          title='DNS 区域加载失败'
+          title='域名加载失败'
         />
         {query.isPending && <DetailHeaderSkeleton />}
       </Page>
     )
   }
-  const selectTab = (tab: ZoneTab) => setView({ tab, editRecords: false })
-  const setEditingRecords = (editRecords: boolean) =>
-    setView({ tab: 'records', editRecords })
-  const conflictItems: ActionMenuItem[] = hasMeaningfulConflicts(zone)
-    ? [
-        {
-          id: 'local',
-          label: '使用本地记录覆盖服务商',
-          onAction: () => commands.resolve(zone, 'local'),
-        },
-        {
-          id: 'remote',
-          label: '使用服务商记录替换本地',
-          onAction: () => commands.resolve(zone, 'remote'),
-        },
-      ]
-    : []
   return (
     <Page>
       <QueryNotice
@@ -129,62 +91,24 @@ export function ZoneDetailLayout() {
           </span>,
         ]}
         actions={
-          <>
-            <Button
-              size='sm'
-              variant='tertiary'
-              isPending={commands.syncingId === zone.id}
-              onPress={() => commands.sync(zone)}
-            >
-              <ArrowsRotateRight className='size-4' />
-              立即同步
-            </Button>
-            <Button
-              size='sm'
-              onPress={() => {
-                if (view.tab === 'records' && view.editRecords) return
-                tabGuard.request(() => setEditingRecords(true))
-              }}
-            >
-              <PencilToSquare className='size-4' />
-              编辑记录
-            </Button>
-          </>
-        }
-        menu={
-          <ActionMenu
-            label={`DNS 区域 ${zone.domain} 的更多操作`}
-            items={[
-              ...conflictItems,
-              {
-                id: 'remove',
-                label: '移除区域',
-                icon: <TrashBin />,
-                danger: true,
-                separated: conflictItems.length > 0,
-                onAction: () => commands.remove(zone),
-              },
-            ]}
-          />
+          <LinkButton href='/dns-zones' variant='tertiary'>
+            <ArrowLeft />
+            返回
+          </LinkButton>
         }
       />
-      {commands.dialogs}
       <PageTabs
         guard={tabGuard}
-        label='DNS 区域详情'
+        label='域名详情'
         items={tabs}
-        selected={view.tab}
-        onSelectionChange={selectTab}
+        selected={tab}
+        onSelectionChange={setTab}
       >
-        {/* The records editor's SaveBar is the tab content's last child. A new
-         * arrival remounts the tab, so its search and filters start over. */}
-        {view.tab === 'records' ? (
-          <ZoneRecords
-            key={arrivalKey}
-            editing={view.editRecords}
-            onEditingChange={setEditingRecords}
-          />
-        ) : view.tab === 'lines' ? (
+        {/* A new arrival remounts the tab, so its search, filters and open
+         * record form start over. */}
+        {tab === 'records' ? (
+          <ZoneRecords key={arrivalKey} />
+        ) : tab === 'lines' ? (
           <ZoneLines key={arrivalKey} />
         ) : (
           <ZoneOverview key={arrivalKey} />

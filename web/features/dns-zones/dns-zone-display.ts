@@ -53,25 +53,32 @@ export const zoneSyncFilterIds = zoneSyncFilters.map(({ id }) => id) as [
   ...ZoneSyncFilter[],
 ]
 
-export type ZoneRecordRow = DnsRecord & {
+/** A row of the records table. `record` and `state` are the cached objects
+ * themselves, so rows of records a live patch did not touch keep their props
+ * and skip re-rendering. */
+export type ZoneRecordRow = {
+  record: DnsRecord
   source: 'system' | 'custom'
   state?: DnsZone['runtime']['record_states'][number]
 }
 
 /** System records first (read-only), then custom records; both carry their
  * `record_states` entry (a website CNAME the provider rejected shows failed). */
-export function zoneRecordRows(zone: DnsZone): ZoneRecordRow[] {
+export function zoneRecordRows(zone: {
+  config: Pick<DnsZone['config'], 'records'>
+  runtime: Pick<DnsZone['runtime'], 'projected_records' | 'record_states'>
+}): ZoneRecordRow[] {
   const states = new Map(
     zone.runtime.record_states.map((state) => [state.id, state])
   )
   return [
     ...zone.runtime.projected_records.map((record) => ({
-      ...record,
+      record,
       source: 'system' as const,
       state: states.get(record.id),
     })),
     ...zone.config.records.map((record) => ({
-      ...record,
+      record,
       source: 'custom' as const,
       state: states.get(record.id),
     })),
