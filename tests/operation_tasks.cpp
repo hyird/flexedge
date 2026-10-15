@@ -19,6 +19,7 @@
 #include "service/features/certificate/dns_challenge.h"
 #include "service/features/certificate/queue.h"
 #include "service/features/cluster_dns/projection.h"
+#include "service/features/dns_sync/mapper.h"
 #include "service/features/live_resource/notifications.h"
 #include "service/features/node_dispatch/apply_history.h"
 #include "service/features/node_dispatch/queue.h"
@@ -401,19 +402,25 @@ ruvia::task<void> insert_fixture(ruvia::db_handle& db) {
         "INSERT INTO sys_provider(id, tenant_id, kind, provider, status) VALUES ($1, $2, 'certificate', "
         "'letsencrypt', 'verified')",
         certificate_provider, tenant);
+    // The schema's empty JSON default is not a valid DNS runtime. These
+    // synced zones need the same complete runtime shape as production writes.
+    service::dns_sync::zone_runtime_data runtime{};
+    runtime.records_imported_ = true;
+    const auto runtime_json = ruvia::to_json(service::dns_sync::to_output(runtime));
     (void)co_await db.execute(
-        "INSERT INTO sys_dns_zone(id, tenant_id, provider_id, domain, sync_status, synced_revision) VALUES ($1, $2, "
-        "$3, 'edge.example.com', 'synced', 1)",
-        cluster_zone, tenant, dns_provider);
+        "INSERT INTO sys_dns_zone(id, tenant_id, provider_id, domain, sync_status, synced_revision, runtime) VALUES "
+        "($1, $2, $3, 'edge.example.com', 'synced', 1, $4::jsonb)",
+        cluster_zone, tenant, dns_provider, std::string_view(runtime_json));
     for (int index = 1; index <= 17; ++index) {
         (void)co_await db.execute(
-            "INSERT INTO sys_dns_zone(id, tenant_id, provider_id, domain, sync_status, synced_revision) VALUES ($1, "
-            "$2, $3, $4, 'synced', 1)",
-            zone(index), tenant, dns_provider, zone_domain(index));
+            "INSERT INTO sys_dns_zone(id, tenant_id, provider_id, domain, sync_status, synced_revision, runtime) "
+            "VALUES ($1, $2, $3, $4, 'synced', 1, $5::jsonb)",
+            zone(index), tenant, dns_provider, zone_domain(index), std::string_view(runtime_json));
     }
     (void)co_await db.execute(
-        "INSERT INTO sys_dns_zone(id, tenant_id, provider_id, domain) VALUES ($1, $2, $3, 'other.example.com')",
-        other_zone, other_tenant, other_provider);
+        "INSERT INTO sys_dns_zone(id, tenant_id, provider_id, domain, runtime) VALUES "
+        "($1, $2, $3, 'other.example.com', $4::jsonb)",
+        other_zone, other_tenant, other_provider, std::string_view(runtime_json));
     (void)co_await db.execute(
         "INSERT INTO sys_cluster(id, tenant_id, dns_zone_id, name, hostname_prefix) VALUES ($1, $5, $6, 'Edge', "
         "'edge'), ($2, $5, $6, 'Failing', 'failing'), ($3, $5, $6, 'Partial', 'partial'), ($4, $5, $6, 'Orphan', "
