@@ -426,6 +426,11 @@ if(BUILD_TESTING)
         LIBRARIES ruvia::web
     )
     set_tests_properties(flexedge_task_history PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    flexedge_add_test(operation_tasks BIG_OBJECT
+        SOURCES tests/operation_tasks.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto ZLIB::ZLIB
+    )
+    set_tests_properties(flexedge_operation_tasks PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     flexedge_add_test(attempt_trace_redaction
         SOURCES tests/attempt_trace_redaction.cpp
         LIBRARIES ruvia::web OpenSSL::Crypto
