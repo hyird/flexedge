@@ -115,8 +115,6 @@ def main():
         late_elapsed = time.monotonic() - late_started
         require(0.70 <= late_elapsed < 2.5, f"late fetch completion elapsed {late_elapsed:.3f}s")
 
-        check_response(base, "/context-stop", "context-stop-cancelled")
-        check_response(base, "/health-db", "db-healthy")
         check_response(base, "/ticket-generation", "ticket-generation-ok")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -195,7 +193,7 @@ def main():
               "< reset budget(1300ms); elapsed="
               f"{short_follower_elapsed:.3f}s; same-budget timeout confirmed")
         print("short budgets, late-result non-publication, A/B ticket generation, follower deadline, "
-              "context/worker cancellation, business failure, owner borrow, and pool recovery passed")
+              "worker cancellation, business failure, owner borrow, and pool recovery passed")
         return 0
     finally:
         if process.poll() is None:

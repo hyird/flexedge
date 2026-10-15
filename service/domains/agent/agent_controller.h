@@ -483,10 +483,10 @@ private:
                 {.code_ = 1008, .reason_ = "node release transfer invalid"});
             co_return false;
         }
-        const auto bytes = co_await c.run_blocking([release = transfer->release_,
-                                                       offset = transfer->next_offset_] {
+        const auto bytes = (co_await c.run_blocking([release = transfer->release_,
+                                                        offset = transfer->next_offset_] {
             return release->binary().contents_range(offset, flexedge::node::node_release_chunk_bytes);
-        });
+        })).value();
         if (bytes.empty()) {
             co_await close(c.get_websocket(), {.code_ = 1011, .reason_ = "node release read failed"});
             co_return false;

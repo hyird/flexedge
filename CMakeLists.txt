@@ -52,7 +52,7 @@ set(RUVIA_ENABLE_REDIS ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
     ruvia
     GIT_REPOSITORY https://github.com/hyird/Ruvia.git
-    GIT_TAG 1f9ddf74e9bb9db817c7052f806b18945933ba88 # main, 2026-10-14
+    GIT_TAG 4270318d736815b4dece7ec9f8e85d40306c7a9c # main, 2026-10-14
 )
 FetchContent_MakeAvailable(ruvia)
 # CMAKE_COMPILE_WARNING_AS_ERROR applies to FlexEdge code only; Ruvia is third-party.

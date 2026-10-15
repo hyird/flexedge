@@ -42,7 +42,7 @@ public:
         return context_.worker();
     }
     [[nodiscard]] bool deadline_exceeded() const noexcept {
-        return clock::now() >= deadline_ || context_.deadline_exceeded() || budget_stop_.stop_requested();
+        return clock::now() >= deadline_ || budget_stop_.stop_requested();
     }
     [[nodiscard]] bool stop_requested() const noexcept {
         return context_.get_stop_token().stop_requested() || budget_stop_.stop_requested();

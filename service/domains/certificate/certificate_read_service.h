@@ -139,7 +139,7 @@ public:
         }
         const auto filename = service::certificate_material::archive_filename(
             rows.front()[0].value().value_or("certificate"));
-        auto archive = co_await c.run_blocking(
+        auto archive_result = co_await c.run_blocking(
             [archive_filename = filename, chain = std::move(*material->certificate_chain_pem_),
                 private_key = service::utils::sensitive_string(
                     service::utils::open_secret(*material->private_key_envelope_))]() {
@@ -148,7 +148,7 @@ public:
             });
         co_return service::certificate_material::certificate_download{
             filename + ".zip",
-            std::move(archive),
+            std::move(archive_result).value(),
         };
     }
 

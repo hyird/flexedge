@@ -3,7 +3,6 @@
 #include <ruvia/core/worker_wait_result.h>
 #include <ruvia/web/app.h>
 #include <ruvia/web/controller.h>
-#include <ruvia/web/deadline.h>
 
 #include <atomic>
 #include <chrono>
@@ -44,7 +43,6 @@ public:
     RUVIA_GET("/short-follower-metrics", short_follower_metrics);
     RUVIA_GET("/short-follower-state", short_follower_state);
     RUVIA_GET("/business-error", business_error);
-    RUVIA_GET("/context-stop", context_stop, ruvia::deadline<250>);
     RUVIA_GET("/worker-stop", worker_stop);
     RUVIA_GET("/health-db", health_db);
     RUVIA_GET("/owner", owner);
@@ -185,22 +183,6 @@ private:
                 co_return "unreachable";
             });
         co_return context.text(std::string_view(result->failure_ ? "business-error-cached" : "unexpected-success"));
-    }
-
-    ruvia::task<ruvia::http_response> context_stop(ruvia::context& context) {
-        auto lease = snapshots.subscribe({"test-tenant", service::live_resource::resource::nodes,
-            "context-stop", "snapshot-budget"});
-        try {
-            (void)co_await service::live_resource::read_snapshot(
-                context, lease, [](snapshot_read_scope& scope) -> ruvia::task<std::string> {
-                    auto db = scope.db();
-                    (void)co_await db.query("SELECT pg_sleep(3)");
-                    co_return "late";
-                });
-            co_return context.text("unexpected-success");
-        } catch (const std::exception&) {
-            co_return context.text(std::string_view("context-stop-cancelled"));
-        }
     }
 
     ruvia::task<ruvia::http_response> worker_stop(ruvia::context& context) {

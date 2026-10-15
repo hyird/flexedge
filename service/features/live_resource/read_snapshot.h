@@ -85,7 +85,7 @@ inline void check_snapshot_read_budget(
     if (context.get_stop_token().stop_requested()) {
         throw std::runtime_error("live resource read interrupted");
     }
-    if (snapshot_cache::clock::now() >= deadline || context.deadline_exceeded()) {
+    if (snapshot_cache::clock::now() >= deadline) {
         throw std::runtime_error("live resource read timed out");
     }
 }
