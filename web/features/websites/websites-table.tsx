@@ -1,17 +1,8 @@
-import { useState } from 'react'
-import {
-  keepPreviousData,
-  useQuery,
-  useQueryClient,
-} from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
-import { toast } from '@heroui/react'
 import type { ListSearchState } from '@/lib/list-search'
-import { queryKeys } from '@/lib/query-keys'
-import { ActionMenu } from '@/components/action-menu'
-import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DataTable } from '@/components/data-table'
 import { LinkButton } from '@/components/link-button'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
@@ -20,7 +11,6 @@ import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { clusterOptionsQuery } from '@/features/clusters/data'
 import {
-  removeWebsite,
   websitesQuery,
   websitesSnapshotQuery,
   type WebsitesListParams,
@@ -59,8 +49,6 @@ export function WebsitesTable({
   certificateId?: string
   snapshot?: boolean
 }) {
-  const client = useQueryClient()
-  const [removing, setRemoving] = useState<Website | null>(null)
   const clusters = useQuery({ ...clusterOptionsQuery, enabled: !clusterId })
   const params: WebsitesListParams = {
     page: list.page,
@@ -153,7 +141,7 @@ export function WebsitesTable({
       cell: (website) => {
         const origin = defaultOrigin(website)
         return (
-          <div className='flex min-w-0 flex-col gap-0.5'>
+          <div className='flex max-w-52 min-w-0 flex-col gap-0.5'>
             <span className={origin ? 'truncate' : 'truncate text-muted'}>
               {origin ? origin.group : '未配置'}
             </span>
@@ -207,37 +195,16 @@ export function WebsitesTable({
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      width: 56,
+      width: 72,
       cell: (website) => (
-        <ActionMenu
-          label={`网站 ${websiteName(website)} 的操作`}
-          items={[
-            {
-              id: 'detail',
-              label: '查看详情',
-              href: `/websites/${website.id}`,
-            },
-            {
-              id: 'settings',
-              label: '编辑配置',
-              href: `/websites/${website.id}`,
-              state: { website: { tab: 'settings' } },
-            },
-            {
-              id: 'logs',
-              label: '访问日志',
-              href: `/websites/${website.id}`,
-              state: { website: { tab: 'logs' } },
-            },
-            {
-              id: 'delete',
-              label: '删除网站',
-              danger: true,
-              separated: true,
-              onAction: () => setRemoving(website),
-            },
-          ]}
-        />
+        <LinkButton
+          href={`/websites/${website.id}`}
+          variant='tertiary'
+          className='px-2'
+          aria-label={`网站 ${websiteName(website)} 的详情`}
+        >
+          详情
+        </LinkButton>
       ),
     },
   ]
@@ -296,7 +263,7 @@ export function WebsitesTable({
         isLoading={query.isPending}
         error={query.isError ? query.error : undefined}
         onRetry={() => void query.refetch()}
-        minWidth={clusterId ? 880 : 1040}
+        minWidth={clusterId ? 896 : 1056}
         empty={
           filtered
             ? {
@@ -331,19 +298,6 @@ export function WebsitesTable({
             onPageSizeChange={(size) => void list.setPageSize(size)}
           />
         }
-      />
-      <ConfirmDialog
-        isOpen={!!removing}
-        onClose={() => setRemoving(null)}
-        title={`删除网站 ${removing ? websiteName(removing) : ''}？`}
-        description='网站配置会从所有边缘节点撤下，域名将不再由边缘处理。此操作无法撤销。'
-        confirmLabel='删除网站'
-        onConfirm={async () => {
-          if (!removing) return
-          await removeWebsite(removing)
-          toast.success('网站已删除')
-          void client.invalidateQueries({ queryKey: queryKeys.websites })
-        }}
       />
     </div>
   )

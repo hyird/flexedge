@@ -15,6 +15,7 @@ import { Choice, Field, Notice, Toggle } from '@/components/forms'
 import { Mono } from '@/components/mono'
 import { QueryNotice } from '@/components/page'
 import { Section } from '@/components/section'
+import { uncoveredHostnames } from '@/features/certificates/certificate-coverage'
 import { usableCertificateOptionsQuery } from '@/features/certificates/data'
 import { clusterOptionsQuery } from '@/features/clusters/data'
 import type { DnsZoneOption } from '@/features/dns-zones/types'
@@ -42,8 +43,10 @@ import type { Website, WebsiteOrigin } from './types'
 import {
   setWebsiteHttpsEnabled,
   websiteCertificateOptions,
+  websiteHostnames,
   type WebsiteFormValues,
 } from './website-form'
+import { WebsiteLifecycleActions } from './website-lifecycle-actions'
 import type { WebsiteFormErrors } from './website-sections'
 
 export type WebsiteSectionProps = {
@@ -80,7 +83,12 @@ function RefreshOptions({
   )
 }
 
-export function BasicSection({ values, errors, update }: WebsiteSectionProps) {
+export function BasicSection({
+  values,
+  errors,
+  update,
+  website,
+}: WebsiteSectionProps) {
   const clusters = useQuery(clusterOptionsQuery)
   const cluster = clusters.data?.find((item) => item.id === values.cluster_id)
   return (
@@ -139,6 +147,7 @@ export function BasicSection({ values, errors, update }: WebsiteSectionProps) {
             </div>
           </div>
         </div>
+        {website && <WebsiteLifecycleActions />}
       </div>
     </Section>
   )
@@ -431,11 +440,20 @@ export function HttpsSection({
     // QueryNotice below shows failures; no duplicate toast.
     meta: { inlineError: true },
   })
+  const hostnames = websiteHostnames(values)
   const options = websiteCertificateOptions(
     certificates.data ?? [],
     values.certificate_ids,
-    website?.certificates ?? []
+    website?.certificates ?? [],
+    hostnames
   )
+  const selectedUsable = options.filter(
+    (certificate) =>
+      certificate.usable && values.certificate_ids.includes(certificate.id)
+  )
+  const uncovered = selectedUsable.length
+    ? uncoveredHostnames(selectedUsable, hostnames)
+    : []
   const expiry = new Map(
     (certificates.data ?? []).map((item) => [item.id, item.expires_at])
   )
@@ -502,15 +520,21 @@ export function HttpsSection({
                           </Mono>
                         }
                       />
-                      <span className='text-xs text-muted'>
-                        {certificate.usable
-                          ? expiry.get(certificate.id)
-                            ? `到期 ${formatDate(expiry.get(certificate.id))}`
-                            : '可用'
-                          : certificates.isPending || certificates.isError
-                            ? '正在读取可用证书，当前绑定仍可移除'
-                            : '证书不可用，请取消绑定并选择可用证书'}
-                      </span>
+                      {certificate.usable && !certificate.matched ? (
+                        <span className='text-xs text-danger'>
+                          未匹配网站域名
+                        </span>
+                      ) : (
+                        <span className='text-xs text-muted'>
+                          {certificate.usable
+                            ? expiry.get(certificate.id)
+                              ? `到期 ${formatDate(expiry.get(certificate.id))}`
+                              : '可用'
+                            : certificates.isPending || certificates.isError
+                              ? '正在读取可用证书，当前绑定仍可移除'
+                              : '证书不可用，请取消绑定并选择可用证书'}
+                        </span>
+                      )}
                       <span className='ml-auto'>
                         <NewWindowLink href={`/certificates/${certificate.id}`}>
                           详情
@@ -522,7 +546,14 @@ export function HttpsSection({
               )}
               {!certificates.isPending && options.length === 0 && (
                 <p className='py-2 text-sm text-muted'>
-                  暂无可用证书。申请证书签发完成后，点击“刷新证书”即可选择。
+                  {hostnames.length
+                    ? '暂无匹配网站域名的可用证书。'
+                    : '请先绑定域名'}
+                </p>
+              )}
+              {uncovered.length > 0 && (
+                <p className='text-sm text-warning'>
+                  证书未覆盖：{uncovered.join('、')}
                 </p>
               )}
               <FieldNotice>{errors.certificate_ids}</FieldNotice>

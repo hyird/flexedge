@@ -41,3 +41,10 @@ export function accessLogStatusTone(code: number) {
   if (code >= 300) return 'accent' as const
   return 'success' as const
 }
+
+/** `AS4134 Chinanet`; empty when the IP database has no AS data. */
+export function accessLogAsnLabel(
+  log: Pick<AccessLog, 'client_ip_asn' | 'client_ip_as_name'>
+) {
+  return [log.client_ip_asn, log.client_ip_as_name].filter(Boolean).join(' ')
+}

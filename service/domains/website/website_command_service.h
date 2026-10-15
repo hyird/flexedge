@@ -16,6 +16,7 @@
 
 #include "service/common/http.h"
 #include "service/domains/website/aggregate_store.h"
+#include "service/domains/website/certificate_coverage.h"
 #include "service/domains/website/domain_claim.h"
 #include "service/domains/website/reference_store.h"
 #include "service/domains/website/relation_store.h"
@@ -220,8 +221,12 @@ private:
             co_return;
         }
 
-        if (!(co_await lock_available_certificates(db, tenant_id, certificate_ids))) {
+        const auto certificates = co_await lock_available_certificates(db, tenant_id, certificate_ids);
+        if (!certificates) {
             service::common::throw_app_error(website_error::certificate_unavailable);
+        }
+        if (find_unmatched_certificate(*certificates, config.domains_)) {
+            service::common::throw_app_error(website_error::certificate_domain_mismatch);
         }
         co_return;
     }

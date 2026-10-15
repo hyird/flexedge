@@ -1,10 +1,10 @@
 import { ArrowRotateLeft } from '@gravity-ui/icons'
-import { ChartTooltip } from '@heroui-pro/react'
+import { ChartTooltip, TrendChip, Widget } from '@heroui-pro/react'
 import { AreaChart } from '@heroui-pro/react/area-chart'
 import { BarChart } from '@heroui-pro/react/bar-chart'
 import { KPI } from '@heroui-pro/react/kpi'
 import { PieChart } from '@heroui-pro/react/pie-chart'
-import { Alert, Button, Skeleton } from '@heroui/react'
+import { Alert, Button, Label, Meter, Skeleton } from '@heroui/react'
 import {
   formatBitsPerSecond,
   formatBytes,
@@ -13,9 +13,9 @@ import {
   formatPercent,
   ratioOf,
 } from '@/lib/format'
-import { Mono } from '@/components/mono'
+import { cn } from '@/lib/utils'
+import { KpiQuantity } from '@/components/kpi-quantity'
 import { EmptyState } from '@/components/page'
-import { Section } from '@/components/section'
 import type {
   WebsiteDashboard,
   WebsiteDashboardClientIpRanking,
@@ -92,7 +92,7 @@ function TrafficSkeleton() {
       aria-label='正在加载流量统计'
       className='flex flex-col gap-6'
     >
-      <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6'>
+      <div className='grid grid-cols-2 gap-3 lg:grid-cols-3 2xl:grid-cols-6'>
         {Array.from({ length: 6 }, (_, index) => (
           <Skeleton key={index} className='h-24 rounded-2xl' />
         ))}
@@ -107,14 +107,6 @@ function TrafficSkeleton() {
 
 function TrafficContent({ data }: { data: WebsiteDashboard }) {
   const { summary } = data
-  const metrics = [
-    ['当前带宽', summary.current_bandwidth_bps, formatBitsPerSecond],
-    ['今日峰值带宽', summary.today_peak_bps, formatBitsPerSecond],
-    ['今日响应流量', summary.today_response_bytes, formatBytes],
-    ['今日独立 IP', summary.today_unique_ips, formatNumber],
-    ['本月峰值带宽', summary.current_month_peak_bps, formatBitsPerSecond],
-    ['上月峰值带宽', summary.previous_month_peak_bps, formatBitsPerSecond],
-  ] as const
   const hourly = data.hourly.map((point) => ({
     label: formatDate(point.timestamp).slice(11, 16),
     time: formatDate(point.timestamp).slice(0, 16),
@@ -130,162 +122,245 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
     (sum, item) => sum + item.request_count,
     0
   )
+  const monthChange = summary.previous_month_peak_bps
+    ? summary.current_month_peak_bps / summary.previous_month_peak_bps - 1
+    : undefined
   return (
     <>
-      <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6'>
-        {metrics.map(([label, value, format]) => (
-          <KPI key={label}>
-            <KPI.Header>
-              <KPI.Title>{label}</KPI.Title>
-            </KPI.Header>
-            <KPI.Content>
-              <KPI.Value value={value}>{() => format(value)}</KPI.Value>
-            </KPI.Content>
-          </KPI>
-        ))}
+      <div className='grid grid-cols-2 gap-3 lg:grid-cols-3 2xl:grid-cols-6'>
+        <KPI className='min-w-0'>
+          <KPI.Header>
+            <KPI.Title>当前带宽</KPI.Title>
+          </KPI.Header>
+          <KPI.Content className='content-start'>
+            <KpiQuantity value={summary.current_bandwidth_bps} unit='bps' />
+          </KPI.Content>
+        </KPI>
+        <KPI className='min-w-0'>
+          <KPI.Header>
+            <KPI.Title>今日峰值带宽</KPI.Title>
+          </KPI.Header>
+          <KPI.Content className='content-start'>
+            <KpiQuantity value={summary.today_peak_bps} unit='bps' />
+          </KPI.Content>
+        </KPI>
+        <KPI className='min-w-0'>
+          <KPI.Header>
+            <KPI.Title>今日响应流量</KPI.Title>
+          </KPI.Header>
+          <KPI.Content className='content-start'>
+            <KpiQuantity value={summary.today_response_bytes} unit='bytes' />
+          </KPI.Content>
+          {daily.length > 1 && (
+            <KPI.Chart
+              data={daily}
+              dataKey='bytes'
+              color='var(--color-accent)'
+              height={40}
+              strokeWidth={1.5}
+            />
+          )}
+        </KPI>
+        <KPI className='min-w-0'>
+          <KPI.Header>
+            <KPI.Title>今日独立 IP</KPI.Title>
+          </KPI.Header>
+          <KPI.Content className='content-start'>
+            <KPI.Value value={summary.today_unique_ips} />
+          </KPI.Content>
+        </KPI>
+        <KPI className='min-w-0'>
+          <KPI.Header>
+            <KPI.Title>本月峰值带宽</KPI.Title>
+          </KPI.Header>
+          <KPI.Content className='grid-cols-1 content-start justify-items-start gap-y-1'>
+            <KpiQuantity value={summary.current_month_peak_bps} unit='bps' />
+            {monthChange !== undefined && (
+              <KPI.Trend
+                trend={
+                  monthChange > 0 ? 'up' : monthChange < 0 ? 'down' : 'neutral'
+                }
+              >
+                {formatPercent(Math.abs(monthChange))}
+                <TrendChip.Suffix>较上月</TrendChip.Suffix>
+              </KPI.Trend>
+            )}
+          </KPI.Content>
+        </KPI>
+        <KPI className='min-w-0'>
+          <KPI.Header>
+            <KPI.Title>上月峰值带宽</KPI.Title>
+          </KPI.Header>
+          <KPI.Content className='content-start'>
+            <KpiQuantity value={summary.previous_month_peak_bps} unit='bps' />
+          </KPI.Content>
+        </KPI>
       </div>
       <p className='-mt-3 text-xs text-muted'>
         统计基于访问日志，按控制台时区（UTC+8）汇总。
       </p>
 
       <div className='grid gap-6 xl:grid-cols-2'>
-        <Section
-          title='24 小时带宽'
-          description='每小时平均出口带宽（bit/s）。'
-        >
-          {hourly.length ? (
-            <AreaChart data={hourly} height={240}>
-              <defs>
-                <linearGradient
-                  id='website-bandwidth'
-                  x1='0'
-                  x2='0'
-                  y1='0'
-                  y2='1'
-                >
-                  <stop
-                    offset='0%'
-                    stopColor='var(--chart-3)'
-                    stopOpacity={0.25}
-                  />
-                  <stop
-                    offset='100%'
-                    stopColor='var(--chart-3)'
-                    stopOpacity={0.02}
-                  />
-                </linearGradient>
-              </defs>
-              <AreaChart.Grid vertical={false} />
-              <AreaChart.XAxis dataKey='label' tickMargin={8} minTickGap={24} />
-              <AreaChart.YAxis
-                width={72}
-                tickFormatter={(value: number) => formatBitsPerSecond(value)}
+        <Widget className='min-w-0'>
+          <Widget.Header>
+            <Widget.Title>24 小时带宽</Widget.Title>
+          </Widget.Header>
+          <Widget.Content>
+            {hourly.length ? (
+              <AreaChart data={hourly} height={240}>
+                <defs>
+                  <linearGradient
+                    id='website-bandwidth'
+                    x1='0'
+                    x2='0'
+                    y1='0'
+                    y2='1'
+                  >
+                    <stop
+                      offset='0%'
+                      stopColor='var(--chart-3)'
+                      stopOpacity={0.25}
+                    />
+                    <stop
+                      offset='100%'
+                      stopColor='var(--chart-3)'
+                      stopOpacity={0.02}
+                    />
+                  </linearGradient>
+                </defs>
+                <AreaChart.Grid vertical={false} />
+                <AreaChart.XAxis
+                  dataKey='label'
+                  tickMargin={8}
+                  minTickGap={24}
+                />
+                <AreaChart.YAxis
+                  width={72}
+                  tickFormatter={(value: number) => formatBitsPerSecond(value)}
+                />
+                <AreaChart.Area
+                  dataKey='bandwidth'
+                  name='带宽'
+                  type='monotone'
+                  dot={false}
+                  stroke='var(--chart-3)'
+                  strokeWidth={2}
+                  fill='url(#website-bandwidth)'
+                />
+                <AreaChart.Tooltip
+                  content={({ active, payload }) => {
+                    const point = payload?.[0]?.payload as
+                      (typeof hourly)[number] | undefined
+                    if (!active || !point) return null
+                    return (
+                      <ChartTooltip>
+                        <ChartTooltip.Header>{point.time}</ChartTooltip.Header>
+                        <ChartTooltip.Item>
+                          <ChartTooltip.Indicator color='var(--chart-3)' />
+                          <ChartTooltip.Label>带宽</ChartTooltip.Label>
+                          <ChartTooltip.Value>
+                            {formatBitsPerSecond(point.bandwidth)}
+                          </ChartTooltip.Value>
+                        </ChartTooltip.Item>
+                        <ChartTooltip.Item>
+                          <ChartTooltip.Indicator color='var(--chart-1)' />
+                          <ChartTooltip.Label>请求</ChartTooltip.Label>
+                          <ChartTooltip.Value>
+                            {formatNumber(point.requests)}
+                          </ChartTooltip.Value>
+                        </ChartTooltip.Item>
+                      </ChartTooltip>
+                    )
+                  }}
+                />
+              </AreaChart>
+            ) : (
+              <EmptyState
+                size='sm'
+                title='暂无带宽数据'
+                description='收到访问记录后显示趋势。'
               />
-              <AreaChart.Area
-                dataKey='bandwidth'
-                name='带宽'
-                type='monotone'
-                dot={false}
-                stroke='var(--chart-3)'
-                strokeWidth={2}
-                fill='url(#website-bandwidth)'
+            )}
+          </Widget.Content>
+        </Widget>
+        <Widget className='min-w-0'>
+          <Widget.Header>
+            <Widget.Title>近 15 天请求量</Widget.Title>
+          </Widget.Header>
+          <Widget.Content>
+            {daily.length ? (
+              <BarChart data={daily} height={240}>
+                <BarChart.Grid vertical={false} />
+                <BarChart.XAxis
+                  dataKey='label'
+                  tickMargin={8}
+                  minTickGap={12}
+                />
+                <BarChart.YAxis
+                  width={56}
+                  tickFormatter={(value: number) =>
+                    formatNumber(value, { compact: true })
+                  }
+                />
+                <BarChart.Bar
+                  dataKey='requests'
+                  name='请求'
+                  fill='var(--chart-3)'
+                  radius={[4, 4, 0, 0]}
+                  maxBarSize={28}
+                />
+                <BarChart.Tooltip
+                  content={({ active, label, payload }) => {
+                    const point = payload?.[0]?.payload as
+                      (typeof daily)[number] | undefined
+                    if (!active || !point) return null
+                    return (
+                      <ChartTooltip>
+                        <ChartTooltip.Header>{label}</ChartTooltip.Header>
+                        <ChartTooltip.Item>
+                          <ChartTooltip.Indicator color='var(--chart-3)' />
+                          <ChartTooltip.Label>请求</ChartTooltip.Label>
+                          <ChartTooltip.Value>
+                            {formatNumber(point.requests)}
+                          </ChartTooltip.Value>
+                        </ChartTooltip.Item>
+                        <ChartTooltip.Item>
+                          <ChartTooltip.Indicator color='var(--chart-1)' />
+                          <ChartTooltip.Label>流量</ChartTooltip.Label>
+                          <ChartTooltip.Value>
+                            {formatBytes(point.bytes)}
+                          </ChartTooltip.Value>
+                        </ChartTooltip.Item>
+                      </ChartTooltip>
+                    )
+                  }}
+                />
+              </BarChart>
+            ) : (
+              <EmptyState
+                size='sm'
+                title='暂无请求数据'
+                description='收到访问记录后显示趋势。'
               />
-              <AreaChart.Tooltip
-                content={({ active, payload }) => {
-                  const point = payload?.[0]?.payload as
-                    (typeof hourly)[number] | undefined
-                  if (!active || !point) return null
-                  return (
-                    <ChartTooltip>
-                      <ChartTooltip.Header>{point.time}</ChartTooltip.Header>
-                      <ChartTooltip.Item>
-                        <ChartTooltip.Indicator color='var(--chart-3)' />
-                        <ChartTooltip.Label>带宽</ChartTooltip.Label>
-                        <ChartTooltip.Value>
-                          {formatBitsPerSecond(point.bandwidth)}
-                        </ChartTooltip.Value>
-                      </ChartTooltip.Item>
-                      <ChartTooltip.Item>
-                        <ChartTooltip.Indicator color='var(--chart-1)' />
-                        <ChartTooltip.Label>请求</ChartTooltip.Label>
-                        <ChartTooltip.Value>
-                          {formatNumber(point.requests)}
-                        </ChartTooltip.Value>
-                      </ChartTooltip.Item>
-                    </ChartTooltip>
-                  )
-                }}
-              />
-            </AreaChart>
-          ) : (
-            <EmptyState
-              size='sm'
-              title='暂无带宽数据'
-              description='收到访问记录后显示趋势。'
-            />
-          )}
-        </Section>
-        <Section title='近 15 天请求量' description='每日请求数。'>
-          {daily.length ? (
-            <BarChart data={daily} height={240}>
-              <BarChart.Grid vertical={false} />
-              <BarChart.XAxis dataKey='label' tickMargin={8} minTickGap={12} />
-              <BarChart.YAxis
-                width={56}
-                tickFormatter={(value: number) =>
-                  formatNumber(value, { compact: true })
-                }
-              />
-              <BarChart.Bar
-                dataKey='requests'
-                name='请求'
-                fill='var(--chart-3)'
-                radius={[4, 4, 0, 0]}
-                maxBarSize={28}
-              />
-              <BarChart.Tooltip
-                content={({ active, label, payload }) => {
-                  const point = payload?.[0]?.payload as
-                    (typeof daily)[number] | undefined
-                  if (!active || !point) return null
-                  return (
-                    <ChartTooltip>
-                      <ChartTooltip.Header>{label}</ChartTooltip.Header>
-                      <ChartTooltip.Item>
-                        <ChartTooltip.Indicator color='var(--chart-3)' />
-                        <ChartTooltip.Label>请求</ChartTooltip.Label>
-                        <ChartTooltip.Value>
-                          {formatNumber(point.requests)}
-                        </ChartTooltip.Value>
-                      </ChartTooltip.Item>
-                      <ChartTooltip.Item>
-                        <ChartTooltip.Indicator color='var(--chart-1)' />
-                        <ChartTooltip.Label>流量</ChartTooltip.Label>
-                        <ChartTooltip.Value>
-                          {formatBytes(point.bytes)}
-                        </ChartTooltip.Value>
-                      </ChartTooltip.Item>
-                    </ChartTooltip>
-                  )
-                }}
-              />
-            </BarChart>
-          ) : (
-            <EmptyState
-              size='sm'
-              title='暂无请求数据'
-              description='收到访问记录后显示趋势。'
-            />
-          )}
-        </Section>
+            )}
+          </Widget.Content>
+        </Widget>
       </div>
 
       <div className='grid gap-6 md:grid-cols-2 xl:grid-cols-3'>
-        <Section title='状态码分布' description='今日请求按状态码。'>
-          {totalStatus ? (
-            <div className='flex flex-col items-center gap-4 sm:flex-row xl:flex-col 2xl:flex-row'>
-              <div className='relative shrink-0'>
-                <PieChart height={168} width={168}>
+        <Widget className='min-w-0'>
+          <Widget.Header>
+            <Widget.Title>今日状态码</Widget.Title>
+          </Widget.Header>
+          <Widget.Content className='flex flex-col justify-center'>
+            {totalStatus ? (
+              <div className='flex flex-col items-center gap-4 sm:flex-row xl:flex-col 2xl:flex-row'>
+                <PieChart
+                  height={168}
+                  width={168}
+                  aria-label='今日状态码分布'
+                  className='w-42 shrink-0'
+                >
                   <PieChart.Pie
                     data={data.status_codes}
                     dataKey='request_count'
@@ -303,6 +378,11 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
                         }
                       />
                     ))}
+                    <PieChart.Label
+                      position='center'
+                      value={formatNumber(totalStatus, { compact: true })}
+                      className='fill-foreground text-lg font-semibold tabular-nums'
+                    />
                   </PieChart.Pie>
                   <PieChart.Tooltip
                     content={
@@ -313,42 +393,37 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
                     }
                   />
                 </PieChart>
-                <div className='pointer-events-none absolute inset-0 flex flex-col items-center justify-center'>
-                  <span className='text-lg font-semibold tabular-nums'>
-                    {formatNumber(totalStatus, { compact: true })}
-                  </span>
-                  <span className='text-xs text-muted'>请求</span>
-                </div>
+                <Widget.Legend className='w-full min-w-0 flex-col items-stretch gap-2'>
+                  {data.status_codes.map((item) => (
+                    <div
+                      key={item.label}
+                      className='flex items-center gap-2 text-sm tabular-nums'
+                    >
+                      <Widget.LegendItem
+                        color={
+                          statusClassColors[item.label[0]] ?? 'var(--chart-1)'
+                        }
+                        className='font-mono'
+                      >
+                        {item.label}
+                      </Widget.LegendItem>
+                      <span className='ml-auto'>
+                        {formatNumber(item.request_count)}
+                      </span>
+                      <span className='w-14 text-right text-xs text-muted'>
+                        {formatPercent(
+                          ratioOf(item.request_count, totalStatus)
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </Widget.Legend>
               </div>
-              <ul className='flex w-full min-w-0 flex-col gap-2'>
-                {data.status_codes.map((item) => (
-                  <li
-                    key={item.label}
-                    className='flex items-center gap-2 text-sm'
-                  >
-                    <span
-                      aria-hidden
-                      className='size-2.5 shrink-0 rounded-full'
-                      style={{
-                        backgroundColor:
-                          statusClassColors[item.label[0]] ?? 'var(--chart-1)',
-                      }}
-                    />
-                    <Mono>{item.label}</Mono>
-                    <span className='ml-auto tabular-nums'>
-                      {formatNumber(item.request_count)}
-                    </span>
-                    <span className='w-14 text-right text-xs text-muted tabular-nums'>
-                      {formatPercent(ratioOf(item.request_count, totalStatus))}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : (
-            <EmptyState size='sm' title='暂无请求' />
-          )}
-        </Section>
+            ) : (
+              <EmptyState size='sm' title='暂无请求' />
+            )}
+          </Widget.Content>
+        </Widget>
         <Ranking title='国家 / 地区' data={data.countries} />
         <Ranking title='域名' data={data.hosts} mono />
         <Ranking title='访问路径' data={data.paths} mono />
@@ -373,7 +448,8 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
 type RankingRow = WebsiteDashboardRanking &
   Partial<Pick<WebsiteDashboardClientIpRanking, 'asn' | 'as_name'>>
 
-/** Top-N card: label, share bar against the leader, requests and bytes. */
+/** Top 8 of one dimension: each row is a HeroUI Meter scaled to the leader,
+ * labelled with the item and showing the ranked metric and the other one. */
 function Ranking({
   title,
   data,
@@ -389,46 +465,52 @@ function Ranking({
     metric === 'bytes' ? item.response_bytes : item.request_count
   const leader = Math.max(0, ...data.map(value))
   return (
-    <Section
-      title={title}
-      description={metric === 'bytes' ? '按响应流量排序' : '按请求数排序'}
-    >
-      {data.length ? (
-        <ol className='flex flex-col gap-2.5'>
-          {data.slice(0, 8).map((item) => (
-            <li key={item.label} className='flex min-w-0 flex-col gap-1'>
-              <div className='flex min-w-0 items-baseline gap-3 text-sm'>
-                <span className='min-w-0 flex-1 truncate' title={item.label}>
-                  {mono ? <Mono>{item.label || '—'}</Mono> : item.label || '—'}
-                  {item.asn && (
-                    <span className='ml-2 text-xs text-muted'>
-                      {item.asn} {item.as_name}
-                    </span>
-                  )}
-                </span>
-                <span className='shrink-0 tabular-nums'>
-                  {metric === 'bytes'
-                    ? formatBytes(item.response_bytes)
-                    : formatNumber(item.request_count)}
-                </span>
-                <span className='w-16 shrink-0 text-right text-xs text-muted tabular-nums'>
-                  {metric === 'bytes'
-                    ? `${formatNumber(item.request_count, { compact: true })} 次`
-                    : formatBytes(item.response_bytes)}
-                </span>
-              </div>
-              <div className='h-1 overflow-hidden rounded-full bg-default'>
-                <div
-                  className='h-full rounded-full bg-accent'
-                  style={{ width: `${ratioOf(value(item), leader) * 100}%` }}
-                />
-              </div>
-            </li>
-          ))}
-        </ol>
-      ) : (
-        <p className='py-6 text-center text-sm text-muted'>暂无数据</p>
-      )}
-    </Section>
+    <Widget className='min-w-0'>
+      <Widget.Header>
+        <Widget.Title>{title}</Widget.Title>
+      </Widget.Header>
+      <Widget.Content>
+        {data.length ? (
+          <ol className='flex flex-col gap-3'>
+            {data.slice(0, 8).map((item) => (
+              <li key={item.label}>
+                <Meter
+                  value={value(item)}
+                  maxValue={leader || 1}
+                  valueLabel={
+                    metric === 'bytes'
+                      ? `${formatBytes(item.response_bytes)} · ${formatNumber(item.request_count, { compact: true })} 次`
+                      : `${formatNumber(item.request_count)} · ${formatBytes(item.response_bytes)}`
+                  }
+                  size='sm'
+                  className='grid-cols-[minmax(0,1fr)_auto] gap-x-3'
+                >
+                  <Label
+                    title={item.label}
+                    className={cn(
+                      'max-w-full min-w-0 truncate font-normal',
+                      mono && 'font-mono text-[13px]'
+                    )}
+                  >
+                    {item.label || '—'}
+                    {item.asn && (
+                      <span className='ml-2 font-sans text-xs text-muted'>
+                        {item.asn} {item.as_name}
+                      </span>
+                    )}
+                  </Label>
+                  <Meter.Output className='text-xs font-normal text-muted' />
+                  <Meter.Track>
+                    <Meter.Fill />
+                  </Meter.Track>
+                </Meter>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <EmptyState size='sm' title='暂无数据' />
+        )}
+      </Widget.Content>
+    </Widget>
   )
 }

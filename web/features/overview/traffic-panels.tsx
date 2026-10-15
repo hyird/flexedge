@@ -1,5 +1,5 @@
 import { ChartAreaStacked, CircleInfo, Globe } from '@gravity-ui/icons'
-import { type DataGridColumn, ChartTooltip } from '@heroui-pro/react'
+import { ChartTooltip, Widget, type DataGridColumn } from '@heroui-pro/react'
 import { AreaChart } from '@heroui-pro/react/area-chart'
 import { PieChart } from '@heroui-pro/react/pie-chart'
 import { Link, Meter, Skeleton } from '@heroui/react'
@@ -13,7 +13,6 @@ import {
 import { DataTable } from '@/components/data-table'
 import { LinkButton } from '@/components/link-button'
 import { EmptyState, QueryNotice } from '@/components/page'
-import { Section } from '@/components/section'
 import {
   coverageState,
   statusDistribution,
@@ -31,12 +30,6 @@ type TrafficQuery = {
   isError: boolean
   error: unknown
   refetch: () => unknown
-}
-
-/** One-line provenance note shared by every access-log based panel. */
-function coverageNote(traffic?: OverviewTraffic) {
-  if (!traffic) return '基于访问日志'
-  return `基于访问日志 · 覆盖 ${traffic.coverage.logging_website_count} / ${traffic.coverage.website_count} 个网站`
 }
 
 /** Explains an empty traffic panel; renders nothing when there is data. */
@@ -85,134 +78,153 @@ function TrafficEmpty({
 
 export function BandwidthPanel({ query }: { query: TrafficQuery }) {
   const traffic = query.data
-  const points = traffic ? trafficSeries(traffic.hourly) : []
   return (
-    <Section
-      title='24 小时带宽'
-      description={coverageNote(traffic)}
-      actions={
-        traffic && (
-          <span className='text-xs text-muted tabular-nums'>
-            峰值 {formatBitsPerSecond(traffic.summary.peak_bandwidth_bps)}
-          </span>
-        )
-      }
-      className='lg:col-span-8'
-    >
-      <QueryNotice query={query} onRetry={query.refetch} />
-      {!traffic ? (
-        query.isPending && <Skeleton className='h-[260px] w-full rounded-xl' />
-      ) : coverageState(traffic) !== 'ok' ? (
-        <TrafficEmpty traffic={traffic} />
-      ) : (
-        <AreaChart data={points} height={260} aria-label='过去 24 小时出口带宽'>
-          <defs>
-            <linearGradient id='overview-bandwidth' x1='0' x2='0' y1='0' y2='1'>
-              <stop
-                offset='0%'
-                stopColor='var(--color-accent)'
-                stopOpacity={0.24}
-              />
-              <stop
-                offset='100%'
-                stopColor='var(--color-accent)'
-                stopOpacity={0.02}
-              />
-            </linearGradient>
-          </defs>
-          <AreaChart.Grid vertical={false} />
-          <AreaChart.XAxis
-            dataKey='label'
-            tickMargin={8}
-            interval='preserveStartEnd'
-            minTickGap={24}
-          />
-          <AreaChart.YAxis
-            width={84}
-            tickFormatter={(value: number) => formatBitsPerSecond(value)}
-          />
-          <AreaChart.Area
-            dataKey='bandwidth_bps'
-            name='带宽'
-            type='monotone'
-            dot={false}
-            stroke='var(--color-accent)'
-            strokeWidth={2}
-            fill='url(#overview-bandwidth)'
-          />
-          <AreaChart.Tooltip
-            content={({ active, payload }) => {
-              const point = payload?.[0]?.payload as TrafficPoint | undefined
-              if (!active || !point) return null
-              return (
-                <ChartTooltip>
-                  <ChartTooltip.Header>
-                    {formatDate(point.timestamp).slice(0, 16)}
-                  </ChartTooltip.Header>
-                  <ChartTooltip.Item>
-                    <ChartTooltip.Indicator color='var(--color-accent)' />
-                    <ChartTooltip.Label>平均带宽</ChartTooltip.Label>
-                    <ChartTooltip.Value>
-                      {formatBitsPerSecond(point.bandwidth_bps)}
-                    </ChartTooltip.Value>
-                  </ChartTooltip.Item>
-                  <ChartTooltip.Item>
-                    <ChartTooltip.Indicator color='var(--color-muted)' />
-                    <ChartTooltip.Label>请求数</ChartTooltip.Label>
-                    <ChartTooltip.Value>
-                      {formatNumber(point.request_count)}
-                    </ChartTooltip.Value>
-                  </ChartTooltip.Item>
-                </ChartTooltip>
-              )
-            }}
-          />
-        </AreaChart>
-      )}
-    </Section>
+    <Widget className='min-w-0 lg:col-span-8'>
+      <Widget.Header>
+        <Widget.Title>24 小时带宽</Widget.Title>
+      </Widget.Header>
+      <Widget.Content>
+        <QueryNotice query={query} onRetry={query.refetch} />
+        {!traffic ? (
+          query.isPending && (
+            <Skeleton className='h-[260px] w-full rounded-xl' />
+          )
+        ) : coverageState(traffic) !== 'ok' ? (
+          <TrafficEmpty traffic={traffic} />
+        ) : (
+          <AreaChart
+            data={trafficSeries(traffic.hourly)}
+            height={260}
+            aria-label='过去 24 小时出口带宽'
+          >
+            <defs>
+              <linearGradient
+                id='overview-bandwidth'
+                x1='0'
+                x2='0'
+                y1='0'
+                y2='1'
+              >
+                <stop
+                  offset='0%'
+                  stopColor='var(--color-accent)'
+                  stopOpacity={0.24}
+                />
+                <stop
+                  offset='100%'
+                  stopColor='var(--color-accent)'
+                  stopOpacity={0.02}
+                />
+              </linearGradient>
+            </defs>
+            <AreaChart.Grid vertical={false} />
+            <AreaChart.XAxis
+              dataKey='label'
+              tickMargin={8}
+              interval='preserveStartEnd'
+              minTickGap={24}
+            />
+            <AreaChart.YAxis
+              width={84}
+              tickFormatter={(value: number) => formatBitsPerSecond(value)}
+            />
+            <AreaChart.Area
+              dataKey='bandwidth_bps'
+              name='带宽'
+              type='monotone'
+              dot={false}
+              stroke='var(--color-accent)'
+              strokeWidth={2}
+              fill='url(#overview-bandwidth)'
+            />
+            <AreaChart.Tooltip
+              content={({ active, payload }) => {
+                const point = payload?.[0]?.payload as TrafficPoint | undefined
+                if (!active || !point) return null
+                return (
+                  <ChartTooltip>
+                    <ChartTooltip.Header>
+                      {formatDate(point.timestamp).slice(0, 16)}
+                    </ChartTooltip.Header>
+                    <ChartTooltip.Item>
+                      <ChartTooltip.Indicator color='var(--color-accent)' />
+                      <ChartTooltip.Label>平均带宽</ChartTooltip.Label>
+                      <ChartTooltip.Value>
+                        {formatBitsPerSecond(point.bandwidth_bps)}
+                      </ChartTooltip.Value>
+                    </ChartTooltip.Item>
+                    <ChartTooltip.Item>
+                      <ChartTooltip.Indicator color='var(--color-muted)' />
+                      <ChartTooltip.Label>请求数</ChartTooltip.Label>
+                      <ChartTooltip.Value>
+                        {formatNumber(point.request_count)}
+                      </ChartTooltip.Value>
+                    </ChartTooltip.Item>
+                  </ChartTooltip>
+                )
+              }}
+            />
+          </AreaChart>
+        )}
+      </Widget.Content>
+    </Widget>
   )
 }
 
+/** Donut of the status classes with the total in its center (`PieChart.Label`)
+ * and a Widget legend carrying each class's count and share. */
 export function StatusClassPanel({ query }: { query: TrafficQuery }) {
   const traffic = query.data
   const distribution = traffic
     ? statusDistribution(traffic.status_classes)
     : undefined
+  const slices = distribution?.items.filter((item) => item.request_count)
   return (
-    <Section title='状态码分布' description={coverageNote(traffic)}>
-      <QueryNotice query={query} onRetry={query.refetch} />
-      {!traffic || !distribution ? (
-        query.isPending && (
-          <div className='flex items-center gap-6'>
-            <Skeleton className='size-36 shrink-0 rounded-full' />
-            <div className='flex flex-1 flex-col gap-3'>
-              {Array.from({ length: 5 }, (_, index) => (
-                <Skeleton key={index} className='h-4 w-full rounded-md' />
-              ))}
+    <Widget className='min-w-0 lg:col-span-5'>
+      <Widget.Header>
+        <Widget.Title>状态码分布</Widget.Title>
+      </Widget.Header>
+      <Widget.Content className='flex flex-col justify-center'>
+        <QueryNotice query={query} onRetry={query.refetch} />
+        {!traffic || !distribution || !slices ? (
+          query.isPending && (
+            <div className='flex items-center gap-6'>
+              <Skeleton className='size-40 shrink-0 rounded-full' />
+              <div className='flex flex-1 flex-col gap-3'>
+                {Array.from({ length: 5 }, (_, index) => (
+                  <Skeleton key={index} className='h-4 w-full rounded-md' />
+                ))}
+              </div>
             </div>
-          </div>
-        )
-      ) : distribution.total === 0 ? (
-        <TrafficEmpty traffic={traffic} size='sm' />
-      ) : (
-        <div className='flex flex-col items-center gap-6 sm:flex-row'>
-          <div className='relative shrink-0'>
-            <PieChart height={160} width={160} aria-label='状态码分布'>
+          )
+        ) : distribution.total === 0 ? (
+          <TrafficEmpty traffic={traffic} size='sm' />
+        ) : (
+          <div className='flex flex-col items-center gap-6 sm:flex-row'>
+            <PieChart
+              height={176}
+              width={176}
+              aria-label='状态码分布'
+              className='w-44 shrink-0'
+            >
               <PieChart.Pie
-                data={distribution.items.filter((item) => item.request_count)}
+                data={slices}
                 dataKey='request_count'
                 nameKey='label'
                 cx='50%'
                 cy='50%'
-                innerRadius='68%'
+                innerRadius='70%'
                 strokeWidth={0}
                 paddingAngle={1}
               >
-                {distribution.items
-                  .filter((item) => item.request_count)
-                  .map((item) => (
-                    <PieChart.Cell key={item.label} fill={item.color} />
-                  ))}
+                {slices.map((item) => (
+                  <PieChart.Cell key={item.label} fill={item.color} />
+                ))}
+                <PieChart.Label
+                  position='center'
+                  value={formatNumber(distribution.total, { compact: true })}
+                  className='fill-foreground text-lg font-semibold tabular-nums'
+                />
               </PieChart.Pie>
               <PieChart.Tooltip
                 content={({ active, payload }) => {
@@ -234,34 +246,31 @@ export function StatusClassPanel({ query }: { query: TrafficQuery }) {
                 }}
               />
             </PieChart>
-            <div className='pointer-events-none absolute inset-0 flex flex-col items-center justify-center'>
-              <span className='text-lg font-semibold tabular-nums'>
-                {formatNumber(distribution.total, { compact: true })}
-              </span>
-              <span className='text-xs text-muted'>请求</span>
-            </div>
+            <Widget.Legend className='w-full min-w-0 flex-1 flex-col items-stretch gap-2.5'>
+              {distribution.items.map((item) => (
+                <div
+                  key={item.label}
+                  className='flex items-center gap-3 text-sm tabular-nums'
+                >
+                  <Widget.LegendItem
+                    color={item.color}
+                    className='w-14 font-mono'
+                  >
+                    {item.label}
+                  </Widget.LegendItem>
+                  <span className='flex-1 text-right'>
+                    {formatNumber(item.request_count)}
+                  </span>
+                  <span className='w-14 text-right text-xs text-muted'>
+                    {formatPercent(item.share)}
+                  </span>
+                </div>
+              ))}
+            </Widget.Legend>
           </div>
-          <ul className='flex w-full min-w-0 flex-1 flex-col gap-2'>
-            {distribution.items.map((item) => (
-              <li key={item.label} className='flex items-center gap-3 text-sm'>
-                <span
-                  aria-hidden
-                  className='size-2.5 shrink-0 rounded-full'
-                  style={{ backgroundColor: item.color }}
-                />
-                <span className='w-10 font-mono text-[13px]'>{item.label}</span>
-                <span className='flex-1 text-right tabular-nums'>
-                  {formatNumber(item.request_count)}
-                </span>
-                <span className='w-14 text-right text-xs text-muted tabular-nums'>
-                  {formatPercent(item.share)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </Section>
+        )}
+      </Widget.Content>
+    </Widget>
   )
 }
 
@@ -303,15 +312,14 @@ const topWebsiteColumns: DataGridColumn<TopWebsiteRow>[] = [
       <Meter
         aria-label={`${site.name} 流量占比`}
         value={site.share * 100}
+        formatOptions={{ style: 'percent', maximumFractionDigits: 1 }}
         size='sm'
-        className='flex w-32 flex-row items-center gap-2'
+        className='w-32 gap-1'
       >
-        <Meter.Track className='flex-1'>
+        <Meter.Output className='text-xs font-normal text-muted' />
+        <Meter.Track>
           <Meter.Fill />
         </Meter.Track>
-        <span className='w-12 shrink-0 text-right text-xs text-muted tabular-nums'>
-          {formatPercent(site.share)}
-        </span>
       </Meter>
     ),
   },
@@ -321,44 +329,46 @@ export function TopWebsitesPanel({ query }: { query: TrafficQuery }) {
   const traffic = query.data
   const state = traffic ? coverageState(traffic) : undefined
   return (
-    <Section
-      title='流量 Top 网站'
-      description={`${coverageNote(traffic)} · 按响应流量排序`}
-      actions={
+    <Widget className='min-w-0 lg:col-span-7'>
+      <Widget.Header>
+        <Widget.Title>流量 Top 网站</Widget.Title>
         <LinkButton variant='ghost' href='/websites'>
           全部网站
         </LinkButton>
-      }
-      className='lg:col-span-6'
-    >
-      <DataTable
-        label='流量 Top 网站'
-        columns={topWebsiteColumns}
-        data={traffic ? topWebsiteRows(traffic) : undefined}
-        isLoading={query.isPending}
-        error={query.isError ? query.error : undefined}
-        onRetry={query.refetch}
-        getRowId={(site) => site.website_id}
-        minWidth={520}
-        empty={
-          state === 'no_websites'
-            ? {
-                title: '还没有网站',
-                description: '创建网站并启用访问日志后，这里会显示流量排行。',
-                action: <LinkButton href='/websites/new'>创建网站</LinkButton>,
-              }
-            : state === 'no_logging'
+      </Widget.Header>
+      <Widget.Content className='p-0'>
+        <DataTable
+          label='流量 Top 网站'
+          columns={topWebsiteColumns}
+          data={traffic ? topWebsiteRows(traffic) : undefined}
+          isLoading={query.isPending}
+          error={query.isError ? query.error : undefined}
+          onRetry={query.refetch}
+          getRowId={(site) => site.website_id}
+          minWidth={520}
+          empty={
+            state === 'no_websites'
               ? {
-                  title: '没有网站启用访问日志',
-                  description:
-                    '在网站配置的「日志」分组中启用访问日志后开始统计。',
+                  title: '还没有网站',
+                  description: '创建网站并启用访问日志后，这里会显示流量排行。',
+                  action: (
+                    <LinkButton href='/websites/new'>创建网站</LinkButton>
+                  ),
                 }
-              : {
-                  title: '过去 24 小时没有访问记录',
-                  description: '启用访问日志的网站产生请求后，这里会显示排行。',
-                }
-        }
-      />
-    </Section>
+              : state === 'no_logging'
+                ? {
+                    title: '没有网站启用访问日志',
+                    description:
+                      '在网站配置的「日志」分组中启用访问日志后开始统计。',
+                  }
+                : {
+                    title: '过去 24 小时没有访问记录',
+                    description:
+                      '启用访问日志的网站产生请求后，这里会显示排行。',
+                  }
+          }
+        />
+      </Widget.Content>
+    </Widget>
   )
 }

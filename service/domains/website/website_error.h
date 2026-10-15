@@ -18,6 +18,8 @@ struct website_error {
         16614, "配置已被其他请求修改，请刷新后重试", 412};
     static inline constexpr service::common::app_error_def https_certificate_selection_invalid{
         16615, "HTTPS 开启时必须选择证书，关闭时不能绑定证书", 422};
+    static inline constexpr service::common::app_error_def certificate_domain_mismatch{
+        16616, "所选证书未匹配任何网站域名", 422};
 };
 
 }  // namespace service::website

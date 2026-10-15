@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { useTabPanelLoading } from '@/components/tab-panel-hold'
 import { recoverStreamSession } from '@/features/auth/session-expiry'
 import { registerSessionCleanup } from '@/features/auth/session-lifecycle'
 import { createLiveLogStore, type LogEntry } from './live-log-store'
@@ -43,9 +44,14 @@ export function useLiveLogs<T extends LogEntry>(
     ),
     store.getSnapshot
   )
+  const loading = enabled && snapshot.loading
+  // A switch to this tab keeps the panel's height until the first batch.
+  useTabPanelLoading(loading)
   return {
     logs: snapshot.logs,
     connected: enabled && snapshot.connected,
+    /** Opening: the first batch has not arrived yet (nor failed). */
+    loading,
     error: enabled ? snapshot.error : null,
     reconnect: store.reconnect,
   }

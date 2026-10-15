@@ -26,6 +26,12 @@ inline void fill_website_access_log(website_access_log_dto& item, const row_type
         item.set<"client_ip">(*value);
         if (const auto location = service::geoip::get_xdb_database().lookup(*value)) {
             item.set<"client_ip_location">(location->display_);
+            if (!location->asn_.empty()) {
+                item.set<"client_ip_asn">(location->asn_);
+            }
+            if (!location->as_name_.empty()) {
+                item.set<"client_ip_as_name">(location->as_name_);
+            }
         }
     }
     if (const auto value = row[13].value()) {

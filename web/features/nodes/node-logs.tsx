@@ -7,6 +7,7 @@ import { formatDate } from '@/lib/format'
 import { EmptyState } from '@/components/page'
 import { Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
+import { useTabPanelLoading } from '@/components/tab-panel-hold'
 import { useLiveLogs } from '@/features/logs/use-live-logs'
 import { nodeSnapshotQuery } from './data'
 import { parseNodeLogs } from './node-log-schema'
@@ -23,6 +24,8 @@ export function NodeLogs() {
   // Same key as the layout header's snapshot: one shared one-shot read. Wait
   // for this visit's read so the node stream is released before logs open.
   const header = useQuery(nodeSnapshotQuery(nodeId))
+  // Until then the tail is not opening yet, but the tab is still loading.
+  useTabPanelLoading(!paused && !header.isFetchedAfterMount)
   const { logs, connected, error, reconnect } = useLiveLogs(
     `/api/nodes/${nodeId}/logs/stream?limit=100`,
     parseNodeLogs,

@@ -1,13 +1,14 @@
 import { useMutation } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { Magnifier } from '@gravity-ui/icons'
-import type { DataGridColumn } from '@heroui-pro/react'
+import { Lock, Magnifier } from '@gravity-ui/icons'
+import { ListView, type DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
-import { Button, toast } from '@heroui/react'
+import { Alert, Button, toast } from '@heroui/react'
 import { formatBytes, formatDate, ratioOf } from '@/lib/format'
 import { statusLabels } from '@/lib/status'
 import { DataTable, TruncatedText } from '@/components/data-table'
 import { Mono } from '@/components/mono'
+import { EmptyState } from '@/components/page'
 import { RelativeTime } from '@/components/relative-time'
 import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
@@ -210,16 +211,19 @@ export function WebsiteOverview() {
         </KPI>
         <KPI>
           <KPI.Header>
-            <KPI.Title>域名</KPI.Title>
+            <KPI.Title>已解析域名</KPI.Title>
           </KPI.Header>
           <KPI.Content>
-            <KPI.Value
-              value={config.domains.length}
-              className='whitespace-nowrap'
-            />
+            <KPI.Value value={resolved} className='whitespace-nowrap'>
+              {(formatted) => `${formatted} / ${config.domains.length}`}
+            </KPI.Value>
           </KPI.Content>
+          <KPI.Progress
+            value={ratioOf(resolved, config.domains.length) * 100}
+            status={kpiStatus(resolved, config.domains.length)}
+            className={config.domains.length > 0 ? undefined : 'invisible'}
+          />
           <KPI.Footer className='text-xs whitespace-nowrap text-muted'>
-            已解析 {resolved} 个 ·{' '}
             {config.https_enabled
               ? `HTTPS · TLS ${config.minimum_tls_version}+`
               : '仅 HTTP'}
@@ -227,14 +231,12 @@ export function WebsiteOverview() {
         </KPI>
         <KPI>
           <KPI.Header>
-            <KPI.Title>源站组 / 健康</KPI.Title>
+            <KPI.Title>健康源站</KPI.Title>
           </KPI.Header>
           <KPI.Content>
-            <KPI.Value value={groups.length} className='whitespace-nowrap'>
+            <KPI.Value value={health.healthy} className='whitespace-nowrap'>
               {(formatted) =>
-                health.total
-                  ? `${formatted} 组 · ${health.healthy}/${health.total} 健康`
-                  : `${formatted} 组`
+                health.total ? `${formatted} / ${health.total}` : '—'
               }
             </KPI.Value>
           </KPI.Content>
@@ -244,9 +246,7 @@ export function WebsiteOverview() {
             className={health.total > 0 ? undefined : 'invisible'}
           />
           <KPI.Footer className='text-xs whitespace-nowrap text-muted'>
-            {health.total
-              ? `${config.origins.length} 个源站`
-              : '等待节点上报健康状态'}
+            {groups.length} 组 · {config.origins.length} 个源站
           </KPI.Footer>
         </KPI>
       </div>
@@ -287,10 +287,7 @@ export function WebsiteOverview() {
         />
       </Section>
 
-      <Section
-        title='源站健康'
-        description='节点上报的回源健康检查结果，实时更新。'
-      >
+      <Section title='源站健康'>
         <DataTable
           label='源站健康状态'
           columns={originColumns}
@@ -321,36 +318,50 @@ export function WebsiteOverview() {
           }
         >
           {!config.https_enabled ? (
-            <p className='text-sm text-muted'>
-              未启用 HTTPS，节点只接受 HTTP 请求。
-            </p>
+            <EmptyState
+              size='sm'
+              icon={<Lock />}
+              title='未启用 HTTPS'
+              description='节点只接受 HTTP 请求。'
+            />
           ) : website.certificates.length ? (
-            <ul className='flex flex-col divide-y divide-separator'>
-              {website.certificates.map((certificate) => (
-                <li
-                  key={certificate.id}
-                  className='grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 py-2.5 first:pt-0 last:pb-0'
+            <ListView
+              aria-label='绑定证书'
+              variant='secondary'
+              items={website.certificates}
+            >
+              {(certificate) => (
+                <ListView.Item
+                  id={certificate.id}
+                  href={`/certificates/${certificate.id}`}
+                  textValue={certificate.domains.join('、')}
+                  className='rounded-lg'
                 >
-                  <Link
-                    to='/certificates/$certificateId'
-                    params={{ certificateId: certificate.id }}
-                    title={certificate.domains.join('、')}
-                    className='link min-w-0 truncate font-mono text-[13px]'
-                  >
-                    {certificate.domains.join('、')}
-                  </Link>
-                  <StatusChip
-                    label={certificate.usable ? '可用' : '不可用'}
-                    tone={certificate.usable ? 'success' : 'warning'}
-                    reserve={certificateReserve}
-                  />
-                </li>
-              ))}
-            </ul>
+                  <ListView.ItemContent>
+                    <ListView.Title
+                      title={certificate.domains.join('、')}
+                      className='font-mono text-[13px] font-normal'
+                    >
+                      {certificate.domains.join('、')}
+                    </ListView.Title>
+                  </ListView.ItemContent>
+                  <ListView.ItemAction>
+                    <StatusChip
+                      label={certificate.usable ? '可用' : '不可用'}
+                      tone={certificate.usable ? 'success' : 'warning'}
+                      reserve={certificateReserve}
+                    />
+                  </ListView.ItemAction>
+                </ListView.Item>
+              )}
+            </ListView>
           ) : (
-            <p className='text-sm text-warning'>
-              已启用 HTTPS，但尚未绑定可用证书。
-            </p>
+            <Alert status='warning'>
+              <Alert.Indicator />
+              <Alert.Content>
+                <Alert.Title>已启用 HTTPS，但尚未绑定可用证书</Alert.Title>
+              </Alert.Content>
+            </Alert>
           )}
         </Section>
         <Section title='配置摘要'>

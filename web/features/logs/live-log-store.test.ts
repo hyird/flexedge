@@ -109,6 +109,39 @@ describe('live log buffers', () => {
     expect(store.getSnapshot().connected).toBe(false)
   })
 
+  it('loads until the first batch even after ready, and stops loading when the connection fails', () => {
+    const sources: Source[] = []
+    const store = createLiveLogStore('/website/a', parseLogs, () => {
+      const source = new Source()
+      sources.push(source)
+      return source
+    })
+    const stop = store.subscribe(() => undefined)
+    try {
+      expect(store.getSnapshot().loading).toBe(true)
+      sources[0].dispatchEvent(new Event('ready'))
+      expect(store.getSnapshot().loading).toBe(true)
+      // An empty first batch is still the first batch.
+      sources[0].logs([])
+      expect(store.getSnapshot().loading).toBe(false)
+    } finally {
+      stop()
+    }
+
+    const failing = createLiveLogStore('/website/b', parseLogs, () => {
+      const source = new Source()
+      sources.push(source)
+      return source
+    })
+    const stopFailing = failing.subscribe(() => undefined)
+    try {
+      sources[1].dispatchEvent(new Event('error'))
+      expect(failing.getSnapshot().loading).toBe(false)
+    } finally {
+      stopFailing()
+    }
+  })
+
   it('preserves the resource buffer across pause and ignores retired connection data', () => {
     const sources: Source[] = []
     const store = createLiveLogStore('/website/a', parseLogs, () => {

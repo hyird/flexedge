@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { certificateMatchesHostnames } from '@/features/certificates/certificate-coverage'
 import {
   hostedPrefixError,
   isWebsiteHostname,
@@ -465,19 +466,65 @@ function hostedDomainIssues(values: unknown, zones: readonly HostedZone[]) {
   return issues
 }
 
+/** Hostnames currently bound in the draft (blank rows skipped). */
+export function websiteHostnames(values: unknown) {
+  const domains = (values as { domains?: unknown } | null)?.domains
+  if (!Array.isArray(domains)) return []
+  return (domains as Partial<WebsiteFormValues['domains'][number]>[])
+    .map((domain) => domain?.hostname?.trim() ?? '')
+    .filter(Boolean)
+}
+
+type CertificateNames = { id: string; domains: readonly string[] }
+
+/** A bound certificate must match at least one bound hostname (mirrors the
+ * backend save check); hostnames left uncovered only stay on HTTP. */
+function unmatchedCertificateIssues(
+  values: unknown,
+  certificates: readonly CertificateNames[]
+) {
+  const ids = (values as { certificate_ids?: unknown } | null)?.certificate_ids
+  if (!Array.isArray(ids)) return []
+  const hostnames = websiteHostnames(values)
+  // Options and attached bindings can describe the same certificate.
+  const unmatched = certificates.filter(
+    (certificate, index) =>
+      certificates.findIndex((other) => other.id === certificate.id) ===
+        index &&
+      ids.includes(certificate.id) &&
+      certificate.domains.length > 0 &&
+      !certificateMatchesHostnames(certificate.domains, hostnames)
+  )
+  if (!unmatched.length) return []
+  return [
+    {
+      code: 'custom',
+      path: ['certificate_ids'],
+      message: `证书未匹配网站域名：${unmatched.map((certificate) => certificate.domains[0]).join('、')}`,
+      input: ids,
+    } satisfies z.core.$ZodIssue,
+  ]
+}
+
 /** Validates a settings draft; built-in range and type messages are Chinese,
  * schema-specific messages take precedence. With the hosted zone list,
  * managed domains are also checked against their zone and prefix; those
- * messages replace the full-hostname format message of the same domain. */
+ * messages replace the full-hostname format message of the same domain.
+ * With known certificate names, every bound certificate must match at least
+ * one bound hostname. */
 export function validateWebsiteForm(
   values: unknown,
-  hostedZones?: readonly HostedZone[]
+  hostedZones?: readonly HostedZone[],
+  certificates?: readonly CertificateNames[]
 ): z.ZodSafeParseResult<WebsiteFormValues> {
   const result = websiteFormSchema.safeParse(values, { error: zhCNErrors })
   const hostedIssues = hostedZones
     ? hostedDomainIssues(values, hostedZones)
     : []
-  if (!hostedIssues.length) return result
+  const certificateIssues = certificates
+    ? unmatchedCertificateIssues(values, certificates)
+    : []
+  if (!hostedIssues.length && !certificateIssues.length) return result
   const replacedHostnames = new Set(
     hostedIssues.map((issue) => `domains.${String(issue.path[1])}.hostname`)
   )
@@ -491,6 +538,7 @@ export function validateWebsiteForm(
     error: new z.ZodError([
       ...hostedIssues,
       ...schemaIssues,
+      ...certificateIssues,
     ]) as z.ZodError<WebsiteFormValues>,
   }
 }
@@ -510,22 +558,34 @@ export function setWebsiteHttpsEnabled(
       }
 }
 
+export type WebsiteCertificateOption = Website['certificates'][number] & {
+  /** Covers at least one bound hostname. */
+  matched: boolean
+}
+
+/** Usable certificates matching a bound hostname, plus every selected
+ * certificate (kept visible, flagged, so it can be removed explicitly). */
 export function websiteCertificateOptions(
   available: readonly { id: string; domains: string[] }[],
   selectedIds: readonly string[],
-  attached: readonly Website['certificates'][number][]
-): Website['certificates'] {
-  const options = available.map((certificate) => ({
-    ...certificate,
-    usable: true,
-  }))
+  attached: readonly Website['certificates'][number][],
+  hostnames: readonly string[]
+): WebsiteCertificateOption[] {
+  const options: WebsiteCertificateOption[] = []
+  for (const certificate of available) {
+    const matched = certificateMatchesHostnames(certificate.domains, hostnames)
+    if (matched || selectedIds.includes(certificate.id))
+      options.push({ ...certificate, usable: true, matched })
+  }
   for (const id of selectedIds) {
-    if (options.some((certificate) => certificate.id === id)) continue
+    if (available.some((certificate) => certificate.id === id)) continue
+    const domains =
+      attached.find((certificate) => certificate.id === id)?.domains ?? []
     options.push({
       id,
-      domains:
-        attached.find((certificate) => certificate.id === id)?.domains ?? [],
+      domains,
       usable: false,
+      matched: certificateMatchesHostnames(domains, hostnames),
     })
   }
   return options

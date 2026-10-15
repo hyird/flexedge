@@ -1,9 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
+import { ListView } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Alert, Skeleton } from '@heroui/react'
-import { formatBitsPerSecond, formatNumber } from '@/lib/format'
+import { formatNumber } from '@/lib/format'
 import { TruncatedText } from '@/components/data-table'
+import { KpiQuantity } from '@/components/kpi-quantity'
 import { Mono } from '@/components/mono'
 import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
@@ -34,7 +36,7 @@ function LoadKpi({ label, value }: { label: string; value?: number }) {
       <KPI.Header>
         <KPI.Title>{label}</KPI.Title>
       </KPI.Header>
-      <KPI.Content>
+      <KPI.Content className='content-start'>
         {ratio === undefined ? (
           <KPI.Value value={0}>{() => '—'}</KPI.Value>
         ) : (
@@ -57,24 +59,32 @@ function LoadKpi({ label, value }: { label: string; value?: number }) {
   )
 }
 
-function TextKpi({
+/** Count KPI; a missing value shows `—` in the same slot. */
+function CountKpi({
   label,
   value,
-  hint,
+  fractionDigits = 0,
 }: {
   label: string
-  value: string
-  hint: string
+  value?: number
+  fractionDigits?: number
 }) {
   return (
     <KPI>
       <KPI.Header>
         <KPI.Title>{label}</KPI.Title>
       </KPI.Header>
-      <KPI.Content>
-        <KPI.Value value={0}>{() => value}</KPI.Value>
+      <KPI.Content className='content-start'>
+        {value === undefined ? (
+          <KPI.Value value={0}>{() => '—'}</KPI.Value>
+        ) : (
+          <KPI.Value
+            value={value}
+            minimumFractionDigits={fractionDigits}
+            maximumFractionDigits={fractionDigits}
+          />
+        )}
       </KPI.Content>
-      <KPI.Footer className='truncate text-xs text-muted'>{hint}</KPI.Footer>
     </KPI>
   )
 }
@@ -86,23 +96,32 @@ function Endpoints({ node }: { node: Node }) {
   )?.dns_zone_id
   const lines = useQuery(dnsZoneLinesQuery(zoneId))
   return (
-    <ul className='flex flex-col divide-y divide-separator'>
-      {node.config.endpoints.map((endpoint) => (
-        <li
-          key={endpoint.id}
-          className='grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] items-center gap-x-4 py-2.5 first:pt-0 last:pb-0'
+    <ListView
+      aria-label='服务端点'
+      variant='secondary'
+      items={node.config.endpoints}
+    >
+      {(endpoint) => (
+        <ListView.Item
+          id={endpoint.id}
+          textValue={endpoint.ip_address}
+          className='cursor-default px-0'
         >
-          <Mono truncate>{endpoint.ip_address}</Mono>
-          <span className='truncate text-right text-[13px] text-muted'>
+          <ListView.ItemContent>
+            <ListView.Title className='font-mono text-[13px] font-normal'>
+              {endpoint.ip_address}
+            </ListView.Title>
+          </ListView.ItemContent>
+          <ListView.ItemAction className='min-w-0 truncate text-[13px] text-muted'>
             {lines.data
               ? dnsLinePath(lines.data, endpoint.line_code)
               : endpoint.line_code === 'default'
                 ? '默认线路'
                 : endpoint.line_code}
-          </span>
-        </li>
-      ))}
-    </ul>
+          </ListView.ItemAction>
+        </ListView.Item>
+      )}
+    </ListView>
   )
 }
 
@@ -141,31 +160,24 @@ export function NodeOverview() {
       <div className='grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6'>
         <LoadKpi label='CPU' value={metrics.cpu_usage} />
         <LoadKpi label='内存' value={metrics.memory_usage} />
-        <TextKpi
-          label='带宽'
-          value={formatBitsPerSecond(metrics.traffic_out_bps)}
-          hint='实时'
-        />
-        <TextKpi
-          label='连接数'
-          value={formatNumber(metrics.connection_count)}
-          hint='当前活动连接'
-        />
-        <TextKpi
-          label='连接 IP'
-          value={formatNumber(metrics.connected_ip_count)}
-          hint='当前连接的客户端 IP'
-        />
-        <TextKpi
-          label='系统负载'
-          value={
-            metrics.load_1m === undefined ? '—' : metrics.load_1m.toFixed(2)
-          }
-          hint='1 分钟平均'
+        <KPI>
+          <KPI.Header>
+            <KPI.Title>带宽</KPI.Title>
+          </KPI.Header>
+          <KPI.Content className='content-start'>
+            <KpiQuantity value={metrics.traffic_out_bps} unit='bps' />
+          </KPI.Content>
+        </KPI>
+        <CountKpi label='连接数' value={metrics.connection_count} />
+        <CountKpi label='连接 IP' value={metrics.connected_ip_count} />
+        <CountKpi
+          label='1 分钟负载'
+          value={metrics.load_1m}
+          fractionDigits={2}
         />
       </div>
       <div className='grid gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]'>
-        <Section title='运行状态' description='来自节点心跳，实时更新。'>
+        <Section title='运行状态'>
           <DescriptionList
             columns={3}
             items={[
@@ -228,10 +240,7 @@ export function NodeOverview() {
             ]}
           />
         </Section>
-        <Section
-          title='服务端点'
-          description='节点对外服务的 IP 与对应 DNS 线路。'
-        >
+        <Section title='服务端点'>
           <Endpoints node={node} />
         </Section>
       </div>

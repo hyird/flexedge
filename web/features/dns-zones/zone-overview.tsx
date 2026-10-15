@@ -1,4 +1,4 @@
-import { KPIGroup, type DataGridColumn } from '@heroui-pro/react'
+import type { DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Alert, Button, Link } from '@heroui/react'
 import { formatDate } from '@/lib/format'
@@ -71,8 +71,8 @@ export function ZoneOverview() {
           </Alert.Content>
         </Alert>
       )}
-      <KPIGroup>
-        <KPI>
+      <div className='grid grid-cols-2 gap-3 md:grid-cols-4'>
+        <KPI className='min-w-0'>
           <KPI.Header>
             <KPI.Title>自定义记录</KPI.Title>
           </KPI.Header>
@@ -80,8 +80,7 @@ export function ZoneOverview() {
             <KPI.Value value={zone.config.records.length} />
           </KPI.Content>
         </KPI>
-        <KPIGroup.Separator />
-        <KPI>
+        <KPI className='min-w-0'>
           <KPI.Header>
             <KPI.Title>系统自动记录</KPI.Title>
           </KPI.Header>
@@ -89,17 +88,18 @@ export function ZoneOverview() {
             <KPI.Value value={zone.runtime.projected_records.length} />
           </KPI.Content>
         </KPI>
-        <KPIGroup.Separator />
-        <KPI>
+        <KPI className='min-w-0'>
           <KPI.Header>
             <KPI.Title>同步失败记录</KPI.Title>
           </KPI.Header>
           <KPI.Content>
-            <KPI.Value value={failedRecords} />
+            <KPI.Value
+              value={failedRecords}
+              className={failedRecords ? 'text-danger' : undefined}
+            />
           </KPI.Content>
         </KPI>
-        <KPIGroup.Separator />
-        <KPI>
+        <KPI className='min-w-0'>
           <KPI.Header>
             <KPI.Title>关联网站</KPI.Title>
           </KPI.Header>
@@ -107,7 +107,7 @@ export function ZoneOverview() {
             <KPI.Value value={zone.website_count} />
           </KPI.Content>
         </KPI>
-      </KPIGroup>
+      </div>
       {zone.runtime.conflicts.length > 0 && (
         <Section
           title={`同步冲突 · ${zone.runtime.conflicts.length}`}

@@ -9,6 +9,8 @@ const accessLogSchema = z.object({
   node_name: z.string(),
   client_ip: z.string().optional(),
   client_ip_location: z.string().optional(),
+  client_ip_asn: z.string().optional(),
+  client_ip_as_name: z.string().optional(),
   protocol: z.string(),
   method: z.string(),
   host: z.string(),

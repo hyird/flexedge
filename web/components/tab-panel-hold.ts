@@ -1,9 +1,13 @@
 import {
+  createContext,
   useCallback,
+  useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
+  type CSSProperties,
 } from 'react'
 import {
   notifyManager,
@@ -21,6 +25,12 @@ export type TabPanelGeometry = {
   startsOnScreen: boolean
 }
 
+/** Inline style of the held panel. */
+export type TabPanelHoldStyle = Pick<
+  CSSProperties,
+  'minHeight' | 'maxHeight' | 'overflow'
+>
+
 /** Queries waiting for their first data (a snapshot or stream frame). */
 function firstLoadHashes(cache: QueryCache) {
   return cache
@@ -36,22 +46,31 @@ type Switching = {
   /** Height that keeps the scroll position once the incoming tab loaded. */
   settledHeight: number | undefined
   /** Queries already waiting for first data before the switch. */
-  earlierLoads: Set<string>
+  earlierQueries: Set<string>
+  /** Loads outside Query (`useTabPanelLoading`) registered before it. */
+  earlierLoads: Set<object>
 }
 
 /** Panel height held across one tab switch.
  *
- * While the incoming tab's first data loads, the panel keeps the outgoing
- * tab's height, so a skeleton, empty state or blank first frame never
- * collapses the page (which would clamp the scroll position and toggle the
- * scrollbar). Once that data is in, the panel only keeps the height that
+ * While the incoming tab's first data loads, the panel keeps exactly the
+ * outgoing tab's height: a skeleton, empty state or blank first frame can
+ * neither collapse the page (which would clamp the scroll position) nor grow
+ * it past the outgoing height (a placeholder taller than both tabs' content),
+ * so the page's scroll height, and with it the scrollbar, changes at most
+ * once per switch, when the real content renders. The placeholder beyond that
+ * height is clipped meanwhile; it starts at or below the bottom of the
+ * outgoing tab's content. First data is a Query's first snapshot or stream
+ * frame, or a load reported through `useTabPanelLoading` (a live log tail's
+ * first batch). Once all of it rendered, the panel only keeps the height that
  * leaves the scroll position where it was, so the header and tab list stay
  * put; when the tabs were already scrolled out of view nothing is kept. */
 export class TabPanelHold {
-  private minHeight: number | undefined
+  private style: TabPanelHoldStyle | undefined
   private listeners = new Set<() => void>()
   private switching: Switching | null = null
   private stopWatching: (() => void) | null = null
+  private loads = new Set<object>()
 
   constructor(private cache: QueryCache) {}
 
@@ -63,7 +82,7 @@ export class TabPanelHold {
     }
   }
 
-  getMinHeight = () => this.minHeight
+  getStyle = () => this.style
 
   /** Call in the event that switches tabs, before the switch renders. */
   hold({ height, below, startsOnScreen }: TabPanelGeometry) {
@@ -71,34 +90,66 @@ export class TabPanelHold {
     const keep = startsOnScreen ? height - below : 0
     this.switching = {
       settledHeight: keep > 0 ? keep : undefined,
-      earlierLoads: new Set(firstLoadHashes(this.cache)),
+      earlierQueries: new Set(firstLoadHashes(this.cache)),
+      earlierLoads: new Set(this.loads),
     }
-    this.setMinHeight(height)
+    this.setStyle({ minHeight: height, maxHeight: height, overflow: 'clip' })
   }
 
-  /** Call after the incoming tab mounted, i.e. once its queries subscribed
-   * and started loading; releases the hold as soon as no query that started
-   * loading since `hold` still waits for its first data. */
-  watch() {
+  /** Registers content that loads its first data outside Query; returns
+   * the call that reports it loaded (or failed). */
+  addLoad() {
+    const load = {}
+    this.loads.add(load)
+    return () => {
+      this.loads.delete(load)
+      this.requestSettle()
+    }
+  }
+
+  /** Call after every commit of the panel's owner. Children's effects ran
+   * first, so the incoming tab's queries started and its other loads are
+   * registered, including loads that only begin once an earlier one landed
+   * (a log tail opening after the header snapshot). Releases the hold when
+   * nothing that started loading since `hold` still waits for first data. */
+  settle() {
     const switching = this.switching
-    if (!switching || this.stopWatching) return
-    // Batched like Query observer notifications, so the release renders
-    // together with the incoming data, never before it.
-    this.stopWatching = this.cache.subscribe(
-      notifyManager.batchCalls(() => this.settleWhenLoaded(switching))
+    if (!switching) return
+    if (!this.stopWatching) {
+      // Batched like Query observer notifications: the owner re-renders in
+      // the same commit as the incoming data, and this check runs after it.
+      this.stopWatching = this.cache.subscribe(
+        notifyManager.batchCalls(() => {
+          if (this.switching === switching && !this.queriesLoading(switching))
+            this.requestSettle()
+        })
+      )
+    }
+    if (this.queriesLoading(switching) || this.otherLoading(switching)) return
+    this.stop()
+    this.setStyle(
+      switching.settledHeight === undefined
+        ? undefined
+        : { minHeight: switching.settledHeight }
     )
-    this.settleWhenLoaded(switching)
   }
 
-  private settleWhenLoaded(switching: Switching) {
-    // A batched call may arrive after the next switch replaced this one.
-    if (this.switching !== switching) return
-    const loading = firstLoadHashes(this.cache).some(
-      (hash) => !switching.earlierLoads.has(hash)
+  private queriesLoading(switching: Switching) {
+    return firstLoadHashes(this.cache).some(
+      (hash) => !switching.earlierQueries.has(hash)
     )
-    if (loading) return
-    this.stop()
-    this.setMinHeight(switching.settledHeight)
+  }
+
+  private otherLoading(switching: Switching) {
+    for (const load of this.loads)
+      if (!switching.earlierLoads.has(load)) return true
+    return false
+  }
+
+  /** Re-renders the owner so `settle` runs after the current commit. */
+  private requestSettle() {
+    if (!this.switching) return
+    this.setStyle({ ...this.style })
   }
 
   private stop() {
@@ -107,11 +158,28 @@ export class TabPanelHold {
     this.switching = null
   }
 
-  private setMinHeight(minHeight: number | undefined) {
-    if (minHeight === this.minHeight) return
-    this.minHeight = minHeight
+  private setStyle(style: TabPanelHoldStyle | undefined) {
+    if (style === this.style) return
+    this.style = style
     this.listeners.forEach((listener) => listener())
   }
+}
+
+/** The hold of the enclosing tab panel; `useTabPanelHold` owners provide it
+ * around the panel content. */
+export const TabPanelHoldContext = createContext<TabPanelHold | null>(null)
+
+/** Reports that content inside a tab panel is loading its first data outside
+ * TanStack Query (e.g. a live log tail before its first batch), so a switch
+ * to its tab keeps the panel's height until that data renders too. */
+export function useTabPanelLoading(loading: boolean) {
+  const hold = useContext(TabPanelHoldContext)
+  // Layout effect: registered within the commit that mounts the content,
+  // before the owner's `settle` runs; released within the data's commit.
+  useLayoutEffect(
+    () => (hold && loading ? hold.addLoad() : undefined),
+    [hold, loading]
+  )
 }
 
 /** Nearest scrolling ancestor: the page itself, or e.g. a sheet body. */
@@ -141,28 +209,25 @@ function measureTabPanel(panel: HTMLElement): TabPanelGeometry {
   }
 }
 
-/** Keeps a tab panel from collapsing or moving the page while tabs switch
- * (see `TabPanelHold`). Attach `ref` and `style` to the `Tabs.Panel` and call
- * `holdForSwitch()` in the same event that changes the selected tab. */
+/** Keeps a tab panel from collapsing, growing or moving the page while tabs
+ * switch (see `TabPanelHold`). Attach `ref` and `style` to the `Tabs.Panel`,
+ * provide `hold` through `TabPanelHoldContext` around the panel content and
+ * call `holdForSwitch()` in the same event that changes the selected tab. */
 export function useTabPanelHold() {
   const client = useQueryClient()
   const ref = useRef<HTMLDivElement>(null)
   const [hold] = useState(() => new TabPanelHold(client.getQueryCache()))
-  const minHeight = useSyncExternalStore(
+  const style = useSyncExternalStore(
     hold.subscribe,
-    hold.getMinHeight,
-    hold.getMinHeight
+    hold.getStyle,
+    hold.getStyle
   )
-  // Effects run children first: by now the incoming tab's queries started.
+  // Effects run children first: by now the incoming tab's loads started.
   useEffect(() => {
-    hold.watch()
+    hold.settle()
   })
   const holdForSwitch = useCallback(() => {
     if (ref.current) hold.hold(measureTabPanel(ref.current))
   }, [hold])
-  return {
-    ref,
-    style: minHeight === undefined ? undefined : { minHeight },
-    holdForSwitch,
-  }
+  return { ref, style, holdForSwitch, hold }
 }

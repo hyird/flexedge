@@ -19,10 +19,15 @@ afterEach(() => {
   clients.splice(0).forEach((client) => client.clear())
 })
 
+/** A hold whose owner "commits" like `useTabPanelHold`: every change it
+ * publishes re-renders the owner, whose effect then calls `settle()`. */
 function setup() {
   const client = new QueryClient()
   clients.push(client)
-  return { client, hold: new TabPanelHold(client.getQueryCache()) }
+  const hold = new TabPanelHold(client.getQueryCache())
+  let renders = 0
+  hold.subscribe(() => renders++)
+  return { client, hold, renders: () => renders }
 }
 
 /** Starts a first load (a snapshot or the first stream frame); `settle`
@@ -49,56 +54,98 @@ function startFirstLoad(client: QueryClient, key: string) {
 }
 
 const outgoing = { height: 900, below: 200, startsOnScreen: true }
+const held = { minHeight: 900, maxHeight: 900, overflow: 'clip' }
 
 describe('tab panel hold', () => {
-  it("keeps the outgoing height until the incoming tab's first data lands", async () => {
-    const { client, hold } = setup()
+  it("keeps exactly the outgoing height until the incoming tab's first data lands", async () => {
+    const { client, hold, renders } = setup()
     hold.hold(outgoing)
-    expect(hold.getMinHeight()).toBe(900)
+    expect(hold.getStyle()).toEqual(held)
 
     // The incoming tab mounts and starts reading its snapshot.
     const incoming = startFirstLoad(client, 'incoming')
-    hold.watch()
-    expect(hold.getMinHeight()).toBe(900)
+    hold.settle()
+    expect(hold.getStyle()).toEqual(held)
 
+    const before = renders()
     await incoming.settle('data')
+    // The data's commit re-renders the owner; its effect releases the hold.
+    expect(renders()).toBeGreaterThan(before)
+    expect(hold.getStyle()).toEqual(held)
+    hold.settle()
     // Only the height that keeps the scroll position stays reserved.
-    expect(hold.getMinHeight()).toBe(700)
+    expect(hold.getStyle()).toEqual({ minHeight: 700 })
   })
 
   it('releases at once for a tab whose data is cached', () => {
     const { client, hold } = setup()
     client.setQueryData(['incoming'], 'cached')
     hold.hold(outgoing)
-    hold.watch()
-    expect(hold.getMinHeight()).toBe(700)
+    hold.settle()
+    expect(hold.getStyle()).toEqual({ minHeight: 700 })
   })
 
   it('ignores loads that started before the switch', () => {
     const { client, hold } = setup()
     startFirstLoad(client, 'header')
+    const release = hold.addLoad()
     hold.hold(outgoing)
-    hold.watch()
-    expect(hold.getMinHeight()).toBe(700)
+    hold.settle()
+    expect(hold.getStyle()).toEqual({ minHeight: 700 })
+    release()
   })
 
   it('releases when the first load fails', async () => {
     const { client, hold } = setup()
     hold.hold(outgoing)
     const incoming = startFirstLoad(client, 'incoming')
-    hold.watch()
+    hold.settle()
     await incoming.settle('error')
-    expect(hold.getMinHeight()).toBe(700)
+    hold.settle()
+    expect(hold.getStyle()).toEqual({ minHeight: 700 })
   })
 
   it('keeps nothing once loaded when the tabs were scrolled out of view', async () => {
     const { client, hold } = setup()
     hold.hold({ ...outgoing, startsOnScreen: false })
     const incoming = startFirstLoad(client, 'incoming')
-    hold.watch()
-    expect(hold.getMinHeight()).toBe(900)
+    hold.settle()
+    expect(hold.getStyle()).toEqual(held)
     await incoming.settle('data')
-    expect(hold.getMinHeight()).toBeUndefined()
+    hold.settle()
+    expect(hold.getStyle()).toBeUndefined()
+  })
+
+  it('waits for loads outside Query, such as a log tail before its first batch', () => {
+    const { hold, renders } = setup()
+    hold.hold(outgoing)
+    // The incoming tab's layout effect registers its opening tail.
+    const firstBatch = hold.addLoad()
+    hold.settle()
+    expect(hold.getStyle()).toEqual(held)
+
+    const before = renders()
+    firstBatch()
+    expect(renders()).toBeGreaterThan(before)
+    hold.settle()
+    expect(hold.getStyle()).toEqual({ minHeight: 700 })
+  })
+
+  it('keeps holding for a load that starts in the commit where a query landed', async () => {
+    const { client, hold } = setup()
+    hold.hold(outgoing)
+    // The logs tab first reads the header snapshot …
+    const header = startFirstLoad(client, 'header-snapshot')
+    hold.settle()
+    await header.settle('data')
+    // … and in the same commit opens its tail, before the owner's effect.
+    const firstBatch = hold.addLoad()
+    hold.settle()
+    expect(hold.getStyle()).toEqual(held)
+
+    firstBatch()
+    hold.settle()
+    expect(hold.getStyle()).toEqual({ minHeight: 700 })
   })
 
   it('runs the panel hold before switches requested outside the tab list', () => {

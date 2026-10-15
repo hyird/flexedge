@@ -59,11 +59,13 @@ function withEnforcedWidth<T>(column: DataGridColumn<T>): DataGridColumn<T> {
 }
 
 /** Pro DataGrid with the console's list states: layout-shaped skeleton while
- * the first snapshot loads, an Alert + retry on error (stale rows stay
- * visible), an empty state inside the grid, a sticky header and an internal
- * scroll viewport that scrolls horizontally on narrow screens. Rows keep one
- * height across state changes: cells never wrap, column `width`/`minWidth`
- * are enforced, status cells use `StatusChip`'s `reserve`. */
+ * the first rows load (the grid then mounts with them, so its columns and
+ * scrollbars never re-lay out from an empty first frame), an Alert + retry
+ * on error (stale rows stay visible), an empty state inside the grid, a
+ * sticky header and an internal scroll viewport that scrolls horizontally on
+ * narrow screens. Rows keep one height across state changes: cells never
+ * wrap, column `width`/`minWidth` are enforced, status cells use
+ * `StatusChip`'s `reserve`. */
 export function DataTable<T extends object>({
   label,
   columns,
@@ -80,7 +82,9 @@ export function DataTable<T extends object>({
   label: string
   columns: DataGridColumn<T>[]
   data: T[] | undefined
-  /** True until the first snapshot arrives (`query.isPending`). */
+  /** True until the first snapshot arrives (`query.isPending`), or while a
+   * live source opens without rows yet; shows the skeleton instead of an
+   * empty grid. */
   isLoading: boolean
   /** Query error (`query.isError ? query.error : undefined`). */
   error?: unknown
@@ -104,7 +108,7 @@ export function DataTable<T extends object>({
         query={{ isError: error !== undefined, error }}
         onRetry={onRetry}
       />
-      {isLoading && !data ? (
+      {isLoading && !data?.length ? (
         <div
           role='status'
           aria-label={`正在加载${label}`}

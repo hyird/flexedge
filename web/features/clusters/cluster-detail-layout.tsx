@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import { Cubes3, Globe, Pencil, Plus, Server } from '@gravity-ui/icons'
-import { Button, Meter, Skeleton } from '@heroui/react'
+import { KPI } from '@heroui-pro/react/kpi'
+import { Button, Skeleton } from '@heroui/react'
 import { ApiBusinessError } from '@/lib/api-response'
 import { formatPercent, ratioOf } from '@/lib/format'
 import { useArrivalState } from '@/lib/history-state'
@@ -15,7 +16,6 @@ import { LinkButton } from '@/components/link-button'
 import { Mono } from '@/components/mono'
 import { EmptyState, Page, QueryNotice } from '@/components/page'
 import { PageTabs } from '@/components/page-tabs'
-import { Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { watchClusterNodeTransitions } from '@/features/nodes/data'
 import { providerLabel } from '@/features/providers/provider-display'
@@ -40,59 +40,65 @@ const clusterStatusLabels = statusLabels(['enabled', 'disabled'])
 function ClusterSummary({ cluster }: { cluster: Cluster }) {
   const online = ratioOf(cluster.online_node_count, cluster.node_count)
   return (
-    <div className='grid gap-4 md:grid-cols-3'>
-      <Section title='接入域名'>
-        <div className='flex items-center gap-1'>
-          <Mono className='min-w-0 break-all'>{cluster.access_domain}</Mono>
-          <CopyButton value={cluster.access_domain} label='复制接入域名' />
-        </div>
-        <p className='mt-1 text-xs text-muted'>网站域名 CNAME 到此地址</p>
-      </Section>
-      <Section title='托管域名'>
-        <Link
-          to='/dns-zones/$zoneId'
-          params={{ zoneId: cluster.dns_zone_id }}
-          className='link font-mono text-[13px]'
-        >
-          {cluster.dns_zone_domain}
-        </Link>
-        <p className='mt-1 text-xs text-muted'>
+    <div className='grid gap-3 md:grid-cols-3'>
+      <KPI className='min-w-0'>
+        <KPI.Header>
+          <KPI.Title>接入域名</KPI.Title>
+        </KPI.Header>
+        <KPI.Content className='content-start'>
+          <dd className='flex min-w-0 items-center gap-1'>
+            <Mono className='min-w-0 text-base font-medium break-all'>
+              {cluster.access_domain}
+            </Mono>
+            <CopyButton value={cluster.access_domain} label='复制接入域名' />
+          </dd>
+        </KPI.Content>
+        <KPI.Footer className='truncate text-xs text-muted'>
+          网站域名 CNAME 到此地址
+        </KPI.Footer>
+      </KPI>
+      <KPI className='min-w-0'>
+        <KPI.Header>
+          <KPI.Title>托管域名</KPI.Title>
+        </KPI.Header>
+        <KPI.Content className='content-start'>
+          <dd className='min-w-0 truncate'>
+            <Link
+              to='/dns-zones/$zoneId'
+              params={{ zoneId: cluster.dns_zone_id }}
+              className='link font-mono text-base font-medium'
+            >
+              {cluster.dns_zone_domain}
+            </Link>
+          </dd>
+        </KPI.Content>
+        <KPI.Footer className='truncate text-xs text-muted'>
           DNS 服务商 {providerLabel(cluster.dns_provider_name)}
-        </p>
-      </Section>
-      <Section title='节点在线'>
-        <Meter
-          aria-label='节点在线比例'
-          value={online * 100}
-          size='sm'
-          color={
-            cluster.node_count === 0
-              ? 'default'
-              : online === 1
-                ? 'success'
-                : online === 0
-                  ? 'danger'
-                  : 'warning'
-          }
-          className='flex flex-col gap-2'
-        >
-          <div className='flex items-baseline justify-between gap-2'>
-            <span className='text-xl font-semibold tabular-nums'>
-              {cluster.online_node_count}
-              <span className='text-sm font-normal text-muted'>
-                {' '}
-                / {cluster.node_count}
-              </span>
-            </span>
-            <span className='text-xs text-muted tabular-nums'>
-              {cluster.node_count ? formatPercent(online, 0) : '无节点'}
-            </span>
-          </div>
-          <Meter.Track>
-            <Meter.Fill />
-          </Meter.Track>
-        </Meter>
-      </Section>
+        </KPI.Footer>
+      </KPI>
+      <KPI className='min-w-0'>
+        <KPI.Header>
+          <KPI.Title>节点在线</KPI.Title>
+        </KPI.Header>
+        <KPI.Content className='content-start'>
+          <KPI.Value
+            value={cluster.online_node_count}
+            className='whitespace-nowrap'
+          >
+            {(formatted) => `${formatted} / ${cluster.node_count}`}
+          </KPI.Value>
+          <KPI.Progress
+            value={online * 100}
+            status={
+              online === 1 ? 'success' : online === 0 ? 'danger' : 'warning'
+            }
+            className={cluster.node_count ? undefined : 'invisible'}
+          />
+        </KPI.Content>
+        <KPI.Footer className='truncate text-xs text-muted'>
+          {cluster.node_count ? formatPercent(online, 0) : '无节点'}
+        </KPI.Footer>
+      </KPI>
     </div>
   )
 }
@@ -200,7 +206,7 @@ export function ClusterDetailLayout() {
       {cluster ? (
         <ClusterSummary cluster={cluster} />
       ) : (
-        <div className='grid gap-4 md:grid-cols-3'>
+        <div className='grid gap-3 md:grid-cols-3'>
           {Array.from({ length: 3 }, (_, index) => (
             <Skeleton key={index} className='h-28 rounded-2xl' />
           ))}

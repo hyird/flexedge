@@ -16,6 +16,7 @@ import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { useLiveLogs } from '@/features/logs/use-live-logs'
+import { AccessLogAsnDetail, AccessLogClientOrigin } from './access-log-asn'
 import { accessLogStatusTone, filterAccessLogs } from './access-log-filter'
 import { parseAccessLogs, type AccessLog } from './access-log-schema'
 import {
@@ -123,9 +124,7 @@ export function AccessLogs() {
       cell: (log) => (
         <div className='flex min-w-0 flex-col gap-0.5'>
           <Mono>{log.client_ip || '—'}</Mono>
-          <span className='truncate text-xs text-muted'>
-            {log.client_ip_location || '—'}
-          </span>
+          <AccessLogClientOrigin log={log} />
         </div>
       ),
     },
@@ -280,11 +279,7 @@ export function AccessLogs() {
           label={history ? '历史访问日志' : '实时访问日志'}
           columns={columns}
           data={rows}
-          isLoading={
-            history
-              ? historyQuery.isPending
-              : !paused && !live.connected && live.logs.length === 0
-          }
+          isLoading={history ? historyQuery.isPending : live.loading}
           error={
             history
               ? historyQuery.isError
@@ -401,6 +396,7 @@ function AccessLogDetail({ log }: { log: AccessLog }) {
           },
           { label: '客户端 IP', value: <Mono>{log.client_ip || '—'}</Mono> },
           { label: 'IP 归属', value: log.client_ip_location || '—' },
+          { label: 'ASN', value: <AccessLogAsnDetail log={log} /> },
           { label: '耗时', value: `${log.duration_ms} ms` },
           { label: '请求流量', value: formatBytes(log.request_bytes) },
           { label: '响应流量', value: formatBytes(log.response_bytes) },

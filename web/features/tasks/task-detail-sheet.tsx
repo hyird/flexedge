@@ -11,7 +11,10 @@ import { EmptyState, QueryNotice } from '@/components/page'
 import { RelativeTime } from '@/components/relative-time'
 import { DescriptionList } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
-import { useTabPanelHold } from '@/components/tab-panel-hold'
+import {
+  TabPanelHoldContext,
+  useTabPanelHold,
+} from '@/components/tab-panel-hold'
 import { latestTaskVersionQuery, taskDetailQuery } from './data'
 import { RedactedText } from './task-attempt-trace'
 import {
@@ -45,7 +48,12 @@ export function TaskDetailSheet({
   const [tab, setTab] = useState<TaskSheetTab>('detail')
   // Execution history loads on first open; the panel keeps its height (and
   // the sheet's scroll position) until it does.
-  const { ref: panelRef, style: panelStyle, holdForSwitch } = useTabPanelHold()
+  const {
+    ref: panelRef,
+    style: panelStyle,
+    holdForSwitch,
+    hold,
+  } = useTabPanelHold()
   // Errors render inside the sheet (not-found state or QueryNotice).
   const latest = useQuery({
     ...latestTaskVersionQuery(version ? null : selection),
@@ -117,42 +125,44 @@ export function TaskDetailSheet({
               </div>
             )
           ) : (
-            <Tabs
-              selectedKey={tab}
-              onSelectionChange={(key) => {
-                holdForSwitch()
-                setTab(key as TaskSheetTab)
-              }}
-            >
-              <Tabs.ListContainer>
-                <Tabs.List aria-label='任务详情'>
-                  <Tabs.Tab id='detail'>
-                    状态
-                    <Tabs.Indicator />
-                  </Tabs.Tab>
-                  <Tabs.Tab id='history'>
-                    执行记录
-                    <Tabs.Indicator />
-                  </Tabs.Tab>
-                </Tabs.List>
-              </Tabs.ListContainer>
-              <Tabs.Panel
-                id='detail'
-                ref={panelRef}
-                style={panelStyle}
-                className='flex flex-col gap-4 pt-4'
+            <TabPanelHoldContext value={hold}>
+              <Tabs
+                selectedKey={tab}
+                onSelectionChange={(key) => {
+                  holdForSwitch()
+                  setTab(key as TaskSheetTab)
+                }}
               >
-                <TaskStatus task={task} />
-              </Tabs.Panel>
-              <Tabs.Panel
-                id='history'
-                ref={panelRef}
-                style={panelStyle}
-                className='flex flex-col gap-4 pt-4'
-              >
-                <TaskHistoryPanel task={task} />
-              </Tabs.Panel>
-            </Tabs>
+                <Tabs.ListContainer>
+                  <Tabs.List aria-label='任务详情'>
+                    <Tabs.Tab id='detail'>
+                      状态
+                      <Tabs.Indicator />
+                    </Tabs.Tab>
+                    <Tabs.Tab id='history'>
+                      执行记录
+                      <Tabs.Indicator />
+                    </Tabs.Tab>
+                  </Tabs.List>
+                </Tabs.ListContainer>
+                <Tabs.Panel
+                  id='detail'
+                  ref={panelRef}
+                  style={panelStyle}
+                  className='flex flex-col gap-4 pt-4'
+                >
+                  <TaskStatus task={task} />
+                </Tabs.Panel>
+                <Tabs.Panel
+                  id='history'
+                  ref={panelRef}
+                  style={panelStyle}
+                  className='flex flex-col gap-4 pt-4'
+                >
+                  <TaskHistoryPanel task={task} />
+                </Tabs.Panel>
+              </Tabs>
+            </TabPanelHoldContext>
           )}
         </>
       )}

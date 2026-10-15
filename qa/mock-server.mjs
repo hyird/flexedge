@@ -624,6 +624,38 @@ let db = {
       website_count: 0,
       ...timestamps,
     },
+    // Name coverage for the website certificate picker: wildcard, multi-SAN,
+    // pending wildcard and a valid certificate no QA website matches.
+    ...[
+      [996, ['*.example.test'], true],
+      [997, ['example.test', 'api.example.test'], true],
+      [998, ['*.qa.example.test'], false],
+      [999, ['*.other.test'], true],
+    ].map(([seed, domains, usable]) => ({
+      id: uuid(seed),
+      revision: 1,
+      domains,
+      issuer: "Let's Encrypt",
+      certificate_provider_id: certificateProviderId,
+      certificate_provider: 'letsencrypt',
+      status: usable ? 'valid' : 'issuing',
+      usable,
+      config: { auto_renew: true },
+      dns_zone_id: zoneId,
+      dns_zone_domain: 'example.test',
+      ...(usable && {
+        not_before: '2026-10-01T00:00:00Z',
+        expires_at: '2026-12-30T00:00:00Z',
+        remaining_days: 77,
+        serial_number: `QA000${seed}`,
+        fingerprint_sha256: String(seed % 10).repeat(64),
+        last_issued_at: initialTime,
+      }),
+      sync_status: usable ? 'completed' : 'running',
+      sync_count_fails: 0,
+      website_count: 0,
+      ...timestamps,
+    })),
   ],
   websites: [
     {
@@ -835,6 +867,9 @@ let db = {
         node_name: 'QA Edge 01',
         client_ip: '198.51.100.20',
         client_ip_location: '台湾',
+        client_ip_asn: 'AS64500',
+        client_ip_as_name:
+          'QA Documentation Network for Very Long Autonomous System Names',
         protocol: 'HTTP/2',
         method: 'GET',
         host: 'qa.example.test',
@@ -2992,7 +3027,27 @@ function dashboard() {
       today_response_bytes: 150994944,
     },
     hourly: series,
-    daily: series.slice(0, 7),
+    // 15 console days (UTC+8 midnights) ending with today's partial day.
+    daily: Array.from({ length: 15 }, (_, index) => {
+      const dayMs = 86400000
+      const today =
+        Math.floor((Date.parse(initialTime) + 8 * 3600000) / dayMs) * dayMs -
+        8 * 3600000
+      // Today's point matches the summary (1,296 requests, 144 MB so far).
+      if (index === 14)
+        return {
+          timestamp: new Date(today).toISOString(),
+          request_count: 1296,
+          response_bytes: 150994944,
+          bandwidth_bps: 3145728,
+        }
+      return {
+        timestamp: new Date(today - (14 - index) * dayMs).toISOString(),
+        request_count: 9000 + ((index * 3779) % 5000),
+        response_bytes: 805306368 + ((index * 167772160) % 671088640),
+        bandwidth_bps: 2097152 + ((index * 524288) % 4194304),
+      }
+    }),
     status_codes: [ranking('200'), ranking('404', 12, 6144)],
     methods: [ranking('GET'), ranking('POST', 26, 8192)],
     countries: [ranking('台湾'), ranking('中国', 732, 67108864)],

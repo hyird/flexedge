@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
+import { uncoveredHostnames } from '@/features/certificates/certificate-coverage'
 import {
   defaultWebsiteConfig,
   routeRuleToForm,
   setWebsiteHttpsEnabled,
+  validateWebsiteForm,
   websiteCertificateOptions,
   websiteFormSchema,
+  websiteHostnames,
 } from './website-form'
 import { websiteFormToConfig } from './website-form-mapping'
 
@@ -90,20 +93,127 @@ describe('website settings validation', () => {
       { id: 'expired', domains: ['old.example.com'], usable: false },
       { id: 'new', domains: ['example.com'], usable: true },
     ]
+    const hostnames = ['example.com', 'old.example.com']
     expect(
       websiteCertificateOptions(
         available,
         ['expired', 'new', 'deleted'],
-        attached
+        attached,
+        hostnames
       )
     ).toEqual([
-      { id: 'new', domains: ['example.com'], usable: true },
-      { id: 'expired', domains: ['old.example.com'], usable: false },
-      { id: 'deleted', domains: [], usable: false },
+      { id: 'new', domains: ['example.com'], usable: true, matched: true },
+      {
+        id: 'expired',
+        domains: ['old.example.com'],
+        usable: false,
+        matched: true,
+      },
+      { id: 'deleted', domains: [], usable: false, matched: false },
     ])
-    expect(websiteCertificateOptions(available, ['new'], attached)).toEqual([
-      { id: 'new', domains: ['example.com'], usable: true },
+    expect(
+      websiteCertificateOptions(available, ['new'], attached, hostnames)
+    ).toEqual([
+      { id: 'new', domains: ['example.com'], usable: true, matched: true },
     ])
+  })
+
+  describe('website certificate picker', () => {
+    const wildcard = {
+      id: '12345678-1234-4234-8234-123456789031',
+      domains: ['*.example.com'],
+    }
+    const apex = {
+      id: '12345678-1234-4234-8234-123456789032',
+      domains: ['example.com', 'api.example.com'],
+    }
+    const other = {
+      id: '12345678-1234-4234-8234-123456789033',
+      domains: ['*.other.test'],
+    }
+    const available = [wildcard, apex, other]
+    function withDomains(hostnames: string[], certificateIds: string[]) {
+      const base = values()
+      return {
+        ...base,
+        domains: hostnames.map((hostname, index) => ({
+          ...base.domains[0],
+          id: `12345678-1234-4234-8234-12345678904${index}`,
+          hostname,
+        })),
+        https_enabled: true,
+        certificate_ids: certificateIds,
+      }
+    }
+    const ids = (options: { id: string }[]) => options.map(({ id }) => id)
+
+    it('lists usable certificates matching at least one bound domain', () => {
+      expect(
+        ids(websiteCertificateOptions(available, [], [], ['www.example.com']))
+      ).toEqual([wildcard.id])
+      expect(
+        ids(websiteCertificateOptions(available, [], [], ['example.com']))
+      ).toEqual([apex.id])
+      // Adding a domain re-filters from the live draft.
+      const draft = withDomains(['www.example.com', 'API.example.com.'], [])
+      expect(websiteHostnames(draft)).toEqual([
+        'www.example.com',
+        'API.example.com.',
+      ])
+      expect(
+        ids(
+          websiteCertificateOptions(available, [], [], websiteHostnames(draft))
+        )
+      ).toEqual([wildcard.id, apex.id])
+    })
+
+    it('lists nothing without bound domains', () => {
+      expect(websiteHostnames(withDomains(['', '  '], []))).toEqual([])
+      expect(websiteCertificateOptions(available, [], [], [])).toEqual([])
+    })
+
+    it('keeps a selected certificate that no longer matches and blocks saving', () => {
+      const options = websiteCertificateOptions(
+        available,
+        [other.id],
+        [],
+        ['www.example.com']
+      )
+      expect(options).toEqual([
+        { ...wildcard, usable: true, matched: true },
+        { ...other, usable: true, matched: false },
+      ])
+      const draft = withDomains(['www.example.com'], [other.id])
+      expect(websiteFormSchema.safeParse(draft).success).toBe(true)
+      // The options snapshot and the attached bindings may repeat a certificate.
+      const result = validateWebsiteForm(draft, undefined, [
+        ...available,
+        other,
+      ])
+      expect(result.success).toBe(false)
+      expect(result.error?.issues).toEqual([
+        expect.objectContaining({
+          path: ['certificate_ids'],
+          message: '证书未匹配网站域名：*.other.test',
+        }),
+      ])
+    })
+
+    it('allows saving while some domains stay uncovered', () => {
+      const draft = withDomains(
+        ['www.example.com', 'example.com'],
+        [wildcard.id]
+      )
+      expect(validateWebsiteForm(draft, undefined, available).success).toBe(
+        true
+      )
+      expect(uncoveredHostnames([wildcard], websiteHostnames(draft))).toEqual([
+        'example.com',
+      ])
+      expect(
+        uncoveredHostnames([wildcard, apex], websiteHostnames(draft))
+      ).toEqual([])
+    })
   })
   it('accepts standalone rewrites and rejects origin/header options on them', () => {
     const rule = routeRuleToForm({

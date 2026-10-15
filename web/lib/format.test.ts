@@ -9,6 +9,8 @@ import {
   formatRelative,
   formatUtcDate,
   ratioOf,
+  scaleBitsPerSecond,
+  scaleBytes,
 } from './format'
 
 describe('format helpers', () => {
@@ -23,6 +25,19 @@ describe('format helpers', () => {
     expect(formatBytes(1536)).toBe('1.5 KB')
     expect(formatBytes(1024 * 1024)).toBe('1.0 MB')
     expect(formatBytes(undefined)).toBe('—')
+  })
+
+  it('splits sizes and rates into amount and unit for KPI values', () => {
+    expect(scaleBitsPerSecond(3_145_728)).toEqual({
+      amount: 3.145728,
+      unit: 'Mbps',
+      fractionDigits: 1,
+    })
+    expect(scaleBytes(512)).toEqual({
+      amount: 512,
+      unit: 'B',
+      fractionDigits: 0,
+    })
   })
 
   it('keeps invalid timestamps visible for diagnosis', () => {

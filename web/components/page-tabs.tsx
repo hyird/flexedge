@@ -6,7 +6,7 @@ import {
   type TabSwitchGuard,
 } from '@/lib/unsaved-changes'
 import { UnsavedChangesDialog } from './save-bar'
-import { useTabPanelHold } from './tab-panel-hold'
+import { TabPanelHoldContext, useTabPanelHold } from './tab-panel-hold'
 
 export type PageTab<T extends string> = {
   id: T
@@ -23,7 +23,7 @@ export type PageTab<T extends string> = {
  * controls outside the tabs also switch tabs, and switch through
  * `guard.request(() => …)` there. Every switch goes through the guard, so the
  * panel holds its height across it (`useTabPanelHold`): a loading tab never
- * collapses the page and the header and tab list never move. */
+ * collapses or grows the page and the header and tab list never move. */
 export function PageTabs<T extends string>({
   label,
   items,
@@ -42,7 +42,12 @@ export function PageTabs<T extends string>({
 }) {
   const ownGuard = useTabSwitchGuard()
   const active = guard ?? ownGuard
-  const { ref: panelRef, style: panelStyle, holdForSwitch } = useTabPanelHold()
+  const {
+    ref: panelRef,
+    style: panelStyle,
+    holdForSwitch,
+    hold,
+  } = useTabPanelHold()
   const { beforeSwitchRef } = active
   useEffect(() => {
     beforeSwitchRef.current = holdForSwitch
@@ -82,9 +87,11 @@ export function PageTabs<T extends string>({
         style={panelStyle}
         className='flex min-w-0 flex-1 flex-col gap-6 p-0'
       >
-        <TabLeaveGuardContext value={active.dirtyRef}>
-          {children}
-        </TabLeaveGuardContext>
+        <TabPanelHoldContext value={hold}>
+          <TabLeaveGuardContext value={active.dirtyRef}>
+            {children}
+          </TabLeaveGuardContext>
+        </TabPanelHoldContext>
         <UnsavedChangesDialog
           guard={{
             isBlocked: active.isPending,

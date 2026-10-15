@@ -34,6 +34,8 @@ export function createLiveLogStore<T extends LogEntry>(
     logs: [] as T[],
     connected: false,
     error: null as string | null,
+    /** The tail has not delivered its first batch yet (nor failed). */
+    loading: true,
   }
   const listeners = new Set<() => void>()
   let source: LogSource | undefined
@@ -56,17 +58,23 @@ export function createLiveLogStore<T extends LogEntry>(
       try {
         incoming = parseLogs((event as MessageEvent<string>).data)
       } catch {
-        update({ ...snapshot, error: '日志数据格式不正确，当前记录已保留。' })
+        update({
+          ...snapshot,
+          error: '日志数据格式不正确，当前记录已保留。',
+          loading: false,
+        })
         return
       }
       update({
         ...snapshot,
         logs: mergeLiveLogs(snapshot.logs, incoming),
         error: null,
+        loading: false,
       })
     })
     connection.addEventListener('error', () => {
-      if (source === connection) update({ ...snapshot, connected: false })
+      if (source === connection)
+        update({ ...snapshot, connected: false, loading: false })
     })
     connection.addEventListener('session-expired', () => {
       if (source !== connection) return
@@ -74,6 +82,7 @@ export function createLiveLogStore<T extends LogEntry>(
         logs: [],
         connected: false,
         error: '登录状态已失效，正在恢复会话。',
+        loading: false,
       })
       onSessionExpired()
     })

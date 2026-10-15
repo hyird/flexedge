@@ -581,6 +581,52 @@ ruvia::task<void> verify_dashboard_without_geoip(read_context& c) {
     REQUIRE(json.find("\"countries\":[]") != std::string::npos);
 }
 
+// Daily buckets are console days (Asia/Shanghai), like 今日: as of 2026-10-02
+// 02:00 +08, a request at 10-01 23:30 +08 (15:30 UTC) and one at 10-02 00:30 +08
+// (16:30 UTC) fall into different buckets, and today's bucket equals 今日.
+ruvia::task<void> verify_dashboard_console_days(read_context& c, ruvia::db_transaction& tx) {
+    constexpr std::string_view website{"00000000-0000-4000-8000-000000000112"};
+    (void)co_await tx.execute(
+        "INSERT INTO sys_website (id, tenant_id, cluster_id, revision, config, deleted_at) "
+        "VALUES ('" +
+        std::string(website) + "', '" + std::string(tenant_a) + "', '" + std::string(cluster_a) +
+        "', 1, '" + website_config(12, "site12.example", "console-day", true) + "', NULL)");
+    const auto log = [&](std::string_view occurred_at, std::int64_t bytes) {
+        return "('" + std::string(tenant_a) + "', '" + std::string(occurred_at) + "', '" +
+               std::string(node_online) + "', '" + std::string(website) +
+               "', '10.0.2.1', 'http/1.1', 'GET', 'site12.example', '/', 200, " +
+               std::to_string(bytes) + ")";
+    };
+    (void)co_await tx.execute(
+        "INSERT INTO sys_website_access_log (tenant_id, occurred_at, node_id, website_id, "
+        "client_ip, protocol, method, host, target, status_code, response_bytes) VALUES " +
+        log("2026-10-01T15:30:00Z", 700) + ", " + log("2026-10-01T16:30:00Z", 900));
+
+    const auto dashboard = co_await service::website::get_website_dashboard_service().dashboard(
+        c, std::string(tenant_a), std::string(website), "2026-10-01T18:00:00Z");
+    const auto& daily = dashboard.get<"daily">();
+    REQUIRE(daily.size() == 15);
+    // Bucket starts are console midnights, rendered like every other timestamp.
+    const auto midnights = co_await tx.query(
+        "SELECT TO_CHAR('2026-10-01T00:00:00+08:00'::timestamptz, 'YYYY-MM-DD\"T\"HH24:MI:SSOF'), "
+        "TO_CHAR('2026-10-02T00:00:00+08:00'::timestamptz, 'YYYY-MM-DD\"T\"HH24:MI:SSOF'), "
+        "TO_CHAR('2026-09-18T00:00:00+08:00'::timestamptz, 'YYYY-MM-DD\"T\"HH24:MI:SSOF')");
+    REQUIRE(daily[13].get<"timestamp">().view() == midnights.front()[0].value().value_or(""));
+    REQUIRE(daily[14].get<"timestamp">().view() == midnights.front()[1].value().value_or(""));
+    REQUIRE(daily[0].get<"timestamp">().view() == midnights.front()[2].value().value_or(""));
+    REQUIRE(integer(daily[13].get<"request_count">()) == 1);
+    REQUIRE(integer(daily[13].get<"response_bytes">()) == 700);
+    REQUIRE(integer(daily[14].get<"request_count">()) == 1);
+    REQUIRE(integer(daily[14].get<"response_bytes">()) == 900);
+    for (std::size_t index = 0; index < 13; ++index) {
+        REQUIRE(integer(daily[index].get<"request_count">()) == 0);
+    }
+    const auto& summary = dashboard.get<"summary">();
+    REQUIRE(integer(summary.get<"today_response_bytes">()) ==
+            integer(daily[14].get<"response_bytes">()));
+    REQUIRE(integer(summary.get<"today_unique_ips">()) == 1);
+}
+
 ruvia::task<void> verify(ruvia::db_client& client) {
     verify_filter_parsing();
     co_await client.connect();
@@ -595,6 +641,7 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     co_await verify_details(c);
     co_await verify_online_window(c, tx);
     co_await verify_dashboard_without_geoip(c);
+    co_await verify_dashboard_console_days(c, tx);
     co_await tx.rollback();
 }
 

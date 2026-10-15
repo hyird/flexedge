@@ -3,6 +3,8 @@
 #include <array>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "service/domains/website/reference_store.h"
 #include "service/domains/website/relation_store.h"
@@ -22,7 +24,8 @@ ruvia::task<void> verify_references(ruvia::db_handle& db) {
         "deleted_at timestamptz) ON COMMIT DROP");
     (void)co_await transaction.execute(
         "CREATE TEMP TABLE sys_certificate (id uuid, tenant_id uuid, issued_revision bigint, "
-        "expires_at timestamptz, deleted_at timestamptz) ON COMMIT DROP");
+        "expires_at timestamptz, deleted_at timestamptz, subject_alt_names varchar(253)[]) ON "
+        "COMMIT DROP");
     const std::string tenant = "00000000-0000-0000-0000-000000000001";
     const std::string other_tenant = "00000000-0000-0000-0000-000000000002";
     const std::string cluster = "00000000-0000-0000-0000-000000000010";
@@ -74,13 +77,25 @@ ruvia::task<void> verify_references(ruvia::db_handle& db) {
     require(!(co_await service::website::lock_available_cluster(transaction, tenant, cluster)));
     (void)co_await transaction.execute("UPDATE sys_cluster SET status='enabled', deleted_at=NOW()");
     require(!(co_await service::website::lock_available_cluster(transaction, tenant, cluster)));
-    require(co_await service::website::lock_available_certificates(transaction, tenant, {}));
+    require((co_await service::website::lock_available_certificates(transaction, tenant, {})).has_value());
     require(!(co_await service::website::lock_available_certificates(transaction, tenant, certificates)));
-    for (const auto& id : certificates) {
-        (void)co_await transaction.execute(
-            "INSERT INTO sys_certificate VALUES ($1, $2, 1, NOW() + INTERVAL '1 day', NULL)", id, tenant);
+    (void)co_await transaction.execute(
+        "INSERT INTO sys_certificate VALUES ($1, $2, 1, NOW() + INTERVAL '1 day', NULL, "
+        "ARRAY['example.com', 'www.example.com']), ($3, $2, 1, NOW() + INTERVAL '1 day', NULL, "
+        "ARRAY['*.example.com'])",
+        certificates[0], tenant, certificates[1]);
+    {
+        // Configured names come back with each locked certificate for domain matching.
+        const auto locked =
+            co_await service::website::lock_available_certificates(transaction, tenant, certificates);
+        require(locked && locked->size() == 2);
+        for (const auto& certificate : *locked) {
+            require(certificate.id_ == certificates[0]
+                        ? certificate.names_ == std::vector<std::string>{"example.com", "www.example.com"}
+                        : certificate.id_ == certificates[1] &&
+                              certificate.names_ == std::vector<std::string>{"*.example.com"});
+        }
     }
-    require(co_await service::website::lock_available_certificates(transaction, tenant, certificates));
     require(!(co_await service::website::lock_available_certificates(transaction, other_tenant, certificates)));
     // One unavailable member must reject the entire selection.
     for (const auto* mutation : {
@@ -92,7 +107,8 @@ ruvia::task<void> verify_references(ruvia::db_handle& db) {
             "UPDATE sys_certificate SET issued_revision=1, expires_at=NOW()+INTERVAL '1 day', "
             "deleted_at=NULL WHERE id=$1",
             certificates[1]);
-        require(co_await service::website::lock_available_certificates(transaction, tenant, certificates));
+        require((co_await service::website::lock_available_certificates(transaction, tenant, certificates))
+                .has_value());
     }
     co_await transaction.rollback();
 }

@@ -1,22 +1,18 @@
 import { useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import {
+  ArrowLeft,
   ChartLine,
   FileText,
   Gear,
   Globe,
   LayoutHeaderCells,
-  Pencil,
-  TrashBin,
 } from '@gravity-ui/icons'
-import { Button, Skeleton, toast } from '@heroui/react'
+import { Skeleton } from '@heroui/react'
 import { useArrivalState } from '@/lib/history-state'
-import { queryKeys } from '@/lib/query-keys'
 import { useTabSwitchGuard } from '@/lib/unsaved-changes'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
-import { ActionMenu } from '@/components/action-menu'
-import { ConfirmDialog } from '@/components/confirm-dialog'
 import { DetailHeader, DetailHeaderSkeleton } from '@/components/detail-header'
 import { LinkButton } from '@/components/link-button'
 import { Mono } from '@/components/mono'
@@ -26,7 +22,6 @@ import { StatusChip } from '@/components/status-chip'
 import { AccessLogs } from './access-logs'
 import {
   isWebsiteNotFound,
-  removeWebsite,
   websiteDetailQuery,
   websiteSnapshotQuery,
 } from './data'
@@ -54,8 +49,10 @@ const tabItems = [
 ] as const
 
 /** `/websites/$websiteId`: header, in-page tabs and the active tab. The tab is
- * component state and never touches the URL; an arrival may request a tab and
- * its starting values via `state.website`, which only that first tab receives.
+ * component state that never touches the URL; each navigation to the page
+ * starts on the overview, and `openTab` (links inside tabs) may seed the
+ * opened tab's starting values. The header's only action leads back to the
+ * list; deleting lives in the settings tab (`WebsiteLifecycleActions`).
  * One live stream per page: the overview and settings tabs subscribe to the
  * website detail stream and the header reuses it; traffic and logs keep
  * their own stream, so the header reads the detail once (or reuses the last
@@ -63,18 +60,14 @@ const tabItems = [
  * selected tab is mounted, so leaving a tab closes its stream. */
 export function WebsiteDetailLayout() {
   const { websiteId } = route.useParams()
-  const [view, setView, arrivalKey] = useArrivalState((state) => ({
-    // History may hold a stale value after a reload; fall back to overview.
-    tab:
-      tabItems.find((item) => item.id === state.website?.tab)?.id ?? 'overview',
-    initial: state.website,
-  }))
+  const [view, setView, arrivalKey] = useArrivalState<{
+    tab: WebsiteDetailTab
+    initial?: WebsiteArrival
+  }>(() => ({ tab: 'overview' }))
   const { tab } = view
-  const client = useQueryClient()
-  const navigate = route.useNavigate()
   const tabGuard = useTabSwitchGuard()
-  // Same-page shortcuts (header, menu, links inside tabs) ask before leaving a
-  // dirty settings draft, like clicking another tab.
+  // Links inside tabs ask before leaving a dirty settings draft, like
+  // clicking another tab.
   const openTab = (next: WebsiteDetailTab, initial?: WebsiteArrival) => {
     if (next !== tab || initial)
       tabGuard.request(() => setView({ tab: next, initial }))
@@ -90,7 +83,6 @@ export function WebsiteDetailLayout() {
   const showLive =
     liveTab || (!!live.data && live.dataUpdatedAt >= snapshot.dataUpdatedAt)
   const query = showLive ? live : snapshot
-  const [removing, setRemoving] = useState(false)
   // After a confirmed delete the stream reports "not found" before navigation
   // settles; keep showing the last snapshot instead of flashing that state.
   const [deleted, setDeleted] = useState(false)
@@ -169,31 +161,10 @@ export function WebsiteDetailLayout() {
           </span>,
         ]}
         actions={
-          <Button size='sm' onPress={() => openTab('settings')}>
-            <Pencil />
-            编辑配置
-          </Button>
-        }
-        menu={
-          <ActionMenu
-            label={`网站 ${name} 的更多操作`}
-            items={[
-              {
-                id: 'logs',
-                label: '访问日志',
-                icon: <FileText />,
-                onAction: () => openTab('logs'),
-              },
-              {
-                id: 'delete',
-                label: '删除网站',
-                icon: <TrashBin />,
-                danger: true,
-                separated: true,
-                onAction: () => setRemoving(true),
-              },
-            ]}
-          />
+          <LinkButton href='/websites' variant='tertiary'>
+            <ArrowLeft />
+            返回
+          </LinkButton>
         }
       />
       {!deleted && (
@@ -210,27 +181,17 @@ export function WebsiteDetailLayout() {
         guard={tabGuard}
         onSelectionChange={(next) => setView({ tab: next, initial: undefined })}
       >
-        <WebsiteContext value={{ website, refresh, openTab }}>
+        <WebsiteContext
+          value={{
+            website,
+            refresh,
+            openTab,
+            markDeleted: () => setDeleted(true),
+          }}
+        >
           {content}
         </WebsiteContext>
       </PageTabs>
-      <ConfirmDialog
-        isOpen={removing}
-        onClose={() => setRemoving(false)}
-        title={`删除网站 ${name}？`}
-        description='网站配置会从所有边缘节点撤下，域名将不再由边缘处理。此操作无法撤销。'
-        confirmLabel='删除网站'
-        onConfirm={async () => {
-          await removeWebsite(website)
-          setDeleted(true)
-          toast.success(`网站 ${name} 已删除`)
-          await navigate({ to: '/websites', replace: true })
-          client.removeQueries({
-            queryKey: [...queryKeys.websites, website.id],
-          })
-          void client.invalidateQueries({ queryKey: queryKeys.websites })
-        }}
-      />
     </Page>
   )
 }

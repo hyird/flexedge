@@ -23,14 +23,15 @@ ruvia::task<void> verify_body(ruvia::db_client& client, ruvia::db_client& peer, 
         "CREATE TABLE sys_cluster (id uuid PRIMARY KEY, tenant_id uuid, status text, deleted_at timestamptz)");
     (void)co_await setup.execute(
         "CREATE TABLE sys_certificate (id uuid PRIMARY KEY, tenant_id uuid, issued_revision bigint, "
-        "expires_at timestamptz, deleted_at timestamptz)");
+        "expires_at timestamptz, deleted_at timestamptz, subject_alt_names varchar(253)[])");
     (void)co_await setup.execute(
         "CREATE TABLE sys_dns_zone (id uuid PRIMARY KEY, tenant_id uuid, domain text, sort int, deleted_at timestamptz)");
     const std::string tenant = "00000000-0000-0000-0000-000000000001";
     const std::string id = "00000000-0000-0000-0000-000000000010";
     (void)co_await setup.execute("INSERT INTO sys_cluster VALUES ($1,$2,'enabled',NULL)", id, tenant);
     (void)co_await setup.execute(
-        "INSERT INTO sys_certificate VALUES ($1,$2,1,NOW()+INTERVAL '1 day',NULL)", id, tenant);
+        "INSERT INTO sys_certificate VALUES ($1,$2,1,NOW()+INTERVAL '1 day',NULL,ARRAY['example.com'])",
+        id, tenant);
     (void)co_await setup.execute("INSERT INTO sys_dns_zone VALUES ($1,$2,'example.com',0,NULL)", id, tenant);
     co_await setup.commit();
     owns_schema = true;
@@ -39,7 +40,7 @@ ruvia::task<void> verify_body(ruvia::db_client& client, ruvia::db_client& peer, 
     (void)co_await reader.execute("SET LOCAL search_path = flexedge_website_lock_qa");
     require(co_await service::website::lock_available_cluster(reader, tenant, id));
     const std::array<std::string, 1> certificates{id};
-    require(co_await service::website::lock_available_certificates(reader, tenant, certificates));
+    require((co_await service::website::lock_available_certificates(reader, tenant, certificates)).has_value());
     require((co_await service::website::lock_dns_zone_references(reader, tenant)).size() == 1);
 
     const std::array<const char*, 3> mutations{

@@ -15,7 +15,11 @@ import { useArrivalState } from '@/lib/history-state'
 import { LinkButton } from '@/components/link-button'
 import { Page, QueryNotice } from '@/components/page'
 import { SaveBar } from '@/components/save-bar'
-import { useTabPanelHold } from '@/components/tab-panel-hold'
+import {
+  TabPanelHoldContext,
+  useTabPanelHold,
+} from '@/components/tab-panel-hold'
+import { usableCertificateOptionsQuery } from '@/features/certificates/data'
 import {
   createWebsite,
   hostedZoneOptionsQuery,
@@ -154,7 +158,12 @@ function SectionNav({
 }) {
   const wide = useMediaQuery('(min-width: 1024px)')
   // A shorter group keeps the page's scroll position (see `useTabPanelHold`).
-  const { ref: panelRef, style: panelStyle, holdForSwitch } = useTabPanelHold()
+  const {
+    ref: panelRef,
+    style: panelStyle,
+    holdForSwitch,
+    hold,
+  } = useTabPanelHold()
   return (
     <Tabs
       selectedKey={section}
@@ -167,7 +176,14 @@ function SectionNav({
       align='start'
       className='w-full min-w-0 gap-6 lg:items-start'
     >
-      <Tabs.ListContainer className='min-w-0 lg:sticky lg:top-4 lg:w-44 lg:shrink-0'>
+      {/* HeroUI's ScrollShadow only writes the overflow flags of the current
+       * orientation, so crossing the breakpoint would leave a stale
+       * horizontal "can scroll" flag showing a chevron on the vertical list;
+       * a fresh list per orientation starts clean. */}
+      <Tabs.ListContainer
+        key={wide ? 'vertical' : 'horizontal'}
+        className='min-w-0 lg:sticky lg:top-4 lg:w-44 lg:shrink-0'
+      >
         <Tabs.List aria-label='网站配置分组' className='lg:w-full'>
           {websiteSections.map((item) => {
             const count = errorCounts[item.id]
@@ -203,7 +219,7 @@ function SectionNav({
         style={panelStyle}
         className='min-w-0 flex-1'
       >
-        {children}
+        <TabPanelHoldContext value={hold}>{children}</TabPanelHoldContext>
       </Tabs.Panel>
     </Tabs>
   )
@@ -309,10 +325,24 @@ function WebsiteEditor({
       values.domains.some((domain) => domain.dns_mode === 'managed')
     )
   ).data
+  // Names of selectable and already bound certificates: the HTTPS section
+  // loads the options snapshot; this only reads it from the cache.
+  const loadedCertificates = useQuery({
+    ...usableCertificateOptionsQuery,
+    enabled: false,
+  }).data
+  const knownCertificates = [
+    ...(loadedCertificates ?? []),
+    ...(base?.certificates ?? []),
+  ]
 
   const errors = showErrors
     ? (() => {
-        const result = validateWebsiteForm(values, hostedZones)
+        const result = validateWebsiteForm(
+          values,
+          hostedZones,
+          knownCertificates
+        )
         return result.success
           ? {}
           : collectWebsiteFormErrors(result.error.issues)
@@ -346,7 +376,7 @@ function WebsiteEditor({
   }
 
   function save() {
-    const parsed = validateWebsiteForm(values, hostedZones)
+    const parsed = validateWebsiteForm(values, hostedZones, knownCertificates)
     if (!parsed.success) {
       const found = collectWebsiteFormErrors(parsed.error.issues)
       const target = firstWebsiteErrorTarget(found)

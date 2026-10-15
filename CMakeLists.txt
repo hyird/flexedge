@@ -269,6 +269,11 @@ if(BUILD_TESTING)
     flexedge_add_test(geoip_location
         SOURCES tests/geoip_location.cpp
     )
+    flexedge_add_test(website_access_log_mapper
+        SOURCES tests/website_access_log_mapper.cpp
+        LIBRARIES ruvia::web
+        DRIVER tests/website_access_log_mapper_test.py
+    )
     flexedge_add_test(uuid_collection_validation
         SOURCES tests/uuid_collection_validation.cpp
         LIBRARIES ruvia::web
@@ -288,6 +293,9 @@ if(BUILD_TESTING)
     )
     flexedge_add_test(website_domain_claim
         SOURCES tests/website_domain_claim.cpp
+    )
+    flexedge_add_test(website_certificate_coverage
+        SOURCES tests/website_certificate_coverage.cpp
     )
     flexedge_add_test(website_dns_flattening
         SOURCES tests/website_dns_flattening.cpp

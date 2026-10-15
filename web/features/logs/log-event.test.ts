@@ -60,6 +60,8 @@ describe('log event contracts', () => {
       request_headers: 'Accept: */*',
       request_body: '',
       client_ip_location: '测试',
+      client_ip_asn: 'AS4134',
+      client_ip_as_name: 'Chinanet',
     }
     expect(parseAccessLogs(encode([detailed]))).toEqual([detailed])
     expect(() =>
@@ -67,6 +69,9 @@ describe('log event contracts', () => {
     ).toThrow()
     expect(() =>
       parseAccessLogs(encode([{ ...accessLog, status_code: '200' }]))
+    ).toThrow()
+    expect(() =>
+      parseAccessLogs(encode([{ ...accessLog, client_ip_asn: 4134 }]))
     ).toThrow()
   })
 

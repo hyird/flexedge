@@ -73,26 +73,46 @@ export function formatRelative(value?: string, now: number = Date.now()) {
   )
 }
 
-function scaled(value: number, base: number, units: string[]) {
+/** A size or rate in its display unit, e.g. `{ amount: 3.1, unit: 'Mbps',
+ * fractionDigits: 1 }`; base units have no fraction digits. */
+export type ScaledQuantity = {
+  amount: number
+  unit: string
+  fractionDigits: number
+}
+
+function scaled(value: number, base: number, units: string[]): ScaledQuantity {
   let amount = Math.max(0, value)
   let index = 0
   while (amount >= base && index < units.length - 1) {
     amount /= base
     index += 1
   }
-  return `${amount.toFixed(index === 0 ? 0 : 1)} ${units[index]}`
+  return { amount, unit: units[index], fractionDigits: index === 0 ? 0 : 1 }
+}
+
+/** Byte count in binary units (1 KB = 1024 B). */
+export function scaleBytes(value: number) {
+  return scaled(value, 1024, ['B', 'KB', 'MB', 'GB', 'TB', 'PB'])
+}
+
+/** `*_bps` bandwidth in decimal bit-per-second units. */
+export function scaleBitsPerSecond(value: number) {
+  return scaled(value, 1000, ['bps', 'Kbps', 'Mbps', 'Gbps', 'Tbps'])
 }
 
 /** Storage and transfer sizes in binary units (1 KB = 1024 B). */
 export function formatBytes(value?: number) {
   if (value === undefined || !Number.isFinite(value)) return placeholder
-  return scaled(value, 1024, ['B', 'KB', 'MB', 'GB', 'TB', 'PB'])
+  const { amount, unit, fractionDigits } = scaleBytes(value)
+  return `${amount.toFixed(fractionDigits)} ${unit}`
 }
 
 /** Network bandwidth for every `*_bps` field (bits per second, decimal units). */
 export function formatBitsPerSecond(value?: number) {
   if (value === undefined || !Number.isFinite(value)) return placeholder
-  return scaled(value, 1000, ['bps', 'Kbps', 'Mbps', 'Gbps', 'Tbps'])
+  const { amount, unit, fractionDigits } = scaleBitsPerSecond(value)
+  return `${amount.toFixed(fractionDigits)} ${unit}`
 }
 
 /** Counts with grouping (`12,345`); `compact` uses 万/亿 for KPI values. */

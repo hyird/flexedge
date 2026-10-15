@@ -37,7 +37,8 @@ inline bool certificate_covers_hostname(std::string_view certificate_domain,
     if (certificate == host) {
         return true;
     }
-    if (!certificate.starts_with("*.")) {
+    // A wildcard website hostname is only covered by the identical wildcard name.
+    if (!certificate.starts_with("*.") || host.starts_with("*.")) {
         return false;
     }
 
