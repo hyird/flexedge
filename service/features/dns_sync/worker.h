@@ -32,10 +32,11 @@ inline ruvia::task<void> process_task(service::background::task_context& context
         const auto failure = service::outbound_http::classify_attempt_failure(exception, "同步任务发生未知错误");
         trace.mark_failure(failure.message_);
         auto step = trace.begin_step(service::attempt_trace::step_code::record_failure);
-        trace.log(failure.permanent_ ? service::attempt_trace::log_level::error
-                                     : service::attempt_trace::log_level::warning,
-            failure.permanent_ ? "永久失败，不再自动重试" : "将在 15 秒后自动重试");
-        co_await fail_dns_task(context, trace, task, failure.message_, failure.permanent_,
+        const bool terminal = failure.permanent_ || task.failures_ >= 2;
+        trace.log(terminal ? service::attempt_trace::log_level::error
+                           : service::attempt_trace::log_level::warning,
+            terminal ? "本次同步失败，等待下次检查或手动重试" : "将在 15 秒后自动重试");
+        co_await fail_dns_task(context, trace, task, failure.message_, terminal,
             attempt.to_json(context.pool()));
         step.complete();
     }
@@ -57,8 +58,22 @@ inline ruvia::task<void> process_marker(service::background::task_context& conte
 }  // namespace detail
 
 inline ruvia::task<void> run_worker(service::background::task_context& context) {
+    auto maintain = [next_repair = std::chrono::steady_clock::time_point{}](service::background::task_context& owned) mutable -> ruvia::task<void> {
+        if (std::chrono::steady_clock::now() >= next_repair) {
+            co_await detail::reconcile_tasks(owned);
+            next_repair = std::chrono::steady_clock::now() + service::sync_runtime::reconciliation_interval;
+        }
+        const auto limit = service::sync_runtime::describe(service::sync_runtime::marker_resource_type::dns_zone).claims_per_round_;
+        for (std::size_t count = 0; count < limit && !owned.get_stop_token().stop_requested(); ++count) {
+            const auto inspection = co_await detail::claim_due_check(owned);
+            if (!inspection) {
+                break;
+            }
+            co_await detail::process_task(owned, *inspection);
+        }
+    };
     co_await service::sync_runtime::run_marker_worker(context, service::sync_runtime::marker_resource_type::dns_zone,
-        detail::reconcile_tasks, detail::process_marker);
+        maintain, detail::process_marker, {}, std::chrono::seconds(15));
 }
 
 }  // namespace service::dns_sync

@@ -299,36 +299,13 @@ private:
         }
     }
 
-    static void fill_conflicts(dns_zone_runtime_dto& output,
-        const service::dns_sync::zone_runtime_data& input) {
-        auto& conflicts = output.template ensure<"conflicts">();
-        for (const auto& conflict : input.conflicts_) {
-            if (!conflict.id_ || !conflict.type_ || !conflict.name_ || !conflict.line_code_ ||
-                !conflict.local_content_ || !conflict.remote_content_) {
-                continue;
-            }
-            auto& item = conflicts.emplace_back();
-            item.template set<"id">(*conflict.id_);
-            item.template set<"type">(*conflict.type_);
-            item.template set<"name">(*conflict.name_);
-            item.template set<"line_code">(*conflict.line_code_);
-            item.template set<"local_content">(*conflict.local_content_);
-            item.template set<"remote_content">(*conflict.remote_content_);
-        }
-    }
-
     static dns_zone_runtime_dto
     to_public_runtime(auto& c, const service::dns_sync::zone_runtime_data& input,
         const std::vector<service::dns_sync::snapshot_record>& projected) {
         dns_zone_runtime_dto output({.resource_ = c.pool()});
-        output.template set<"records_imported">(input.records_imported_);
-        if (input.lines_synced_at_) {
-            output.template set<"lines_synced_at">(*input.lines_synced_at_);
-        }
         fill_runtime_lines(output, input);
         fill_projected_records(output, projected);
         fill_record_states(output, input);
-        fill_conflicts(output, input);
         return output;
     }
 

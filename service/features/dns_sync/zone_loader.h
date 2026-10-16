@@ -23,16 +23,16 @@ namespace service::dns_sync::detail {
 
 struct zone_sync_state final {
     zone_runtime_data runtime_;
-    zone_config_data config_;
     zone_config_data desired_;
     // Desired records projected from hosted website domains (their CNAMEs).
     std::unordered_set<std::string> website_record_ids_;
+    std::unordered_set<std::string> cluster_hostnames_;
     service::dns::dns_provider_config_data provider_config_;
     std::string domain_;
     std::string provider_;
     std::string account_id_;
     std::int64_t revision_;
-    std::int64_t config_revision_;
+    std::int64_t snapshot_revision_;
     bool deleted_;
 };
 
@@ -52,7 +52,7 @@ load_zone_sync_state(service::background::task_context& context, const dns_task&
     const auto rows = co_await db.query(
         "SELECT zone.desired_revision, zone.domain, zone.runtime::text, zone.deleted_at IS NOT "
         "NULL, provider.provider, provider.account_id, provider.config::text, provider.status, "
-        "zone.config::text, zone.revision FROM "
+        "zone.revision FROM "
         "sys_dns_zone zone INNER "
         "JOIN sys_provider provider ON provider.tenant_id = zone.tenant_id AND provider.id "
         "= zone.provider_id AND provider.kind = 'dns' WHERE zone.id = $1 AND zone.tenant_id = "
@@ -85,14 +85,10 @@ load_zone_sync_state(service::background::task_context& context, const dns_task&
         throw std::runtime_error("DNS 服务商账号尚未通过检测");
     }
 
-    const std::optional<zone_config_data> config =
-        parse_stored(row[8].value().value_or("{}"), {.resource_ = context.pool()});
-    if (!config) {
-        throw std::runtime_error("DNS 聚合配置损坏");
-    }
-
-    zone_config_data desired = *config;
+    zone_config_data desired;
     std::unordered_set<std::string> website_record_ids;
+    auto cluster_hostnames = co_await load_cluster_hostnames(
+        db, task.tenant_id_, task.resource_id_, row[1].value().value_or(""));
     const auto projected =
         co_await load_projected_records(db, task.tenant_id_, task.resource_id_);
     for (const auto& record : projected) {
@@ -121,15 +117,15 @@ load_zone_sync_state(service::background::task_context& context, const dns_task&
 
     co_return zone_sync_state{
         .runtime_ = std::move(*runtime),
-        .config_ = std::move(*config),
         .desired_ = std::move(desired),
         .website_record_ids_ = std::move(website_record_ids),
+        .cluster_hostnames_ = std::move(cluster_hostnames),
         .provider_config_ = std::move(provider_config),
         .domain_ = std::string(row[1].value().value_or("")),
         .provider_ = provider,
         .account_id_ = account_id,
         .revision_ = revision,
-        .config_revision_ = row[9].as<std::int64_t>().value_or(0),
+        .snapshot_revision_ = row[8].as<std::int64_t>().value_or(1),
         .deleted_ = deleted,
     };
 }

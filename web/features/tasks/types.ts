@@ -31,7 +31,6 @@ export const taskStatusValues = [
   'running',
   'retrying',
   'failed',
-  'attention_required',
   'completed',
 ] as const
 export const taskResourceTypes = [
@@ -55,7 +54,6 @@ export const taskSchema = z.object({
   // Open codes; `taskOperations` names the known ones.
   operation: z.string(),
   status: open(taskStatusValues),
-  warning: open(['', 'dns_conflict', 'dns_unpushed', 'domain_unverified']),
   error: z.string(),
   next_attempt_at: z.string(),
   updated_at: z.string(),
@@ -109,16 +107,6 @@ const taskAttemptDetailSchema = z.discriminatedUnion('kind', [
     updated_count: count,
     deleted_count: count,
     unchanged_count: count,
-    conflicts: z.array(
-      z.object({
-        name: z.string(),
-        type: z.string(),
-        line_code: z.string(),
-        local_content: z.string(),
-        remote_content: z.string(),
-      })
-    ),
-    conflict_count: count,
   }),
   z.object({
     kind: z.literal('certificate'),
@@ -323,7 +311,6 @@ const taskAttemptSchema = z.object({
   started_at: z.string(),
   emitted_at: z.string(),
   duration_ms: z.number().int().nonnegative(),
-  next_attempt_at: z.string(),
   detail: taskAttemptDetailSchema.or(
     z.unknown().transform(() => invalidDetail)
   ),

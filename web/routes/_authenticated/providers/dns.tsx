@@ -4,6 +4,6 @@ import { providersSearchSchema } from '@/features/providers/provider-search'
 
 export const Route = createFileRoute('/_authenticated/providers/dns')({
   validateSearch: providersSearchSchema,
-  staticData: { breadcrumb: 'DNS 账号' },
+  staticData: { breadcrumb: 'DNS' },
   component: DnsProvidersPage,
 })

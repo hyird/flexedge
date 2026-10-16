@@ -247,7 +247,8 @@ inline ruvia::task<void> prune_result_events(context_type& context) {
 // own wakeup or the next bounded scan.
 template <typename reconcile_type, typename process_type>
 ruvia::task<void> run_marker_worker(service::background::task_context& context, marker_resource_type resource_type,
-    reconcile_type reconcile, process_type process, std::span<const std::string_view> aggregate_columns = {}) {
+    reconcile_type reconcile, process_type process, std::span<const std::string_view> aggregate_columns = {},
+    std::chrono::seconds maintenance_interval = reconciliation_interval) {
     const auto& type = describe(resource_type);
     const auto stopped = [&] { return context.get_stop_token().stop_requested(); };
     // Subscribe before the first durable claim: a wakeup committed meanwhile
@@ -270,7 +271,7 @@ ruvia::task<void> run_marker_worker(service::background::task_context& context, 
             }
             if (std::chrono::steady_clock::now() >= next_reconciliation) {
                 co_await reconcile(context);
-                next_reconciliation = std::chrono::steady_clock::now() + reconciliation_interval;
+                next_reconciliation = std::chrono::steady_clock::now() + maintenance_interval;
             }
             if (stopped()) {
                 break;

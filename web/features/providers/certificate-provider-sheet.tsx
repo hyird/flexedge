@@ -66,17 +66,17 @@ export function CertificateProviderSheet({
       onClose={onClose}
       title={
         provider
-          ? `编辑证书供应商 ${providerLabel(provider.provider)}`
-          : '添加证书供应商'
+          ? `编辑证书服务商 ${providerLabel(provider.provider)}`
+          : '添加证书服务商'
       }
       description='用于 ACME 签发与续期证书；保存后在编辑中“验证凭据”，验证通过才能申请证书。'
       onSubmit={submit}
-      submitLabel={provider ? '保存' : '添加供应商'}
+      submitLabel={provider ? '保存' : '添加服务商'}
       isSubmitting={mutation.isPending}
       error={mutation.isError ? apiErrorMessage(mutation.error) : undefined}
     >
       <Choice
-        label='供应商'
+        label='服务商'
         value={values.provider}
         onChange={(value) =>
           update(
@@ -148,8 +148,8 @@ export function CertificateProviderSheet({
           <ProviderRemoval
             kind='certificate'
             provider={provider}
-            label='删除供应商'
-            title={`删除证书供应商 ${providerLabel(provider.provider)}？`}
+            label='删除服务商'
+            title={`删除证书服务商 ${providerLabel(provider.provider)}？`}
             description='删除后无法再用该凭据签发或续期证书。仍有证书使用它时，删除会被拒绝。'
             isDisabled={mutation.isPending}
             onRemoved={onClose}

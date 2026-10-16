@@ -84,11 +84,4 @@ public:
     }
 };
 
-inline void validate_dns_zone_sync(const dns_zone_sync_body& body, ruvia::validator& validator) {
-    const auto& policy = body.get<"conflict_policy">();
-    if (policy && policy->view() != "local" && policy->view() != "remote") {
-        validator.add("conflict_policy", "one_of", "冲突处理方式不正确");
-    }
-}
-
 }  // namespace service::dns_zone

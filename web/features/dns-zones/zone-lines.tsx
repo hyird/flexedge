@@ -49,7 +49,7 @@ export function ZoneLines() {
   return (
     <Section
       title={`解析线路 · ${options.length}`}
-      description={`服务商支持的解析线路，记录和节点服务端点按线路分别解析。最近更新：${formatDate(zone.runtime.lines_synced_at)}`}
+      description={`服务商支持的解析线路，记录和节点服务端点按线路分别解析。最近更新：${formatDate(zone.last_synced_at)}`}
     >
       <DataTable
         label='解析线路'

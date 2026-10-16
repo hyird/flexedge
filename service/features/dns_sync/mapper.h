@@ -82,12 +82,6 @@ parse_stored(std::string_view json, ruvia::model_parse_options options = {}) {
 
 [[nodiscard]] inline zone_runtime_data normalize(const zone_runtime_input& input) {
     zone_runtime_data result;
-    if (const auto& value = input.get<"records_imported">()) {
-        result.records_imported_ = value->value_;
-    }
-    if (const auto& value = input.get<"lines_synced_at">()) {
-        result.lines_synced_at_ = std::string(value->view());
-    }
     if (const auto& source = input.get<"lines">()) {
         result.lines_.reserve(source->size());
         for (const auto& line : *source) {
@@ -126,32 +120,10 @@ parse_stored(std::string_view json, ruvia::model_parse_options options = {}) {
             if (const auto& value = state.get<"last_error">()) {
                 item.last_error_ = std::string(value->view());
             }
+            if (const auto& managed = state.get<"managed">()) {
+                item.managed_ = managed->value_;
+            }
             result.record_states_.push_back(std::move(item));
-        }
-    }
-    if (const auto& source = input.get<"conflicts">()) {
-        result.conflicts_.reserve(source->size());
-        for (const auto& conflict : *source) {
-            zone_record_conflict_data item;
-            if (const auto& value = conflict.get<"id">()) {
-                item.id_ = std::string(value->view());
-            }
-            if (const auto& value = conflict.get<"type">()) {
-                item.type_ = std::string(value->view());
-            }
-            if (const auto& value = conflict.get<"name">()) {
-                item.name_ = std::string(value->view());
-            }
-            if (const auto& value = conflict.get<"line_code">()) {
-                item.line_code_ = std::string(value->view());
-            }
-            if (const auto& value = conflict.get<"local_content">()) {
-                item.local_content_ = std::string(value->view());
-            }
-            if (const auto& value = conflict.get<"remote_content">()) {
-                item.remote_content_ = std::string(value->view());
-            }
-            result.conflicts_.push_back(std::move(item));
         }
     }
     if (const auto& source = input.get<"challenge_records">()) {
@@ -179,8 +151,7 @@ parse_stored(std::string_view json, ruvia::model_parse_options options = {}) {
 [[nodiscard]] inline std::optional<zone_runtime_data>
 parse_stored_runtime(std::string_view json, ruvia::model_parse_options options = {}) {
     const std::optional<zone_runtime_input> input = ruvia::from_json<zone_runtime_input>(json, options);
-    if (!input || !input->get<"records_imported">() || !input->get<"lines">() ||
-        !input->get<"record_states">() || !input->get<"conflicts">()) {
+    if (!input || !input->get<"lines">() || !input->get<"record_states">()) {
         return std::nullopt;
     }
     return normalize(*input);
@@ -204,10 +175,6 @@ inline void append_challenge_records(zone_runtime_dto& output, const zone_runtim
 [[nodiscard]] inline zone_runtime_dto to_output(const zone_runtime_data& input,
     ruvia::model_options options = {}) {
     zone_runtime_dto output(options);
-    output.set<"records_imported">(input.records_imported_);
-    if (input.lines_synced_at_) {
-        output.set<"lines_synced_at">(*input.lines_synced_at_);
-    }
     auto& lines = output.ensure<"lines">();
     for (const auto& line : input.lines_) {
         auto& item = lines.emplace_back(options);
@@ -222,22 +189,13 @@ inline void append_challenge_records(zone_runtime_dto& output, const zone_runtim
         item.set<"id">(state.id_.value_or(""));
         item.set<"sync_status">(state.sync_status_.value_or("pending"));
         item.set<"synced_revision">(state.synced_revision_.value_or(0));
+        item.set<"managed">(state.managed_);
         if (state.remote_record_id_) {
             item.set<"remote_record_id">(*state.remote_record_id_);
         }
         if (state.last_error_) {
             item.set<"last_error">(*state.last_error_);
         }
-    }
-    auto& conflicts = output.ensure<"conflicts">();
-    for (const auto& conflict : input.conflicts_) {
-        auto& item = conflicts.emplace_back(options);
-        item.set<"id">(conflict.id_.value_or(""));
-        item.set<"type">(conflict.type_.value_or(""));
-        item.set<"name">(conflict.name_.value_or(""));
-        item.set<"line_code">(conflict.line_code_.value_or(""));
-        item.set<"local_content">(conflict.local_content_.value_or(""));
-        item.set<"remote_content">(conflict.remote_content_.value_or(""));
     }
     append_challenge_records(output, input);
     return output;

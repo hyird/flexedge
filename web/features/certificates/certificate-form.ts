@@ -15,7 +15,7 @@ export function certificateFormSchema(editing = false) {
           ),
     certificate_provider_id: editing
       ? z.string()
-      : z.string().uuid('请选择证书供应商'),
+      : z.string().uuid('请选择证书服务商'),
     dns_zone_id: editing ? z.string() : z.string().uuid('请选择托管域名'),
     auto_renew: z.boolean(),
   })

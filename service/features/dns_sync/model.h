@@ -16,6 +16,8 @@ struct zone_record_data final {
     std::optional<std::int64_t> priority_;
     bool proxied_;
     std::string line_code_;
+
+    friend bool operator==(const zone_record_data&, const zone_record_data&) = default;
 };
 
 struct zone_config_data final {
@@ -35,15 +37,8 @@ struct zone_record_runtime_data final {
     std::optional<std::string> sync_status_;
     std::optional<std::int64_t> synced_revision_;
     std::optional<std::string> last_error_;
-};
-
-struct zone_record_conflict_data final {
-    std::optional<std::string> id_;
-    std::optional<std::string> type_;
-    std::optional<std::string> name_;
-    std::optional<std::string> line_code_;
-    std::optional<std::string> local_content_;
-    std::optional<std::string> remote_content_;
+    // Only business projections are reconciled or retired by the background task.
+    bool managed_{false};
 };
 
 struct zone_challenge_runtime_data final {
@@ -55,11 +50,8 @@ struct zone_challenge_runtime_data final {
 };
 
 struct zone_runtime_data final {
-    bool records_imported_{false};
-    std::optional<std::string> lines_synced_at_;
     std::vector<zone_line_runtime_data> lines_;
     std::vector<zone_record_runtime_data> record_states_;
-    std::vector<zone_record_conflict_data> conflicts_;
     std::vector<zone_challenge_runtime_data> challenge_records_;
 };
 

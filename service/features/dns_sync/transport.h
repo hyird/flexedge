@@ -123,14 +123,8 @@ RUVIA_MODEL(zone_record_runtime_input, RUVIA_OPTIONAL_FIELD(id, ruvia::string),
     RUVIA_OPTIONAL_FIELD_NAME("remote_record_id", remote_record_id, ruvia::string),
     RUVIA_OPTIONAL_FIELD_NAME("sync_status", sync_status, ruvia::string),
     RUVIA_OPTIONAL_FIELD_NAME("synced_revision", synced_revision, ruvia::int64),
-    RUVIA_OPTIONAL_FIELD_NAME("last_error", last_error, ruvia::string));
-
-RUVIA_MODEL(zone_record_conflict_input, RUVIA_OPTIONAL_FIELD(id, ruvia::string),
-    RUVIA_OPTIONAL_FIELD(type, ruvia::string),
-    RUVIA_OPTIONAL_FIELD(name, ruvia::string),
-    RUVIA_OPTIONAL_FIELD_NAME("line_code", line_code, ruvia::string),
-    RUVIA_OPTIONAL_FIELD_NAME("local_content", local_content, ruvia::string),
-    RUVIA_OPTIONAL_FIELD_NAME("remote_content", remote_content, ruvia::string));
+    RUVIA_OPTIONAL_FIELD_NAME("last_error", last_error, ruvia::string),
+    RUVIA_OPTIONAL_FIELD(managed, ruvia::bool_value));
 
 RUVIA_MODEL(zone_challenge_runtime_input, RUVIA_OPTIONAL_FIELD(id, ruvia::string),
     RUVIA_OPTIONAL_FIELD(name, ruvia::string),
@@ -139,12 +133,9 @@ RUVIA_MODEL(zone_challenge_runtime_input, RUVIA_OPTIONAL_FIELD(id, ruvia::string
     RUVIA_OPTIONAL_FIELD_NAME("certificate_id", certificate_id, ruvia::string));
 
 RUVIA_MODEL(zone_runtime_input,
-    RUVIA_OPTIONAL_FIELD_NAME("records_imported", records_imported, ruvia::bool_value),
-    RUVIA_OPTIONAL_FIELD_NAME("lines_synced_at", lines_synced_at, ruvia::string),
     RUVIA_OPTIONAL_FIELD(lines, ruvia::array<zone_line_runtime_input>),
     RUVIA_OPTIONAL_FIELD_NAME("record_states", record_states,
         ruvia::array<zone_record_runtime_input>),
-    RUVIA_OPTIONAL_FIELD(conflicts, ruvia::array<zone_record_conflict_input>),
     RUVIA_OPTIONAL_FIELD_NAME("challenge_records", challenge_records,
         ruvia::array<zone_challenge_runtime_input>));
 
@@ -159,14 +150,8 @@ RUVIA_MODEL(zone_record_runtime_dto, RUVIA_REQUIRED_FIELD(id, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("sync_status", sync_status, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("synced_revision", synced_revision, ruvia::int64),
     RUVIA_OPTIONAL_FIELD_NAME("last_error", last_error, ruvia::string,
-        RUVIA_OMIT_EMPTY));
-
-RUVIA_MODEL(zone_record_conflict_dto, RUVIA_REQUIRED_FIELD(id, ruvia::string),
-    RUVIA_REQUIRED_FIELD(type, ruvia::string),
-    RUVIA_REQUIRED_FIELD(name, ruvia::string),
-    RUVIA_REQUIRED_FIELD_NAME("line_code", line_code, ruvia::string),
-    RUVIA_REQUIRED_FIELD_NAME("local_content", local_content, ruvia::string),
-    RUVIA_REQUIRED_FIELD_NAME("remote_content", remote_content, ruvia::string));
+        RUVIA_OMIT_EMPTY),
+    RUVIA_REQUIRED_FIELD(managed, ruvia::bool_value));
 
 RUVIA_MODEL(zone_challenge_runtime_dto, RUVIA_REQUIRED_FIELD(id, ruvia::string),
     RUVIA_REQUIRED_FIELD(name, ruvia::string),
@@ -175,11 +160,9 @@ RUVIA_MODEL(zone_challenge_runtime_dto, RUVIA_REQUIRED_FIELD(id, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("certificate_id", certificate_id, ruvia::string));
 
 RUVIA_MODEL(
-    zone_runtime_dto, RUVIA_REQUIRED_FIELD_NAME("records_imported", records_imported, ruvia::bool_value),
-    RUVIA_OPTIONAL_FIELD_NAME("lines_synced_at", lines_synced_at, ruvia::string, RUVIA_OMIT_EMPTY),
+    zone_runtime_dto,
     RUVIA_REQUIRED_FIELD(lines, ruvia::array<zone_line_runtime_dto>),
     RUVIA_REQUIRED_FIELD_NAME("record_states", record_states, ruvia::array<zone_record_runtime_dto>),
-    RUVIA_REQUIRED_FIELD(conflicts, ruvia::array<zone_record_conflict_dto>),
     RUVIA_REQUIRED_FIELD_NAME("challenge_records", challenge_records,
         ruvia::array<zone_challenge_runtime_dto>));
 

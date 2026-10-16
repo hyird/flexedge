@@ -25,19 +25,13 @@ RUVIA_MODEL(dns_attempt_record_dto, RUVIA_REQUIRED_FIELD(name, ruvia::string),
     RUVIA_REQUIRED_FIELD(proxied, ruvia::bool_value));
 RUVIA_MODEL(dns_attempt_update_dto, RUVIA_REQUIRED_FIELD(before, dns_attempt_record_dto),
     RUVIA_REQUIRED_FIELD(after, dns_attempt_record_dto));
-RUVIA_MODEL(dns_attempt_conflict_dto, RUVIA_REQUIRED_FIELD(name, ruvia::string),
-    RUVIA_REQUIRED_FIELD(type, ruvia::string), RUVIA_REQUIRED_FIELD(line_code, ruvia::string),
-    RUVIA_REQUIRED_FIELD(local_content, ruvia::string),
-    RUVIA_REQUIRED_FIELD(remote_content, ruvia::string));
 RUVIA_MODEL(dns_attempt_detail_dto, RUVIA_REQUIRED_FIELD(kind, ruvia::string),
     RUVIA_REQUIRED_FIELD(truncated, ruvia::bool_value),
     RUVIA_REQUIRED_FIELD(created, ruvia::array<dns_attempt_record_dto>),
     RUVIA_REQUIRED_FIELD(updated, ruvia::array<dns_attempt_update_dto>),
     RUVIA_REQUIRED_FIELD(deleted, ruvia::array<dns_attempt_record_dto>),
     RUVIA_REQUIRED_FIELD(created_count, ruvia::int64), RUVIA_REQUIRED_FIELD(updated_count, ruvia::int64),
-    RUVIA_REQUIRED_FIELD(deleted_count, ruvia::int64), RUVIA_REQUIRED_FIELD(unchanged_count, ruvia::int64),
-    RUVIA_REQUIRED_FIELD(conflicts, ruvia::array<dns_attempt_conflict_dto>),
-    RUVIA_REQUIRED_FIELD(conflict_count, ruvia::int64));
+    RUVIA_REQUIRED_FIELD(deleted_count, ruvia::int64), RUVIA_REQUIRED_FIELD(unchanged_count, ruvia::int64));
 
 // A provider record as the task history shows it: the name is relative to
 // the hosted zone ("@", "www") whichever provider naming it came from.
@@ -67,7 +61,7 @@ struct attempt_record_update final {
         .proxied_ = record.proxied_};
 }
 
-[[nodiscard]] inline attempt_record to_attempt_record(const managed_record& record) {
+[[nodiscard]] inline attempt_record to_attempt_record(const zone_record_data& record) {
     return {.name_ = record.name_,
         .type_ = record.type_,
         .line_code_ = record.line_code_,
@@ -107,14 +101,8 @@ public:
         ++unchanged_count_;
     }
 
-    void record_conflicts(const std::vector<record_conflict>& conflicts) {
-        conflict_count_ += conflicts.size();
-        for (const auto& conflict : conflicts) {
-            if (conflicts_.size() == service::sync_runtime::detail_list_items) {
-                break;
-            }
-            conflicts_.push_back(conflict);
-        }
+    [[nodiscard]] bool changed() const noexcept {
+        return created_count_ != 0 || updated_count_ != 0 || deleted_count_ != 0;
     }
 
     [[nodiscard]] std::string to_json(std::pmr::memory_resource* resource) const noexcept {
@@ -143,27 +131,14 @@ public:
                     break;
                 }
             }
-            auto& conflicts = output.ensure<"conflicts">();
-            for (const auto& conflict : conflicts_) {
-                dns_attempt_conflict_dto item({.resource_ = pool});
-                item.set<"name">(bounds.text(conflict.name_));
-                item.set<"type">(bounds.text(conflict.type_));
-                item.set<"line_code">(bounds.text(conflict.line_code_));
-                item.set<"local_content">(bounds.text(conflict.local_content_));
-                item.set<"remote_content">(bounds.text(conflict.remote_content_));
-                if (!bounds.append(conflicts, std::move(item), pool)) {
-                    break;
-                }
-            }
             if (created.size() < created_count_ || updated.size() < updated_count_ ||
-                deleted.size() < deleted_count_ || conflicts.size() < conflict_count_) {
+                deleted.size() < deleted_count_) {
                 bounds.mark_truncated();
             }
             output.set<"created_count">(static_cast<std::int64_t>(created_count_));
             output.set<"updated_count">(static_cast<std::int64_t>(updated_count_));
             output.set<"deleted_count">(static_cast<std::int64_t>(deleted_count_));
             output.set<"unchanged_count">(static_cast<std::int64_t>(unchanged_count_));
-            output.set<"conflict_count">(static_cast<std::int64_t>(conflict_count_));
             output.set<"truncated">(bounds.truncated());
             return output;
         });
@@ -190,12 +165,10 @@ private:
     std::vector<attempt_record> created_;
     std::vector<attempt_record_update> updated_;
     std::vector<attempt_record> deleted_;
-    std::vector<record_conflict> conflicts_;
     std::size_t created_count_{};
     std::size_t updated_count_{};
     std::size_t deleted_count_{};
     std::size_t unchanged_count_{};
-    std::size_t conflict_count_{};
 };
 
 }  // namespace service::dns_sync::detail

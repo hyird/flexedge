@@ -118,8 +118,8 @@ for item in snapshot("/api/tasks/stream?page_size=100")["list"]:
     assert "version" not in item and "id" not in item and item["resource_id"] not in (N5, N6), item
 
 # Filters; counters ignore them.
-statuses = {"queued": 1, "running": 1, "retrying": 2, "failed": 2, "completed": 3, "attention_required": 1,
-            "active": 4, "attention": 5}
+statuses = {"queued": 1, "running": 1, "retrying": 2, "failed": 2, "completed": 4,
+            "active": 4, "attention": 4}
 for status, count in statuses.items():
     assert total("status=" + status) == count, status
 filtered = snapshot("/api/tasks/stream?status=failed")
@@ -136,7 +136,7 @@ for query in ("status=unknown", "status=ACTIVE", "status=merged", "type=unknown"
     snapshot("/api/tasks/stream?" + query, expected_code=10001)
 
 # Task snapshots.
-fields = {"resource_type", "resource_id", "resource_kind", "name", "operation", "status", "warning", "error",
+fields = {"resource_type", "resource_id", "resource_kind", "name", "operation", "status", "error",
           "next_attempt_at", "updated_at", "last_success_at", "attempt_count", "failure_count", "node_offline"}
 retrying = snapshot(f"/api/tasks/dns_zone/{Z3}/stream")
 assert set(retrying) == fields, retrying
@@ -144,18 +144,18 @@ assert (retrying["status"], retrying["operation"], retrying["error"], retrying["
         retrying["failure_count"]) == ("retrying", "sync", "QA: API read failed", 3, 2), retrying
 assert retrying["next_attempt_at"] and retrying["last_success_at"] == "" and retrying["name"] == "qa-3.example.com"
 running = snapshot(f"/api/tasks/dns_zone/{Z2}/stream")
-assert (running["status"], running["operation"], running["next_attempt_at"]) == ("running", "sync_local", "")
+assert (running["status"], running["operation"], running["next_attempt_at"]) == ("running", "sync", "")
 attention = snapshot(f"/api/tasks/dns_zone/{Z4}/stream")
-assert (attention["status"], attention["warning"], attention["error"]) == ("attention_required", "dns_conflict", "")
+assert (attention["status"], attention["error"]) == ("completed", "")
 recovered = snapshot(f"/api/tasks/provider/{P1}/stream")
 assert (recovered["status"], recovered["resource_kind"], recovered["attempt_count"], recovered["failure_count"],
-        recovered["name"]) == ("completed", "dns", 2, 1, "QA 100%_dns"), recovered
+        recovered["name"]) == ("completed", "dns", 2, 0, "QA 100%_dns"), recovered
 reinitiated = snapshot(f"/api/tasks/provider/{P2}/stream")
 assert (reinitiated["resource_kind"], reinitiated["name"], reinitiated["attempt_count"],
         reinitiated["failure_count"]) == ("certificate", "letsencrypt", 2, 0), reinitiated
 healthy = snapshot(f"/api/tasks/node/{N1}/stream")
 assert (healthy["status"], healthy["operation"], healthy["attempt_count"], healthy["failure_count"],
-        healthy["node_offline"]) == ("completed", "publish", 3, 1, False), healthy
+        healthy["node_offline"]) == ("completed", "publish", 3, 0, False), healthy
 publish_failed = snapshot(f"/api/tasks/node/{N2}/stream")
 assert (publish_failed["status"], publish_failed["error"], publish_failed["node_offline"]) == \
     ("failed", "QA deployment error", True), publish_failed
@@ -256,7 +256,7 @@ provider_body = {"name": provider_name, "provider": "cloudflare", "account_id": 
 write("/api/providers/dns", provider_body)
 providers = snapshot("/api/providers/dns/stream?page_size=100&keyword=" + urllib.parse.quote(provider_name))
 [provider_id] = [item["id"] for item in providers["list"] if item["name"] == provider_name]
-failed_write("/api/providers/dns", 409, 16102, provider_body)
+failed_write("/api/providers/dns", 409, 16103, provider_body)
 write(f"/api/providers/dns/{provider_id}", {"name": provider_name + " renamed"}, method="PUT", revision=1)
 failed_write(f"/api/providers/dns/{provider_id}", 412, 16107, {"name": "Must not be saved"}, method="PUT", revision=1)
 provider = snapshot(f"/api/providers/dns/{provider_id}/stream")

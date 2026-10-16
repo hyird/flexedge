@@ -75,10 +75,7 @@ export function RecordForm({
     onSaved: (response, change) => {
       toastWriteSuccess(
         response.message ||
-          (change.kind === 'remove'
-            ? '记录已删除，正在同步到服务商'
-            : '记录已保存，正在同步到服务商'),
-        { resourceType: 'dns_zone', resourceId: zone.id }
+          (change.kind === 'remove' ? '记录已删除' : '记录已保存')
       )
       void afterDnsZoneWrite(client)
       onClose()
@@ -122,7 +119,7 @@ export function RecordForm({
         isOpen
         onClose={close}
         title={record ? `编辑记录 ${record.name} ${record.type}` : '添加记录'}
-        description={`为 ${zone.domain} 配置自定义解析记录，保存后同步到 DNS 服务商。`}
+        description={`为 ${zone.domain} 配置自定义解析记录，保存时直接更新 DNS 服务商。`}
         onSubmit={submit}
         isSubmitting={draft.isSaving}
         error={

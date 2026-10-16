@@ -92,7 +92,6 @@ const task = {
   name: 'www.a-z.xin',
   operation: 'issue',
   status: 'running',
-  warning: '',
   error: '',
   next_attempt_at: '',
   updated_at: '2026-10-15T08:00:05.000000+00',
@@ -278,7 +277,10 @@ test('one detail stream carries the task, its records and new attempts', async (
   expect(header.getCurrentResult().isError).toBe(false)
 
   // A recovery `history` frame replaces the records as a whole.
-  source.frame('history', history([attempt(3, '12'), attempt(2, '11', 'failed')]))
+  source.frame(
+    'history',
+    history([attempt(3, '12'), attempt(2, '11', 'failed')])
+  )
   await settle()
   expect(records.getCurrentResult().data?.list.map((item) => item.id)).toEqual([
     '12',

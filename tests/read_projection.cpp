@@ -143,7 +143,7 @@ ruvia::task<void> insert_fixture(ruvia::db_transaction& tx) {
     co_await exec(R"sql(UPDATE sys_provider SET config =
         '{"credential":{"envelope":"qa-opaque","hint":"****qa"}}' WHERE kind = 'dns')sql");
     const std::string runtime =
-        R"('{"records_imported":false,"lines":[],"record_states":[],"conflicts":[]}')";
+        R"('{"lines":[],"record_states":[]}')";
     co_await exec(
         "INSERT INTO sys_dns_zone (id, tenant_id, provider_id, domain, sync_status, revision, "
         "desired_revision, synced_revision, runtime) VALUES "
@@ -157,7 +157,7 @@ ruvia::task<void> insert_fixture(ruvia::db_transaction& tx) {
         "), "
         "('00000000-0000-4000-8000-0000000000b3', '" +
         std::string(tenant_a) +
-        "', '00000000-0000-4000-8000-0000000000da', 'c.example', 'conflict', 1, 1, 0, " + runtime +
+        "', '00000000-0000-4000-8000-0000000000da', 'c.example', 'failed', 1, 1, 0, " + runtime +
         "), "
         "('00000000-0000-4000-8000-0000000000b4', '" +
         std::string(tenant_a) +
@@ -489,7 +489,7 @@ ruvia::task<void> verify_overview_and_filters(read_context& c) {
     const auto issue = co_await zones(std::string("issue"));
     REQUIRE(integer(issue.get<"total">()) == integer(issues.get<"dns_zone_issue_count">()));
     for (const auto& zone : issue.get<"list">()) {
-        REQUIRE(zone.get<"sync_status">().view() == "failed" || zone.get<"sync_status">().view() == "conflict");
+        REQUIRE(zone.get<"sync_status">().view() == "failed");
     }
     const auto synced = co_await zones(std::string("synced"));
     REQUIRE(integer(synced.get<"total">()) == 1 && synced.get<"list">()[0].get<"domain">().view() == "a.example");

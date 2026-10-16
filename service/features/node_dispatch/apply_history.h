@@ -144,7 +144,7 @@ inline ruvia::task<std::optional<recorded_node_attempt>> record_node_apply_attem
         service::sync_runtime::next_attempt_number(source, {.tenant_id_ = {"tenant_id", "target"}, .task_id_ = {"release_id", "target"}, .resource_id_ = {"node_id", "target"}, .version_ = {"generation", "release"}}),
         service::sync_runtime::attempt_started_at(source, emitted_at, attempt.elapsed_milliseconds_),
         source.cast(source.value(attempt.elapsed_milliseconds_.value_or(0)), ruvia::db_data_type::big_int),
-        source.cast(source.null_value(), ruvia::db_data_type::timestamp_tz), stored_detail, emitted_at});
+        stored_detail, emitted_at});
     source.where(equals(target("tenant_id"), source.value(attempt.tenant_id_)))
         .and_where(equals(target("release_id"), source.value(attempt.release_id_)))
         .and_where(equals(target("node_id"), source.value(attempt.node_id_)));
@@ -182,7 +182,7 @@ inline ruvia::task<std::optional<recorded_node_attempt>> record_node_config_atte
         service::sync_runtime::next_attempt_number(source, {.tenant_id_ = {"tenant_id", "node"}, .task_id_ = {"id", "node"}, .resource_id_ = {"id", "node"}, .version_ = {"revision", "spec"}}),
         service::sync_runtime::attempt_started_at(source, emitted_at, attempt.elapsed_milliseconds_),
         source.cast(source.value(attempt.elapsed_milliseconds_.value_or(0)), ruvia::db_data_type::big_int),
-        source.cast(source.null_value(), ruvia::db_data_type::timestamp_tz), stored_detail, emitted_at});
+        stored_detail, emitted_at});
     source.where(equals(node("tenant_id"), source.value(attempt.tenant_id_)))
         .and_where(equals(node("id"), source.value(attempt.node_id_)));
     co_return co_await detail::insert_node_attempt(transaction, source);

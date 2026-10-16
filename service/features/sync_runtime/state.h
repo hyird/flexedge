@@ -35,8 +35,6 @@ enum class marker_resource_type {
 enum class marker_operation {
     verify,
     sync,
-    sync_local,
-    sync_remote,
     remove,
     issue,
     renew,
@@ -49,10 +47,6 @@ enum class marker_operation {
             return "verify";
         case marker_operation::sync:
             return "sync";
-        case marker_operation::sync_local:
-            return "sync_local";
-        case marker_operation::sync_remote:
-            return "sync_remote";
         case marker_operation::remove:
             return "delete";
         case marker_operation::issue:
@@ -72,12 +66,6 @@ parse_marker_operation(std::string_view operation) {
     }
     if (operation == "sync") {
         return marker_operation::sync;
-    }
-    if (operation == "sync_local") {
-        return marker_operation::sync_local;
-    }
-    if (operation == "sync_remote") {
-        return marker_operation::sync_remote;
     }
     if (operation == "delete") {
         return marker_operation::remove;
@@ -108,8 +96,7 @@ parse_marker_operation(std::string_view operation) {
         case marker_resource_type::provider:
             return operation == marker_operation::verify;
         case marker_resource_type::dns_zone:
-            return operation == marker_operation::sync || operation == marker_operation::sync_local ||
-                   operation == marker_operation::sync_remote || operation == marker_operation::remove;
+            return operation == marker_operation::sync || operation == marker_operation::remove;
         case marker_resource_type::certificate:
             return operation == marker_operation::issue || operation == marker_operation::renew;
         case marker_resource_type::website:
@@ -604,8 +591,6 @@ inline ruvia::task<std::optional<std::int64_t>> record_running_result_event(data
         next_attempt_number(source, {.tenant_id_ = {"tenant_id", "marker"}, .task_id_ = {"id", "marker"}, .resource_id_ = {"resource_id", "marker"}, .version_ = {"version", "marker"}}),
         attempt_started_at(source, emitted_at, elapsed),
         source.cast(source.value(elapsed.value_or(0)), ruvia::db_data_type::big_int),
-        outcome == attempt_outcome::retryable_failure ? marker("next_attempt_at")
-                                                      : source.cast(source.null_value(), ruvia::db_data_type::timestamp_tz),
         source.cast(source.value(accepted_detail(detail)), ruvia::db_data_type::jsonb), emitted_at});
     source.where(equals(marker("tenant_id"), source.value(lease.marker_.tenant_id_)))
         .and_where(equals(marker("id"), source.value(lease.marker_.marker_id_)))

@@ -82,7 +82,7 @@ export function ClusterAccessFields({
   const zoneHint =
     zones.isSuccess && zoneItems.length === 0
       ? zones.data.length === 0
-        ? '还没有托管域名，请先在“域名管理”中添加'
+        ? '还没有托管域名，请先在“域名”中添加'
         : '暂无可用托管域名：域名同步完成且所属账号验证通过后才可选择'
       : '只列出已同步且账号已验证的托管域名'
   return (

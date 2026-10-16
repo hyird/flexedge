@@ -13,7 +13,6 @@ import { RelativeTime } from '@/components/relative-time'
 import { StatusChip } from '@/components/status-chip'
 import { providerLabel } from '@/features/providers/provider-display'
 import {
-  displaySyncStatus,
   isZoneNotFound,
   zoneSyncStatuses,
   zoneSyncStatusReserve,
@@ -33,7 +32,7 @@ const tabs = [
 
 /** `/dns-zones/$zoneId` with in-page tabs kept in component state; every
  * arrival starts on 概览 and switching tabs never touches the URL. Sync,
- * conflicts live on 概览; removal is beside 返回 and records are edited on 记录. */
+ * removal is beside 返回 and records are edited on 记录. */
 export function ZoneDetailLayout() {
   const navigate = useNavigate()
   const commands = useZoneCommands({
@@ -55,7 +54,7 @@ export function ZoneDetailLayout() {
           <EmptyState
             title='域名不存在'
             description='该域名可能已被移除，或链接有误。'
-            action={<LinkButton href='/dns-zones'>返回域名管理</LinkButton>}
+            action={<LinkButton href='/dns-zones'>返回域名</LinkButton>}
           />
         </Page>
       )
@@ -81,7 +80,7 @@ export function ZoneDetailLayout() {
         title={zone.domain}
         status={
           <StatusChip
-            {...describeStatus(zoneSyncStatuses, displaySyncStatus(zone))}
+            {...describeStatus(zoneSyncStatuses, zone.sync_status)}
             reserve={zoneSyncStatusReserve}
           />
         }

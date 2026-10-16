@@ -24,7 +24,6 @@ const task: Task = {
   name: 'a-z.xin',
   operation: 'sync',
   status: 'completed',
-  warning: '',
   error: '',
   next_attempt_at: '',
   updated_at: '2026-10-15T08:00:00.000000+00',
@@ -50,10 +49,6 @@ test('titles name the task type and the object; unknown codes stay raw', () => {
     expect(taskTitle({ resource_type, operation, name: '对象' })).toBe(
       `${label} · 对象`
     )
-  expect(describeStatus(taskStatuses, 'attention_required')).toEqual({
-    label: '需处理',
-    tone: 'warning',
-  })
   expect(describeStatus(taskStatuses, 'queued').tone).toBe('default')
   expect(describeStatus(taskStatuses, 'future')).toEqual({
     label: 'future',
@@ -106,23 +101,8 @@ test('each task has at most one note, in priority order', () => {
   expect(taskNote({ ...retrying, node_offline: true })).toEqual({
     kind: 'offline',
   })
-  expect(
-    taskNote({
-      ...task,
-      status: 'attention_required',
-      warning: 'dns_conflict',
-      failure_count: 1,
-    })
-  ).toEqual({ kind: 'warning', label: '存在冲突记录' })
-  expect(
-    taskNote({ ...task, status: 'attention_required', warning: 'future' })
-  ).toEqual({ kind: 'warning', label: 'future' })
-  expect(taskNote({ ...task, failure_count: 3 })).toEqual({
-    kind: 'recovered',
-    failures: 3,
-  })
-  // Still failing: the count is not a recovery.
-  expect(taskNote({ ...task, status: 'failed', failure_count: 3 })).toBeNull()
+  expect(taskNote({ ...task, status: 'completed' })).toBeNull()
+  expect(taskNote({ ...task, status: 'failed' })).toBeNull()
 })
 
 test('recent tasks list active ones first, then by last update', () => {

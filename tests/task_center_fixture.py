@@ -56,7 +56,7 @@ INSERT INTO sys_provider(id,tenant_id,kind,provider,name,account_id,deleted_at) 
 ('{P2}', :'qa_tenant', 'certificate', 'letsencrypt', NULL, NULL, NOW());
 INSERT INTO sys_dns_zone(id,tenant_id,provider_id,domain,sync_status,deleted_at)
 SELECT ('00000000-0000-4000-8000-00000000020'||i)::uuid, :'qa_tenant', '{P1}', 'qa-'||i||'.example.com',
-    CASE i WHEN 3 THEN 'failed' WHEN 4 THEN 'conflict' ELSE 'pending' END, NOW()
+    CASE i WHEN 3 THEN 'failed' WHEN 4 THEN 'synced' ELSE 'pending' END, NOW()
 FROM generate_series(1,4) i;
 INSERT INTO sys_cluster(id,tenant_id,dns_zone_id,name,hostname_prefix)
 VALUES ('{C1}', :'qa_tenant', '{Z1}', 'QA cluster', 'qa');
@@ -89,9 +89,9 @@ INSERT INTO sys_node_release_target(tenant_id,release_id,node_id,status,retryabl
 INSERT INTO sys_sync_task(tenant_id,resource_type,dns_zone_id,provider_id,operation,version,processed_version,is_done,
     is_ok,count_fails,error,next_attempt_at,lease_owner,lease_until,updated_at) VALUES
 (:'qa_tenant', 'dns_zone', '{Z1}', NULL, 'sync', 1, 0, false, false, 0, '', NOW()+INTERVAL '1 day', NULL, NULL, NOW()-INTERVAL '10 minutes'),
-(:'qa_tenant', 'dns_zone', '{Z2}', NULL, 'sync_local', 1, 0, false, false, 0, '', NOW()+INTERVAL '1 day', 'qa-lease', NOW()+INTERVAL '1 day', NOW()-INTERVAL '20 minutes'),
+(:'qa_tenant', 'dns_zone', '{Z2}', NULL, 'sync', 1, 0, false, false, 0, '', NOW()+INTERVAL '1 day', 'qa-lease', NOW()+INTERVAL '1 day', NOW()-INTERVAL '20 minutes'),
 (:'qa_tenant', 'dns_zone', '{Z3}', NULL, 'sync', 2, 1, false, false, 2, 'QA: API read failed', NOW()+INTERVAL '1 day', NULL, NULL, NOW()-INTERVAL '30 minutes'),
-(:'qa_tenant', 'dns_zone', '{Z4}', NULL, 'sync_remote', 1, 1, true, true, 0, '', NOW()+INTERVAL '1 day', NULL, NULL, NOW()-INTERVAL '40 minutes'),
+(:'qa_tenant', 'dns_zone', '{Z4}', NULL, 'sync', 1, 1, true, true, 0, '', NOW()+INTERVAL '1 day', NULL, NULL, NOW()-INTERVAL '40 minutes'),
 (:'qa_tenant', 'provider', NULL, '{P1}', 'verify', 1, 1, true, true, 0, '', NOW()+INTERVAL '1 day', NULL, NULL, NOW()-INTERVAL '50 minutes'),
 (:'qa_tenant', 'provider', NULL, '{P2}', 'verify', 2, 2, true, true, 0, '', NOW()+INTERVAL '1 day', NULL, NULL, NOW()-INTERVAL '60 minutes');
 
@@ -106,7 +106,7 @@ FROM (VALUES
 (990001, :'qa_tenant', NULL, 'dns_zone', '{Z3}', 'sync', 1, 'failed', 'QA: old version', 300, 0, 1, '{"kind":"none","truncated":false}'),
 (990002, :'qa_tenant', NULL, 'dns_zone', '{Z3}', 'sync', 2, 'failed', 'QA: API timeout', 29, 2000, 1, '{"kind":"none","truncated":false}'),
 (990003, :'qa_tenant', NULL, 'dns_zone', '{Z3}', 'sync', 2, 'failed', 'QA: API read failed', 25, 1000, 2, '{"kind":"none","truncated":false}'),
-(990004, :'qa_tenant', NULL, 'dns_zone', '{Z4}', 'sync_remote', 1, 'completed', '', 88, 0, 1, '{"kind":"dns_sync","truncated":false,"conflict_count":1}'),
+(990004, :'qa_tenant', NULL, 'dns_zone', '{Z4}', 'sync', 1, 'completed', '', 88, 0, 1, '{"kind":"dns_sync","truncated":false}'),
 (990005, :'qa_tenant', NULL, 'provider', '{P1}', 'verify', 1, 'failed', 'QA: credentials rejected', 55, 0, 1, '{"kind":"none","truncated":false}'),
 (990006, :'qa_tenant', NULL, 'provider', '{P1}', 'verify', 1, 'completed', '', 52, 0, 2, '{"kind":"none","truncated":false}'),
 (990007, :'qa_tenant', NULL, 'provider', '{P2}', 'verify', 1, 'failed', 'QA: before re-initiation', 65, 0, 1, '{"kind":"none","truncated":false}'),

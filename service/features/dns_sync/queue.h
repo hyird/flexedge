@@ -43,12 +43,6 @@ struct snapshot_record final {
     snapshot_record_source source_;
 };
 
-inline bool is_cluster_managed_record(const zone_record_data& record,
-    const std::unordered_set<std::string>& hostnames) {
-    return hostnames.contains(record.name_) &&
-           (record.type_ == "A" || record.type_ == "AAAA" || record.type_ == "CNAME");
-}
-
 inline std::string record_hostname(std::string_view name, std::string_view zone_domain) {
     const auto normalized_name = service::common::normalize_domain_name(name);
     const auto normalized_zone = service::common::normalize_domain_name(zone_domain);
@@ -66,6 +60,21 @@ inline bool is_traffic_record(std::string_view type) {
 }
 
 using projected_records_by_zone = std::unordered_map<std::string, std::vector<snapshot_record>>;
+
+// A cluster keeps its access hostname even when it has no enabled endpoints.
+template <typename db_type>
+inline ruvia::task<std::unordered_set<std::string>> load_cluster_hostnames(db_type& db,
+    std::string_view tenant_id, std::string_view zone_id, std::string_view domain) {
+    const auto rows = co_await db.query(
+        "SELECT hostname_prefix FROM sys_cluster WHERE tenant_id = $1 AND dns_zone_id = $2 "
+        "AND status = 'enabled' AND deleted_at IS NULL",
+        tenant_id, zone_id);
+    std::unordered_set<std::string> hostnames;
+    for (const auto& row : rows) {
+        hostnames.emplace(record_hostname(row[0].value().value_or(""), domain));
+    }
+    co_return hostnames;
+}
 
 template <typename db_type>
 inline ruvia::task<projected_records_by_zone>
@@ -180,12 +189,9 @@ enqueue_zone_revision(ruvia::db_transaction& transaction, std::string_view tenan
 
 // What one zone revision changes besides its desired revision.
 struct zone_revision_change final {
-    // Replaces the records configuration and advances the configuration revision.
-    std::optional<std::string_view> config_json_{};
-    // Replaces the runtime (lines, record states, conflicts, challenge records).
+    // Replaces the runtime (lines, record states, challenge records).
     std::optional<std::string_view> runtime_json_{};
     // Fences: the change applies only while the zone is at these revisions.
-    std::optional<std::int64_t> expected_revision_{};
     std::optional<std::int64_t> expected_desired_revision_{};
     // The sync task's operation; `remove` also deletes the zone and advances
     // its configuration revision.
@@ -218,11 +224,8 @@ inline ruvia::task<std::optional<zone_revision>> advance_zone_revision(ruvia::db
         .set("sync_status", update.value(std::string_view{"pending"}))
         .set("last_error", update.null_value())
         .set("updated_at", update.call("now"));
-    if (change.config_json_ || removal) {
+    if (removal) {
         update.set("revision", increment("revision"));
-    }
-    if (change.config_json_) {
-        update.set("config", update.cast(update.value(*change.config_json_), ruvia::db_data_type::jsonb));
     }
     if (change.runtime_json_) {
         update.set("runtime", update.cast(update.value(*change.runtime_json_), ruvia::db_data_type::jsonb));
@@ -233,9 +236,6 @@ inline ruvia::task<std::optional<zone_revision>> advance_zone_revision(ruvia::db
     update.where(equals("tenant_id", update.value(tenant_id)))
         .and_where(equals("id", update.value(zone_id)))
         .and_where(update.unary(ruvia::db_unary_operator::is_null, update.column("deleted_at")));
-    if (change.expected_revision_) {
-        update.and_where(equals("revision", update.value(*change.expected_revision_)));
-    }
     if (change.expected_desired_revision_) {
         update.and_where(equals("desired_revision", update.value(*change.expected_desired_revision_)));
     }
@@ -252,76 +252,10 @@ inline ruvia::task<std::optional<zone_revision>> advance_zone_revision(ruvia::db
     co_return result;
 }
 
-// Drops configured records that collide with the A/AAAA/CNAME records the
-// zone's clusters project. True when the configuration changed (and a new
-// revision was queued).
-inline ruvia::task<bool> prune_cluster_managed_records(ruvia::db_transaction& transaction,
-    std::string_view tenant_id, std::string_view zone_id, service::background::queued_work& work) {
-    const auto zone_rows = co_await transaction.query(
-        "SELECT revision, config::text FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 AND "
-        "deleted_at IS NULL LIMIT 1 FOR UPDATE",
-        tenant_id, zone_id);
-    if (zone_rows.empty()) {
-        co_return false;
-    }
-    const auto cluster_rows = co_await transaction.query(
-        "SELECT hostname_prefix FROM sys_cluster WHERE tenant_id = $1 AND dns_zone_id = $2 AND "
-        "status = 'enabled' AND deleted_at IS NULL",
-        tenant_id, zone_id);
-    if (cluster_rows.empty()) {
-        co_return false;
-    }
-
-    std::unordered_set<std::string> hostnames;
-    hostnames.reserve(cluster_rows.size());
-    for (const auto& row : cluster_rows) {
-        hostnames.emplace(row[0].value().value_or(""));
-    }
-
-    const std::optional<zone_config_data> config = parse_stored(zone_rows.front()[1].value().value_or("{}"));
-    if (!config) {
-        throw std::runtime_error("DNS 聚合配置损坏");
-    }
-
-    zone_config_output filtered;
-    auto& filtered_records = filtered.ensure<"records">();
-    bool changed = false;
-    for (const auto& record : config->records_) {
-        if (is_cluster_managed_record(record, hostnames)) {
-            changed = true;
-            continue;
-        }
-        auto& output = filtered_records.emplace_back();
-        output.set<"id">(record.id_);
-        output.set<"type">(record.type_);
-        output.set<"name">(record.name_);
-        output.set<"content">(record.content_);
-        output.set<"ttl">(record.ttl_);
-        output.set<"proxied">(record.proxied_);
-        output.set<"line_code">(record.line_code_);
-        if (record.priority_) {
-            output.set<"priority">(*record.priority_);
-        }
-    }
-    if (!changed) {
-        co_return false;
-    }
-
-    const auto config_json = ruvia::to_json(filtered);
-    co_return (co_await advance_zone_revision(transaction, tenant_id, zone_id,
-                   {.config_json_ = std::string_view(config_json),
-                       .expected_revision_ = zone_rows.front()[0].as<std::int64_t>().value_or(0)},
-                   work))
-        .has_value();
-}
-
 // The records a zone projects changed (a cluster's nodes, a website's
 // domains): queues a new revision.
 inline ruvia::task<void> mark_zone_dirty(ruvia::db_transaction& transaction, std::string_view tenant_id,
     std::string_view zone_id, service::background::queued_work& work) {
-    if (co_await prune_cluster_managed_records(transaction, tenant_id, zone_id, work)) {
-        co_return;
-    }
     if (!co_await advance_zone_revision(transaction, tenant_id, zone_id, {}, work)) {
         throw std::runtime_error("DNS 聚合根不存在");
     }

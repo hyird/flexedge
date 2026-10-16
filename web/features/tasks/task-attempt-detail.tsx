@@ -207,50 +207,6 @@ function DnsSyncDetail({ detail }: { detail: DetailOf<'dns_sync'> }) {
           </Table>
         )}
       </DetailBlock>
-      {detail.conflict_count > 0 && (
-        <DetailBlock title={`冲突 ${detail.conflict_count} 条`}>
-          <Table variant='secondary' className={compactTable}>
-            <Table.ScrollContainer>
-              <Table.Content
-                aria-label='DNS 记录冲突'
-                className='min-w-[400px]'
-              >
-                <Table.Header>
-                  <Table.Column isRowHeader>记录</Table.Column>
-                  <Table.Column>本地</Table.Column>
-                  <Table.Column>远端</Table.Column>
-                </Table.Header>
-                <Table.Body>
-                  {detail.conflicts.map((conflict, index) => (
-                    <Table.Row key={index}>
-                      <Table.Cell>
-                        <TwoLines
-                          first={
-                            <Mono truncate className='max-w-36'>
-                              {conflict.name}
-                            </Mono>
-                          }
-                          second={`${conflict.type} · ${conflict.line_code}`}
-                        />
-                      </Table.Cell>
-                      <Table.Cell>
-                        <Mono truncate className='max-w-48'>
-                          {conflict.local_content}
-                        </Mono>
-                      </Table.Cell>
-                      <Table.Cell>
-                        <Mono truncate className='max-w-48'>
-                          {conflict.remote_content}
-                        </Mono>
-                      </Table.Cell>
-                    </Table.Row>
-                  ))}
-                </Table.Body>
-              </Table.Content>
-            </Table.ScrollContainer>
-          </Table>
-        </DetailBlock>
-      )}
     </>
   )
 }

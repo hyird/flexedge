@@ -50,16 +50,12 @@ RUVIA_MODEL(dns_record_input, RUVIA_REQUIRED_FIELD(name, ruvia::string), RUVIA_R
     RUVIA_REQUIRED_FIELD(proxied, ruvia::bool_value));
 RUVIA_MODEL(dns_update_input, RUVIA_REQUIRED_FIELD(before, dns_record_input),
     RUVIA_REQUIRED_FIELD(after, dns_record_input));
-RUVIA_MODEL(dns_conflict_input, RUVIA_REQUIRED_FIELD(name, ruvia::string), RUVIA_REQUIRED_FIELD(type, ruvia::string),
-    RUVIA_REQUIRED_FIELD(line_code, ruvia::string), RUVIA_REQUIRED_FIELD(local_content, ruvia::string),
-    RUVIA_REQUIRED_FIELD(remote_content, ruvia::string));
 RUVIA_MODEL(dns_detail_input, RUVIA_REQUIRED_FIELD(kind, ruvia::string), RUVIA_REQUIRED_FIELD(truncated, ruvia::bool_value),
     RUVIA_REQUIRED_FIELD(created, ruvia::array<dns_record_input>),
     RUVIA_REQUIRED_FIELD(updated, ruvia::array<dns_update_input>),
     RUVIA_REQUIRED_FIELD(deleted, ruvia::array<dns_record_input>), RUVIA_REQUIRED_FIELD(created_count, ruvia::int64),
     RUVIA_REQUIRED_FIELD(updated_count, ruvia::int64), RUVIA_REQUIRED_FIELD(deleted_count, ruvia::int64),
-    RUVIA_REQUIRED_FIELD(unchanged_count, ruvia::int64), RUVIA_REQUIRED_FIELD(conflicts, ruvia::array<dns_conflict_input>),
-    RUVIA_REQUIRED_FIELD(conflict_count, ruvia::int64));
+    RUVIA_REQUIRED_FIELD(unchanged_count, ruvia::int64));
 RUVIA_MODEL(certificate_detail_input, RUVIA_REQUIRED_FIELD(kind, ruvia::string),
     RUVIA_REQUIRED_FIELD(truncated, ruvia::bool_value), RUVIA_REQUIRED_FIELD(operation, ruvia::string),
     RUVIA_REQUIRED_FIELD(provider, ruvia::string), RUVIA_REQUIRED_FIELD(domains, ruvia::array<ruvia::string>),
@@ -142,10 +138,9 @@ ruvia::task<void> verify_schema(ruvia::db_client& client) {
     const auto columns = co_await db.query(
         "SELECT string_agg(column_name || ':' || data_type || ':' || is_nullable, ',' ORDER BY column_name) "
         "FROM information_schema.columns WHERE table_name = 'sys_sync_event' AND column_name IN "
-        "('attempt','started_at','duration_ms','next_attempt_at','detail')");
+        "('attempt','started_at','duration_ms','detail')");
     require(text(columns) ==
-                "attempt:integer:NO,detail:jsonb:NO,duration_ms:bigint:NO,next_attempt_at:timestamp with time "
-                "zone:YES,started_at:timestamp with time zone:YES",
+                "attempt:integer:NO,detail:jsonb:NO,duration_ms:bigint:NO,started_at:timestamp with time zone:YES",
         "attempt columns: " + text(columns));
     const auto indexes = co_await db.query(
         "SELECT string_agg(indexname, ',' ORDER BY indexname) FROM pg_indexes WHERE tablename = 'sys_sync_event'");
@@ -321,26 +316,18 @@ ruvia::task<void> verify_dns_sync(ruvia::db_handle& db, read_context& context, s
                 failure.get<"id">().view() == std::to_string(*first.event_id_) &&
                 success.get<"operation">().view() == "sync" && failure.get<"operation">().view() == "sync",
         "attempt order, ids and operation");
-    require(success.get<"outcome">().view() == "completed" && success.get<"error">().view().empty() &&
-                success.get<"next_attempt_at">().view().empty(),
+    require(success.get<"outcome">().view() == "completed" && success.get<"error">().view().empty(),
         "completion fields");
-    require(failure.get<"outcome">().view() == "failed" && failure.get<"error">().view() == "Cloudflare 返回异常" &&
-                !failure.get<"next_attempt_at">().view().empty(),
-        "failure keeps error and retry time");
+    require(failure.get<"outcome">().view() == "failed" && failure.get<"error">().view() == "Cloudflare 返回异常",
+        "failure keeps its execution error");
     require(failure.get<"duration_ms">().value_ >= 1500 && failure.get<"duration_ms">().value_ < 60'000 &&
                 !failure.get<"started_at">().view().empty(),
         "duration from the claim instant");
     const auto timing = co_await db.query(
         "SELECT count(*) FROM sys_sync_event WHERE task_id = $1 AND started_at + duration_ms * INTERVAL '1 "
-        "millisecond' = emitted_at AND (next_attempt_at IS NULL) = (outcome = 'completed')",
+        "millisecond' = emitted_at",
         dns_marker);
     require(integer(timing) == 2, "started_at + duration_ms = emitted_at; retry only on failure");
-    const auto retry = co_await db.query(
-        "SELECT count(*) FROM sys_sync_event event JOIN sys_sync_task marker ON marker.id = event.task_id "
-        "WHERE event.task_id = $1 AND event.outcome = 'failed' AND event.next_attempt_at > event.emitted_at",
-        dns_marker);
-    require(integer(retry) == 1, "failure records the scheduled retry");
-
     const auto partial = parse_detail<dns_detail_input>(failure);
     require(partial.get<"kind">().view() == "dns_sync" && partial.get<"deleted_count">().value_ == 1 &&
                 partial.get<"created">().empty(),
@@ -348,7 +335,7 @@ ruvia::task<void> verify_dns_sync(ruvia::db_handle& db, read_context& context, s
     const auto detail = parse_detail<dns_detail_input>(success);
     require(detail.get<"created_count">().value_ == 1 && detail.get<"updated_count">().value_ == 1 &&
                 detail.get<"deleted_count">().value_ == 1 && detail.get<"unchanged_count">().value_ == 2 &&
-                detail.get<"conflict_count">().value_ == 0 && !detail.get<"truncated">().value_,
+                !detail.get<"truncated">().value_,
         "dns counts");
     require(detail.get<"created">()[0].get<"name">().view() == "www" &&
                 detail.get<"created">()[0].get<"proxied">().value_ &&
@@ -359,20 +346,6 @@ ruvia::task<void> verify_dns_sync(ruvia::db_handle& db, read_context& context, s
                 *detail.get<"updated">()[0].get<"after">().get<"priority">() == 10,
         "updated before and after");
     require_no_sensitive_terms(success.get<"detail">().view());
-
-    // A conflicting sync completes without provider changes and lists the conflicts.
-    service::dns_sync::detail::zone_sync_attempt conflicting;
-    conflicting.record_conflicts({{.id_ = "local-id", .type_ = "A", .name_ = "api", .line_code_ = "default", .local_content_ = "192.0.2.10", .remote_content_ = "（远端已删除）"}});
-    (void)co_await record_attempt(db,
-        running(dns_marker, 4, service::sync_runtime::marker_resource_type::dns_zone, zone,
-            std::chrono::steady_clock::now()),
-        true, conflicting.to_json(pool));
-    const auto conflict_data = co_await history(context, "dns_zone", zone);
-    const auto conflicts = parse_detail<dns_detail_input>(newest(conflict_data));
-    require(conflicts.get<"conflict_count">().value_ == 1 &&
-                conflicts.get<"conflicts">()[0].get<"remote_content">().view() == "（远端已删除）" &&
-                conflicts.get<"created_count">().value_ == 0,
-        "conflict detail");
 }
 
 ruvia::task<void> verify_certificate(ruvia::db_handle& db, read_context& context, std::pmr::memory_resource* pool) {
@@ -535,7 +508,7 @@ ruvia::task<void> verify_node_apply(ruvia::db_handle& db, read_context& context,
     const auto applied = parse_detail<node_detail_input>(list[0]);
     const auto failed = parse_detail<node_detail_input>(list[1]);
     require(list[0].get<"attempt">().value_ == 2 && list[0].get<"duration_ms">().value_ == 900 &&
-                list[1].get<"error">().view() == "配置校验失败" && list[1].get<"next_attempt_at">().view().empty(),
+                list[1].get<"error">().view() == "配置校验失败",
         "node attempt metadata");
     require(applied.get<"result">().view() == "applied" && applied.get<"phase">().view().empty() &&
                 applied.get<"error_code">().view().empty() && !applied.get<"retryable">().value_ &&
@@ -551,8 +524,8 @@ ruvia::task<void> verify_node_apply(ruvia::db_handle& db, read_context& context,
     require(confirmed.get<"source">().view() == "heartbeat" && newest(heartbeat).get<"started_at">().view().empty() &&
                 newest(heartbeat).get<"duration_ms">().value_ == 0 && confirmed.get<"agent_version">().view().empty(),
         "heartbeat confirmation has no timing");
-    // Each node has its own task: the failure before the success counts as
-    // 「失败 1 次后成功」, and node attempts never leak into another node's task.
+    // Each node has its own task; success clears current retry state while
+    // historical failures remain in the execution history.
     for (const auto node : {node_a, node_b}) {
         const bool first_node = node == node_a;
         const auto task = co_await service::task::get_task_service().detail(context, std::string(tenant), "node",
@@ -560,7 +533,7 @@ ruvia::task<void> verify_node_apply(ruvia::db_handle& db, read_context& context,
         require(task.get<"resource_type">().view() == "node" && task.get<"resource_id">().view() == node &&
                     task.get<"status">().view() == "completed" && task.get<"error">().view().empty() &&
                     task.get<"attempt_count">().value_ == (first_node ? 2 : 1) &&
-                    task.get<"failure_count">().value_ == (first_node ? 1 : 0) &&
+                    task.get<"failure_count">().value_ == 0 &&
                     task.get<"name">().view() == (first_node ? "History node A" : "History node B"),
             "node task per registered node");
     }

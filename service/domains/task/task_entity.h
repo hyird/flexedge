@@ -83,7 +83,6 @@ using event_entity = ruvia::db_entity<"sys_sync_event",
     ruvia::db_column<"started_at", std::pmr::string, {.data_type_ = ruvia::db_data_type::timestamp_tz, .nullable_ = true}>,
     ruvia::db_column<"emitted_at", std::pmr::string, {.data_type_ = ruvia::db_data_type::timestamp_tz}>,
     ruvia::db_column<"duration_ms", std::int64_t>,
-    ruvia::db_column<"next_attempt_at", std::pmr::string, {.data_type_ = ruvia::db_data_type::timestamp_tz, .nullable_ = true}>,
     ruvia::db_column<"detail", std::pmr::string, {.data_type_ = ruvia::db_data_type::jsonb}>>;
 using event_trace_entity = ruvia::db_entity<"sys_sync_event_trace",
     ruvia::db_column<"event_id", std::int64_t, {.primary_key_ = true}>,
@@ -94,7 +93,7 @@ using task_projection = ruvia::db_projection<
     ruvia::db_column<"resource_type", std::pmr::string>, ruvia::db_column<"resource_id", std::pmr::string>,
     ruvia::db_column<"resource_kind", std::pmr::string>, ruvia::db_column<"name", std::pmr::string>,
     ruvia::db_column<"operation", std::pmr::string>, ruvia::db_column<"status", std::pmr::string>,
-    ruvia::db_column<"warning", std::pmr::string>, ruvia::db_column<"error", std::pmr::string>,
+    ruvia::db_column<"error", std::pmr::string>,
     ruvia::db_column<"next_attempt_at", std::pmr::string>, ruvia::db_column<"updated_at", std::pmr::string>,
     ruvia::db_column<"last_success_at", std::pmr::string>, ruvia::db_column<"attempt_count", std::int64_t>,
     ruvia::db_column<"failure_count", std::int64_t>, ruvia::db_column<"node_offline", bool>>;
@@ -104,7 +103,7 @@ using attempt_projection = ruvia::db_projection<ruvia::db_column<"id", std::pmr:
     ruvia::db_column<"attempt", std::int64_t>, ruvia::db_column<"operation", std::pmr::string>,
     ruvia::db_column<"outcome", std::pmr::string>, ruvia::db_column<"error", std::pmr::string>,
     ruvia::db_column<"started_at", std::pmr::string>, ruvia::db_column<"emitted_at", std::pmr::string>,
-    ruvia::db_column<"duration_ms", std::int64_t>, ruvia::db_column<"next_attempt_at", std::pmr::string>,
+    ruvia::db_column<"duration_ms", std::int64_t>,
     ruvia::db_column<"detail", std::pmr::string>, ruvia::db_column<"trace", std::pmr::string>>;
 using history_summary_projection = ruvia::db_projection<ruvia::db_column<"attempt_count", std::int64_t>,
     ruvia::db_column<"failure_count", std::int64_t>, ruvia::db_column<"first_failure_at", std::pmr::string>,

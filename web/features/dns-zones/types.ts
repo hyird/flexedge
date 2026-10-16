@@ -39,16 +39,6 @@ export const dnsRecordStateSchema = z.object({
   last_error: z.string().optional(),
 })
 
-/** `dns_record_conflict_dto` */
-export const dnsRecordConflictSchema = z.object({
-  id: z.string(),
-  type: z.string(),
-  name: z.string(),
-  line_code: z.string(),
-  local_content: z.string(),
-  remote_content: z.string(),
-})
-
 /** `dns_zone_dto` */
 export const dnsZoneSchema = revisionedSchema.extend({
   dns_provider_id: z.string(),
@@ -61,12 +51,9 @@ export const dnsZoneSchema = revisionedSchema.extend({
   website_count: z.number().int(),
   config: z.object({ records: z.array(dnsRecordSchema) }),
   runtime: z.object({
-    records_imported: z.boolean(),
-    lines_synced_at: z.string().optional(),
     lines: z.array(dnsLineSchema),
     projected_records: z.array(dnsRecordSchema),
     record_states: z.array(dnsRecordStateSchema),
-    conflicts: z.array(dnsRecordConflictSchema),
   }),
   last_synced_at: z.string().optional(),
   last_error: z.string().optional(),

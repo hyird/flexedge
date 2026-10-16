@@ -65,7 +65,7 @@ private:
             .keyword_ = service::common::require_keyword(c.req().query("keyword")),
             .provider_id_ = std::move(provider_id),
             .sync_status_ = service::common::require_enum_query(c, "sync_status",
-                {dns_zone_issue_filter, "pending", "synced", "failed", "conflict"}, "sync_status 不正确")};
+                {dns_zone_issue_filter, "pending", "synced", "failed"}, "sync_status 不正确")};
     }
 
     static ruvia::task<dns_zone_page_response> read_list(auto& read, const std::string& tenant,
@@ -172,21 +172,12 @@ private:
             service::middleware::current_tenant_id(c), service::common::require_uuid_param(c, "id"),
             expected_revision, c.request_state<service::dns_sync::zone_config_input>());
         service::common::set_revision_etag(c, revision);
-        co_return c.json(service::common::operation(c, "配置已保存，同步任务已提交"));
+        co_return c.json(service::common::operation(c, "DNS 记录已更新"));
     }
 
     ruvia::task<ruvia::http_response> sync(ruvia::context& c) {
-        std::string_view conflict_policy;
-        if (auto body = co_await c.req().json_if<dns_zone_sync_body>()) {
-            ruvia::validator validator({.resource_ = c.pool()});
-            validate_dns_zone_sync(*body, validator);
-            validator.throw_if_invalid();
-            if (const auto& value = body->get<"conflict_policy">()) {
-                conflict_policy = value->view();
-            }
-        }
         co_await get_dns_zone_command_service().request_sync(c, service::middleware::current_tenant_id(c),
-            service::common::require_uuid_param(c, "id"), conflict_policy);
+            service::common::require_uuid_param(c, "id"));
         co_return c.json(service::common::operation(c, "同步任务已提交"));
     }
 

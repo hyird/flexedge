@@ -25,6 +25,11 @@ struct recorded_notifications final {
     std::vector<bool> committed_{};
     std::vector<std::string> own_claims_{};
     std::pmr::memory_resource* pool_{std::pmr::new_delete_resource()};
+    std::string lease_owner_{"test-owner"};
+
+    [[nodiscard]] std::string_view lease_owner() const {
+        return lease_owner_;
+    }
 
     ruvia::db_handle db() {
         return handle_;
@@ -35,7 +40,7 @@ struct recorded_notifications final {
     std::nullptr_t redis() {
         return nullptr;
     }
-    ruvia::task<void> record_committed_notification( const service::live_resource::notifications::resource_notification& value) {
+    ruvia::task<void> record_committed_notification(const service::live_resource::notifications::resource_notification& value) {
         bool committed = true;
         for (const auto& attempt : value.task_attempts_) {
             const auto rows = co_await handle_.query("SELECT count(*) FROM sys_sync_event WHERE id = $1",

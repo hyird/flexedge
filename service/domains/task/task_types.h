@@ -10,13 +10,13 @@ namespace service::task {
 
 // `resource_kind` is the provider kind ("dns" | "certificate") of provider
 // tasks, "" otherwise. `attempt_count` covers every retained attempt;
-// `failure_count` the failed attempts of the task's current work, so a
-// completed task with failures recovered after them.
+// `failure_count` is current retry state and clears on success or re-initiation.
+// Cumulative failures belong to the execution-history summary.
 RUVIA_MODEL(task_dto, RUVIA_REQUIRED_FIELD_NAME("resource_type", resource_type, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("resource_id", resource_id, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("resource_kind", resource_kind, ruvia::string), RUVIA_REQUIRED_FIELD(name, ruvia::string),
     RUVIA_REQUIRED_FIELD(operation, ruvia::string), RUVIA_REQUIRED_FIELD(status, ruvia::string),
-    RUVIA_REQUIRED_FIELD(warning, ruvia::string), RUVIA_REQUIRED_FIELD(error, ruvia::string),
+    RUVIA_REQUIRED_FIELD(error, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("next_attempt_at", next_attempt_at, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("updated_at", updated_at, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("last_success_at", last_success_at, ruvia::string),
@@ -43,7 +43,7 @@ RUVIA_MODEL(attempt_dto, RUVIA_REQUIRED_FIELD(id, ruvia::string), RUVIA_REQUIRED
     RUVIA_REQUIRED_FIELD(operation, ruvia::string), RUVIA_REQUIRED_FIELD(outcome, ruvia::string),
     RUVIA_REQUIRED_FIELD(error, ruvia::string), RUVIA_REQUIRED_FIELD(started_at, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("emitted_at", emitted_at, ruvia::string),
-    RUVIA_REQUIRED_FIELD(duration_ms, ruvia::int64), RUVIA_REQUIRED_FIELD(next_attempt_at, ruvia::string),
+    RUVIA_REQUIRED_FIELD(duration_ms, ruvia::int64),
     RUVIA_REQUIRED_FIELD(detail, ruvia::json_object), RUVIA_REQUIRED_FIELD(trace, ruvia::json_object));
 // Covers every retained attempt, not live task scheduling.
 RUVIA_MODEL(history_summary_dto, RUVIA_REQUIRED_FIELD(attempt_count, ruvia::int64),

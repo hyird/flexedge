@@ -18,7 +18,6 @@ import { providerLabel } from '@/features/providers/provider-display'
 import { CreateZoneSheet } from './create-zone-sheet'
 import { dnsZonesQuery } from './data'
 import {
-  displaySyncStatus,
   zoneSyncFilters,
   zoneSyncStatuses,
   zoneSyncStatusReserve,
@@ -103,7 +102,7 @@ export function DnsZonesPage() {
       minWidth: 130,
       cell: (zone) => (
         <StatusChip
-          {...describeStatus(zoneSyncStatuses, displaySyncStatus(zone))}
+          {...describeStatus(zoneSyncStatuses, zone.sync_status)}
           reserve={zoneSyncStatusReserve}
         />
       ),
@@ -136,7 +135,7 @@ export function DnsZonesPage() {
   ]
   return (
     <Page
-      title='域名管理'
+      title='域名'
       description='托管在 DNS 账号中的域名：自定义记录、系统自动记录与解析线路的同步状态。'
     >
       <ListToolbar
@@ -177,7 +176,7 @@ export function DnsZonesPage() {
         actions={createAction}
       />
       <DataTable
-        label='域名管理'
+        label='域名'
         columns={columns}
         data={query.data?.list}
         isLoading={query.isPending}

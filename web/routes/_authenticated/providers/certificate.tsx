@@ -4,6 +4,6 @@ import { providersSearchSchema } from '@/features/providers/provider-search'
 
 export const Route = createFileRoute('/_authenticated/providers/certificate')({
   validateSearch: providersSearchSchema,
-  staticData: { breadcrumb: '证书供应商' },
+  staticData: { breadcrumb: '证书' },
   component: CertificateProvidersPage,
 })

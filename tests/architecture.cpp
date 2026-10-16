@@ -219,15 +219,12 @@ int run_architecture_tests() {
     REQUIRE(!service::sync_runtime::parse_marker_resource_type("unknown"));
     REQUIRE(service::sync_runtime::marker_operation_name(marker_operation::verify) == "verify");
     REQUIRE(service::sync_runtime::marker_operation_name(marker_operation::sync) == "sync");
-    REQUIRE(service::sync_runtime::marker_operation_name(marker_operation::sync_local) == "sync_local");
-    REQUIRE(service::sync_runtime::marker_operation_name(marker_operation::sync_remote) ==
-            "sync_remote");
     REQUIRE(service::sync_runtime::marker_operation_name(marker_operation::remove) == "delete");
     REQUIRE(service::sync_runtime::marker_operation_name(marker_operation::issue) == "issue");
     REQUIRE(service::sync_runtime::marker_operation_name(marker_operation::renew) == "renew");
     REQUIRE(service::sync_runtime::marker_operation_name(marker_operation::apply) == "apply");
     REQUIRE(service::sync_runtime::supports_marker_operation(marker_resource_type::dns_zone,
-        marker_operation::sync_remote));
+        marker_operation::sync));
     REQUIRE(!service::sync_runtime::supports_marker_operation(marker_resource_type::website,
         marker_operation::remove));
     REQUIRE(throws_runtime_error(

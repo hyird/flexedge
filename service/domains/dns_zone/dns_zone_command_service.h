@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -23,12 +24,18 @@
 #include "service/domains/provider/provider_reference.h"
 #include "service/domains/website/website_reference.h"
 #include "service/features/background/queued_work.h"
+#include "service/features/dns/driver.h"
+#include "service/features/dns/provider_config_mapper.h"
 #include "service/features/dns_sync/line.h"
 #include "service/features/dns_sync/mapper.h"
 #include "service/features/dns_sync/queue.h"
+#include "service/features/dns_sync/reconciliation.h"
+#include "service/features/dns_sync/snapshot.h"
 #include "service/features/live_resource/notification_outbox.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/sync_runtime/work_commit.h"
+#include "service/utils/secret.h"
+#include "service/utils/sensitive_string.h"
 
 namespace service::dns_zone {
 
@@ -47,10 +54,8 @@ public:
         const std::string config_json{R"json({"records":[]})json"};
 
         service::dns_sync::zone_runtime_dto runtime({.resource_ = c.pool()});
-        runtime.set<"records_imported">(false);
         (void)runtime.ensure<"lines">();
         (void)runtime.ensure<"record_states">();
-        (void)runtime.ensure<"conflicts">();
         const auto runtime_json = ruvia::to_json(runtime, {.resource_ = c.pool()});
 
         try {
@@ -90,47 +95,112 @@ public:
 
     ruvia::task<std::int64_t>
     update_config(ruvia::context& c, const std::string& tenant_id, const std::string& id,
-        std::int64_t expected_revision,
-        const service::dns_sync::zone_config_input& config) {
+        std::int64_t expected_revision, const service::dns_sync::zone_config_input& config) {
         auto transaction = co_await c.db().begin_transaction();
-        const auto current = co_await transaction.query(
-            "SELECT revision, runtime::text, provider_id, domain FROM sys_dns_zone WHERE id = $1 AND "
-            "tenant_id = $2 AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
+        const auto identity = co_await transaction.query(
+            "SELECT provider_id FROM sys_dns_zone WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
             id, tenant_id);
-        service::common::require_current_revision(current, expected_revision, revision_errors_);
-        const auto provider = co_await service::provider::lock_dns_provider(transaction, tenant_id,
-            current.front()[2].value().value_or(""));
-        if (!provider) {
+        if (identity.empty()) {
             service::common::throw_app_error(dns_zone_error::not_found);
         }
-        const auto normalized_config = service::dns_sync::normalize(config);
-        if (!normalized_config) {
+        // Provider commands lock the account before its zones. Use the same order.
+        const auto provider = co_await service::provider::lock_dns_provider(
+            transaction, tenant_id, identity.front()[0].value().value_or(""));
+        const auto current = co_await transaction.query(
+            "SELECT revision, runtime::text, provider_id, domain, config::text, desired_revision "
+            "FROM sys_dns_zone WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
+            id, tenant_id);
+        service::common::require_current_revision(current, expected_revision, revision_errors_);
+        const auto& row = current.front();
+        const auto previous = service::dns_sync::parse_stored(row[4].value().value_or("{}"));
+        auto runtime = service::dns_sync::parse_stored_runtime(row[1].value().value_or("{}"));
+        const auto requested = service::dns_sync::normalize(config);
+        if (!previous || !runtime) {
+            throw_corrupt_config();
+        }
+        if (!requested) {
             service::common::throw_app_error(service::common::validation_error_code,
                 "records 不能为空且每条记录必须完整", 400);
         }
-        validate_record_lines(c, *normalized_config, current.front()[1].value().value_or("{}"));
-        validate_record_ttls(*normalized_config, provider->provider_);
-        co_await validate_system_managed_records(
-            transaction, tenant_id, id, current.front()[3].value().value_or(""),
-            current.front()[1].value().value_or("{}"), *normalized_config);
-        const auto config_json = serialize_config(c, *normalized_config);
-        service::background::queued_work work;
-        const auto revision = co_await advance_locked_zone(transaction, tenant_id, id,
-            {.config_json_ = std::string_view(config_json)}, work);
-        co_await commit_changes(transaction, c, tenant_id, id, work);
-        co_return revision.revision_;
+        const auto changes = service::dns_sync::detail::plan_record_changes(*previous, *requested);
+        if (changes.writes_.records_.empty() && changes.removals_.records_.empty()) {
+            co_await transaction.commit();
+            co_return expected_revision;
+        }
+        const auto provider_id = row[2].value().value_or("");
+        if (!provider || !provider->verified_) {
+            service::common::throw_app_error(dns_zone_error::provider_unavailable);
+        }
+        const auto domain = std::string(row[3].value().value_or(""));
+        validate_record_lines(c, changes.writes_, row[1].value().value_or("{}"));
+        validate_record_ttls(changes.writes_, provider->provider_);
+        auto affected = changes.writes_;
+        affected.records_.insert(affected.records_.end(), changes.removals_.records_.begin(), changes.removals_.records_.end());
+        co_await validate_system_managed_records(transaction, tenant_id, id, domain,
+            row[1].value().value_or("{}"), affected);
+        const auto credentials = co_await transaction.query(
+            "SELECT account_id, config::text FROM sys_provider WHERE tenant_id = $1 AND id = $2", tenant_id, provider_id);
+        const auto account = std::string(credentials.front()[0].value().value_or(""));
+        const auto provider_config = service::dns::parse_dns_provider_config(
+            credentials.front()[1].value().value_or("{}"), c.pool());
+        service::utils::sensitive_string secret(service::utils::open_secret(provider_config.credential_envelope_));
+        service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::dns_sync, "web",
+            std::chrono::steady_clock::now());
+        trace.register_secret(secret.view());
+        trace.register_secret(account);
+        const service::dns::dns_provider_driver driver(provider->provider_, {.tenant_id_ = tenant_id, .account_id_ = account});
+        const auto remote_zone = co_await driver.find_zone(c, trace, account, secret.view(), domain);
+        auto remote = co_await driver.list_records(c, trace, account, secret.view(), remote_zone.id_, domain);
+        auto remote_ids = service::dns_sync::detail::collect_remote_ids_by_local_id(*runtime);
+        for (const auto& record : changes.removals_.records_) {
+            const auto known = remote_ids.find(record.id_);
+            if (known == remote_ids.end() || std::ranges::none_of(remote,
+                                                 [&](const auto& item) { return item.id_ == known->second; })) {
+                continue;
+            }
+            co_await driver.delete_record(c, trace, account, secret.view(), remote_zone.id_, known->second,
+                record.name_ + " " + record.type_);
+            std::erase_if(remote, [&](const auto& item) { return item.id_ == known->second; });
+        }
+        for (const auto& record : changes.writes_.records_) {
+            const auto known = remote_ids.find(record.id_);
+            const auto result = co_await driver.reconcile_record(c, trace, account, secret.view(), remote_zone.id_, domain,
+                known == remote_ids.end() ? std::string_view{} : std::string_view{known->second},
+                record.type_, record.name_, record.content_, record.ttl_, record.priority_, record.proxied_,
+                record.line_code_, remote);
+            auto observed = service::dns_sync::detail::to_remote_record(record, driver.record_names(), domain);
+            observed.id_ = result.remote_id_;
+            std::erase_if(remote, [&](const auto& item) { return item.id_ == observed.id_; });
+            remote.push_back(std::move(observed));
+            // Keep the request's UUID when the provider assigns its own id.
+            std::erase_if(runtime->record_states_, [&](const auto& item) { return item.id_ == record.id_; });
+            runtime->record_states_.push_back({.id_ = record.id_, .remote_record_id_ = result.remote_id_, .sync_status_ = "synced", .synced_revision_ = row[5].as<std::int64_t>().value_or(1), .last_error_ = {}, .managed_ = false});
+        }
+        const auto lines = co_await driver.list_lines(c, trace, account, secret.view(), domain);
+        std::vector<service::dns_sync::zone_record_runtime_data> managed;
+        for (const auto& state : runtime->record_states_) {
+            if (state.managed_) {
+                managed.push_back(state);
+            }
+        }
+        const auto snapshot = service::dns_sync::capture_zone_snapshot(id, domain, driver.record_names(), remote,
+            lines, *runtime, managed, row[5].as<std::int64_t>().value_or(1));
+        const auto config_json = serialize_config(c, snapshot.records_);
+        const auto runtime_json = ruvia::to_json(service::dns_sync::to_output(snapshot.runtime_), {.resource_ = c.pool()});
+        (void)co_await transaction.execute(
+            "UPDATE sys_dns_zone SET config = $3::jsonb, runtime = $4::jsonb, revision = revision + 1, "
+            "updated_at = NOW() WHERE tenant_id = $1 AND id = $2",
+            tenant_id, id, std::string_view(config_json), std::string_view(runtime_json));
+        service::live_resource::notifications::resource_notification notification(tenant_id);
+        notification.changed(service::live_resource::resource::dns_zones, id);
+        co_await service::live_resource::commit_and_notify(transaction, c, notification);
+        co_return expected_revision + 1;
     }
 
-    ruvia::task<void> request_sync(ruvia::context& c, const std::string& tenant_id,
-        const std::string& id, std::string_view conflict_policy) {
+    ruvia::task<void> request_sync(ruvia::context& c, const std::string& tenant_id, const std::string& id) {
         auto transaction = co_await c.db().begin_transaction();
         service::background::queued_work work;
-        const auto revision = co_await service::dns_sync::advance_zone_revision(transaction, tenant_id, id,
-            {.operation_ = conflict_policy == "remote"  ? service::sync_runtime::marker_operation::sync_remote
-                           : conflict_policy == "local" ? service::sync_runtime::marker_operation::sync_local
-                                                        : service::sync_runtime::marker_operation::sync},
-            work);
-        if (!revision) {
+        if (!co_await service::dns_sync::advance_zone_revision(transaction, tenant_id, id, {}, work)) {
             service::common::throw_app_error(dns_zone_error::not_found);
         }
         co_await commit_changes(transaction, c, tenant_id, id, work);
@@ -150,27 +220,18 @@ public:
             service::common::throw_app_error(dns_zone_error::in_use);
         }
         service::background::queued_work work;
-        const auto revision = co_await advance_locked_zone(transaction, tenant_id, id,
+        const auto revision = co_await service::dns_sync::advance_zone_revision(transaction, tenant_id, id,
             {.operation_ = service::sync_runtime::marker_operation::remove}, work);
+        if (!revision) {
+            throw std::logic_error("locked DNS zone was not advanced");
+        }
         co_await commit_changes(transaction, c, tenant_id, id, work);
-        co_return revision.revision_;
+        co_return revision->revision_;
     }
 
 private:
     static constexpr service::common::revision_errors revision_errors_{dns_zone_error::not_found,
         dns_zone_error::revision_conflict};
-
-    // Advances a zone this transaction holds FOR UPDATE at the checked
-    // revision, so the advance cannot miss it.
-    static ruvia::task<service::dns_sync::zone_revision> advance_locked_zone(ruvia::db_transaction& transaction,
-        const std::string& tenant_id, const std::string& id, const service::dns_sync::zone_revision_change& change,
-        service::background::queued_work& work) {
-        auto revision = co_await service::dns_sync::advance_zone_revision(transaction, tenant_id, id, change, work);
-        if (!revision) {
-            throw std::logic_error("locked DNS zone was not advanced");
-        }
-        co_return std::move(*revision);
-    }
 
     static ruvia::task<void> commit_changes(ruvia::db_transaction& transaction, ruvia::context& c, const std::string& tenant_id, const std::string& id,
         const service::background::queued_work& work) {
@@ -224,7 +285,8 @@ private:
         const auto projected =
             co_await service::dns_sync::load_projected_records(transaction, tenant_id, zone_id);
         std::unordered_set<std::string> system_ids;
-        std::unordered_set<std::string> traffic_hostnames;
+        auto traffic_hostnames = co_await service::dns_sync::load_cluster_hostnames(
+            transaction, tenant_id, zone_id, zone_domain);
         system_ids.reserve(projected.size());
         traffic_hostnames.reserve(projected.size());
         for (const auto& record : projected) {
@@ -238,6 +300,11 @@ private:
         const auto runtime = service::dns_sync::parse_stored_runtime(runtime_json);
         if (!runtime) {
             throw_corrupt_config();
+        }
+        for (const auto& state : runtime->record_states_) {
+            if (state.managed_ && state.id_) {
+                system_ids.emplace(*state.id_);
+            }
         }
         std::unordered_set<std::string> challenge_hostnames;
         challenge_hostnames.reserve(runtime->challenge_records_.size());

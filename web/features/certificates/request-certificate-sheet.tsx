@@ -123,10 +123,10 @@ export function RequestCertificateSheet({
       <QueryNotice
         query={providers}
         onRetry={() => void providers.refetch()}
-        title='证书供应商加载失败'
+        title='证书服务商加载失败'
       />
       <Choice
-        label='证书供应商'
+        label='证书服务商'
         required
         value={values.certificate_provider_id}
         onChange={(certificate_provider_id) =>
@@ -141,8 +141,8 @@ export function RequestCertificateSheet({
       />
       {providers.isSuccess && !providers.data.length && (
         <Notice>
-          还没有证书供应商，请先在
-          <Link href='/providers/certificate'>供应商账号 › 证书供应商</Link>
+          还没有证书服务商，请先在
+          <Link href='/providers/certificate'>服务商 › 证书</Link>
           中添加。
         </Notice>
       )}

@@ -258,7 +258,19 @@ if(BUILD_TESTING)
     set_tests_properties(flexedge_snapshot_read_budget PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90)
     flexedge_add_test(dns_reconciliation
         SOURCES tests/dns_reconciliation.cpp
+        LIBRARIES OpenSSL::Crypto
     )
+    flexedge_add_test(dns_maintenance
+        SOURCES tests/dns_maintenance.cpp
+        LIBRARIES ruvia::web OpenSSL::Crypto
+    )
+    set_tests_properties(flexedge_dns_maintenance PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90)
+    flexedge_add_test(dns_management BIG_OBJECT
+        SOURCES tests/dns_management.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto
+        DRIVER tests/dns_management_test.py
+    )
+    set_tests_properties(flexedge_dns_management PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90)
     flexedge_add_test(credential_crypto
         SOURCES tests/credential_crypto.cpp
         LIBRARIES OpenSSL::Crypto

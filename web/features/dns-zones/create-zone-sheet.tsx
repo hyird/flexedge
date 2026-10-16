@@ -109,9 +109,7 @@ export function CreateZoneSheet({
         error={errors.provider}
       />
       {providers.isSuccess && !providers.data.length && (
-        <Notice>
-          还没有 DNS 账号，请先在「供应商账号 › DNS 账号」中添加。
-        </Notice>
+        <Notice>还没有 DNS 账号，请先在「服务商 › DNS」中添加。</Notice>
       )}
       <Choice
         label='域名'

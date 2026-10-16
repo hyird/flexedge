@@ -156,7 +156,8 @@ CREATE TABLE sys_dns_zone (id uuid PRIMARY KEY, tenant_id uuid NOT NULL, provide
     domain text, desired_revision bigint DEFAULT 10, synced_revision bigint DEFAULT 9,
     revision bigint DEFAULT 1, deleted_at timestamptz, sort bigint DEFAULT 1,
     config jsonb DEFAULT '{"records":[]}', runtime jsonb, sync_status text DEFAULT 'pending',
-    last_synced_at timestamptz, last_error text, updated_at timestamptz DEFAULT NOW());
+    last_synced_at timestamptz, last_error text, next_check_at timestamptz,
+    updated_at timestamptz DEFAULT NOW());
 CREATE TABLE sys_certificate (id uuid PRIMARY KEY, tenant_id uuid NOT NULL, provider_id uuid, dns_zone_id uuid,
     subject_alt_names text[] DEFAULT '{dependency.example.com}', issuance_revision bigint DEFAULT 1,
     issued_revision bigint DEFAULT 0, revision bigint DEFAULT 1, status text DEFAULT 'pending', expires_at timestamptz,
@@ -179,7 +180,7 @@ CREATE TABLE sys_sync_event (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, tenant_id uuid NOT NULL, task_id uuid NOT NULL,
     resource_type text NOT NULL, resource_id uuid NOT NULL, operation text NOT NULL, version bigint NOT NULL,
     outcome text NOT NULL, error text NOT NULL, attempt integer NOT NULL, started_at timestamptz,
-    duration_ms bigint NOT NULL, next_attempt_at timestamptz, detail jsonb NOT NULL, emitted_at timestamptz NOT NULL);
+    duration_ms bigint NOT NULL, detail jsonb NOT NULL, emitted_at timestamptz NOT NULL);
 CREATE TABLE sys_sync_event_trace (event_id bigint PRIMARY KEY REFERENCES sys_sync_event(id), tenant_id uuid NOT NULL,
     summary jsonb NOT NULL, trace jsonb NOT NULL, trace_bytes integer NOT NULL);
 CREATE TABLE sys_notification_outbox (id varchar(64) PRIMARY KEY, kind varchar(24) NOT NULL, payload text NOT NULL,
@@ -205,15 +206,15 @@ CREATE TABLE sys_notification_outbox (id varchar(64) PRIMARY KEY, kind varchar(2
     (void)co_await db.execute("INSERT INTO sys_certificate(id, tenant_id, provider_id, dns_zone_id) VALUES ($1,$2,$3,$4)", certificate, tenant, provider, zone);
 }
 
-service::dns_sync::zone_runtime_dto challenge_runtime(bool synced, std::int64_t revision = 10, bool unrelated_failure = false) {
+service::dns_sync::zone_runtime_data challenge_runtime(bool synced, std::int64_t revision = 10, bool unrelated_failure = false) {
     service::dns_sync::zone_runtime_data data;
-    data.records_imported_ = true;
+
     data.challenge_records_.push_back({.id_ = std::string(challenge_id), .name_ = "_acme-challenge.dependency.example.com", .content_ = "qa-challenge", .ttl_ = 600, .certificate_id_ = std::string(certificate)});
     data.record_states_.push_back({.id_ = std::string(challenge_id), .remote_record_id_ = "remote-qa", .sync_status_ = synced ? "synced" : "failed", .synced_revision_ = synced ? revision : revision - 1, .last_error_ = synced ? std::optional<std::string>{} : "record name conflict"});
     if (unrelated_failure) {
         data.record_states_.push_back({.id_ = "unrelated", .remote_record_id_ = {}, .sync_status_ = "failed", .synced_revision_ = 0, .last_error_ = "unrelated name conflict"});
     }
-    return service::dns_sync::to_output(data);
+    return data;
 }
 
 issuance::issuance_state progress(std::int64_t revision = 1) {
@@ -223,7 +224,7 @@ issuance::issuance_state progress(std::int64_t revision = 1) {
 ruvia::task<void> reset(task_context& context, bool legacy = false) {
     auto db = context.db();
     (void)co_await db.execute("TRUNCATE sys_sync_event_trace, sys_sync_event, sys_sync_task, sys_notification_outbox");
-    const auto runtime = ruvia::to_json(challenge_runtime(false));
+    const auto runtime = ruvia::to_json(service::dns_sync::to_output(challenge_runtime(false)));
     (void)co_await db.execute("UPDATE sys_dns_zone SET desired_revision=10, synced_revision=9, runtime=$1::jsonb, sync_status='pending', last_error=NULL", std::string_view(runtime));
     auto value = progress();
     if (legacy) {
@@ -260,9 +261,10 @@ ruvia::task<void> finish_dns(task_context& context, bool success, bool challenge
     service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::dns_sync, "web", marker->claimed_at_);
     const service::dns_sync::detail::dns_task task{.id_ = marker->id_, .tenant_id_ = marker->tenant_id_, .resource_id_ = marker->resource_id_, .operation_ = marker->operation_, .version_ = marker->version_, .failures_ = marker->failures_, .claimed_at_ = marker->claimed_at_};
     if (success) {
-        auto runtime = challenge_runtime(challenge_synced, marker->version_, unrelated_failure);
-        co_await service::dns_sync::detail::persist_synced_zone(context, trace, task, lease, runtime, marker->version_,
-            challenge_synced && !unrelated_failure ? "" : "record conflict", sync::detail_none_json);
+        const service::dns_sync::zone_snapshot snapshot{
+            .records_ = {}, .runtime_ = challenge_runtime(challenge_synced, marker->version_, unrelated_failure)};
+        co_await service::dns_sync::detail::persist_synced_zone(context, trace, task, lease, snapshot, marker->version_, 1,
+            challenge_synced && !unrelated_failure ? "" : "record conflict", sync::detail_none_json, true);
     } else {
         co_await service::dns_sync::detail::fail_dns_task(context, trace, task, "DNS credentials rejected", true, sync::detail_none_json);
     }
@@ -274,7 +276,7 @@ ruvia::task<void> require_waiting(task_context& context) {
 }
 
 ruvia::task<void> require_terminal(task_context& context) {
-    const auto rows = co_await context.db().query("SELECT task.is_done AND NOT task.is_ok, certificate.status='failed' AND certificate.issuance_state IS NULL, event.outcome='failed' AND event.next_attempt_at IS NULL, task.error LIKE '%DNS-01%' FROM sys_sync_task task JOIN sys_certificate certificate ON certificate.id=task.certificate_id JOIN sys_sync_event event ON event.task_id=task.id WHERE task.resource_type='certificate' ORDER BY event.id DESC LIMIT 1");
+    const auto rows = co_await context.db().query("SELECT task.is_done AND NOT task.is_ok, certificate.status='failed' AND certificate.issuance_state IS NULL, event.outcome='failed', task.error LIKE '%DNS-01%' FROM sys_sync_task task JOIN sys_certificate certificate ON certificate.id=task.certificate_id JOIN sys_sync_event event ON event.task_id=task.id WHERE task.resource_type='certificate' ORDER BY event.id DESC LIMIT 1");
     require(rows.size() == 1 && rows.front()[0].as<bool>().value() && rows.front()[1].as<bool>().value() && rows.front()[2].as<bool>().value() && rows.front()[3].as<bool>().value(), "unapplied terminal DNS yields an explicit terminal certificate result with no retry");
     require(!(co_await sync::claim_marker(context, sync::marker_resource_type::certificate)), "terminal certificate is not retried");
 }
@@ -328,7 +330,7 @@ ruvia::task<void> verify_result_during_gate(ruvia::web_worker_context& web, task
         }
         require(false, "the certificate gate reached its zone lock");
     }
-    const auto runtime = ruvia::to_json(challenge_runtime(success));
+    const auto runtime = ruvia::to_json(service::dns_sync::to_output(challenge_runtime(success)));
     (void)co_await holder.execute("UPDATE sys_dns_zone SET synced_revision=$1,runtime=$2::jsonb,sync_status=$3 WHERE id=$4",
         std::int64_t{success ? 10 : 9}, std::string_view(runtime), success ? std::string_view{"synced"} : std::string_view{"failed"}, zone);
     const auto lease = sync::make_running_lease(tenant, dns_marker->id_, dns_marker->version_, context.lease_owner(),
@@ -419,7 +421,7 @@ ruvia::task<void> verify(ruvia::web_worker_context& web, const acme_origin& orig
     require(origin.count() == before, "marker success alone cannot replace the actual required DNS revision");
 
     co_await reset(context);
-    const auto synced_runtime = ruvia::to_json(challenge_runtime(true));
+    const auto synced_runtime = ruvia::to_json(service::dns_sync::to_output(challenge_runtime(true)));
     (void)co_await context.db().execute("UPDATE sys_dns_zone SET synced_revision=10,runtime=$1::jsonb,desired_revision=11", std::string_view(synced_runtime));
     (void)co_await context.db().execute("UPDATE sys_sync_task SET version=11,is_done=TRUE,is_ok=FALSE,processed_version=11 WHERE resource_type='dns_zone'");
     const auto challenges_before = origin.count("/challenge/fresh");

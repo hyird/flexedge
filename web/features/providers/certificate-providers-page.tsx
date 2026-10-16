@@ -50,7 +50,7 @@ export function CertificateProvidersPage() {
   const columns: DataGridColumn<CertificateProvider>[] = [
     {
       id: 'provider',
-      header: '供应商',
+      header: '服务商',
       isRowHeader: true,
       minWidth: 170,
       cell: (item) => (
@@ -119,7 +119,7 @@ export function CertificateProvidersPage() {
           size='sm'
           variant='tertiary'
           className='px-2'
-          aria-label={`编辑证书供应商 ${providerLabel(item.provider)}`}
+          aria-label={`编辑证书服务商 ${providerLabel(item.provider)}`}
           onPress={() => void sheet.openEdit(item.id)}
         >
           编辑
@@ -130,7 +130,7 @@ export function CertificateProvidersPage() {
   const createButton = (
     <Button size='sm' onPress={() => void sheet.openCreate()}>
       <Plus className='size-4' />
-      添加供应商
+      添加服务商
     </Button>
   )
   return (
@@ -139,7 +139,7 @@ export function CertificateProvidersPage() {
         search={{
           value: list.keyword,
           onChange: (q) => void list.setSearch({ q }),
-          placeholder: '搜索供应商或账户',
+          placeholder: '搜索服务商或账户',
         }}
         hasFilters={filtered}
         onClearFilters={() => void list.clearFilters([])}
@@ -148,7 +148,7 @@ export function CertificateProvidersPage() {
         actions={createButton}
       />
       <DataTable
-        label='证书供应商'
+        label='证书服务商'
         columns={columns}
         data={query.data?.list}
         isLoading={query.isPending}
@@ -158,11 +158,11 @@ export function CertificateProvidersPage() {
         empty={
           filtered
             ? {
-                title: '没有匹配的证书供应商',
+                title: '没有匹配的证书服务商',
                 description: '调整搜索关键字后重试。',
               }
             : {
-                title: '还没有证书供应商',
+                title: '还没有证书服务商',
                 description:
                   "添加 Let's Encrypt 或 ZeroSSL 凭据后，即可为网站申请受信任证书。",
               }

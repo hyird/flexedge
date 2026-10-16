@@ -607,6 +607,24 @@ $flexedge_initial$)sql"},
     for (auto& migration : log_indexes.compile("0002_log_event_lookup")) {
         migrations.push_back(std::move(migration));
     }
+    migrations.emplace_back(ruvia::db_migration_options{
+        .id_ = "0003_dns_reconciliation",
+        .sql_ = R"sql(DO $flexedge_dns$
+BEGIN
+ALTER TABLE public.sys_dns_zone ADD COLUMN next_check_at timestamptz NOT NULL DEFAULT now();
+CREATE INDEX idx_dns_zone_check ON public.sys_dns_zone (next_check_at, sort) WHERE deleted_at IS NULL;
+ALTER TABLE public.sys_dns_zone DROP CONSTRAINT ck_dns_zone_sync_status;
+ALTER TABLE public.sys_dns_zone ADD CONSTRAINT ck_dns_zone_sync_status
+    CHECK (sync_status IN ('pending', 'synced', 'failed'));
+ALTER TABLE public.sys_sync_task DROP CONSTRAINT ck_sync_task_operation;
+ALTER TABLE public.sys_sync_task ADD CONSTRAINT ck_sync_task_operation CHECK (
+    (resource_type = 'provider' AND operation = 'verify') OR
+    (resource_type = 'dns_zone' AND operation IN ('sync', 'delete')) OR
+    (resource_type = 'certificate' AND operation IN ('issue', 'renew')) OR
+    (resource_type = 'website' AND operation = 'apply'));
+ALTER TABLE public.sys_sync_event DROP COLUMN next_attempt_at;
+END;
+$flexedge_dns$)sql"});
     return migrations;
 }();
 

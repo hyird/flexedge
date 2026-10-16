@@ -204,52 +204,14 @@ private:
         return query;
     }
 
-    expression marker_warning(expression successful) {
-        const auto conflict_count = expressions_.coalesce({expressions_.cast(
-                                                               json_text(column("success", "detail"), "conflict_count"), ruvia::db_data_type::big_int),
-            value(std::int64_t{0})});
-        const auto domains = json(column("success", "detail"), "domains");
-        const auto domain_array = expressions_.case_when({{equal(expressions_.call("jsonb_typeof", {domains}),
-                                                               value("array")),
-                                                             domains}},
-            expressions_.cast(value("[]"), ruvia::db_data_type::jsonb));
-        ruvia::db_query unverified(expressions_.resource());
-        unverified.select(unverified.value(std::int64_t{1}))
-            .from_function(unverified.call("jsonb_array_elements", {unverified.import_expression(domain_array)}), "domain")
-            .where(unverified.binary(unverified.binary(unverified.column("value", "domain"),
-                                         ruvia::db_binary_operator::json_get_text, unverified.value("status")),
-                ruvia::db_binary_operator::not_equal, unverified.value("verified")));
-        return expressions_.case_when({{expressions_.unary(ruvia::db_unary_operator::not_value, successful), value("")},
-                                          {all({equal(column("marker", "resource_type"), value("dns_zone")),
-                                               either({expressions_.binary(conflict_count, ruvia::db_binary_operator::greater, value(std::int64_t{0})),
-                                                   equal(column("zone", "sync_status"), value("conflict"))})}),
-                                              value("dns_conflict")},
-                                          {all({equal(column("marker", "resource_type"), value("dns_zone")),
-                                               equal(column("zone", "sync_status"), value("failed"))}),
-                                              value("dns_unpushed")},
-                                          {all({equal(column("marker", "resource_type"), value("website")), expressions_.exists(unverified)}),
-                                              value("domain_unverified")}},
-            value(""));
-    }
-
     auto marker_tasks() {
         const auto successful = all({column("marker", "is_done"), column("marker", "is_ok")});
-        auto statistics = event_statistics(equal(column("event", "version"), column("marker", "version")),
+        auto statistics = event_statistics(value(false),
             "marker", "resource_id", column("marker", "resource_type"));
-        auto success = source<event_entity>("event");
-        success.select({{"detail", column("event", "detail")}})
-            .where(all({successful, equal(column("event", "tenant_id"), value(tenant_)),
-                equal(column("event", "resource_type"), column("marker", "resource_type")),
-                equal(column("event", "resource_id"), column("marker", "resource_id")),
-                equal(column("event", "version"), column("marker", "version")),
-                equal(column("event", "outcome"), value("completed"))}))
-            .order_by(column("event", "id"), ruvia::db_order_direction::desc)
-            .take(1);
-        const auto warning = marker_warning(successful);
         const auto status = expressions_.case_when({{all({column("marker", "is_done"), expressions_.unary(ruvia::db_unary_operator::not_value,
                                                                                            column("marker", "is_ok"))}),
                                                         value("failed")},
-                                                       {successful, expressions_.case_when({{different(warning, value("")), value("attention_required")}}, value("completed"))},
+                                                       {successful, value("completed")},
                                                        {expressions_.coalesce({expressions_.binary(column("marker", "lease_until"),
                                                                                    ruvia::db_binary_operator::greater, expressions_.call("now")),
                                                             value(false)}),
@@ -264,19 +226,18 @@ private:
             .template join<certificate_entity>(ruvia::db_join_type::left, "certificate", resource_join("certificate", "certificate"))
             .template join<provider_entity>(ruvia::db_join_type::left, "provider", resource_join("provider", "provider"))
             .join(ruvia::db_join_type::cross, statistics, "attempts", {}, {.lateral_ = true})
-            .join(ruvia::db_join_type::left, success, "success", value(true), {.lateral_ = true})
             .where(all({equal(column("marker", "tenant_id"), value(tenant_)),
                 expressions_.unary(ruvia::db_unary_operator::is_not_null, expressions_.coalesce({column("website", "id"), column("zone", "id"), column("certificate", "id"), column("provider", "id")}))}))
             .select({{"resource_type", column("marker", "resource_type")}, {"resource_id", column("marker", "resource_id")},
                 {"resource_kind", expressions_.coalesce({column("provider", "kind"), value("")})},
                 {"name", expressions_.coalesce({json_text(column("website", "config"), "name"), column("zone", "domain"),
                              column("certificate", "domain"), column("provider", "name"), column("provider", "provider"), value("")})},
-                {"operation", column("marker", "operation")}, {"status", status}, {"warning", warning},
+                {"operation", column("marker", "operation")}, {"status", status},
                 {"error", expressions_.case_when({{one_of(status, {"retrying", "failed"}), column("marker", "error")}}, value(""))},
                 {"next_attempt_at", expressions_.case_when({{equal(status, value("retrying")), column("marker", "next_attempt_at")}}, null_time())},
-                {"updated_at", expressions_.greatest({column("marker", "updated_at"), column("attempts", "last_at")})},
+                {"updated_at", column("marker", "updated_at")},
                 {"last_success_at", column("attempts", "last_success_at")},
-                {"attempt_count", column("attempts", "attempt_count")}, {"failure_count", column("attempts", "failure_count")},
+                {"attempt_count", column("attempts", "attempt_count")}, {"failure_count", column("marker", "count_fails")},
                 {"node_offline", value(false)}});
         return query;
     }
@@ -327,7 +288,7 @@ private:
                 expressions_.unary(ruvia::db_unary_operator::is_null, column("node", "deleted_at"))}))
             .select({{"resource_type", value("node")}, {"resource_id", column("node", "id")}, {"resource_kind", value("")},
                 {"name", column("node", "name")}, {"operation", expressions_.case_when({{spec_pending, value("configure")}}, value("publish"))},
-                {"status", status}, {"warning", value("")},
+                {"status", status},
                 {"error", expressions_.case_when({{one_of(status, {"failed", "retrying"}), expressions_.case_when({{equal(status, release_status), expressions_.coalesce({column("target", "last_error"), value("")})}},
                                                                                                expressions_.coalesce({column("configure", "error"), value("")}))}},
                               value(""))},
@@ -339,7 +300,8 @@ private:
                                        null_time()),
                                    expressions_.coalesce({column("node", "registered_at"), column("node", "created_at")})})},
                 {"last_success_at", column("attempts", "last_success_at")},
-                {"attempt_count", column("attempts", "attempt_count")}, {"failure_count", column("attempts", "failure_count")},
+                {"attempt_count", column("attempts", "attempt_count")},
+                {"failure_count", expressions_.case_when({{equal(status, value("completed")), value(std::int64_t{0})}}, column("attempts", "failure_count"))},
                 {"node_offline", all({expressions_.unary(ruvia::db_unary_operator::not_value, recent), different(status, value("completed"))})}});
         return query;
     }
@@ -349,7 +311,7 @@ private:
         auto nodes = node_tasks();
         markers.combine(ruvia::db_set_operation::union_all, nodes);
         auto query = source<marker_entity>("task");
-        query.with("tasks", markers).from_cte("tasks").select({{"resource_type", column("task", "resource_type")}, {"resource_id", text(column("task", "resource_id"))}, {"resource_kind", column("task", "resource_kind")}, {"name", column("task", "name")}, {"operation", column("task", "operation")}, {"status", column("task", "status")}, {"warning", column("task", "warning")}, {"error", column("task", "error")}, {"next_attempt_at", format_time(column("task", "next_attempt_at"))}, {"updated_at", format_time(column("task", "updated_at"))}, {"last_success_at", format_time(column("task", "last_success_at"))}, {"attempt_count", column("task", "attempt_count")}, {"failure_count", column("task", "failure_count")}, {"node_offline", column("task", "node_offline")}});
+        query.with("tasks", markers).from_cte("tasks").select({{"resource_type", column("task", "resource_type")}, {"resource_id", text(column("task", "resource_id"))}, {"resource_kind", column("task", "resource_kind")}, {"name", column("task", "name")}, {"operation", column("task", "operation")}, {"status", column("task", "status")}, {"error", column("task", "error")}, {"next_attempt_at", format_time(column("task", "next_attempt_at"))}, {"updated_at", format_time(column("task", "updated_at"))}, {"last_success_at", format_time(column("task", "last_success_at"))}, {"attempt_count", column("task", "attempt_count")}, {"failure_count", column("task", "failure_count")}, {"node_offline", column("task", "node_offline")}});
         return query;
     }
 
@@ -357,7 +319,7 @@ private:
         if (!filter.status_.empty()) {
             const auto status = column(alias, "status");
             query.and_where(filter.status_ == "active"      ? one_of(status, {"queued", "running", "retrying"})
-                            : filter.status_ == "attention" ? one_of(status, {"retrying", "failed", "attention_required"})
+                            : filter.status_ == "attention" ? one_of(status, {"retrying", "failed"})
                                                             : equal(status, value(filter.status_)));
         }
         if (!filter.type_.empty()) {
@@ -389,7 +351,6 @@ private:
                 {"operation", column("event", "operation")}, {"outcome", column("event", "outcome")},
                 {"error", column("event", "error")}, {"started_at", format_time(column("event", "started_at"))},
                 {"emitted_at", format_time(column("event", "emitted_at"))}, {"duration_ms", column("event", "duration_ms")},
-                {"next_attempt_at", format_time(column("event", "next_attempt_at"))},
                 {"detail", text(column("event", "detail"))}, {"trace", text(summary)}});
         return query;
     }

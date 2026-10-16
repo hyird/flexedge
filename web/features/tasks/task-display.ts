@@ -22,8 +22,6 @@ export const taskTypeLabels = {
 export const taskOperations = {
   apply: '检查网站',
   sync: '同步',
-  sync_local: '以本地为准同步',
-  sync_remote: '以远端为准同步',
   delete: '删除托管域',
   issue: '签发',
   renew: '续期',
@@ -38,7 +36,6 @@ export const taskStatuses = {
   running: { label: '执行中', tone: 'accent' },
   retrying: { label: '重试中', tone: 'warning' },
   failed: { label: '失败', tone: 'danger' },
-  attention_required: { label: '需处理', tone: 'warning' },
   completed: { label: '成功', tone: 'success' },
 } as const satisfies StatusDictionary<(typeof taskStatusValues)[number]>
 export const taskStatusReserve = statusReserve(taskStatuses)
@@ -81,13 +78,6 @@ export function recentTaskOrder<T extends Pick<Task, 'status' | 'updated_at'>>(
         (parseDate(left.updated_at)?.getTime() ?? 0)
   )
 }
-
-/** Why a settled task still needs attention (`warning`). */
-export const taskWarnings = {
-  dns_conflict: '存在冲突记录',
-  dns_unpushed: '有记录未推送',
-  domain_unverified: '域名未生效',
-} as const
 
 export function operationLabel(operation: string) {
   return known(taskOperations, operation) ?? operation
@@ -162,31 +152,14 @@ export function taskTarget(
 
 /** What a task shows in its fixed note slot next to the status, in priority
  * order; `null` when nothing applies. */
-export type TaskNote =
-  | { kind: 'offline' }
-  | { kind: 'retry'; at: string }
-  | { kind: 'warning'; label: string }
-  | { kind: 'recovered'; failures: number }
+export type TaskNote = { kind: 'offline' } | { kind: 'retry'; at: string }
 
 export function taskNote(
-  task: Pick<
-    Task,
-    'status' | 'node_offline' | 'next_attempt_at' | 'warning' | 'failure_count'
-  >
+  task: Pick<Task, 'status' | 'node_offline' | 'next_attempt_at'>
 ): TaskNote | null {
   // The backend sets `node_offline` only while the task is unfinished.
   if (task.node_offline) return { kind: 'offline' }
   if (task.status === 'retrying' && task.next_attempt_at)
     return { kind: 'retry', at: task.next_attempt_at }
-  if (task.status === 'attention_required' && task.warning)
-    return {
-      kind: 'warning',
-      label: known(taskWarnings, task.warning) ?? task.warning,
-    }
-  if (
-    (task.status === 'completed' || task.status === 'attention_required') &&
-    task.failure_count > 0
-  )
-    return { kind: 'recovered', failures: task.failure_count }
   return null
 }

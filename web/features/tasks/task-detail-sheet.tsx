@@ -87,7 +87,7 @@ export function TaskDetailSheet({
 function TaskHeader({ task }: { task: Task }) {
   const target = taskTarget(task)
   const unsettled = task.status !== 'completed'
-  const error = unsettled && task.status !== 'attention_required' && task.error
+  const error = unsettled && task.error
   return (
     <div className='flex min-w-0 flex-col gap-1 text-sm'>
       <p className='m-0 flex min-w-0 items-center gap-1.5 overflow-x-auto whitespace-nowrap text-muted'>

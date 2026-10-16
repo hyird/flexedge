@@ -155,8 +155,7 @@ const dnsModeItems = [
 /** Why a zone is not ready yet; every zone stays selectable regardless. */
 function hostedZoneState(zone: DnsZoneOption) {
   if (zone.available) return undefined
-  if (zone.sync_status === 'failed' || zone.sync_status === 'conflict')
-    return { label: '同步异常', danger: true }
+  if (zone.sync_status === 'failed') return { label: '同步异常', danger: true }
   return {
     label: zone.sync_status === 'synced' ? '不可用' : '未同步',
     danger: false,
@@ -343,7 +342,7 @@ export function DomainsSection({
             />
             {zones.isSuccess && zones.data.length === 0 && (
               <p className='text-[13px] text-muted'>
-                还没有托管域名，请先在“域名管理”中添加
+                还没有托管域名，请先在“域名”中添加
               </p>
             )}
           </>

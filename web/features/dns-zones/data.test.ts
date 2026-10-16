@@ -96,7 +96,7 @@ test('record saves enforce provider capabilities without mutating editor values 
   await saveDnsRecords(zone, [record])
   await saveDnsRecords({ ...zone, dns_provider: 'cloudflare' }, [record])
   await removeDnsZone(zone)
-  await syncDnsZone({ item: zone, policy: 'remote' })
+  await syncDnsZone({ item: zone })
   expect(record.proxied).toBe(true)
   expect(calls).toEqual([
     [
@@ -107,7 +107,7 @@ test('record saves enforce provider capabilities without mutating editor values 
     ],
     ['put', '/dns-zones/zone', { records: [record] }, '"7"'],
     ['delete', '/dns-zones/zone', undefined, '"7"'],
-    ['post', '/dns-zones/zone/sync', { conflict_policy: 'remote' }, undefined],
+    ['post', '/dns-zones/zone/sync', undefined, undefined],
   ])
 })
 

@@ -36,7 +36,7 @@ export function dnsZonesQuery(params: {
   page_size: number
   keyword?: string
   dns_provider_id?: string
-  /** `issue` = failed or conflict (overview `dns_zone_issue_count`). */
+  /** `issue` = failed (overview `dns_zone_issue_count`). */
   sync_status?: ZoneSyncFilter
 }) {
   return queryOptions({
@@ -115,18 +115,8 @@ export function createDnsZone(values: {
   return sendData('post', '/dns-zones', values)
 }
 
-export function syncDnsZone({
-  item,
-  policy,
-}: {
-  item: Pick<DnsZone, 'id'>
-  policy?: 'local' | 'remote'
-}) {
-  return sendData(
-    'post',
-    '/dns-zones/' + item.id + '/sync',
-    policy ? { conflict_policy: policy } : undefined
-  )
+export function syncDnsZone({ item }: { item: Pick<DnsZone, 'id'> }) {
+  return sendData('post', '/dns-zones/' + item.id + '/sync', undefined)
 }
 
 export function removeDnsZone(zone: Pick<DnsZone, 'id' | 'revision'>) {

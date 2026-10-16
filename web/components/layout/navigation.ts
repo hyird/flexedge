@@ -18,13 +18,12 @@ type NavigationItem = {
   /** Extra palette search terms. */
   keywords?: string
 }
-type NavigationGroup = '工作台' | '业务' | '基础设施' | '集成'
+type NavigationGroup = '工作台' | '业务' | '基础设施'
 
 export const navigationGroups: NavigationGroup[] = [
   '工作台',
   '业务',
   '基础设施',
-  '集成',
 ]
 
 export const navigation: NavigationItem[] = [
@@ -72,16 +71,16 @@ export const navigation: NavigationItem[] = [
   },
   {
     href: '/dns-zones',
-    label: '域名管理',
+    label: '域名',
     icon: Signal,
     group: '基础设施',
     keywords: 'dns zones',
   },
   {
     href: '/providers',
-    label: '供应商账号',
+    label: '服务商',
     icon: PlugConnection,
-    group: '集成',
+    group: '基础设施',
     keywords: 'providers accounts',
   },
 ]

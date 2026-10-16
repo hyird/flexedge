@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "service/features/dns_sync/reconciliation.h"
+#include "service/features/dns_sync/snapshot.h"
 
 #define REQUIRE(condition)                                               \
     do {                                                                 \
@@ -24,80 +25,52 @@ int main() {
     REQUIRE(aliyun.remote_record_name("www.example.com", "example.com") == "www");
     REQUIRE(aliyun.local_record_name("", "example.com") == "@");
 
-    const zone_config_data config{{{
-        .id_ = "local-1",
-        .type_ = "A",
-        .name_ = "www",
-        .content_ = "192.0.2.1",
-        .ttl_ = 300,
-        .priority_ = {},
-        .proxied_ = false,
-        .line_code_ = "default",
-    }}};
-    zone_runtime_data runtime;
-    runtime.records_imported_ = true;
-    zone_record_runtime_data state;
-    state.id_ = "local-1";
-    state.remote_record_id_ = "remote-1";
-    runtime.record_states_.push_back(state);
-    provider_line line{};
-    line.code_ = "default";
-    const std::vector<provider_line> lines{line};
-    const provider_record remote{
-        .id_ = "remote-1",
-        .type_ = "A",
-        .name_ = "www.example.com",
-        .content_ = "192.0.2.2",
-        .ttl_ = 600,
-        .priority_ = {},
-        .proxied_ = false,
-        .line_code_ = "default",
-    };
-    auto plan = [&](std::string_view operation, std::vector<provider_record> records) {
-        return plan_remote_merge(operation, config, runtime, config, "example.com",
-            cloudflare, records, lines);
-    };
-
-    // A changed remote value requires an explicit resolution before a normal sync.
-    const auto conflict = plan("sync", {remote});
-    REQUIRE(conflict.conflicts_.size() == 1);
-    REQUIRE(conflict.conflicts_[0].local_content_ == "192.0.2.1");
-    REQUIRE(conflict.conflicts_[0].remote_content_ == "192.0.2.2");
-    REQUIRE(conflict.records_.empty());
-    REQUIRE(!conflict.changed_);
-
-    const auto imported = plan("sync_remote", {remote});
-    REQUIRE(imported.changed_ && imported.conflicts_.empty());
-    REQUIRE(imported.records_.size() == 1);
-    REQUIRE(imported.records_[0].id_ == "local-1");
-    REQUIRE(imported.records_[0].name_ == "www");
-    REQUIRE(imported.records_[0].content_ == "192.0.2.2");
-    REQUIRE(imported.records_[0].ttl_ == 600);
-    REQUIRE(imported.remote_ids_by_local_id_.at("local-1") == "remote-1");
-
-    REQUIRE(plan("sync", {}).conflicts_.size() == 1);
-    const auto deleted = plan("sync_remote", {});
-    REQUIRE(deleted.changed_ && deleted.records_.empty());
-    REQUIRE(deleted.remote_ids_by_local_id_.empty());
-    const auto retained = plan("sync_local", {});
-    REQUIRE(retained.records_.size() == 1);
-    REQUIRE(retained.records_[0].content_ == "192.0.2.1");
-
-    // Identical snapshots produce no write plan, including provider FQDN conversion.
-    auto identical = remote;
-    identical.content_ = "192.0.2.1";
-    identical.ttl_ = 300;
-    const auto unchanged = plan("sync", {identical});
-    REQUIRE(!unchanged.changed_ && unchanged.conflicts_.empty());
-    REQUIRE(unchanged.records_.size() == 1);
-
+    zone_config_data config{{{.id_ = "local-1", .type_ = "A", .name_ = "www", .content_ = "192.0.2.1", .ttl_ = 300, .priority_ = {}, .proxied_ = false, .line_code_ = "default"}}};
+    zone_runtime_data previous;
+    previous.record_states_.push_back({.id_ = "local-1", .remote_record_id_ = "remote-1", .sync_status_ = "synced", .synced_revision_ = 1, .last_error_ = {}, .managed_ = false});
+    const service::dns::provider_record remote{.id_ = "remote-1", .type_ = "A", .name_ = "www.example.com", .content_ = "192.0.2.2", .ttl_ = 600, .priority_ = {}, .proxied_ = false, .line_code_ = "default"};
+    const std::vector<service::dns::provider_line> lines{{"default", "Default", "Default"}};
+    const auto observed = capture_zone_snapshot("zone", "example.com", cloudflare, {remote}, lines, previous, {}, 1);
+    REQUIRE(observed.records_.records_.size() == 1);
+    REQUIRE(observed.records_.records_[0].id_ == "local-1");
+    REQUIRE(observed.records_.records_[0].content_ == "192.0.2.2");
+    REQUIRE(plan_record_changes(config, config).writes_.records_.empty());
+    auto edited = config;
+    edited.records_[0].content_ = "192.0.2.3";
+    REQUIRE(plan_record_changes(config, edited).writes_.records_.size() == 1);
+    REQUIRE(plan_record_changes(config, {}).removals_.records_.size() == 1);
+    const auto removed = capture_zone_snapshot("zone", "example.com", cloudflare, {}, lines, previous, {}, 1);
+    REQUIRE(removed.records_.records_.empty());
+    const std::vector<zone_record_runtime_data> owned{{.id_ = "system", .remote_record_id_ = "remote-1", .sync_status_ = "synced", .synced_revision_ = 1, .last_error_ = {}, .managed_ = true}};
+    const auto system = capture_zone_snapshot("zone", "example.com", cloudflare, {remote}, lines, previous, owned, 1);
+    REQUIRE(system.records_.records_.empty());
+    REQUIRE(system.runtime_.record_states_[0].managed_);
+    auto unknown = remote;
+    unknown.type_ = "CAA";
+    const auto ignored = capture_zone_snapshot("zone", "example.com", cloudflare, {unknown}, lines, {}, {}, 1);
+    REQUIRE(ignored.records_.records_.empty());
+    REQUIRE(snapshot_record_id("zone", "remote") == snapshot_record_id("zone", "remote"));
+    REQUIRE(snapshot_record_id("zone", "remote") != snapshot_record_id("another", "remote"));
     bool duplicate_rejected = false;
     try {
-        (void)plan("sync_remote", {remote, remote});
+        (void)capture_zone_snapshot("zone", "example.com", cloudflare, {remote, remote}, lines, previous, {}, 1);
     } catch (const std::runtime_error&) {
         duplicate_rejected = true;
     }
     REQUIRE(duplicate_rejected);
+
+    // A remote record shared by two projected nodes survives when only one
+    // node is removed. Unowned records are never deleted by their old UUID.
+    zone_runtime_data shared;
+    shared.record_states_ = owned;
+    shared.record_states_.push_back({.id_ = "remaining", .remote_record_id_ = "remote-1", .sync_status_ = "synced", .synced_revision_ = 1, .last_error_ = {}, .managed_ = true});
+    auto retained = config;
+    retained.records_[0].id_ = "remaining";
+    REQUIRE(obsolete_system_record_ids(shared, retained, {remote}, {}, cloudflare, "example.com").empty());
+    REQUIRE(obsolete_system_record_ids(previous, {}, {remote}, {}, cloudflare, "example.com").empty());
+    REQUIRE(obsolete_system_record_ids(shared, {}, {remote}, {}, cloudflare, "example.com").contains("remote-1"));
+    REQUIRE(obsolete_system_record_ids({}, config, {remote}, {"www.example.com"}, cloudflare, "example.com").contains("remote-1"));
+    REQUIRE(obsolete_system_record_ids({}, config, {unknown}, {"www.example.com"}, cloudflare, "example.com").empty());
 
     // A hosted apex domain projects its CNAME under the zone's own name; each provider gets
     // its own spelling of the apex and every spelling reads back as "@".

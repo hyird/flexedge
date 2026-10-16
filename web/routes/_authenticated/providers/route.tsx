@@ -7,13 +7,13 @@ const tabs = [
   {
     id: 'dns',
     href: '/providers/dns',
-    label: 'DNS 账号',
+    label: 'DNS',
     icon: <Globe />,
   },
   {
     id: 'certificate',
     href: '/providers/certificate',
-    label: '证书供应商',
+    label: '证书',
     icon: <ShieldCheck />,
   },
 ] as const
@@ -27,8 +27,8 @@ export const Route = createFileRoute('/_authenticated/providers')({
       tabs.find(({ href }) => pathname.startsWith(href))?.id ?? 'dns'
     return (
       <Page
-        title='供应商账号'
-        description='管理托管域名所用的 DNS 账号，以及签发证书所用的证书供应商凭据。'
+        title='服务商'
+        description='管理域名解析和证书签发所用的服务商账号。'
       >
         <Tabs
           variant='secondary'
@@ -36,7 +36,7 @@ export const Route = createFileRoute('/_authenticated/providers')({
           className='-mt-2 flex w-full min-w-0 flex-1 flex-col gap-6'
         >
           <Tabs.ListContainer className='shrink-0'>
-            <Tabs.List aria-label='供应商类型'>
+            <Tabs.List aria-label='服务商类型'>
               {tabs.map((tab) => (
                 <Tabs.Tab
                   key={tab.id}

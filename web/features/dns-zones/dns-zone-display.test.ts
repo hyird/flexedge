@@ -3,7 +3,6 @@ import { expect, test } from 'vitest'
 import { ApiBusinessError } from '@/lib/api-response'
 import { describeStatus } from '@/lib/status'
 import {
-  displaySyncStatus,
   isZoneNotFound,
   recordSyncStatuses,
   zoneRecordRows,
@@ -37,7 +36,6 @@ const zone = (patch: Partial<DnsZone> = {}): DnsZone => ({
   website_count: 0,
   config: { records: [record('custom')] },
   runtime: {
-    records_imported: true,
     lines: [],
     projected_records: [record('system')],
     record_states: [
@@ -48,15 +46,8 @@ const zone = (patch: Partial<DnsZone> = {}): DnsZone => ({
         last_error: 'x',
       },
     ],
-    conflicts: [],
   },
   ...patch,
-})
-
-test('a conflict status without remaining conflicts displays as consistent', () => {
-  expect(displaySyncStatus(zone({ sync_status: 'conflict' }))).toBe(
-    'consistent'
-  )
 })
 
 test('the fixture is a valid zone DTO', () => {
@@ -64,22 +55,8 @@ test('the fixture is a valid zone DTO', () => {
 })
 
 test('every displayed zone status has its own label', () => {
-  for (const status of [
-    'synced',
-    'pending',
-    'queued',
-    'syncing',
-    'failed',
-    'out_of_sync',
-    'consistent',
-  ])
+  for (const status of ['synced', 'pending', 'queued', 'syncing', 'failed'])
     expect(describeStatus(zoneSyncStatuses, status).label).not.toBe(status)
-  expect(
-    describeStatus(
-      zoneSyncStatuses,
-      displaySyncStatus(zone({ sync_status: 'conflict' }))
-    )
-  ).toEqual({ label: '一致', tone: 'success' })
 })
 
 test('sync filters and chips word the same status the same way', () => {
@@ -110,7 +87,6 @@ test('a rejected website CNAME keeps its failed state on the system row', () => 
   const rows = zoneRecordRows(
     zone({
       runtime: {
-        records_imported: true,
         lines: [],
         projected_records: [{ ...record('website'), type: 'CNAME', name: '@' }],
         record_states: [
@@ -121,7 +97,6 @@ test('a rejected website CNAME keeps its failed state on the system row', () => 
             last_error: lastError,
           },
         ],
-        conflicts: [],
       },
     })
   )

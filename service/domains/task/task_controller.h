@@ -55,7 +55,7 @@ private:
             .skip_ = skip,
             .filter_ = {
                 .status_ = service::common::require_enum_query(c, "status",
-                    {"queued", "running", "retrying", "failed", "completed", "attention_required", "active",
+                    {"queued", "running", "retrying", "failed", "completed", "active",
                         "attention"},
                     "任务筛选条件不正确")
                     .value_or(""),

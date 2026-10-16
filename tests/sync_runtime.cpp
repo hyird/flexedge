@@ -79,7 +79,7 @@ CREATE TABLE sys_sync_event (
     resource_type text NOT NULL, resource_id uuid NOT NULL, operation text NOT NULL, version bigint NOT NULL,
     outcome text NOT NULL CHECK (outcome IN ('completed', 'failed', 'progressed')),
     error text NOT NULL, attempt integer NOT NULL CHECK (attempt > 0),
-    started_at timestamptz, duration_ms bigint NOT NULL, next_attempt_at timestamptz,
+    started_at timestamptz, duration_ms bigint NOT NULL,
     detail jsonb NOT NULL CHECK (jsonb_typeof(detail) = 'object'), emitted_at timestamptz NOT NULL);
 CREATE TABLE sys_sync_event_trace (
     event_id bigint PRIMARY KEY REFERENCES sys_sync_event(id), tenant_id uuid NOT NULL,
@@ -153,12 +153,12 @@ ruvia::task<void> verify_terminal_failures(task_context& context) {
         require(transition.marker_transitioned_ && transition.event_id_.has_value(), "terminal result and event commit together");
         const auto rows = co_await db.query(
             "SELECT task.is_done AND NOT task.is_ok, task.processed_version = task.version, task.count_fails, "
-            "event.outcome = 'failed' AND event.next_attempt_at IS NULL, task.lease_owner IS NULL AND task.wait_task_id IS NULL "
+            "event.outcome = 'failed', task.lease_owner IS NULL AND task.wait_task_id IS NULL "
             "FROM sys_sync_task task JOIN sys_sync_event event ON event.task_id = task.id WHERE event.id = $1",
             *transition.event_id_);
         require(rows.front()[0].as<bool>().value() && rows.front()[1].as<bool>().value() &&
                     rows.front()[2].as<int>().value() == 1 && rows.front()[3].as<bool>().value() && rows.front()[4].as<bool>().value(),
-            "terminal state has no lease, dependency or historical retry schedule");
+            "terminal failure records its outcome and releases its lease and dependency");
         (void)co_await db.execute("UPDATE sys_sync_task SET next_attempt_at = NOW() - INTERVAL '1 minute' WHERE id = $1", id);
         require(!(co_await sync::claim_marker(context, subject_value.type_)).has_value(), "an overdue terminal failure is never claimed");
     }
@@ -182,9 +182,9 @@ ruvia::task<void> verify_retry_and_fences(task_context& first, task_context& sec
     const auto retried = co_await finish(first, original_lease, sync::attempt_result::retry("temporary network failure"));
     const auto retry = co_await db.query(
         "SELECT NOT task.is_done AND NOT task.is_ok, task.next_attempt_at > NOW() + INTERVAL '10 seconds', "
-        "event.next_attempt_at = task.next_attempt_at FROM sys_sync_task task JOIN sys_sync_event event ON event.task_id = task.id WHERE event.id = $1",
+        "event.outcome = 'failed' FROM sys_sync_task task JOIN sys_sync_event event ON event.task_id = task.id WHERE event.id = $1",
         *retried.event_id_);
-    require(retry.front()[0].as<bool>().value() && retry.front()[1].as<bool>().value() && retry.front()[2].as<bool>().value(), "retryable failure schedules the same task and records its retry time");
+    require(retry.front()[0].as<bool>().value() && retry.front()[1].as<bool>().value() && retry.front()[2].as<bool>().value(), "retryable failure schedules the same task and records the failed outcome");
     require(!(co_await sync::claim_marker(second, sync::marker_resource_type::dns_zone)), "retry cannot run before it is due");
     (void)co_await db.execute("UPDATE sys_sync_task SET next_attempt_at = NOW() - INTERVAL '1 second' WHERE id = $1", id);
     const auto reclaimed = co_await sync::claim_marker(second, sync::marker_resource_type::dns_zone);
@@ -218,8 +218,8 @@ ruvia::task<void> verify_waiting(task_context& context) {
     const auto waiter_lease = sync::make_running_lease(waiter->tenant_id_, waiter->id_, waiter->version_, context.lease_owner(),
         waiter->claimed_at_, sync::marker_resource_type::website, website);
     const auto parked = co_await finish(context, waiter_lease, sync::attempt_result::waiting(awaited_id, 1));
-    const auto event = co_await db.query("SELECT outcome, next_attempt_at IS NULL FROM sys_sync_event WHERE id = $1", *parked.event_id_);
-    require(event.front()[0].value().value() == "progressed" && event.front()[1].as<bool>().value(), "waiting records progress without a retry schedule");
+    const auto event = co_await db.query("SELECT outcome FROM sys_sync_event WHERE id = $1", *parked.event_id_);
+    require(event.front()[0].value().value() == "progressed", "waiting records the execution outcome");
     require(!(co_await sync::claim_marker(context, sync::marker_resource_type::website)), "a parked task cannot be claimed");
     const auto awaited = co_await sync::claim_marker(context, sync::marker_resource_type::dns_zone);
     require(awaited.has_value(), "the dependency can run independently");
@@ -314,7 +314,7 @@ ruvia::task<void> verify_stale_maintenance_candidates(ruvia::web_worker_context&
             try {
                 switch (repair.type_) {
                     case sync::marker_resource_type::dns_zone:
-                        co_await service::dns_sync::detail::reconcile_missing_zone_markers(repair_context);
+                        co_await service::dns_sync::detail::reconcile_tasks(repair_context);
                         break;
                     case sync::marker_resource_type::certificate:
                         co_await service::certificate_issuance::worker_detail::reconcile_missing_issuance_markers(repair_context);
@@ -331,7 +331,12 @@ ruvia::task<void> verify_stale_maintenance_candidates(ruvia::web_worker_context&
             }
         };
         tasks.spawn(restore());
-        const auto blocked = co_await wait_for_resource_lock(context, identity.front()[0].as<std::int64_t>().value());
+        const auto blocked = repair.type_ == sync::marker_resource_type::dns_zone ||
+                             co_await wait_for_resource_lock(context, identity.front()[0].as<std::int64_t>().value());
+        if (repair.type_ == sync::marker_resource_type::dns_zone) {
+            // DNS recovery skips locked resources and retries them on its next scan.
+            co_await tasks.join();
+        }
         if (!blocked) {
             co_await holder.rollback();
             tasks.request_stop();
@@ -352,7 +357,9 @@ ruvia::task<void> verify_stale_maintenance_candidates(ruvia::web_worker_context&
         notification.task_attempt(repair.id_, *transition.event_id_);
         (void)co_await service::live_resource::enqueue_notification(holder, notification);
         co_await holder.commit();
-        co_await tasks.join();
+        if (repair.type_ != sync::marker_resource_type::dns_zone) {
+            co_await tasks.join();
+        }
         if (failure) {
             std::rethrow_exception(failure);
         }

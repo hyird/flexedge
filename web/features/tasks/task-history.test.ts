@@ -30,7 +30,6 @@ function attempt(
     started_at: `2026-10-14T00:0${number}:00Z`,
     emitted_at: `2026-10-14T00:0${number}:01Z`,
     duration_ms: 1000,
-    next_attempt_at: '',
     detail: { kind: 'none', truncated: false },
     trace: null,
   }
@@ -101,7 +100,6 @@ test('unknown values and a malformed detail only affect their own attempt', () =
     started_at: '2026-10-14T00:00:00Z',
     emitted_at: '2026-10-14T00:00:01Z',
     duration_ms: 1000,
-    next_attempt_at: '',
   }
   // Parsed like the wire snapshot so the degraded shapes are the real ones.
   const history = parseHistory({
@@ -273,7 +271,6 @@ test('history and timeline show absolute times in the same console time, without
         started_at: startedAt,
         emitted_at: '2026-10-14T14:16:49.150034+00',
         duration_ms: 5026,
-        next_attempt_at: '2026-10-14T14:17:44+00',
         detail: { kind: 'none', truncated: false },
         trace: {
           state: 'available',

@@ -238,7 +238,7 @@ export function CertificateDetailPage() {
                 value: certificate.issuer || providerName,
               },
               {
-                label: '证书供应商',
+                label: '证书服务商',
                 value: providerName,
               },
               {

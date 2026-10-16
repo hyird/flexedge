@@ -20,7 +20,6 @@ inline task_dto to_task(const task_projection& stored, std::pmr::memory_resource
     result.set<"name">(stored.get<"name">());
     result.set<"operation">(stored.get<"operation">());
     result.set<"status">(stored.get<"status">());
-    result.set<"warning">(stored.get<"warning">());
     result.set<"error">(stored.get<"error">());
     result.set<"next_attempt_at">(stored.get<"next_attempt_at">());
     result.set<"updated_at">(stored.get<"updated_at">());
@@ -50,7 +49,6 @@ inline attempt_dto to_attempt(const attempt_projection& stored, std::pmr::memory
     result.set<"started_at">(stored.get<"started_at">());
     result.set<"emitted_at">(stored.get<"emitted_at">());
     result.set<"duration_ms">(stored.get<"duration_ms">());
-    result.set<"next_attempt_at">(stored.get<"next_attempt_at">());
     result.set<"detail">(parse_object(stored.get<"detail">(), service::sync_runtime::detail_none_json, pool));
     result.set<"trace">(parse_object(stored.get<"trace">(), service::attempt_trace::summary_none_json, pool));
     return result;

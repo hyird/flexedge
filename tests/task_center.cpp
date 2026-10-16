@@ -105,7 +105,7 @@ ruvia::task<void> insert_fixture(ruvia::db_handle& db) {
         dns_provider, tenant);
     // The schema's empty JSON default is not a valid DNS runtime.
     service::dns_sync::zone_runtime_data runtime{};
-    runtime.records_imported_ = true;
+
     const auto runtime_json = ruvia::to_json(service::dns_sync::to_output(runtime));
     (void)co_await db.execute(
         "INSERT INTO sys_dns_zone(id, tenant_id, provider_id, domain, sync_status, synced_revision, runtime) VALUES "
@@ -271,8 +271,8 @@ ruvia::task<void> verify_marker_task(ruvia::db_handle& db, read_context& context
     const auto succeeded = co_await run(db, worker, marker_resource_type::dns_zone, zone(1), true);
     const auto completed = co_await task_of(context, "dns_zone", zone(1));
     require(completed.get<"status">().view() == "completed" && completed.get<"error">().view().empty() &&
-                completed.get<"warning">().view().empty() && completed.get<"next_attempt_at">().view().empty() &&
-                !completed.get<"last_success_at">().view().empty() && completed.get<"failure_count">().value_ == 1 &&
+                completed.get<"next_attempt_at">().view().empty() &&
+                !completed.get<"last_success_at">().view().empty() && completed.get<"failure_count">().value_ == 0 &&
                 completed.get<"attempt_count">().value_ == 2,
         "the retry completes the same task: 失败 1 次后成功");
     const auto one = co_await list(context, "", "dns_zone", zone(1));
@@ -281,9 +281,9 @@ ruvia::task<void> verify_marker_task(ruvia::db_handle& db, read_context& context
         "one task per resource");
 
     // (c) Re-initiation resets the same task.
-    co_await initiate(db, worker, marker_resource_type::dns_zone, zone(1), marker_operation::sync_remote, 3);
+    co_await initiate(db, worker, marker_resource_type::dns_zone, zone(1), marker_operation::sync, 3);
     const auto reset = co_await task_of(context, "dns_zone", zone(1));
-    require(reset.get<"status">().view() == "queued" && reset.get<"operation">().view() == "sync_remote" &&
+    require(reset.get<"status">().view() == "queued" && reset.get<"operation">().view() == "sync" &&
                 reset.get<"failure_count">().value_ == 0 && reset.get<"attempt_count">().value_ == 2 &&
                 reset.get<"error">().view().empty(),
         "re-initiation queues the same task again with a fresh failure count and its attempts kept");
@@ -303,7 +303,7 @@ ruvia::task<void> verify_marker_task(ruvia::db_handle& db, read_context& context
                 attempts[1].get<"id">().view() == std::to_string(*succeeded.event_id_) &&
                 attempts[2].get<"id">().view() == std::to_string(*failed.event_id_),
         "newest first, identified by event id");
-    require(attempts[0].get<"operation">().view() == "sync_remote" && attempts[0].get<"outcome">().view() == "completed" &&
+    require(attempts[0].get<"operation">().view() == "sync" && attempts[0].get<"outcome">().view() == "completed" &&
                 attempts[1].get<"operation">().view() == "sync" && attempts[1].get<"outcome">().view() == "completed" &&
                 attempts[2].get<"operation">().view() == "sync" && attempts[2].get<"outcome">().view() == "failed" &&
                 attempts[2].get<"error">().view() == "QA 同步失败",
@@ -332,10 +332,11 @@ ruvia::task<void> verify_terminal_failure(ruvia::db_handle& db, read_context& co
     co_await initiate(db, worker, marker_resource_type::dns_zone, zone(5), marker_operation::sync, 2);
     (void)co_await run(db, worker, marker_resource_type::dns_zone, zone(5), false,
         service::sync_runtime::detail_none_json, "永久配置错误", true);
+    (void)co_await db.execute("UPDATE sys_sync_task SET count_fails = 3 WHERE dns_zone_id = $1", zone(5));
     const auto failed = co_await task_of(context, "dns_zone", zone(5));
     require(failed.get<"status">().view() == "failed" && failed.get<"error">().view() == "永久配置错误" &&
-                failed.get<"next_attempt_at">().view().empty() && failed.get<"warning">().view().empty() &&
-                failed.get<"attempt_count">().value_ == 1 && failed.get<"failure_count">().value_ == 1,
+                failed.get<"next_attempt_at">().view().empty() &&
+                failed.get<"attempt_count">().value_ == 1 && failed.get<"failure_count">().value_ == 3,
         "a terminal marker is failed with its error and no retry schedule");
     const auto active = co_await list(context, "active", "dns_zone");
     const auto failures = co_await list(context, "failed", "dns_zone");
@@ -345,7 +346,6 @@ ruvia::task<void> verify_terminal_failure(ruvia::db_handle& db, read_context& co
         "terminal failure participates in failed totals and attention, not active tasks");
     const auto history = co_await history_of(context, "dns_zone", zone(5));
     require(history.get<"list">().size() == 1 && history.get<"list">()[0].get<"outcome">().view() == "failed" &&
-                history.get<"list">()[0].get<"next_attempt_at">().view().empty() &&
                 history.get<"summary">().get<"failure_count">().value_ == 1,
         "terminal failure retains a failed attempt without a retry time");
     co_await initiate(db, worker, marker_resource_type::dns_zone, zone(5), marker_operation::sync, 3);
@@ -379,64 +379,22 @@ ruvia::task<void> verify_query_pagination(read_context& context) {
 }
 
 // (f) Completed work that needs attention.
-ruvia::task<void> verify_warnings(ruvia::db_handle& db, read_context& context) {
+// Task status comes from its own current snapshot, never a previous success's detail.
+ruvia::task<void> verify_result_status(ruvia::db_handle& db, read_context& context) {
     recorder worker{.handle_ = db};
-    std::pmr::monotonic_buffer_resource pool;
-    service::dns_sync::detail::zone_sync_attempt conflicting;
-    conflicting.record_conflicts({{.id_ = "local-id", .type_ = "A", .name_ = "api", .line_code_ = "default", .local_content_ = "192.0.2.10", .remote_content_ = "（远端已删除）"}});
     co_await initiate(db, worker, marker_resource_type::dns_zone, zone(2), marker_operation::sync, 2);
-    (void)co_await run(db, worker, marker_resource_type::dns_zone, zone(2), true, conflicting.to_json(&pool));
-    const auto conflict = co_await task_of(context, "dns_zone", zone(2));
-    require(conflict.get<"status">().view() == "attention_required" &&
-                conflict.get<"warning">().view() == "dns_conflict",
-        "a sync with conflicts needs attention");
-
+    (void)co_await run(db, worker, marker_resource_type::dns_zone, zone(2), false);
+    require(co_await status_of(context, "dns_zone", zone(2)) == "retrying", "failed work retries");
     co_await initiate(db, worker, marker_resource_type::dns_zone, zone(3), marker_operation::sync, 2);
     (void)co_await run(db, worker, marker_resource_type::dns_zone, zone(3), true);
-    require(co_await status_of(context, "dns_zone", zone(3)) == "completed",
-        "a clean sync completes");
     (void)co_await db.execute("UPDATE sys_dns_zone SET sync_status = 'failed' WHERE id = $1", zone(3));
-    const auto unpushed = co_await task_of(context, "dns_zone", zone(3));
-    require(unpushed.get<"status">().view() == "attention_required" &&
-                unpushed.get<"warning">().view() == "dns_unpushed",
-        "a zone whose records were not pushed needs attention");
-
-    service::website_dns::website_domain_attempt check;
-    check.start("edge.edge.example.com", 2);
-    check.record_check({.hostname_ = "www.z5.example.com",
-        .query_name_ = "www.z5.example.com",
-        .resolved_ = {"edge.edge.example.com"},
-        .status_ = "verified",
-        .error_ = {}});
-    check.record_check({.hostname_ = "api.z5.example.com",
-        .query_name_ = "api.z5.example.com",
-        .resolved_ = {"other.example.net"},
-        .status_ = "invalid",
-        .error_ = "期望 edge.edge.example.com，实际 other.example.net"});
-    co_await initiate(db, worker, marker_resource_type::website, website, marker_operation::apply, 1);
-    (void)co_await run(db, worker, marker_resource_type::website, website, true, check.to_json(&pool));
-    const auto unverified = co_await task_of(context, "website", website);
-    require(unverified.get<"status">().view() == "attention_required" &&
-                unverified.get<"warning">().view() == "domain_unverified" &&
-                unverified.get<"operation">().view() == "apply",
-        "a website with unverified domains needs attention");
-
+    require(co_await status_of(context, "dns_zone", zone(3)) == "completed", "resource diagnostics do not rewrite task results");
     const auto attention = co_await list(context, "attention", "");
-    require(listed(attention, zone(2)) && listed(attention, zone(3)) && listed(attention, website) &&
-                !listed(attention, zone(1)),
-        "the attention group lists tasks needing attention");
-    const auto attention_only = co_await list(context, "attention_required", "dns_zone");
-    require(attention_only.get<"total">().value_ == 2 && !listed(attention_only, website), "status and type filters");
-
-    // A provider task carries the provider kind.
+    require(listed(attention, zone(2)) && !listed(attention, zone(3)), "attention is unfinished failed work only");
     co_await initiate(db, worker, marker_resource_type::provider, dns_provider, marker_operation::verify, 1);
     const auto provider = co_await task_of(context, "provider", dns_provider);
-    require(provider.get<"status">().view() == "queued" && provider.get<"resource_kind">().view() == "dns" &&
-                provider.get<"operation">().view() == "verify",
-        "provider tasks name their kind");
-    const auto active = co_await list(context, "active", "");
-    require(listed(active, dns_provider) && !listed(active, zone(2)) && active.get<"active">().value_ >= 1,
-        "the active group lists queued work and counts it");
+    require(provider.get<"status">().view() == "queued" && provider.get<"resource_kind">().view() == "dns",
+        "provider tasks preserve their kind");
 }
 
 // Publishes a new release of the cluster: every target node's task changes.
@@ -563,7 +521,7 @@ ruvia::task<void> verify_node_task(ruvia::db_handle& db, read_context& context) 
         "a non-retryable configure failure fails");
     co_await report_config(db, node_online, revision, true);
     const auto configured = co_await task_of(context, "node", node_online);
-    require(configured.get<"status">().view() == "completed" && configured.get<"failure_count">().value_ == 2 &&
+    require(configured.get<"status">().view() == "completed" && configured.get<"failure_count">().value_ == 0 &&
                 configured.get<"attempt_count">().value_ == 5,
         "the applied spec completes the node task: 失败 2 次后成功");
 
@@ -604,7 +562,7 @@ ruvia::task<void> verify_tasks(ruvia::db_client& client) {
     read_context context{.handle_ = client.handle(), .pool_ = &pool};
     co_await insert_fixture(db);
     co_await verify_marker_task(db, context);
-    co_await verify_warnings(db, context);
+    co_await verify_result_status(db, context);
     co_await verify_node_task(db, context);
     co_await verify_terminal_failure(db, context);
     co_await verify_query_pagination(context);

@@ -45,8 +45,6 @@ RUVIA_MODEL(dns_zone_collection_response, RUVIA_REQUIRED_FIELD(code, ruvia::int6
 RUVIA_MODEL(create_dns_zone_body,
     RUVIA_OPTIONAL_FIELD_NAME("dns_provider_id", dns_provider_id, ruvia::string),
     RUVIA_OPTIONAL_FIELD(domain, ruvia::string));
-RUVIA_MODEL(dns_zone_sync_body,
-    RUVIA_OPTIONAL_FIELD_NAME("conflict_policy", conflict_policy, ruvia::string));
 
 RUVIA_MODEL(projected_dns_record_dto, RUVIA_REQUIRED_FIELD(id, ruvia::string),
     RUVIA_REQUIRED_FIELD(type, ruvia::string),
@@ -66,20 +64,12 @@ RUVIA_MODEL(dns_record_runtime_dto, RUVIA_REQUIRED_FIELD(id, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("synced_revision", synced_revision, ruvia::int64),
     RUVIA_OPTIONAL_FIELD_NAME("last_error", last_error, ruvia::string,
         RUVIA_OMIT_EMPTY));
-RUVIA_MODEL(dns_record_conflict_dto, RUVIA_REQUIRED_FIELD(id, ruvia::string),
-    RUVIA_REQUIRED_FIELD(type, ruvia::string),
-    RUVIA_REQUIRED_FIELD(name, ruvia::string),
-    RUVIA_REQUIRED_FIELD_NAME("line_code", line_code, ruvia::string),
-    RUVIA_REQUIRED_FIELD_NAME("local_content", local_content, ruvia::string),
-    RUVIA_REQUIRED_FIELD_NAME("remote_content", remote_content, ruvia::string));
 RUVIA_MODEL(
-    dns_zone_runtime_dto, RUVIA_REQUIRED_FIELD_NAME("records_imported", records_imported, ruvia::bool_value),
-    RUVIA_OPTIONAL_FIELD_NAME("lines_synced_at", lines_synced_at, ruvia::string, RUVIA_OMIT_EMPTY),
+    dns_zone_runtime_dto,
     RUVIA_REQUIRED_FIELD(lines, ruvia::array<dns_line_runtime_dto>),
     RUVIA_REQUIRED_FIELD_NAME("projected_records", projected_records,
         ruvia::array<projected_dns_record_dto>),
-    RUVIA_REQUIRED_FIELD_NAME("record_states", record_states, ruvia::array<dns_record_runtime_dto>),
-    RUVIA_REQUIRED_FIELD(conflicts, ruvia::array<dns_record_conflict_dto>));
+    RUVIA_REQUIRED_FIELD_NAME("record_states", record_states, ruvia::array<dns_record_runtime_dto>));
 
 RUVIA_MODEL(dns_zone_dto, RUVIA_REQUIRED_FIELD(id, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("dns_provider_id", dns_provider_id, ruvia::string),
