@@ -1178,7 +1178,7 @@ inline std::vector<ruvia::db_migration> task_attempt_details_migration() {
     return {compiled.begin(), compiled.end()};
 }
 
-// Attempt traces (docs/task-center.md "执行跟踪"): one row per recorded
+// Attempt traces: one row per recorded
 // attempt that has a trace, keyed by the attempt row and deleted with it, so
 // the 7-day attempt retention also bounds traces. `summary` is what the
 // history list reads; `trace` is read only for one expanded attempt.
@@ -1224,7 +1224,7 @@ inline std::vector<ruvia::db_migration> task_attempt_traces_migration() {
     return {compiled.begin(), compiled.end()};
 }
 
-// Tasks are user operations (docs/task-center.md): sys_operation is one
+// Tasks are user operations: sys_operation is one
 // operation or system action, sys_operation_subtask one piece of background
 // work it caused. Markers, release targets and attempts name the subtask
 // they belong to; the columns are nullable so a server without task tracking
@@ -1394,6 +1394,23 @@ inline std::vector<ruvia::db_migration> operation_tasks_migration() {
     return {compiled.begin(), compiled.end()};
 }
 
+inline std::vector<ruvia::db_migration> notification_outbox_migration() {
+    ruvia::db_schema schema({.driver_ = ruvia::db_driver::postgresql});
+    ruvia::db_query expressions;
+    schema.create_table({.name_ = "sys_notification_outbox", .columns_ = {{.name_ = "id", .type_ = {.data_type_ = ruvia::db_data_type::varchar, .length_ = 64}, .primary_key_ = true}, {.name_ = "kind", .type_ = {.data_type_ = ruvia::db_data_type::varchar, .length_ = 24}}, {.name_ = "payload", .type_ = {.data_type_ = ruvia::db_data_type::text}}, {.name_ = "created_at", .type_ = {.data_type_ = ruvia::db_data_type::timestamp_tz}, .default_value_ = expressions.call("now")}, {.name_ = "available_at", .type_ = {.data_type_ = ruvia::db_data_type::timestamp_tz}, .default_value_ = expressions.call("now")}, {.name_ = "attempts", .type_ = {.data_type_ = ruvia::db_data_type::integer}, .default_value_ = expressions.value(0)}}});
+    schema.create_index({.name_ = "idx_notification_outbox_available", .table_ = "sys_notification_outbox", .keys_ = {{.column_ = "available_at"}, {.column_ = "created_at"}, {.column_ = "id"}}});
+    const auto compiled = schema.compile("0026_notification_outbox");
+    return {compiled.begin(), compiled.end()};
+}
+
+inline std::vector<ruvia::db_migration> node_report_receipt_migration() {
+    ruvia::db_schema schema({.driver_ = ruvia::db_driver::postgresql});
+    ruvia::db_query expressions;
+    schema.create_table({.name_ = "sys_node_report_receipt", .columns_ = {{.name_ = "id", .type_ = {.data_type_ = ruvia::db_data_type::text}, .primary_key_ = true}, {.name_ = "tenant_id", .type_ = {.data_type_ = ruvia::db_data_type::uuid}}, {.name_ = "node_id", .type_ = {.data_type_ = ruvia::db_data_type::uuid}}, {.name_ = "agent_id", .type_ = {.data_type_ = ruvia::db_data_type::text}}, {.name_ = "received_at", .type_ = {.data_type_ = ruvia::db_data_type::timestamp_tz}}, {.name_ = "completed_at", .type_ = {.data_type_ = ruvia::db_data_type::timestamp_tz}, .default_value_ = expressions.call("now")}}});
+    const auto compiled = schema.compile("0027_node_report_receipt");
+    return {compiled.begin(), compiled.end()};
+}
+
 inline std::vector<ruvia::db_migration> schema_migrations() {
     std::vector<ruvia::db_migration> migrations(released_migrations.begin(),
         released_migrations.end());
@@ -1409,6 +1426,10 @@ inline std::vector<ruvia::db_migration> schema_migrations() {
     auto operation_tasks = operation_tasks_migration();
     migrations.insert(migrations.end(), std::make_move_iterator(operation_tasks.begin()),
         std::make_move_iterator(operation_tasks.end()));
+    auto outbox = notification_outbox_migration();
+    migrations.insert(migrations.end(), std::make_move_iterator(outbox.begin()), std::make_move_iterator(outbox.end()));
+    auto receipts = node_report_receipt_migration();
+    migrations.insert(migrations.end(), std::make_move_iterator(receipts.begin()), std::make_move_iterator(receipts.end()));
     return migrations;
 }
 

@@ -88,6 +88,21 @@ export function AccessLogs() {
       ),
     },
     {
+      id: 'node',
+      header: '节点',
+      minWidth: 120,
+      cell: (log) => (
+        <Link
+          to='/nodes/$nodeId'
+          params={{ nodeId: log.node_id }}
+          title={log.node_name}
+          className='link'
+        >
+          {log.node_name}
+        </Link>
+      ),
+    },
+    {
       id: 'request',
       header: '请求',
       isRowHeader: true,
@@ -99,7 +114,7 @@ export function AccessLogs() {
             <Button
               size='sm'
               variant='ghost'
-              className='h-auto w-0 min-w-full justify-start gap-2 px-1 py-0.5 text-left'
+              className='h-auto w-max max-w-120 justify-start gap-2 px-1 py-0.5 text-left'
               aria-label={`查看请求 ${log.method} ${url}`}
               onPress={() => setOpenLogId(log.id)}
             >
@@ -133,7 +148,7 @@ export function AccessLogs() {
           asn={log.client_ip_asn}
           asName={log.client_ip_as_name}
           label={log.client_ip || '—'}
-          className='block w-0 min-w-full truncate font-mono text-[13px] tabular-nums'
+          className='font-mono text-[13px] tabular-nums'
         />
       ),
     },
@@ -143,27 +158,8 @@ export function AccessLogs() {
       minWidth: 150,
       cell: (log) => {
         const location = formatClientLocation(log.client_ip_location)
-        return (
-          <span className='block w-0 min-w-full truncate' title={location}>
-            {location}
-          </span>
-        )
+        return <span title={location}>{location}</span>
       },
-    },
-    {
-      id: 'node',
-      header: '节点',
-      minWidth: 120,
-      cell: (log) => (
-        <Link
-          to='/nodes/$nodeId'
-          params={{ nodeId: log.node_id }}
-          title={log.node_name}
-          className='link block w-0 min-w-full truncate'
-        >
-          {log.node_name}
-        </Link>
-      ),
     },
     {
       id: 'duration',

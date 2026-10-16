@@ -18,7 +18,7 @@
 #include "service/domains/cluster/cluster_error.h"
 #include "service/domains/cluster/cluster_types.h"
 #include "service/features/cluster_dns/projection.h"
-#include "service/features/live_resource/notifications.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/node_dispatch/queue.h"
 #include "service/features/website_dns/projection.h"
 
@@ -58,13 +58,12 @@ public:
             (void)co_await origin.require_operation(transaction, tenant_id);
             co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id,
                 rows.front()[0].value().value_or(""), origin);
-            co_await transaction.commit();
             service::live_resource::notifications::resource_notification notification(tenant_id);
             notification.node_config()
                 .changed(service::live_resource::resource::clusters, rows.front()[0].value().value_or(""))
                 .changed(service::live_resource::resource::nodes);
             origin.add_changes(notification);
-            co_await service::live_resource::notify(c, notification);
+            co_await service::live_resource::commit_and_notify(transaction, c, notification);
             co_return origin.operation_id();
         } catch (const ruvia::db_error& error) {
             if (is_identity_conflict(error)) {
@@ -134,13 +133,12 @@ public:
                 origin);
             co_await service::website_dns::reconcile_cluster_consumers(transaction, tenant_id, id, origin);
             co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id, id, origin);
-            co_await transaction.commit();
             service::live_resource::notifications::resource_notification notification(tenant_id);
             notification.node_config()
                 .changed(service::live_resource::resource::clusters, id)
                 .changed(service::live_resource::resource::nodes);
             origin.add_changes(notification);
-            co_await service::live_resource::notify(c, notification);
+            co_await service::live_resource::commit_and_notify(transaction, c, notification);
             co_return origin.operation_id();
         } catch (const ruvia::db_error& error) {
             if (is_identity_conflict(error)) {
@@ -194,13 +192,12 @@ public:
             service::common::throw_app_error(cluster_error::not_found);
         }
         co_await service::cluster_dns::reconcile_cluster(transaction, tenant_id, id, origin);
-        co_await transaction.commit();
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.node_config()
             .changed(service::live_resource::resource::clusters, id)
             .changed(service::live_resource::resource::nodes);
         origin.add_changes(notification);
-        co_await service::live_resource::notify(c, notification);
+        co_await service::live_resource::commit_and_notify(transaction, c, notification);
         co_return origin.operation_id();
     }
 

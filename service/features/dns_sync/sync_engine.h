@@ -15,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/dns/driver.h"
 #include "service/features/dns_sync/attempt_detail.h"
 #include "service/features/dns_sync/failure.h"
@@ -31,7 +31,7 @@
 namespace service::dns_sync::detail {
 
 inline ruvia::task<bool>
-merge_remote_records(service::background::worker_context& context, service::attempt_trace::recorder& trace,
+merge_remote_records(service::background::task_context& context, service::attempt_trace::recorder& trace,
     const dns_task& task, const service::sync_runtime::running_marker_lease& lease,
     std::int64_t config_revision, std::int64_t desired_revision,
     const zone_config_data& config, const zone_runtime_data& runtime,
@@ -85,7 +85,7 @@ collect_desired_record_ids(const zone_config_data& desired_config,
 }
 
 inline ruvia::task<void> delete_obsolete_remote_records(
-    service::background::worker_context& context, service::attempt_trace::recorder& trace,
+    service::background::task_context& context, service::attempt_trace::recorder& trace,
     const service::sync_runtime::running_marker_lease& lease,
     const service::dns::dns_provider_driver& driver, std::string_view account_id,
     std::string_view secret, std::string_view remote_zone_id, std::string_view domain,
@@ -138,7 +138,7 @@ struct reconciled_zone final {
 }
 
 inline ruvia::task<reconciled_zone> reconcile_zone_records(
-    service::background::worker_context& context, service::attempt_trace::recorder& trace,
+    service::background::task_context& context, service::attempt_trace::recorder& trace,
     const service::sync_runtime::running_marker_lease& lease,
     const service::dns::dns_provider_driver& driver, std::string_view account_id,
     std::string_view secret, std::string_view remote_zone_id, std::string_view domain,
@@ -255,7 +255,7 @@ inline ruvia::task<reconciled_zone> reconcile_zone_records(
     co_return result;
 }
 
-inline ruvia::task<std::int64_t> sync_zone(service::background::worker_context& context,
+inline ruvia::task<std::int64_t> sync_zone(service::background::task_context& context,
     service::attempt_trace::recorder& trace, const dns_task& task, zone_sync_attempt& attempt) {
     using service::attempt_trace::step_code;
     const auto lease = service::sync_runtime::make_running_lease(
@@ -277,7 +277,8 @@ inline ruvia::task<std::int64_t> sync_zone(service::background::worker_context& 
     trace.register_secret(secret.view());
     trace.register_secret(state->account_id_);
     credential_step.complete();
-    const service::dns::dns_provider_driver driver(state->provider_);
+    const service::dns::dns_provider_driver driver(state->provider_,
+        {.tenant_id_ = task.tenant_id_, .account_id_ = state->account_id_});
     auto ttl_step = trace.begin_step(step_code::validate_ttl);
     for (const auto& record : state->desired_.records_) {
         if (record.ttl_ < driver.minimum_record_ttl()) {

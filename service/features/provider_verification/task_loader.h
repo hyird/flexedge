@@ -7,16 +7,17 @@
 #include <optional>
 #include <string>
 
-#include "service/features/background/worker_pool.h"
-#include "service/features/live_resource/notifications.h"
+#include "service/features/background/task_context.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/provider_verification/task.h"
 #include "service/features/sync_runtime/state.h"
 
 namespace service::provider_verification::detail {
 
 inline ruvia::task<std::optional<verification_task>>
-claim(service::background::worker_context& context) {
-    const auto rows = co_await context.db().query(
+claim(service::background::task_context& context) {
+    auto transaction = co_await context.db().begin_transaction();
+    const auto rows = co_await transaction.query(
         "WITH candidate AS (SELECT marker.id, provider.kind, provider.provider, provider.name, "
         "provider.account_id, provider.revision, provider.config::text AS config, "
         "provider.runtime::text AS runtime FROM sys_sync_task marker INNER JOIN sys_provider "
@@ -34,6 +35,7 @@ claim(service::background::worker_context& context) {
             service::sync_runtime::claimed_owner_columns("marker"),
         context.lease_owner());
     if (rows.empty()) {
+        co_await transaction.commit();
         co_return std::nullopt;
     }
     const auto claimed_at = std::chrono::steady_clock::now();
@@ -43,7 +45,7 @@ claim(service::background::worker_context& context) {
     if (!owner.operation_id_.empty()) {
         notification.changed(service::live_resource::resource::operations, owner.operation_id_);
     }
-    co_await service::live_resource::notify(context, notification);
+    co_await service::live_resource::commit_and_notify(transaction, context, notification);
     co_return verification_task{
         .id_ = std::string(row[0].value().value_or("")),
         .tenant_id_ = std::string(row[1].value().value_or("")),

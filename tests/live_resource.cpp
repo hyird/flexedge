@@ -13,7 +13,7 @@
 
 #include "service/features/live_resource/fanout.h"
 #include "service/features/live_resource/notifications.h"
-#include "service/features/live_resource/snapshot_cache.h"
+#include "service/features/live_resource/snapshot_reads.h"
 
 #define REQUIRE(condition)                                                                  \
     do {                                                                                    \
@@ -25,7 +25,7 @@ namespace {
 
 using hub = service::live_resource::hub;
 using resource = service::live_resource::resource;
-using cache = service::live_resource::snapshot_cache;
+using reads = service::live_resource::snapshot_reads;
 using snapshot = service::live_resource::snapshot;
 
 std::shared_ptr<const snapshot> get_snapshot(std::string bytes, bool failure = false) {
@@ -33,7 +33,7 @@ std::shared_ptr<const snapshot> get_snapshot(std::string bytes, bool failure = f
 }
 
 template <typename loop_type, typename read_type>
-cache::result receive_result(const loop_type& loop, read_type& read) {
+reads::result receive_result(const loop_type& loop, read_type& read) {
     auto outcome = loop.start(read.receiver_.receive_for(std::chrono::seconds(1))).get();
     REQUIRE(outcome.has_value());
     return outcome.value();
@@ -52,18 +52,18 @@ void run_query_key_tests() {
     REQUIRE(query_key("list", 1) != query_key("list", "1"));
 }
 
-void run_snapshot_cache_tests() {
+void run_snapshot_read_tests() {
     using service::live_resource::snapshot_capacity_error;
     ruvia::event_loop_pool loops({.loop_count_ = 2});
     const auto first = loops.loop(0);
     const auto second = loops.loop(1);
     loops.start();
 
-    cache cache_value;
+    reads reads_value;
     const auto key = service::live_resource::snapshot_key{"tenant-a", resource::nodes, "node-a",
         service::live_resource::query_key("detail")};
-    auto leader = cache_value.subscribe(key);
-    auto follower = cache_value.subscribe(key);
+    auto leader = reads_value.subscribe(key);
+    auto follower = reads_value.subscribe(key);
     auto first_read = leader.read(first.handle());
     auto second_read = follower.read(second.handle());
     REQUIRE(first_read.ticket_.has_value());
@@ -75,26 +75,28 @@ void run_snapshot_cache_tests() {
     REQUIRE(first_result.snapshot_ == second_result.snapshot_);
     REQUIRE(first_result.snapshot_->data_ == "same-bytes");
     REQUIRE(leader.current(first_result));
-    auto hit = cache_value.subscribe(key).read(first.handle());
-    REQUIRE(!hit.ticket_.has_value() && hit.ready_.snapshot_->data_ == "same-bytes");
+    auto subsequent = reads_value.subscribe(key).read(first.handle());
+    REQUIRE(subsequent.ticket_.has_value());
+    subsequent.ticket_->complete(get_snapshot("next-read"));
+    REQUIRE(receive_result(first, subsequent).snapshot_->data_ == "next-read");
 
-    // Query, tenant, resource and row id all participate in cache identity.
-    auto list = cache_value.subscribe({"tenant-a", resource::nodes, {},
+    // Query, tenant, resource and row id all participate in flight identity.
+    auto list = reads_value.subscribe({"tenant-a", resource::nodes, {},
         service::live_resource::query_key("list", 1, 20)});
-    auto other_query = cache_value.subscribe({"tenant-a", resource::nodes, {},
+    auto other_query = reads_value.subscribe({"tenant-a", resource::nodes, {},
         service::live_resource::query_key("list", 2, 20)});
-    auto other_tenant = cache_value.subscribe({"tenant-b", resource::nodes, "node-a",
+    auto other_tenant = reads_value.subscribe({"tenant-b", resource::nodes, "node-a",
         service::live_resource::query_key("detail")});
-    auto other_resource = cache_value.subscribe({"tenant-a", resource::clusters, "node-a",
+    auto other_resource = reads_value.subscribe({"tenant-a", resource::clusters, "node-a",
         service::live_resource::query_key("detail")});
-    auto other_id = cache_value.subscribe({"tenant-a", resource::nodes, "node-b",
+    auto other_id = reads_value.subscribe({"tenant-a", resource::nodes, "node-b",
         service::live_resource::query_key("detail")});
-    REQUIRE(cache_value.get_stats().groups_ == 6);
+    REQUIRE(reads_value.get_stats().groups_ == 6);
 
-    cache_value.invalidate("tenant-a", resource::nodes, "node-a");
+    reads_value.invalidate("tenant-a", resource::nodes, "node-a");
     auto pending = leader.read(first.handle());
     REQUIRE(pending.ticket_.has_value());
-    cache_value.invalidate("tenant-a", resource::nodes, "node-a");
+    reads_value.invalidate("tenant-a", resource::nodes, "node-a");
     pending.ticket_->complete(get_snapshot("stale"));
     const auto stale = receive_result(first, pending);
     REQUIRE(!stale.snapshot_ && stale.version_ == 0);
@@ -116,24 +118,30 @@ void run_snapshot_cache_tests() {
     (void)receive_result(first, tenant_read);
     (void)receive_result(first, resource_read);
     (void)receive_result(first, id_read);
-    cache_value.invalidate("tenant-a", resource::nodes, "node-a", true);
     auto list_hit = list.read(first.handle());
     auto tenant_hit = other_tenant.read(first.handle());
     auto resource_hit = other_resource.read(first.handle());
     auto id_hit = other_id.read(first.handle());
-    REQUIRE(!list_hit.ticket_.has_value() && list_hit.ready_.snapshot_);
-    REQUIRE(!tenant_hit.ticket_.has_value() && tenant_hit.ready_.snapshot_);
-    REQUIRE(!resource_hit.ticket_.has_value() && resource_hit.ready_.snapshot_);
-    REQUIRE(!id_hit.ticket_.has_value() && id_hit.ready_.snapshot_);
+    REQUIRE(list_hit.ticket_.has_value() && tenant_hit.ticket_.has_value() &&
+            resource_hit.ticket_.has_value() && id_hit.ticket_.has_value());
+    reads_value.invalidate("tenant-a", resource::nodes, "node-a", true);
+    list_hit.ticket_->complete(get_snapshot("list-unaffected"));
+    tenant_hit.ticket_->complete(get_snapshot("tenant-unaffected"));
+    resource_hit.ticket_->complete(get_snapshot("resource-unaffected"));
+    id_hit.ticket_->complete(get_snapshot("id-unaffected"));
+    REQUIRE(list.current(receive_result(first, list_hit)));
+    REQUIRE(other_tenant.current(receive_result(first, tenant_hit)));
+    REQUIRE(other_resource.current(receive_result(first, resource_hit)));
+    REQUIRE(other_id.current(receive_result(first, id_hit)));
     auto detail_after = leader.read(first.handle());
     REQUIRE(detail_after.ticket_.has_value());
     detail_after.ticket_->complete(get_snapshot("detail-after"));
     (void)receive_result(first, detail_after);
 
     // A canceled waiter is weakly held and does not block another consumer.
-    cache canceled_cache;
-    auto canceled_leader = canceled_cache.subscribe(key);
-    auto canceled_follower = canceled_cache.subscribe(key);
+    reads canceled_reads;
+    auto canceled_leader = canceled_reads.subscribe(key);
+    auto canceled_follower = canceled_reads.subscribe(key);
     auto leader_read = canceled_leader.read(first.handle());
     auto follower_read = canceled_follower.read(second.handle());
     auto leader_ticket = std::move(leader_read.ticket_);
@@ -143,65 +151,47 @@ void run_snapshot_cache_tests() {
     leader_ticket->complete(get_snapshot("remaining"));
     REQUIRE(receive_result(second, follower_read).snapshot_->data_ == "remaining");
 
-    // TTL expiry and failed reads are lazy and never leave a permanent hit.
-    cache::limits ttl_limits;
-    ttl_limits.max_age_ = std::chrono::seconds(5);
-    cache ttl(ttl_limits);
+    // Every completed read is released; successes and failures are delivered
+    // to current readers once, with no resident in-memory response bytes.
+    reads ttl;
     auto ttl_lease = ttl.subscribe(key);
     auto ttl_read = ttl_lease.read(first.handle());
     ttl_read.ticket_->complete(get_snapshot("ttl"));
-    const auto ttl_result = receive_result(first, ttl_read);
-    REQUIRE(!ttl_lease.read(first.handle(), cache::clock::now() + std::chrono::seconds(1)).ticket_);
-    auto expired = ttl_lease.read(first.handle(), cache::clock::now() + std::chrono::seconds(6));
+    REQUIRE(receive_result(first, ttl_read).snapshot_->data_ == "ttl");
+    auto expired = ttl_lease.read(first.handle());
     REQUIRE(expired.ticket_.has_value());
     expired.ticket_->complete(get_snapshot("expired"));
     REQUIRE(receive_result(first, expired).snapshot_->data_ == "expired");
-    auto failed = ttl_lease.read(first.handle(), cache::clock::now() + std::chrono::seconds(7));
+    auto failed = ttl_lease.read(first.handle());
     REQUIRE(failed.ticket_.has_value());
     failed.ticket_->complete(get_snapshot("db-error", true));
     REQUIRE(receive_result(first, failed).snapshot_->failure_);
-    auto retry = ttl_lease.read(first.handle(), cache::clock::now() + std::chrono::seconds(8));
+    auto retry = ttl_lease.read(first.handle());
     REQUIRE(retry.ticket_.has_value());
     retry.ticket_->complete(get_snapshot("recovered"));
     REQUIRE(receive_result(first, retry).snapshot_->data_ == "recovered");
 
-    // Byte LRU, per-snapshot size, group, subscriber, flight and key caps.
-    cache::limits limits;
-    limits.bytes_ = 4;
-    cache lru(limits);
-    auto lru_a = lru.subscribe({"t", resource::nodes, "a", "s1:a"});
-    auto lru_b = lru.subscribe({"t", resource::nodes, "b", "s1:b"});
-    auto lru_c = lru.subscribe({"t", resource::nodes, "c", "s1:c"});
-    for (auto* lease : {&lru_a, &lru_b}) {
-        auto read = lease->read(first.handle());
-        read.ticket_->complete(get_snapshot("aa"));
-        (void)receive_result(first, read);
-    }
-    auto lru_read = lru_c.read(first.handle());
-    lru_read.ticket_->complete(get_snapshot("cc"));
-    (void)receive_result(first, lru_read);
-    REQUIRE(lru.get_stats().bytes_ == 4);
-    auto lru_a_read = lru_a.read(first.handle());
-    REQUIRE(lru_a_read.ticket_.has_value());
-    lru_a_read.ticket_->complete(get_snapshot("aa"));
-    (void)receive_result(first, lru_a_read);
+    reads released;
+    auto released_lease = released.subscribe(key);
+    auto released_read = released_lease.read(first.handle());
+    auto bytes = get_snapshot(std::string(1024 * 1024, 'x'));
+    const std::weak_ptr<const snapshot> weak = bytes;
+    released_read.ticket_->complete(bytes);
+    bytes.reset();
+    auto delivered = receive_result(first, released_read);
+    REQUIRE(!weak.expired());
+    delivered.snapshot_.reset();
+    REQUIRE(weak.expired());
+    REQUIRE(released_lease.read(first.handle()).ticket_.has_value());
 
-    cache::limits size_limits;
-    size_limits.snapshot_bytes_ = 2;
-    cache sized(size_limits);
-    auto sized_lease = sized.subscribe(key);
-    auto oversized = sized_lease.read(first.handle());
-    oversized.ticket_->complete(get_snapshot("123"));
-    (void)receive_result(first, oversized);
-    REQUIRE(sized.get_stats().bytes_ == 0);
-    REQUIRE(sized_lease.read(first.handle()).ticket_.has_value());
+    // Only connection coordination has group, subscriber, flight and key caps.
 
-    cache::limits cap_limits;
+    reads::limits cap_limits;
     cap_limits.groups_ = 1;
     cap_limits.subscribers_ = 1;
     cap_limits.flights_ = 1;
     cap_limits.key_bytes_ = 4;
-    cache caps(cap_limits);
+    reads caps(cap_limits);
     auto cap_lease = caps.subscribe({"t", resource::nodes, {}, "q"});
     bool rejected = false;
     try {
@@ -222,9 +212,9 @@ void run_snapshot_cache_tests() {
     auto cap_read2 = cap_lease.read(second.handle());
     REQUIRE(!cap_read2.ticket_.has_value());
 
-    cache::limits group_limits;
+    reads::limits group_limits;
     group_limits.groups_ = 1;
-    cache group_caps(group_limits);
+    reads group_caps(group_limits);
     auto group_lease = group_caps.subscribe({"t", resource::nodes, {}, "q"});
     rejected = false;
     try {
@@ -234,9 +224,9 @@ void run_snapshot_cache_tests() {
     }
     REQUIRE(rejected);
 
-    cache::limits subscriber_limits;
+    reads::limits subscriber_limits;
     subscriber_limits.subscribers_ = 1;
-    cache subscriber_caps(subscriber_limits);
+    reads subscriber_caps(subscriber_limits);
     auto subscriber_lease = subscriber_caps.subscribe({"t", resource::nodes, {}, "q"});
     rejected = false;
     try {
@@ -247,8 +237,8 @@ void run_snapshot_cache_tests() {
     REQUIRE(rejected);
 
     // Dropping the last lease erases the entry and rejects an in-flight result.
-    cache disconnect;
-    std::optional<cache::lease> old_lease;
+    reads disconnect;
+    std::optional<reads::lease> old_lease;
     old_lease.emplace(disconnect.subscribe(key));
     auto old_read = old_lease->read(first.handle());
     auto old_ticket = std::move(old_read.ticket_);
@@ -265,23 +255,23 @@ void run_snapshot_cache_tests() {
     // A returning reader freezes the patch boundary it has already replayed.
     // A flight begun before that boundary is rejected; the next flight is
     // accepted even if another patch arrives while it is running.
-    cache boundary_cache;
-    auto boundary_lease = boundary_cache.subscribe(key);
+    reads boundary_reads;
+    auto boundary_lease = boundary_reads.subscribe(key);
     auto boundary_read = boundary_lease.read(first.handle());
     const auto boundary_ticket = std::move(boundary_read.ticket_);
-    boundary_cache.invalidate("tenant-a", resource::nodes, "node-a", false, true);
+    boundary_reads.invalidate("tenant-a", resource::nodes, "node-a", false, true);
     const auto boundary = boundary_lease.patch_epoch();
     boundary_ticket->complete(get_snapshot("before-boundary"));
     const auto before_boundary = receive_result(first, boundary_read);
     REQUIRE(!boundary_lease.current(before_boundary, boundary));
     auto after_boundary_read = boundary_lease.read(first.handle());
     REQUIRE(after_boundary_read.ticket_.has_value());
-    boundary_cache.invalidate("tenant-a", resource::nodes, "node-a", false, true);
+    boundary_reads.invalidate("tenant-a", resource::nodes, "node-a", false, true);
     after_boundary_read.ticket_->complete(get_snapshot("after-boundary"));
     const auto after_boundary = receive_result(first, after_boundary_read);
     REQUIRE(boundary_lease.current(after_boundary, boundary));
 
-    // hub notifications invalidate the cache that belongs to each
+    // hub notifications invalidate the reads that belongs to each
     // subscription, including detail-only runtime and origin updates.
     hub hub;
     auto node_sub = hub.subscribe(first.handle(), "hub-tenant", resource::nodes, "node-1",
@@ -343,9 +333,11 @@ void run_snapshot_cache_tests() {
     auto website_detail_after = website_detail.snapshots().read(first.handle());
     auto website_list_after = website_list.snapshots().read(first.handle());
     REQUIRE(website_detail_after.ticket_.has_value());
-    REQUIRE(!website_list_after.ticket_.has_value() && website_list_after.ready_.snapshot_);
+    REQUIRE(website_list_after.ticket_.has_value());
     website_detail_after.ticket_->complete(get_snapshot("site-origin"));
     (void)receive_result(first, website_detail_after);
+    website_list_after.ticket_->complete(get_snapshot("site-list-reloaded"));
+    (void)receive_result(first, website_list_after);
 
     loops.stop();
     loops.join();
@@ -576,7 +568,7 @@ int main() {
         REQUIRE(ordinary.snapshot_ && !ordinary.recovery_);
 
         // A stream part writes a snapshot only when its bytes changed, however
-        // often the cache re-read it; forgetting (initial, recovery) writes again.
+        // often the reads re-read it; forgetting (initial, recovery) writes again.
         service::live_resource::written_snapshot written;
         REQUIRE(written.replace(R"({"name":"a"})"));
         REQUIRE(!written.replace(R"({"name":"a"})"));
@@ -614,7 +606,7 @@ int main() {
         REQUIRE(degraded.changes_.empty() && degraded.missed_until_);
 
         run_query_key_tests();
-        run_snapshot_cache_tests();
+        run_snapshot_read_tests();
         run_combined_and_coalesced_tests();
 
         loops.stop();

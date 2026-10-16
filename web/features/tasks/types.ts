@@ -237,8 +237,7 @@ const taskAttemptDetailSchema = z.discriminatedUnion('kind', [
 ])
 const invalidDetail = { kind: 'invalid' } as const
 
-// Attempt traces (build/task-trace/contract.md, docs/task-center.md
-// "执行跟踪"). Every string is redacted server-side; `[REDACTED]` marks a
+// Attempt traces. Every string is redacted server-side; `[REDACTED]` marks a
 // hidden value. Like history, traces degrade locally: absent fields take
 // their empty value (older or abridged payloads), a field of the wrong type
 // fails only the enclosing item, and list items that do not parse become

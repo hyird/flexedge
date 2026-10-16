@@ -129,9 +129,11 @@ inline std::string problem_detail(const std::optional<acme_problem_input>& probl
 
 class acme_client final {
 public:
-    acme_client(acme_settings settings, service::attempt_trace::recorder& trace)
+    acme_client(acme_settings settings, service::attempt_trace::recorder& trace,
+        service::outbound_http::quota_scope scope)
         : settings_(std::move(settings)),
-          trace_(trace) {}
+          trace_(trace),
+          scope_(std::move(scope)) {}
 
     [[nodiscard]] const acme_settings& settings() const noexcept {
         return settings_;
@@ -498,8 +500,7 @@ private:
         service::attempt_trace::outbound_operation operation) const {
         try {
             const auto alias = service::config::outbound_origin_alias(service::config::acme_origin(settings_.host_));
-            auto&& client = context.get_http_client(alias);
-            co_return co_await service::outbound_http::send_buffered(client,
+            co_return co_await service::outbound_http::send_buffered(context, scope_,
                 {.origin_alias_ = alias, .operation_ = operation}, trace_, request,
                 {.timeout_ = std::chrono::seconds(30), .stop_token_ = context.get_stop_token()});
         } catch (const ruvia::http_client_error& error) {
@@ -766,6 +767,7 @@ private:
 
     acme_settings settings_;
     service::attempt_trace::recorder& trace_;
+    service::outbound_http::quota_scope scope_;
 };
 
 }  // namespace service::certificate_issuance

@@ -14,7 +14,7 @@
 
 #include "service/features/attempt_trace/recorder.h"
 #include "service/features/attempt_trace/trace_store.h"
-#include "service/features/live_resource/notifications.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/operation/work_origin.h"
 #include "service/features/sync_runtime/attempt_record.h"
 
@@ -263,6 +263,17 @@ inline ruvia::task<void> commit_and_publish_result_event(transaction_type& trans
     const running_marker_lease& lease, const running_result_transition& transition,
     service::attempt_trace::recorder& trace, bool node_config = false,
     const service::operation::work_origin* caused = nullptr) {
+    auto notification = transition.event_recorded_ || !transition.owner_.operation_id_.empty()
+                            ? detail::recorded_result_notification(lease, transition)
+                            : service::live_resource::notifications::resource_notification(lease.marker_.tenant_id_);
+    if (node_config) {
+        notification.node_config();
+    }
+    if (caused != nullptr) {
+        caused->add_changes(notification);
+    }
+    const auto notification_id = co_await service::live_resource::enqueue_notification(
+        transaction, notification, service::live_resource::trace_delivery_guard);
     co_await transaction.commit();
     if (transition.event_id_) {
         auto database = context.db();
@@ -273,16 +284,7 @@ inline ruvia::task<void> commit_and_publish_result_event(transaction_type& trans
                 .version_ = lease.marker_.version_},
             *transition.event_id_, trace);
     }
-    auto notification = transition.event_recorded_ || !transition.owner_.operation_id_.empty()
-                            ? detail::recorded_result_notification(lease, transition)
-                            : service::live_resource::notifications::resource_notification(lease.marker_.tenant_id_);
-    if (node_config) {
-        notification.node_config();
-    }
-    if (caused != nullptr) {
-        caused->add_changes(notification);
-    }
-    co_await service::live_resource::notify(context, notification);
+    co_await service::live_resource::release_notification(context, notification_id, notification);
 }
 
 [[nodiscard]] inline std::string_view resource_column(marker_resource_type resource_type) {
@@ -375,6 +377,10 @@ inline ruvia::task<std::string> upsert_marker(ruvia::db_transaction& transaction
     if (rows.empty()) {
         throw std::runtime_error("sync marker could not be created");
     }
+    const auto worker_type = resource_type == marker_resource_type::provider ? "provider-verification" :
+        resource_type == marker_resource_type::dns_zone ? "dns-sync" :
+        resource_type == marker_resource_type::certificate ? "certificate" : "website-dispatch";
+    co_await service::live_resource::enqueue_worker_wakeup(transaction, worker_type);
     const auto closed_by = origin.operation_id().value_or("");
     if (exists && version >= existing_version && !existing_subtask.empty() && existing_subtask != owner) {
         // Work that already ran keeps its result; pending or running work is
@@ -430,10 +436,14 @@ inline ruvia::task<void> remove_marker(ruvia::db_transaction& transaction, std::
 // Notifies the changes of several tenants after one autocommit statement:
 // one notification per tenant.
 template <typename context_type>
-inline ruvia::task<void> notify_by_tenant(context_type& context,
+inline ruvia::task<void> commit_tenant_changes(ruvia::db_transaction& transaction, context_type& context,
     std::vector<service::live_resource::notifications::resource_notification> notifications) {
     for (const auto& notification : notifications) {
-        co_await service::live_resource::notify(context, notification);
+        (void)co_await service::live_resource::enqueue_notification(transaction, notification);
+    }
+    co_await transaction.commit();
+    if constexpr (requires { context.record_committed_notification(notifications.front()); }) {
+        for (const auto& notification : notifications) co_await context.record_committed_notification(notification);
     }
 }
 
@@ -451,16 +461,17 @@ inline service::live_resource::notifications::resource_notification& tenant_noti
 // Notifies the tasks a committed background transaction changed (nothing
 // when it changed none).
 template <typename context_type>
-inline ruvia::task<void> notify_origin(context_type& context, std::string_view tenant_id,
+inline ruvia::task<void> commit_origin(ruvia::db_transaction& transaction, context_type& context, std::string_view tenant_id,
     const service::operation::work_origin& origin) {
     service::live_resource::notifications::resource_notification notification(tenant_id);
     origin.add_changes(notification);
-    co_await service::live_resource::notify(context, notification);
+    co_await service::live_resource::commit_and_notify(transaction, context, notification);
 }
 
 template <typename context_type>
 inline ruvia::task<void> recover_stale_running(context_type& context, marker_resource_type resource_type) {
-    const auto rows = co_await context.db().query(
+    auto transaction = co_await context.db().begin_transaction();
+    const auto rows = co_await transaction.query(
         "UPDATE sys_sync_task task SET is_done = FALSE, is_ok = FALSE, count_fails = count_fails + 1, "
         "error = $2, next_attempt_at = NOW() + CAST($3 AS BIGINT) * INTERVAL '1 second', "
         "lease_owner = NULL, lease_until = NULL, updated_at = NOW() WHERE resource_type = $1 "
@@ -477,7 +488,7 @@ inline ruvia::task<void> recover_stale_running(context_type& context, marker_res
             notification.changed(service::live_resource::resource::operations, owner.operation_id_);
         }
     }
-    co_await notify_by_tenant(context, std::move(notifications));
+    co_await commit_tenant_changes(transaction, context, std::move(notifications));
 }
 
 template <typename database_type>
@@ -582,11 +593,12 @@ inline ruvia::task<std::optional<recorded_attempt>> record_running_result_event(
 // once; lists re-read.
 template <typename context_type>
 inline ruvia::task<void> prune_result_events(context_type& context) {
-    const auto removed = co_await context.db().query(
+    auto transaction = co_await context.db().begin_transaction();
+    const auto removed = co_await transaction.query(
         "WITH removed AS (DELETE FROM sys_sync_event WHERE emitted_at < NOW() - INTERVAL '7 days' "
         "RETURNING subtask_id) SELECT DISTINCT subtask.tenant_id::text, subtask.operation_id::text FROM "
         "removed INNER JOIN sys_operation_subtask subtask ON subtask.id = removed.subtask_id");
-    const auto expired = co_await context.db().query(
+    const auto expired = co_await transaction.query(
         "DELETE FROM sys_operation operation WHERE operation.created_at < NOW() - INTERVAL '7 days' AND "
         "NOT EXISTS (SELECT 1 FROM sys_operation_subtask subtask WHERE subtask.operation_id = operation.id "
         "AND subtask.state = 'open' AND (EXISTS (SELECT 1 FROM sys_sync_task marker WHERE "
@@ -608,7 +620,7 @@ inline ruvia::task<void> prune_result_events(context_type& context) {
         tenant_notification(notifications, row[0].value().value_or(""))
             .changed(service::live_resource::resource::operations, row[1].value().value_or(""));
     }
-    co_await notify_by_tenant(context, std::move(notifications));
+    co_await commit_tenant_changes(transaction, context, std::move(notifications));
 }
 
 template <typename database_type>

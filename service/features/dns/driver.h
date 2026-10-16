@@ -35,8 +35,10 @@ struct reconciled_record final {
 
 class dns_provider_driver final {
 public:
-    explicit dns_provider_driver(std::string_view provider)
-        : kind_(require_dns_provider(provider).kind_) {}
+    explicit dns_provider_driver(std::string_view provider, service::outbound_http::quota_scope scope = {})
+        : kind_(require_dns_provider(provider).kind_),
+          cloudflare_(scope),
+          aliyun_(std::move(scope)) {}
 
     [[nodiscard]] static bool supports(std::string_view provider) noexcept {
         return find_dns_provider(provider) != nullptr;
@@ -55,13 +57,13 @@ public:
         std::string_view account_id, std::string_view secret) const {
         std::vector<provider_zone> result;
         if (kind_ == dns_provider_kind::cloudflare) {
-            const auto zones = co_await get_cloudflare_client().verify_token(c, trace, secret, account_id);
+            const auto zones = co_await cloudflare_.verify_token(c, trace, secret, account_id);
             result.reserve(zones.size());
             for (const auto& zone : zones) {
                 result.push_back({zone.id_, zone.name_, zone.status_});
             }
         } else {
-            const auto zones = co_await get_aliyun_client().verify_access_key(c, trace, account_id, secret);
+            const auto zones = co_await aliyun_.verify_access_key(c, trace, account_id, secret);
             result.reserve(zones.size());
             for (const auto& zone : zones) {
                 result.push_back({zone.id_, zone.name_, zone.status_});
@@ -74,10 +76,10 @@ public:
     ruvia::task<provider_zone> find_zone(runtime_type& c, service::attempt_trace::recorder& trace,
         std::string_view account_id, std::string_view secret, std::string_view domain) const {
         if (kind_ == dns_provider_kind::cloudflare) {
-            const auto zone = co_await get_cloudflare_client().find_zone(c, trace, secret, account_id, domain);
+            const auto zone = co_await cloudflare_.find_zone(c, trace, secret, account_id, domain);
             co_return provider_zone{zone.id_, zone.name_, zone.status_};
         }
-        const auto zones = co_await get_aliyun_client().list_domains(c, trace, account_id, secret);
+        const auto zones = co_await aliyun_.list_domains(c, trace, account_id, secret);
         const auto found = std::find_if(zones.begin(), zones.end(), [domain](const auto& zone) {
             return record_name_policy::dns_name_equals(zone.name_, domain);
         });
@@ -93,7 +95,7 @@ public:
         std::string_view secret, std::string_view zone_id, std::string_view domain) const {
         std::vector<provider_record> result;
         if (kind_ == dns_provider_kind::cloudflare) {
-            const auto records = co_await get_cloudflare_client().list_all_records(c, trace, secret, zone_id);
+            const auto records = co_await cloudflare_.list_all_records(c, trace, secret, zone_id);
             result.reserve(records.size());
             for (const auto& record : records) {
                 result.push_back({record.id_, record.type_, record.name_, record.content_, record.ttl_,
@@ -101,7 +103,7 @@ public:
             }
         } else {
             const auto records =
-                co_await get_aliyun_client().list_all_records(c, trace, account_id, secret, domain);
+                co_await aliyun_.list_all_records(c, trace, account_id, secret, domain);
             result.reserve(records.size());
             for (const auto& record : records) {
                 result.push_back({record.id_, record.type_, record.rr_, record.value_, record.ttl_,
@@ -117,7 +119,7 @@ public:
         if (kind_ == dns_provider_kind::cloudflare) {
             co_return std::vector<provider_line>{{"default", "默认", "默认"}};
         }
-        const auto lines = co_await get_aliyun_client().list_support_lines(c, trace, account_id, secret, domain);
+        const auto lines = co_await aliyun_.list_support_lines(c, trace, account_id, secret, domain);
         std::vector<provider_line> result;
         result.reserve(lines.size());
         for (const auto& line : lines) {
@@ -164,22 +166,22 @@ public:
         }
         if (kind_ == dns_provider_kind::cloudflare) {
             if (plan.action_ == record_reconciliation_action::update) {
-                result.remote_id_ = co_await get_cloudflare_client().update_record(c, trace, secret, zone_id,
+                result.remote_id_ = co_await cloudflare_.update_record(c, trace, secret, zone_id,
                     plan.record_->id_, type, name,
                     content, ttl, priority, proxied);
                 co_return result;
             }
-            result.remote_id_ = co_await get_cloudflare_client().create_or_adopt_record(
+            result.remote_id_ = co_await cloudflare_.create_or_adopt_record(
                 c, trace, secret, zone_id, type, name, content, ttl, priority, proxied);
             co_return result;
         }
         if (plan.action_ == record_reconciliation_action::update) {
-            result.remote_id_ = co_await get_aliyun_client().update_record(c, trace, account_id, secret,
+            result.remote_id_ = co_await aliyun_.update_record(c, trace, account_id, secret,
                 plan.record_->id_, domain, type, name, content, ttl,
                 priority, line_code);
             co_return result;
         }
-        result.remote_id_ = co_await get_aliyun_client().create_record(c, trace, account_id, secret, domain,
+        result.remote_id_ = co_await aliyun_.create_record(c, trace, account_id, secret, domain,
             type, name, content, ttl, priority, line_code);
         co_return result;
     }
@@ -189,9 +191,9 @@ public:
         std::string_view account_id, std::string_view secret, std::string_view zone_id, std::string_view record_id,
         std::string_view subject) const {
         if (kind_ == dns_provider_kind::cloudflare) {
-            co_await get_cloudflare_client().delete_record(c, trace, secret, zone_id, record_id, subject);
+            co_await cloudflare_.delete_record(c, trace, secret, zone_id, record_id, subject);
         } else {
-            co_await get_aliyun_client().delete_record(c, trace, account_id, secret, record_id, subject);
+            co_await aliyun_.delete_record(c, trace, account_id, secret, record_id, subject);
         }
         co_return;
     }
@@ -276,6 +278,8 @@ private:
     }
 
     dns_provider_kind kind_;
+    cloudflare_client cloudflare_;
+    aliyun_client aliyun_;
 };
 
 }  // namespace service::dns

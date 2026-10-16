@@ -112,7 +112,7 @@ inline const std::string& subtask_sql() {
     return sql;
 }
 
-// Tasks of tenant $1 with their rolled-up status (docs/task-center.md):
+// Tasks of tenant $1 with their rolled-up status:
 // retrying > running > queued > partial_failed / failed > attention_required >
 // completed > merged / cancelled.
 inline const std::string& operation_sql() {

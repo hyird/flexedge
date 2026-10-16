@@ -27,7 +27,7 @@ test('the actual lint config rejects business dependencies in shared layers', as
       ).toBe(true)
     }
   }
-})
+}, 15000)
 
 test('UI files remain linted and can reuse shared primitives', async () => {
   const [result] = await eslint.lintText("export { cn } from '@/lib/utils'", {

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <ruvia/web/context.h>
 #include <ruvia/web/model_json.h>
 
 #include <string>
@@ -10,7 +9,8 @@
 
 namespace service::agent {
 
-inline std::string heartbeat_runtime_json(ruvia::context& c, const heartbeat_report& report) {
+template <typename runtime_type>
+std::string heartbeat_runtime_json(runtime_type& c, const heartbeat_report& report) {
     service::node_runtime::node_runtime_output runtime({.resource_ = c.pool()});
     runtime.set<"agent_version">(report.agent_version_);
     runtime.set<"cpu_usage">(report.cpu_usage_);

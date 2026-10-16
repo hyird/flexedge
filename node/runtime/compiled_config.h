@@ -21,6 +21,12 @@
 
 namespace flexedge::node {
 
+class invalid_hostname final : public std::runtime_error {
+public:
+    invalid_hostname()
+        : std::runtime_error("hostname is empty or exceeds 253 bytes after normalization") {}
+};
+
 inline std::string normalize_hostname(std::string_view value) {
     while (!value.empty() && value.back() == '.') {
         value.remove_suffix(1);
@@ -30,7 +36,7 @@ inline std::string normalize_hostname(std::string_view value) {
         value = value.substr(0, first_colon);
     }
     if (value.empty() || value.size() > 253) {
-        throw std::runtime_error("invalid hostname in node config");
+        throw invalid_hostname{};
     }
     std::string result(value);
     std::ranges::transform(result, result.begin(),

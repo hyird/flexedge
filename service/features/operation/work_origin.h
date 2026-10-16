@@ -17,7 +17,7 @@
 // action) and the background work it caused, its subtasks. Every write that
 // schedules background work passes a work_origin, so each queued marker, node
 // release target and recorded attempt names the subtask it belongs to
-// (docs/task-center.md). Operations never name a worker instance; claims,
+//. Operations never name a worker instance; claims,
 // leases and retries stay with the markers and targets.
 namespace service::operation {
 
@@ -274,7 +274,7 @@ struct operation_request final {
     // "website", "cluster", "node", "dns_zone", "certificate" or "provider".
     std::string target_type_;
     std::string target_id_;
-    // Request summary (docs/task-center.md): section names or counts only.
+    // Request summary: section names or counts only.
     std::string summary_{"{}"};
 };
 

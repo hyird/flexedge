@@ -17,7 +17,7 @@
 #include "service/domains/provider/dns_provider_read_service.h"
 #include "service/domains/provider/dns_provider_types.h"
 #include "service/features/dns/provider_config_mapper.h"
-#include "service/features/live_resource/notifications.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/provider_verification/queue.h"
 #include "service/utils/secret.h"
 
@@ -67,8 +67,7 @@ public:
             const auto id = std::string(inserted.front()[0].value().value_or(""));
             auto origin = start(c, service::operation::action::provider_create, id);
             (void)co_await origin.require_operation(transaction, tenant_id);
-            co_await transaction.commit();
-            co_await notify(c, tenant_id, id, origin);
+            co_await commit_changes(transaction, c, tenant_id, id, origin);
             co_return origin.operation_id();
         } catch (const ruvia::db_error& error) {
             if (service::common::is_unique_constraint_violation(error, "uk_provider_name")) {
@@ -141,8 +140,7 @@ public:
             } else {
                 co_await service::provider_verification::remove(transaction, tenant_id, id, origin);
             }
-            co_await transaction.commit();
-            co_await notify(c, tenant_id, id, origin);
+            co_await commit_changes(transaction, c, tenant_id, id, origin);
         } catch (const ruvia::db_error& error) {
             if (service::common::is_unique_constraint_violation(error, "uk_provider_name")) {
                 service::common::throw_app_error(dns_provider_error::name_exists);
@@ -168,8 +166,7 @@ public:
             }
             service::common::throw_app_error(dns_provider_error::revision_conflict);
         }
-        co_await transaction.commit();
-        co_await notify(c, tenant_id, id, origin);
+        co_await commit_changes(transaction, c, tenant_id, id, origin);
         co_return origin.operation_id();
     }
 
@@ -202,8 +199,7 @@ public:
             "NOW(), updated_at = NOW() WHERE id = $1 AND tenant_id = $2 AND revision = $3",
             id, tenant_id, expected_revision);
         co_await service::provider_verification::remove(transaction, tenant_id, id, origin);
-        co_await transaction.commit();
-        co_await notify(c, tenant_id, id, origin);
+        co_await commit_changes(transaction, c, tenant_id, id, origin);
         co_return origin.operation_id();
     }
 
@@ -217,12 +213,12 @@ private:
             .summary_ = std::move(summary)});
     }
 
-    static ruvia::task<void> notify(ruvia::context& c, const std::string& tenant_id, const std::string& id,
+    static ruvia::task<void> commit_changes(ruvia::db_transaction& transaction, ruvia::context& c, const std::string& tenant_id, const std::string& id,
         const service::operation::work_origin& origin) {
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.changed(service::live_resource::resource::providers, id);
         origin.add_changes(notification);
-        co_await service::live_resource::notify(c, notification);
+        co_await service::live_resource::commit_and_notify(transaction, c, notification);
     }
 
     static ruvia::task<void> ensure_available(ruvia::context& c, const std::string& tenant_id,

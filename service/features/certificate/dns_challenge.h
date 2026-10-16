@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/dns_sync/mapper.h"
 #include "service/features/dns_sync/queue.h"
 #include "service/features/sync_runtime/state.h"
@@ -150,8 +150,7 @@ ruvia::task<queued_dns_sync> persist_dns_challenges(
     if (!co_await service::sync_runtime::renew_running_lease(transaction, certificate_marker)) {
         throw std::runtime_error("证书同步标记 lease 已失效");
     }
-    co_await transaction.commit();
-    co_await service::sync_runtime::notify_origin(context, certificate_marker.marker_.tenant_id_, origin);
+    co_await service::sync_runtime::commit_origin(transaction, context, certificate_marker.marker_.tenant_id_, origin);
     co_return queued;
 }
 
@@ -202,13 +201,12 @@ ruvia::task<queued_dns_sync> retire_dns_challenges(runtime_type& context, const 
     if (!co_await service::sync_runtime::renew_running_lease(transaction, certificate_marker)) {
         throw std::runtime_error("证书同步标记 lease 已失效");
     }
-    co_await transaction.commit();
-    co_await service::sync_runtime::notify_origin(context, certificate_marker.marker_.tenant_id_, origin);
+    co_await service::sync_runtime::commit_origin(transaction, context, certificate_marker.marker_.tenant_id_, origin);
     co_return queued;
 }
 
 inline ruvia::task<void>
-wait_for_dns_marker(service::background::worker_context& context, std::string_view marker_id,
+wait_for_dns_marker(service::background::task_context& context, std::string_view marker_id,
     const service::sync_runtime::running_marker_lease& certificate_marker) {
     if (marker_id.empty()) {
         co_return;

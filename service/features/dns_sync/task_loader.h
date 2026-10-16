@@ -7,15 +7,16 @@
 #include <optional>
 #include <string>
 
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/dns_sync/task.h"
-#include "service/features/live_resource/notifications.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/sync_runtime/state.h"
 
 namespace service::dns_sync::detail {
 
-inline ruvia::task<std::optional<dns_task>> claim(service::background::worker_context& context) {
-    const auto rows = co_await context.db().query(
+inline ruvia::task<std::optional<dns_task>> claim(service::background::task_context& context) {
+    auto transaction = co_await context.db().begin_transaction();
+    const auto rows = co_await transaction.query(
         "WITH candidate AS (SELECT task.id FROM sys_sync_task task INNER JOIN sys_dns_zone zone ON "
         "zone.tenant_id = task.tenant_id AND zone.id = task.resource_id WHERE "
         "task.resource_type = 'dns_zone' AND NOT task.is_done AND task.next_attempt_at <= NOW() "
@@ -28,6 +29,7 @@ inline ruvia::task<std::optional<dns_task>> claim(service::background::worker_co
             service::sync_runtime::claimed_owner_columns("task"),
         context.lease_owner());
     if (rows.empty()) {
+        co_await transaction.commit();
         co_return std::nullopt;
     }
     const auto claimed_at = std::chrono::steady_clock::now();
@@ -38,7 +40,7 @@ inline ruvia::task<std::optional<dns_task>> claim(service::background::worker_co
     if (!owner.operation_id_.empty()) {
         notification.changed(service::live_resource::resource::operations, owner.operation_id_);
     }
-    co_await service::live_resource::notify(context, notification);
+    co_await service::live_resource::commit_and_notify(transaction, context, notification);
     co_return dns_task{
         .id_ = std::string(row[0].value().value_or("")),
         .tenant_id_ = std::string(row[1].value().value_or("")),

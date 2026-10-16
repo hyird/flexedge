@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/certificate/provider.h"
 #include "service/features/certificate/provider_config_mapper.h"
 #include "service/features/dns/driver.h"
@@ -58,13 +58,13 @@ template <typename runtime_type>
 ruvia::task<service::certificate_issuance::eab_credentials>
 fetch_zero_ssl_eab(runtime_type& context, service::attempt_trace::recorder& trace,
     const service::certificate_issuance::certificate_provider_config_data& config,
-    std::string_view credential_mode) {
+    std::string_view credential_mode, const service::outbound_http::quota_scope& scope) {
     if (credential_mode == "email") {
         if (!config.account_email_) {
             throw verification_error("ZeroSSL 供应商配置不完整", true);
         }
         co_return co_await service::certificate_issuance::fetch_zero_ssl_eab_by_email(
-            context, trace, *config.account_email_);
+            context, trace, *config.account_email_, scope);
     }
     if (credential_mode == "access_key") {
         if (!config.envelope_) {
@@ -78,12 +78,12 @@ fetch_zero_ssl_eab(runtime_type& context, service::attempt_trace::recorder& trac
             }
         }());
         co_return co_await service::certificate_issuance::fetch_zero_ssl_eab_by_access_key(
-            context, trace, access_key.view());
+            context, trace, access_key.view(), scope);
     }
     throw verification_error("ZeroSSL 供应商配置不完整", true);
 }
 
-inline ruvia::task<verification_result> verify_dns(service::background::worker_context& context,
+inline ruvia::task<verification_result> verify_dns(service::background::task_context& context,
     service::attempt_trace::recorder& trace, const verification_task& task, provider_attempt& attempt) {
     using service::attempt_trace::step_code;
     auto credential_step = trace.begin_step(step_code::decrypt_credential);
@@ -99,7 +99,8 @@ inline ruvia::task<verification_result> verify_dns(service::background::worker_c
     trace.register_secret(task.account_id_);
     credential_step.complete();
     auto verify_step = trace.begin_step(step_code::verify_dns_credential, task.provider_);
-    const service::dns::dns_provider_driver driver(task.provider_);
+    const service::dns::dns_provider_driver driver(task.provider_,
+        {.tenant_id_ = task.tenant_id_, .account_id_ = task.account_id_});
     const auto zones = co_await driver.verify(context, trace, task.account_id_, secret.view());
     std::vector<service::dns::dns_provider_zone_runtime_data> runtime_zones;
     runtime_zones.reserve(zones.size());
@@ -115,10 +116,11 @@ inline ruvia::task<verification_result> verify_dns(service::background::worker_c
 }
 
 inline ruvia::task<verification_result>
-verify_certificate(service::background::worker_context& context, service::attempt_trace::recorder& trace,
+verify_certificate(service::background::task_context& context, service::attempt_trace::recorder& trace,
     const verification_task& task, std::string_view current_runtime_json, provider_attempt& attempt) {
     using service::attempt_trace::step_code;
     auto settings_step = trace.begin_step(step_code::load_acme_settings, task.provider_);
+    const service::outbound_http::quota_scope scope{.tenant_id_ = task.tenant_id_, .account_id_ = task.provider_id_};
     const auto config = service::certificate_issuance::parse_certificate_provider_config(
         task.config_json_, context.pool());
     const auto settings = service::certificate_issuance::settings_for_provider(task.provider_);
@@ -137,7 +139,7 @@ verify_certificate(service::background::worker_context& context, service::attemp
             trace.register_secret(eab->hmac_key_.view());
             trace.log(service::attempt_trace::log_level::info, "复用已保存的 EAB 凭据");
         } else {
-            eab = co_await fetch_zero_ssl_eab(context, trace, config, config.credential_mode_);
+            eab = co_await fetch_zero_ssl_eab(context, trace, config, config.credential_mode_, scope);
             external_account = "fetched";
             trace.log(service::attempt_trace::log_level::info, "已从 ZeroSSL 获取新的 EAB 凭据");
         }
@@ -146,7 +148,7 @@ verify_certificate(service::background::worker_context& context, service::attemp
         eab_step.skip("该供应商不需要 EAB");
     }
     auto directory_step = trace.begin_step(step_code::check_acme_directory, settings->directory_url_);
-    co_await service::certificate_issuance::verify_acme_directory(context, trace, *settings);
+    co_await service::certificate_issuance::verify_acme_directory(context, trace, *settings, scope);
     directory_step.complete();
     attempt.record_directory(settings->directory_url_, std::move(external_account));
     co_return verification_result{.eab_ = std::move(eab)};

@@ -20,7 +20,7 @@
 #include <utility>
 #include <vector>
 
-#include "service/features/live_resource/snapshot_cache.h"
+#include "service/features/live_resource/snapshot_reads.h"
 
 namespace service::live_resource {
 
@@ -103,7 +103,7 @@ class hub final {
     struct state final {
         std::vector<entry> entries_;
         std::vector<coalesced_gate> gates_;
-        snapshot_cache snapshots_;
+        snapshot_reads snapshots_;
 
         std::vector<target> targets(std::string_view tenant, resource resource) const {
             std::vector<target> result;
@@ -128,7 +128,7 @@ public:
     public:
         subscription(std::shared_ptr<state> state, std::shared_ptr<mailbox> mailbox,
             ruvia::channel_receiver<std::uint64_t> receiver, std::string tenant,
-            std::vector<resource> resources, std::vector<snapshot_cache::lease> snapshots)
+            std::vector<resource> resources, std::vector<snapshot_reads::lease> snapshots)
             : state_(std::move(state)),
               mailbox_(std::move(mailbox)),
               receiver_(std::move(receiver)),
@@ -164,7 +164,7 @@ public:
         pending_changes drain(std::size_t part = 0) {
             return std::exchange(mailbox_->pending_.at(part), {});
         }
-        const snapshot_cache::lease& snapshots(std::size_t part = 0) const {
+        const snapshot_reads::lease& snapshots(std::size_t part = 0) const {
             return snapshots_.at(part);
         }
         // Delivers a coalesced change whose deferral has elapsed. Every
@@ -180,7 +180,7 @@ public:
         ruvia::channel_receiver<std::uint64_t> receiver_;
         std::string tenant_;
         std::vector<resource> resources_;
-        std::vector<snapshot_cache::lease> snapshots_;
+        std::vector<snapshot_reads::lease> snapshots_;
     };
 
     subscription subscribe(const ruvia::worker_handle& worker, std::string_view tenant,
@@ -194,7 +194,7 @@ public:
         auto [sender, receiver] = ruvia::make_channel<std::uint64_t>(
             worker, {.capacity_ = 1, .resource_ = std::pmr::new_delete_resource()});
         auto mailbox_value = std::make_shared<mailbox>(std::move(sender), parts.size());
-        std::vector<snapshot_cache::lease> snapshots;
+        std::vector<snapshot_reads::lease> snapshots;
         std::vector<resource> resources;
         snapshots.reserve(parts.size());
         resources.reserve(parts.size());
@@ -234,7 +234,7 @@ public:
         parts.push_back({resource, std::string(id), std::move(query)});
         return subscribe(worker, tenant, std::move(parts));
     }
-    snapshot_cache::stats cache_stats() const {
+    snapshot_reads::stats read_stats() const {
         return state_->snapshots_.get_stats();
     }
 

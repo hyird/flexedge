@@ -70,6 +70,7 @@ static_assert(!std::is_move_assignable_v<flexedge::node::compiled_config>);
 static_assert(!std::is_copy_constructible_v<flexedge::node::tls_context_set>);
 static_assert(!std::is_move_constructible_v<flexedge::node::tls_context_set>);
 static_assert(!std::is_move_assignable_v<flexedge::node::tls_context_set>);
+static_assert(std::is_base_of_v<std::runtime_error, flexedge::node::invalid_hostname>);
 
 using flexedge::testing::snapshot;
 using flexedge::testing::TestConfig;
@@ -89,6 +90,19 @@ void apply(flexedge::node::runtime_state& runtime, TestConfig value) {
 
 using flexedge::testing::request;
 using flexedge::testing::waitUntil;
+
+std::vector<flexedge::node::v2::NodeLog> drain_node_logs(flexedge::node::node_log_buffer& buffer) {
+    std::vector<flexedge::node::v2::NodeLog> result;
+    while (auto delivery = buffer.take("node-log-test")) {
+        for (const auto& event : delivery->value().events()) {
+            if (event.has_node_log()) {
+                result.push_back(event.node_log());
+            }
+        }
+        buffer.acknowledge(std::move(*delivery));
+    }
+    return result;
+}
 
 bool accept_until_stopped(asio::ip::tcp::acceptor& acceptor, asio::ip::tcp::socket& socket,
     std::stop_token stop_token) {
@@ -1126,6 +1140,105 @@ int main(int argc, char* argv[]) {
         REQUIRE(no_route_response.starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
         REQUIRE(waitUntil([&] { return runtime_metrics.connection_count() == 0; },
             std::chrono::seconds(1)));
+        (void)drain_node_logs(log_buffer);
+        // Invalid incoming Host values are request errors, not broken node configuration.
+        for (const auto& host : {std::string("."), std::string(254, 'a')}) {
+            REQUIRE(request(port, host).starts_with("HTTP/1.1 400 Bad Request\r\n"));
+            REQUIRE(waitUntil([&] { return runtime_metrics.connection_count() == 0; },
+                std::chrono::seconds(1)));
+            const auto entries = drain_node_logs(log_buffer);
+            REQUIRE(entries.size() == 1);
+            REQUIRE(entries.front().level() == "warning");
+            REQUIRE(entries.front().category() == "http1");
+            REQUIRE(entries.front().message().starts_with("request rejected: invalid HTTP Host header:"));
+            REQUIRE(entries.front().message().find("node config") == std::string::npos);
+        }
+        // Reset a real client only after its request reaches the origin. Both buffered
+        // responses and streamed relays must record its departure at info level.
+        for (const auto buffered : {false, true}) {
+            asio::io_context reset_context;
+            asio::ip::tcp::acceptor reset_acceptor(reset_context,
+                {asio::ip::address_v4::loopback(), 0});
+            auto reset_config = snapshot(false);
+            reset_config.setGeneration(next_generation++);
+            auto* website = reset_config.mutableWebsite();
+            website->set_response_compression_enabled(buffered);
+            website->set_health_check_enabled(false);
+            website->mutable_origins(0)->set_host("127.0.0.1");
+            website->mutable_origins(0)->set_port(reset_acceptor.local_endpoint().port());
+            apply(runtime, std::move(reset_config));
+            std::atomic<bool> origin_received{};
+            std::atomic<bool> client_reset{};
+            std::jthread reset_origin([&](std::stop_token stop) {
+                asio::ip::tcp::socket socket(reset_context);
+                if (!accept_until_stopped(reset_acceptor, socket, stop)) {
+                    return;
+                }
+                std::array<char, 4096> bytes{};
+                std::error_code error;
+                if (socket.read_some(asio::buffer(bytes), error) == 0 || error) {
+                    return;
+                }
+                origin_received = true;
+                while (!client_reset && !stop.stop_requested()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                const std::string reply =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
+                asio::write(socket, asio::buffer(reply), error);
+            });
+            asio::ip::tcp::socket client(reset_context);
+            client.connect({asio::ip::address_v4::loopback(), port});
+            const std::string input =
+                "GET /client-reset HTTP/1.1\r\nHost: www.example.com\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n";
+            asio::write(client, asio::buffer(input));
+            REQUIRE(waitUntil([&] { return origin_received.load(); }, std::chrono::seconds(2)));
+            client.set_option(asio::socket_base::linger(true, 0));
+            client.close();
+            client_reset = true;
+            reset_origin.join();
+            REQUIRE(waitUntil([&] { return runtime_metrics.connection_count() == 0; },
+                std::chrono::seconds(2)));
+            const auto entries = drain_node_logs(log_buffer);
+            REQUIRE(entries.size() == 1);
+            REQUIRE(entries.front().level() == "info");
+            REQUIRE(entries.front().message().starts_with(buffered
+                                                              ? "client response write failed:"
+                                                              : "client relay write failed:"));
+        }
+        // An origin resetting the connection remains an actual upstream failure.
+        {
+            asio::io_context reset_context;
+            asio::ip::tcp::acceptor reset_acceptor(reset_context,
+                {asio::ip::address_v4::loopback(), 0});
+            auto reset_config = snapshot(false);
+            reset_config.setGeneration(next_generation++);
+            auto* website = reset_config.mutableWebsite();
+            website->set_response_compression_enabled(false);
+            website->set_health_check_enabled(false);
+            website->mutable_origins(0)->set_host("127.0.0.1");
+            website->mutable_origins(0)->set_port(reset_acceptor.local_endpoint().port());
+            apply(runtime, std::move(reset_config));
+            std::jthread reset_origin([&](std::stop_token stop) {
+                asio::ip::tcp::socket socket(reset_context);
+                if (!accept_until_stopped(reset_acceptor, socket, stop)) {
+                    return;
+                }
+                std::array<char, 4096> bytes{};
+                std::error_code error;
+                (void)socket.read_some(asio::buffer(bytes), error);
+                socket.set_option(asio::socket_base::linger(true, 0), error);
+                socket.close(error);
+            });
+            REQUIRE(request(port).starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+            reset_origin.join();
+            REQUIRE(waitUntil([&] { return runtime_metrics.connection_count() == 0; },
+                std::chrono::seconds(2)));
+            const auto entries = drain_node_logs(log_buffer);
+            REQUIRE(entries.size() == 1);
+            REQUIRE(entries.front().level() == "error");
+            REQUIRE(entries.front().message().starts_with("origin response head read failed:"));
+        }
         const auto observed_metrics = runtime_metrics.sample();
         REQUIRE(observed_metrics.traffic_out_bps_ > 0);
         REQUIRE(observed_metrics.connection_count_ == 0);

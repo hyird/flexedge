@@ -9,7 +9,7 @@
 #include <utility>
 
 #include "service/features/background/marker_worker_loop.h"
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/provider_verification/failure.h"
 #include "service/features/provider_verification/persistence.h"
 #include "service/features/provider_verification/task.h"
@@ -22,18 +22,17 @@ namespace service::provider_verification {
 
 namespace detail {
 
-inline constexpr std::chrono::seconds idle_poll_interval{2};
 inline constexpr std::chrono::seconds lease_recovery_interval{15};
 inline constexpr std::chrono::minutes reconciliation_interval{15};
 inline constexpr std::size_t max_jobs_per_tick{8};
 
-inline ruvia::task<void> recover_stale_markers(service::background::worker_context& context) {
+inline ruvia::task<void> recover_stale_markers(service::background::task_context& context) {
     co_await service::sync_runtime::recover_stale_running(
         context, service::sync_runtime::marker_resource_type::provider);
     co_return;
 }
 
-inline ruvia::task<void> execute(service::background::worker_context& context,
+inline ruvia::task<void> execute(service::background::task_context& context,
     service::attempt_trace::recorder& trace, const verification_task& task, provider_attempt& attempt) {
     auto load_step = trace.begin_step(service::attempt_trace::step_code::load_provider, task.name_);
     const auto current_runtime = co_await load_current_runtime(context, task);
@@ -55,9 +54,9 @@ inline ruvia::task<void> execute(service::background::worker_context& context,
     save_step.complete();
 }
 
-inline ruvia::task<void> process_marker(service::background::worker_context& context,
+inline ruvia::task<void> process_marker(service::background::task_context& context,
     const verification_task& task) {
-    service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::provider, "provider-verification",
+    service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::provider, "web",
         task.claimed_at_);
     provider_attempt attempt(task.provider_, task.kind_);
     std::exception_ptr exception;
@@ -80,7 +79,7 @@ inline ruvia::task<void> process_marker(service::background::worker_context& con
     co_return;
 }
 
-inline ruvia::task<void> process_markers(service::background::worker_context& context,
+inline ruvia::task<void> process_markers(service::background::task_context& context,
     std::size_t& processed) {
     for (; processed < max_jobs_per_tick; ++processed) {
         if (context.get_stop_token().stop_requested()) {
@@ -95,7 +94,7 @@ inline ruvia::task<void> process_markers(service::background::worker_context& co
     co_return;
 }
 
-inline ruvia::task<void> run_maintenance(service::background::worker_context& context,
+inline ruvia::task<void> run_maintenance(service::background::task_context& context,
     std::chrono::steady_clock::time_point& next_lease_recovery,
     std::chrono::steady_clock::time_point& next_reconciliation) {
     if (std::chrono::steady_clock::now() >= next_lease_recovery) {
@@ -112,16 +111,16 @@ inline ruvia::task<void> run_maintenance(service::background::worker_context& co
     co_return;
 }
 
-inline ruvia::task<void> run(service::background::worker_context& context) {
+inline ruvia::task<void> run(service::background::task_context& context) {
     co_await service::background::run_marker_worker_loop(
-        context, idle_poll_interval, "Provider verification worker failure: ", "未知供应商检测错误",
+        context, "provider-verification", "Provider verification worker failure: ", "未知供应商检测错误",
         run_maintenance, process_markers, service::sync_runtime::worker_error);
     co_return;
 }
 
 }  // namespace detail
 
-inline ruvia::task<void> run_worker(service::background::worker_context& context) {
+inline ruvia::task<void> run_worker(service::background::task_context& context) {
     co_await detail::run(context);
 }
 

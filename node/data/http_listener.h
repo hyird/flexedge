@@ -153,25 +153,34 @@ private:
         }
     }
 
-    void log(std::string_view message, const std::exception& error) const noexcept {
+    void log(std::string_view message, const std::exception& error,
+        std::string_view level = "error") const noexcept {
         try {
             const auto text = std::string(message) + ": " + error.what();
             std::cerr << "flexedge node http1: " << text << '\n';
-            logs_.node("error", "http1", text);
+            logs_.node(level, "http1", text);
         } catch (...) {
         }
     }
 
-    void log_io(std::string_view message, const std::error_code& error) const noexcept {
+    void log_io(std::string_view message, const std::error_code& error,
+        std::string_view level = "error") const noexcept {
         if (normal_io_close(error)) {
             return;
         }
         try {
             const auto text = std::string(message) + ": " + error.message();
             std::cerr << "flexedge node http1: " << text << '\n';
-            logs_.node("error", "http1", text);
+            logs_.node(level, "http1", text);
         } catch (...) {
         }
+    }
+
+    void log_client_io(std::string_view message, const std::error_code& error) const noexcept {
+        const auto disconnected = error == asio::error::connection_reset ||
+                                  error == asio::error::connection_aborted ||
+                                  error == asio::error::broken_pipe;
+        log_io(message, error, disconnected ? "info" : "error");
     }
 
     static std::uint32_t wire_status_code(std::string_view bytes) noexcept {
@@ -448,7 +457,7 @@ private:
                                         : wire_status_code(self->response_bytes_),
                     size);
                 if (error) {
-                    self->log_io("client response write failed", error);
+                    self->log_client_io("client response write failed", error);
                 }
                 self->close();
             });
@@ -468,7 +477,14 @@ private:
         request_method_.assign(parsed.request().method());
         request_target_.assign(parsed.request().target());
         request_host_.assign(*host);
-        const auto* website = config->website(*host);
+        const v2::Website* website{};
+        try {
+            website = config->website(*host);
+        } catch (const invalid_hostname& error) {
+            log("request rejected: invalid HTTP Host header", error, "warning");
+            send(response("400 Bad Request"));
+            return;
+        }
         if (website != nullptr) {
             website_id_ = website->id();
             access_log_enabled_ = website->access_log_enabled();
@@ -920,7 +936,7 @@ private:
                     if (self->access_log_client_abort_enabled_) {
                         self->record_access(499, self->proxied_response_bytes_);
                     }
-                    self->log_io("client relay write failed", error);
+                    self->log_client_io("client relay write failed", error);
                     self->close();
                     return;
                 }

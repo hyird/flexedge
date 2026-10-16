@@ -22,7 +22,7 @@
 #include "service/domains/website/relation_store.h"
 #include "service/domains/website/website_error.h"
 #include "service/domains/website/website_types.h"
-#include "service/features/live_resource/notifications.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/node_dispatch/queue.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/website_config/mapper.h"
@@ -45,11 +45,10 @@ public:
         (void)co_await service::sync_runtime::upsert_marker(transaction, tenant_id,
             service::sync_runtime::marker_resource_type::website, id, service::sync_runtime::marker_operation::apply,
             *revision, origin);
-        co_await transaction.commit();
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.node_config().changed(service::live_resource::resource::websites, id);
         origin.add_changes(notification);
-        co_await service::live_resource::notify(c, notification);
+        co_await service::live_resource::commit_and_notify(transaction, c, notification);
         co_return origin.operation_id();
     }
 
@@ -81,11 +80,10 @@ public:
                 service::sync_runtime::marker_operation::apply, 1, origin);
             co_await service::website_dns::reconcile_config_change(transaction, tenant_id, std::nullopt, config_json,
                 origin);
-            co_await transaction.commit();
             service::live_resource::notifications::resource_notification notification(tenant_id);
             notification.node_config().changed(service::live_resource::resource::websites, website_id);
             origin.add_changes(notification);
-            co_await service::live_resource::notify(c, notification);
+            co_await service::live_resource::commit_and_notify(transaction, c, notification);
             result.set<"id">(website_id);
             result.set<"revision">(1);
             if (const auto operation_id = origin.operation_id()) {
@@ -155,11 +153,10 @@ public:
                 service::sync_runtime::marker_operation::apply, *revision, origin);
             co_await service::website_dns::reconcile_config_change(transaction, tenant_id, previous_config,
                 config_json, origin);
-            co_await transaction.commit();
             service::live_resource::notifications::resource_notification notification(tenant_id);
             notification.node_config().changed(service::live_resource::resource::websites, id);
             origin.add_changes(notification);
-            co_await service::live_resource::notify(c, notification);
+            co_await service::live_resource::commit_and_notify(transaction, c, notification);
             co_return origin.operation_id();
         } catch (const ruvia::db_error& error) {
             if (is_domain_claim_conflict(error)) {
@@ -189,13 +186,12 @@ public:
             std::nullopt, origin);
         co_await service::sync_runtime::remove_marker(transaction, tenant_id,
             service::sync_runtime::marker_resource_type::website, id, origin);
-        co_await transaction.commit();
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.node_config()
             .changed(service::live_resource::resource::websites, id)
             .changed(service::live_resource::resource::access_history, id);
         origin.add_changes(notification);
-        co_await service::live_resource::notify(c, notification);
+        co_await service::live_resource::commit_and_notify(transaction, c, notification);
         co_return origin.operation_id();
     }
 
@@ -209,7 +205,7 @@ private:
             .summary_ = std::move(summary)});
     }
 
-    // Section names (docs/task-center.md) of changed top-level config keys.
+    // Section names of changed top-level config keys.
     static std::vector<std::string_view> config_sections(const std::vector<std::string>& keys) {
         std::vector<std::string_view> sections;
         for (const std::string_view key : keys) {

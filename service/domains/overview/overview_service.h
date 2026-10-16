@@ -43,7 +43,7 @@ public:
                 service::certificate::certificate_abnormal_sql() + ")",
             tenant_id);
 
-        // Same online rule as node lists and node_deadlines, which publish the
+        // Same online rule as node lists and Redis presence deadlines, which publish the
         // overview on every registration, enable/disable and online/offline change.
         ruvia::db_query nodes(c.pool());
         const auto node_count = nodes.aggregate("count", {nodes.star()});

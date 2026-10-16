@@ -12,7 +12,7 @@
 #include <string_view>
 #include <vector>
 
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/node_config/mapper.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/website_config/mapper.h"
@@ -24,7 +24,7 @@
 namespace service::website_dns {
 
 inline ruvia::task<void>
-complete_stale_website_task(service::background::worker_context& context,
+complete_stale_website_task(service::background::task_context& context,
     const service::sync_runtime::running_marker_lease& marker,
     bool revision_changed) {
     auto completion = co_await context.db().begin_transaction();
@@ -80,11 +80,13 @@ inline std::string join_answers(const std::vector<std::string>& answers) {
 }
 
 inline ruvia::task<website_runtime_data>
-probe_website_domains(service::background::worker_context& context, service::attempt_trace::recorder& trace,
+probe_website_domains(service::background::task_context& context, service::attempt_trace::recorder& trace,
     const service::website_config::website_config_data& config,
     std::string_view expected_target, std::span<const std::string> cluster_addresses, std::string_view checked_at,
     const service::sync_runtime::running_marker_lease& marker, website_domain_attempt& attempt) {
     website_runtime_data output;
+    const service::outbound_http::quota_scope scope{
+        .tenant_id_ = std::string(marker.marker_.tenant_id_), .account_id_ = "public-dns"};
     auto& domain_states = output.domain_states_;
     auto db = context.db();
     for (const auto& domain : config.domains_) {
@@ -102,7 +104,7 @@ probe_website_domains(service::background::worker_context& context, service::att
             .error_ = {}};
         try {
             auto result =
-                co_await probe_cname(context, trace, domain.hostname_, expected_target, domain.id_);
+                co_await probe_cname(context, trace, domain.hostname_, expected_target, domain.id_, scope);
             check.query_name_ = std::move(result.query_name_);
             check.resolved_ = std::move(result.answers_);
             if (result.matched_) {
@@ -111,7 +113,7 @@ probe_website_domains(service::background::worker_context& context, service::att
             } else if (domain.dns_mode_ == "managed" && check.resolved_.empty()) {
                 // Hosted domains: FlexEdge wrote the CNAME itself, so a provider that flattens it
                 // (Cloudflare at the zone apex) is verified by the cluster addresses it answers.
-                auto addresses = co_await probe_addresses(context, trace, domain.hostname_, check.query_name_);
+                auto addresses = co_await probe_addresses(context, trace, domain.hostname_, check.query_name_, scope);
                 if (matches_flattened_cname(addresses, cluster_addresses)) {
                     state.resolution_status_ = "verified";
                     trace.log(service::attempt_trace::log_level::info,
@@ -143,7 +145,7 @@ probe_website_domains(service::background::worker_context& context, service::att
     co_return output;
 }
 
-inline ruvia::task<void> probe_website(service::background::worker_context& context,
+inline ruvia::task<void> probe_website(service::background::task_context& context,
     service::attempt_trace::recorder& trace, const std::string& website_id,
     const service::sync_runtime::running_marker_lease& marker,
     std::int64_t expected_revision, website_domain_attempt& attempt) {

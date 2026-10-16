@@ -59,7 +59,7 @@ template <typename client_type>
 concept untraced_outbound_send = requires(client_type& client, const ruvia::http_client_request_view& request) {
     service::outbound_http::send_buffered(client, request);
 };
-static_assert(!untraced_outbound_send<ruvia::http_client>);
+static_assert(!untraced_outbound_send<ruvia::web_worker_context>);
 
 }  // namespace
 
@@ -386,23 +386,23 @@ int run_architecture_tests() {
     const auto& schema_migrations = service::config::schema_migrations;
     REQUIRE(schema_migrations.size() >= 20);
     REQUIRE(schema_migrations.front().id() == "0001");
-    REQUIRE(schema_migrations.back().id() == "0025_operation_tasks");
-    const auto remove_http2_migration = schema_migrations[schema_migrations.size() - 4].sql();
-    REQUIRE(schema_migrations[schema_migrations.size() - 4].id() == "0022_remove_website_http2");
+    REQUIRE(schema_migrations.back().id() == "0027_node_report_receipt");
+    const auto remove_http2_migration = schema_migrations[schema_migrations.size() - 6].sql();
+    REQUIRE(schema_migrations[schema_migrations.size() - 6].id() == "0022_remove_website_http2");
     REQUIRE(remove_http2_migration.find("sys_website") != std::string_view::npos);
     REQUIRE(remove_http2_migration.find("http2_enabled") != std::string_view::npos);
-    REQUIRE(schema_migrations[schema_migrations.size() - 3].id() == "0023_task_attempt_details");
-    const auto attempt_details_migration = schema_migrations[schema_migrations.size() - 3].sql();
+    REQUIRE(schema_migrations[schema_migrations.size() - 5].id() == "0023_task_attempt_details");
+    const auto attempt_details_migration = schema_migrations[schema_migrations.size() - 5].sql();
     REQUIRE(attempt_details_migration.find("idx_sync_event_task_resource_version") != std::string_view::npos);
     REQUIRE(attempt_details_migration.find("'node'") != std::string_view::npos);
     REQUIRE(attempt_details_migration.find("row_number") != std::string_view::npos);
-    REQUIRE(schema_migrations[schema_migrations.size() - 2].id() == "0024_task_attempt_traces");
-    const auto attempt_traces_migration = schema_migrations[schema_migrations.size() - 2].sql();
+    REQUIRE(schema_migrations[schema_migrations.size() - 4].id() == "0024_task_attempt_traces");
+    const auto attempt_traces_migration = schema_migrations[schema_migrations.size() - 4].sql();
     REQUIRE(attempt_traces_migration.find("sys_sync_event_trace") != std::string_view::npos);
     REQUIRE(attempt_traces_migration.find("ON DELETE CASCADE") != std::string_view::npos);
     // Tasks are operations: nullable owner columns keep an older server
     // working on this schema; retained attempts are deleted with the upgrade.
-    const auto operation_tasks_migration = schema_migrations.back().sql();
+    const auto operation_tasks_migration = schema_migrations[schema_migrations.size() - 3].sql();
     REQUIRE(operation_tasks_migration.find("sys_operation_subtask") != std::string_view::npos);
     REQUIRE(operation_tasks_migration.find("uk_sync_task_subtask") != std::string_view::npos);
     REQUIRE(operation_tasks_migration.find("DELETE FROM") != std::string_view::npos);

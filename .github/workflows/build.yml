@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  VCPKG_COMMIT: 4bca8fd8654e5ba76f92661db7bfe954768ad8ef
+  VCPKG_COMMIT: 3cd21e48a75f67acfef289da52893ce79144aaa1
   BUILD_TYPE: Release
 
 jobs:
@@ -36,7 +36,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.3
 
       - name: Install frontend dependencies
         env:

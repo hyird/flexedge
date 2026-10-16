@@ -23,7 +23,7 @@ inline constexpr std::string_view event_outcome_completed{"completed"};
 inline constexpr std::string_view event_outcome_failed{"failed"};
 
 // Bounds of one attempt detail document stored in sys_sync_event.detail and
-// returned verbatim by the task history stream (docs/task-center.md).
+// returned verbatim by the task history stream.
 inline constexpr std::size_t detail_max_bytes{16384};
 inline constexpr std::size_t detail_list_bytes{12288};
 inline constexpr std::size_t detail_list_items{50};

@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/dns/driver.h"
 #include "service/features/dns/provider_config_mapper.h"
 #include "service/features/dns_sync/mapper.h"
@@ -43,7 +43,7 @@ struct remote_zone_data final {
 };
 
 inline ruvia::task<std::optional<zone_sync_state>>
-load_zone_sync_state(service::background::worker_context& context, const dns_task& task,
+load_zone_sync_state(service::background::task_context& context, const dns_task& task,
     const service::sync_runtime::running_marker_lease& lease) {
     auto db = context.db();
     if (!co_await service::sync_runtime::renew_running_lease(db, lease)) {
@@ -135,7 +135,7 @@ load_zone_sync_state(service::background::worker_context& context, const dns_tas
 }
 
 inline ruvia::task<remote_zone_data>
-load_remote_zone_data(service::background::worker_context& context, service::attempt_trace::recorder& trace,
+load_remote_zone_data(service::background::task_context& context, service::attempt_trace::recorder& trace,
     const service::sync_runtime::running_marker_lease& lease,
     const service::dns::dns_provider_driver& driver, std::string_view account_id,
     std::string_view secret, std::string_view domain) {

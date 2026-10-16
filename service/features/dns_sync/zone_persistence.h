@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/dns/driver.h"
 #include "service/features/dns_sync/mapper.h"
 #include "service/features/dns_sync/queue.h"
@@ -24,7 +24,7 @@
 namespace service::dns_sync::detail {
 
 inline ruvia::task<void>
-import_initial_remote_records(service::background::worker_context& context, const dns_task& task,
+import_initial_remote_records(service::background::task_context& context, const dns_task& task,
     const service::sync_runtime::running_marker_lease& lease,
     std::int64_t config_revision, std::string_view domain,
     const zone_runtime_data& current_runtime,
@@ -130,13 +130,12 @@ import_initial_remote_records(service::background::worker_context& context, cons
     auto origin = service::operation::work_origin::continuing(task.owner_);
     (void)co_await enqueue_zone_revision(transaction, task.tenant_id_, task.resource_id_,
         updated.front()[0].as<std::int64_t>().value_or(task.version_ + 1), origin);
-    co_await transaction.commit();
-    co_await service::sync_runtime::notify_origin(context, task.tenant_id_, origin);
+    co_await service::sync_runtime::commit_origin(transaction, context, task.tenant_id_, origin);
     co_return;
 }
 
 inline ruvia::task<void>
-store_conflicts(service::background::worker_context& context, service::attempt_trace::recorder& trace,
+store_conflicts(service::background::task_context& context, service::attempt_trace::recorder& trace,
     const dns_task& task,
     const service::sync_runtime::running_marker_lease& lease, std::int64_t desired_revision,
     const zone_runtime_data& runtime, const std::vector<service::dns::provider_line>& lines,
@@ -208,7 +207,7 @@ store_conflicts(service::background::worker_context& context, service::attempt_t
     co_return;
 }
 
-inline ruvia::task<bool> persist_remote_merge(service::background::worker_context& context,
+inline ruvia::task<bool> persist_remote_merge(service::background::task_context& context,
     const dns_task& task,
     const service::sync_runtime::running_marker_lease& lease,
     std::int64_t config_revision,
@@ -301,15 +300,14 @@ inline ruvia::task<bool> persist_remote_merge(service::background::worker_contex
     (void)co_await enqueue_zone_revision(transaction, task.tenant_id_, task.resource_id_,
         updated.front()[0].as<std::int64_t>().value_or(desired_revision + 1), origin, task.operation_);
     (void)co_await service::sync_runtime::release_running(transaction, lease);
-    co_await transaction.commit();
-    co_await service::sync_runtime::notify_origin(context, task.tenant_id_, origin);
+    co_await service::sync_runtime::commit_origin(transaction, context, task.tenant_id_, origin);
     co_return true;
 }
 
 // Records the attempt's runtime and completes the marker. Records the attempt left unpushed
 // (`unsynced_error` non-empty) mark the zone failed without a retry: nothing changes until the
 // records, the website domains or a manual sync enqueue a new revision.
-inline ruvia::task<void> persist_synced_zone(service::background::worker_context& context,
+inline ruvia::task<void> persist_synced_zone(service::background::task_context& context,
     service::attempt_trace::recorder& trace, const dns_task& task,
     const service::sync_runtime::running_marker_lease& lease,
     const zone_runtime_dto& runtime, std::int64_t revision, std::string_view unsynced_error,
@@ -351,7 +349,7 @@ inline ruvia::task<void> persist_synced_zone(service::background::worker_context
 }
 
 inline ruvia::task<void>
-finish_deleted_zone_without_remote(service::background::worker_context& context, const dns_task& task,
+finish_deleted_zone_without_remote(service::background::task_context& context, const dns_task& task,
     const service::sync_runtime::running_marker_lease& lease) {
     auto transaction = co_await context.db().begin_transaction();
     const auto updated = co_await transaction.execute(
@@ -368,16 +366,16 @@ finish_deleted_zone_without_remote(service::background::worker_context& context,
     } else {
         (void)co_await service::sync_runtime::release_running(transaction, lease);
     }
-    co_await transaction.commit();
     if (removed && !removed->operation_id_.empty()) {
-        co_await service::live_resource::notify(context,
+        (void)co_await service::live_resource::enqueue_notification(transaction,
             service::live_resource::notifications::resource_notification(task.tenant_id_)
                 .changed(service::live_resource::resource::operations, removed->operation_id_));
     }
+    co_await transaction.commit();
     co_return;
 }
 
-inline ruvia::task<void> fail_dns_task(service::background::worker_context& context,
+inline ruvia::task<void> fail_dns_task(service::background::task_context& context,
     service::attempt_trace::recorder& trace, const dns_task& task, std::string_view error, bool permanent,
     std::string_view detail) {
     const auto message = service::sync_runtime::attempt_error(trace, error);

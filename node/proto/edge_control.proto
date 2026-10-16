@@ -39,6 +39,7 @@ message Authenticate {
     string agent_version = 8;
     AgentSessionPurpose session_purpose = 10;
     bool require_apply_ack = 11;
+    bool multiplex_logs = 12;
     reserved 9;
 }
 
@@ -55,6 +56,7 @@ message Welcome {
     string desired_manifest_digest = 4;
     uint32 heartbeat_interval_seconds = 5;
     string node_binary_sha256 = 6;
+    bool multiplex_logs = 7;
 }
 
 message Heartbeat {

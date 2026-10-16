@@ -17,7 +17,8 @@
 
 #include "service/common/http.h"
 #include "service/features/live_resource/read_scope.h"
-#include "service/features/live_resource/snapshot_cache.h"
+#include "service/features/live_resource/redis_snapshot_cache.h"
+#include "service/features/live_resource/snapshot_reads.h"
 #include "service/features/logging/logger.h"
 
 namespace service::live_resource {
@@ -38,7 +39,7 @@ namespace detail {
 
 template <typename fetch_type>
 ruvia::task<snapshot> fetch_snapshot_and_join_watchdog(
-    ruvia::context& context, snapshot_cache::clock::time_point deadline, fetch_type& fetch) {
+    ruvia::context& context, snapshot_reads::clock::time_point deadline, fetch_type& fetch) {
     snapshot_read_scope scope(context, deadline);
     std::optional<snapshot> candidate;
     std::exception_ptr fetch_failure;
@@ -81,50 +82,87 @@ ruvia::task<snapshot> fetch_snapshot_and_join_watchdog(
 }
 
 inline void check_snapshot_read_budget(
-    const ruvia::context& context, snapshot_cache::clock::time_point deadline) {
+    const ruvia::context& context, snapshot_reads::clock::time_point deadline) {
     if (context.get_stop_token().stop_requested()) {
         throw std::runtime_error("live resource read interrupted");
     }
-    if (snapshot_cache::clock::now() >= deadline) {
+    if (snapshot_reads::clock::now() >= deadline) {
         throw std::runtime_error("live resource read timed out");
     }
 }
+
+#ifdef RUVIA_ENABLE_REDIS
+inline ruvia::redis_handle snapshot_redis(ruvia::context& context, snapshot_reads::clock::time_point deadline) {
+    check_snapshot_read_budget(context, deadline);
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - snapshot_reads::clock::now());
+    if (remaining <= std::chrono::milliseconds::zero()) {
+        throw std::runtime_error("live resource read timed out");
+    }
+    return context.redis().with_options({.timeout_ = std::min(remaining, redis_snapshot_cache::operation_timeout),
+        .stop_token_ = context.get_stop_token()});
+}
+#endif
 
 }  // namespace detail
 
 template <typename fetch_type>
 ruvia::task<std::shared_ptr<const snapshot>> read_snapshot_until(
-    ruvia::context& context, const snapshot_cache::lease& lease,
-    snapshot_cache::clock::time_point deadline, fetch_type fetch) {
+    ruvia::context& context, const snapshot_reads::lease& lease,
+    snapshot_reads::clock::time_point deadline, fetch_type fetch) {
     std::uint64_t minimum_patch_epoch{};
     std::shared_ptr<const snapshot> answer;
     std::exception_ptr failure;
-    std::optional<snapshot_cache::ticket> active_ticket;
+    std::optional<snapshot_reads::ticket> active_ticket;
 
     try {
         minimum_patch_epoch = lease.patch_epoch();
         for (;;) {
             detail::check_snapshot_read_budget(context, deadline);
             auto read = lease.read(context.worker());
-            if (read.ready_.snapshot_ && lease.current(read.ready_, minimum_patch_epoch)) {
-                answer = read.ready_.snapshot_;
-                break;
-            }
-
             if (read.ticket_) {
                 active_ticket.emplace(*read.ticket_);
-                auto candidate = co_await detail::fetch_snapshot_and_join_watchdog(context, deadline, fetch);
+                std::optional<redis_snapshot_cache::lookup> cached;
+#ifdef RUVIA_ENABLE_REDIS
+                if (redis_snapshot_cache::cacheable(lease.key())) {
+                    try {
+                        cached = co_await redis_snapshot_cache::read(detail::snapshot_redis(context, deadline), lease.key());
+                    } catch (const std::exception&) {
+                        detail::check_snapshot_read_budget(context, deadline);
+                    }
+                }
+#endif
+                snapshot candidate;
+                if (cached && cached->snapshot_) {
+                    candidate = std::move(*cached->snapshot_);
+                } else {
+                    candidate = co_await detail::fetch_snapshot_and_join_watchdog(context, deadline, fetch);
+#ifdef RUVIA_ENABLE_REDIS
+                    if (cached && !candidate.failure_) {
+                        bool unchanged = true;
+                        try {
+                            unchanged = co_await redis_snapshot_cache::store(detail::snapshot_redis(context, deadline),
+                                lease.key(), cached->generation_, candidate);
+                        } catch (const std::exception&) {
+                            detail::check_snapshot_read_budget(context, deadline);
+                        }
+                        if (!unchanged) {
+                            // An atomic post-commit invalidation overtook the
+                            // database flight. Never distribute its old bytes.
+                            active_ticket->cancel();
+                            active_ticket.reset();
+                            continue;
+                        }
+                    }
+#endif
+                }
                 detail::check_snapshot_read_budget(context, deadline);
                 active_ticket->complete(std::make_shared<const snapshot>(std::move(candidate)));
                 active_ticket.reset();
             }
 
-            const auto remaining = deadline - snapshot_cache::clock::now();
-            if (remaining <= snapshot_cache::clock::duration::zero()) {
+            const auto remaining = deadline - snapshot_reads::clock::now();
+            if (remaining <= snapshot_reads::clock::duration::zero()) {
                 throw std::runtime_error("live resource read timed out");
-            }
-            if (read.ready_.snapshot_) {
-                continue;
             }
             auto received = co_await read.receiver_.receive_for(remaining, context.get_stop_token());
             if (!received.has_value()) {
@@ -159,8 +197,8 @@ ruvia::task<std::shared_ptr<const snapshot>> read_snapshot_until(
 
 template <typename fetch_type>
 ruvia::task<std::shared_ptr<const snapshot>> read_snapshot(
-    ruvia::context& context, const snapshot_cache::lease& lease, fetch_type fetch) {
-    const auto deadline = snapshot_cache::clock::now() + std::chrono::seconds(30);
+    ruvia::context& context, const snapshot_reads::lease& lease, fetch_type fetch) {
+    const auto deadline = snapshot_reads::clock::now() + std::chrono::seconds(30);
     co_return co_await read_snapshot_until(context, lease, deadline, std::move(fetch));
 }
 

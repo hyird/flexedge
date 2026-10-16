@@ -41,12 +41,15 @@
 #include "service/config/database.h"
 #include "service/config/http_server.h"
 #include "service/config/outbound.h"
+#include "service/config/rate_limit.h"
 #include "service/config/redis.h"
 #include "service/config/runtime_env.h"
 #include "service/config/schema.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/logging/access.h"
 #include "service/features/logging/connection.h"
 #include "service/features/logging/logger.h"
+#include "service/middleware/rate_limit.h"
 
 // 业务控制器（RUVIA_CONTROLLER_GROUP 在静态阶段把路由表注册到 ruvia::app()）。
 #include "service/domains/agent/agent_controller.h"
@@ -59,13 +62,17 @@
 #include "service/domains/provider/provider_controller.h"
 #include "service/domains/task/task_controller.h"
 #include "service/domains/website/website_controller.h"
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
+#include "service/features/background/work_available.h"
 #include "service/features/certificate/worker.h"
 #include "service/features/dns_sync/worker.h"
 #include "service/features/initial_admin/bootstrap.h"
 #include "service/features/live_resource/notification_reader.h"
 #include "service/features/log_ingest/fanout.h"
 #include "service/features/log_ingest/ingest.h"
+#include "service/features/node_channel/projection.h"
+#include "service/features/node_channel/report_persistence.h"
+#include "service/features/node_channel/report_waits.h"
 #include "service/features/node_release/catalog.h"
 #include "service/features/provider_verification/worker.h"
 #include "service/features/website_dispatch/worker.h"
@@ -150,10 +157,10 @@ ruvia::redis_config configure_redis(ruvia::application& app) {
 // workers. Changes arrive only through the worker's own Redis readers.
 void configure_worker_states(ruvia::application& app) {
     app.use_worker_state<service::live_resource::hub>();
-    app.use_worker_state<service::live_resource::node_deadlines>();
-    app.use_worker_state<service::live_resource::notifications::sender>();
     app.use_worker_state<service::node_dispatch::fanout::hub>();
     app.use_worker_state<service::log_ingest::fanout::hub>();
+    app.use_worker_state<service::node_channel::report_waits>();
+    app.use_worker_state<service::background::work_available::signals>();
 }
 
 std::filesystem::path system_ca_bundle([[maybe_unused]] const std::filesystem::path& runtime_dir) {
@@ -290,14 +297,14 @@ ruvia::task<ruvia::http_response> handle_error(ruvia::context& c, ruvia::http_er
         service::common::response_error_message(info)));
 }
 
-void configure_http_server(ruvia::application& app) {
-    const auto settings = service::config::get_http_server_settings(app.env());
+void configure_http_server(ruvia::application& app, const std::filesystem::path& configuration_dir) {
+    const auto settings = service::config::get_http_server_settings(app.env(), configuration_dir);
     app.get_blocking_pool({
                               .thread_count_ = settings.blocking_threads_,
                               .queue_capacity_ = settings.blocking_queue_capacity_,
                           })
         .compression({.min_bytes_ = settings.compression_min_bytes_})
-        .listen({.address_ = settings.host_, .http_ = settings.port_})
+        .listen(settings.listen_)
         // Server limits Ruvia 8a14af03 did not have are pinned to that release's
         // behavior: stop() closes connections at once (no graceful drain), request
         // heads/bodies have no absolute completion deadline (the 60s inactivity
@@ -318,8 +325,13 @@ void configure_http_server(ruvia::application& app) {
         .on_access(ruvia::access_log_callback_type(service::logging::access_logger{}))
         .on_connection_failure(
             ruvia::connection_failure_callback_type(service::logging::connection_failure_logger{}));
-    service::logging::info("Server starting on " + settings.host_ + ":" +
-                           std::to_string(settings.port_));
+    service::logging::info("Server HTTP starting on " + settings.listen_.address_ + ":" +
+                           std::to_string(*settings.listen_.http_) +
+                           (settings.listen_.auto_https_redirect_ ? " (redirect to HTTPS)" : ""));
+    if (settings.listen_.https_.has_value()) {
+        service::logging::info("Server HTTPS starting on " + settings.listen_.address_ + ":" +
+                               std::to_string(*settings.listen_.https_));
+    }
 }
 
 }  // namespace
@@ -360,96 +372,80 @@ int main(int argc, char* argv[]) {
         configure_document_root(app, runtime_dir);
         auto database = configure_database(app);
         service::initial_admin::initialize(database, std::move(initial_admin));
-        const auto redis = configure_redis(app);
+        (void)configure_redis(app);
+        service::config::configure_rate_limits(service::config::get_rate_limit_config(app.env()));
+        app.use<service::middleware::request_rate_limit_middleware>();
         configure_worker_states(app);
         configure_outbound_origins(app, runtime_dir);
-        configure_http_server(app);
+        configure_http_server(app, env_path.parent_path());
 
-        std::vector<service::background::worker_definition> workers;
-        workers.emplace_back(service::background::worker_definition{
-            .name_ = "provider-verification",
-            .outbound_aliases_ = {service::config::cloudflare_origin_alias,
-                service::config::aliyun_dns_origin_alias,
-                service::config::lets_encrypt_origin_alias,
-                service::config::zero_ssl_acme_origin_alias,
-                service::config::zero_ssl_api_origin_alias},
-            .run_ = [](service::background::worker_context& context) -> ruvia::task<void> {
-                co_await service::provider_verification::run_worker(context);
-            },
+        app.on_start([] {
+            const auto workers = ruvia::app().workers();
+            if (workers.empty()) {
+                throw std::runtime_error("service requires at least one Web Worker");
+            }
+            // Every instance receives exactly the same assembly. A task claims
+            // durable work; it never chooses a Worker or takes a connection.
+            for (const auto& worker : workers) {
+                const auto post = [&worker](auto operation) {
+                    const auto result = worker.post(
+                        [operation](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                            try {
+                                co_await operation(context);
+                                if (!context.get_stop_token().stop_requested()) {
+                                    throw std::runtime_error("Web Worker task stopped unexpectedly");
+                                }
+                            } catch (const std::exception& error) {
+                                if (!context.get_stop_token().stop_requested()) {
+                                    service::logging::error("Web Worker task failed: " + std::string(error.what()));
+                                    ruvia::app().stop();
+                                    throw;
+                                }
+                            }
+                        });
+                    if (!result.accepted()) {
+                        throw std::runtime_error("Web Worker task could not start");
+                    }
+                };
+                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                    co_await service::live_resource::run_notification_reader(context);
+                });
+                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                    service::background::task_context task(context);
+                    co_await service::provider_verification::run_worker(task);
+                });
+                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                    service::background::task_context task(context);
+                    co_await service::dns_sync::run_worker(task);
+                });
+                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                    service::background::task_context task(context);
+                    co_await service::certificate_issuance::run_worker(task);
+                });
+                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                    service::background::task_context task(context);
+                    co_await service::website_dispatch::run_worker(task);
+                });
+                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                    service::background::task_context task(context);
+                    co_await service::live_resource::node_presence::run_worker(task);
+                });
+                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                    service::background::task_context task(context);
+                    co_await service::live_resource::outbox::run_worker(task);
+                });
+                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                    service::background::task_context task(context);
+                    co_await service::log_ingest::run_worker(task, std::string(task.lease_owner()));
+                });
+                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                    co_await service::node_channel::run_projection(context);
+                });
+                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                    co_await service::node_channel::run_reports(context);
+                });
+            }
         });
-        workers.emplace_back(service::background::worker_definition{
-            .name_ = "dns-sync",
-            .outbound_aliases_ = {service::config::cloudflare_origin_alias,
-                service::config::aliyun_dns_origin_alias},
-            .run_ = [](service::background::worker_context& context) -> ruvia::task<void> {
-                co_await service::dns_sync::run_worker(context);
-            },
-        });
-        workers.emplace_back(service::background::worker_definition{
-            .name_ = "certificate",
-            .outbound_aliases_ = {service::config::cloudflare_origin_alias,
-                service::config::aliyun_dns_origin_alias,
-                service::config::lets_encrypt_origin_alias,
-                service::config::zero_ssl_acme_origin_alias},
-            .run_ = [](service::background::worker_context& context) -> ruvia::task<void> {
-                co_await service::certificate_issuance::run_worker(context);
-            },
-        });
-        workers.emplace_back(service::background::worker_definition{
-            .name_ = "website-dispatch",
-            .outbound_aliases_ = {service::config::ali_dns_doh_origin_alias},
-            .run_ = [](service::background::worker_context& context) -> ruvia::task<void> {
-                co_await service::website_dispatch::run_worker(context);
-            },
-        });
-        // Background workers reuse the Redis settings; each owns one connection.
-        auto background_redis = redis;
-        background_redis.pool_size_per_worker_ = 1;
-        background_redis.blocking_pool_size_per_worker_ = 1;
-        service::background::worker_pool background_workers(
-            database, background_redis, service::config::get_outbound_origins(), std::move(workers));
-        const auto log_consumer_instance = service::utils::random_token().substr(0, 32);
-        app.on_start([&background_workers, log_consumer_instance] {
-               background_workers.start();
-               auto web_workers = ruvia::app().workers();
-               if (web_workers.empty()) {
-                   throw std::runtime_error("resource notifications require a web worker");
-               }
-               for (auto& worker : web_workers) {
-                   const auto deadlines_posted = worker.post(
-                       [](ruvia::web_worker_context& context) -> ruvia::task<void> {
-                           co_await service::live_resource::seed_node_deadlines(context);
-                           co_await service::live_resource::get_node_deadlines(context).run(context);
-                       });
-                   if (!deadlines_posted.accepted()) {
-                       throw std::runtime_error("node deadlines could not start");
-                   }
-                   const auto notifications_posted = worker.post(
-                       [](ruvia::web_worker_context& context) -> ruvia::task<void> {
-                           co_await service::live_resource::run_notification_reader(context);
-                       });
-                   if (!notifications_posted.accepted()) {
-                       throw std::runtime_error("resource notification reader could not start");
-                   }
-                   const auto fanout_posted = worker.post(
-                       [](ruvia::web_worker_context& context) -> ruvia::task<void> {
-                           co_await service::log_ingest::fanout::run(context);
-                       });
-                   if (!fanout_posted.accepted()) {
-                       throw std::runtime_error("log notification fanout could not start");
-                   }
-                   auto consumer = log_consumer_instance + "-" + std::to_string(worker.id());
-                   const auto posted = worker.post(
-                       [consumer = std::move(consumer)](ruvia::web_worker_context& context)
-                           -> ruvia::task<void> {
-                           co_await service::log_ingest::run_worker(context, consumer);
-                       });
-                   if (!posted.accepted()) {
-                       throw std::runtime_error("log ingest worker could not start");
-                   }
-               }
-           })
-            .on_stop([&background_workers] { background_workers.stop(); });
         app.run();
         return 0;
     } catch (const std::exception& ex) {

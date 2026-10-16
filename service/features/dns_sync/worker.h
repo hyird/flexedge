@@ -8,7 +8,7 @@
 #include <exception>
 
 #include "service/features/background/marker_worker_loop.h"
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/dns_sync/failure.h"
 #include "service/features/dns_sync/maintenance.h"
 #include "service/features/dns_sync/sync_engine.h"
@@ -21,20 +21,19 @@ namespace service::dns_sync {
 
 namespace detail {
 
-inline constexpr std::chrono::seconds idle_poll_interval{2};
 inline constexpr std::chrono::seconds lease_recovery_interval{15};
 inline constexpr std::chrono::minutes reconciliation_interval{15};
 inline constexpr std::size_t max_jobs_per_tick{32};
 
-inline ruvia::task<void> recover_stale_tasks(service::background::worker_context& context) {
+inline ruvia::task<void> recover_stale_tasks(service::background::task_context& context) {
     co_await service::sync_runtime::recover_stale_running(
         context, service::sync_runtime::marker_resource_type::dns_zone);
     co_return;
 }
 
-inline ruvia::task<void> process_task(service::background::worker_context& context,
+inline ruvia::task<void> process_task(service::background::task_context& context,
     const dns_task& task) {
-    service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::dns_sync, "dns-sync",
+    service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::dns_sync, "web",
         task.claimed_at_);
     zone_sync_attempt attempt;
     std::exception_ptr exception;
@@ -57,7 +56,7 @@ inline ruvia::task<void> process_task(service::background::worker_context& conte
     co_return;
 }
 
-inline ruvia::task<void> process_tasks(service::background::worker_context& context,
+inline ruvia::task<void> process_tasks(service::background::task_context& context,
     std::size_t& processed) {
     for (; processed < max_jobs_per_tick; ++processed) {
         const auto task = co_await claim(context);
@@ -69,7 +68,7 @@ inline ruvia::task<void> process_tasks(service::background::worker_context& cont
     co_return;
 }
 
-inline ruvia::task<void> run_maintenance(service::background::worker_context& context,
+inline ruvia::task<void> run_maintenance(service::background::task_context& context,
     std::chrono::steady_clock::time_point& next_lease_recovery,
     std::chrono::steady_clock::time_point& next_reconciliation) {
     if (std::chrono::steady_clock::now() >= next_lease_recovery) {
@@ -83,16 +82,16 @@ inline ruvia::task<void> run_maintenance(service::background::worker_context& co
     co_return;
 }
 
-inline ruvia::task<void> run(service::background::worker_context& context) {
+inline ruvia::task<void> run(service::background::task_context& context) {
     co_await service::background::run_marker_worker_loop(
-        context, idle_poll_interval, "DNS sync worker failure: ", "未知 DNS 同步错误",
+        context, "dns-sync", "DNS sync worker failure: ", "未知 DNS 同步错误",
         run_maintenance, process_tasks, service::sync_runtime::worker_error);
     co_return;
 }
 
 }  // namespace detail
 
-inline ruvia::task<void> run_worker(service::background::worker_context& context) {
+inline ruvia::task<void> run_worker(service::background::task_context& context) {
     co_await detail::run(context);
 }
 

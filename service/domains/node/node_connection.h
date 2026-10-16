@@ -14,7 +14,7 @@ namespace service::node {
 // deployed agents follow it without an update.
 inline constexpr std::chrono::seconds agent_heartbeat_interval{5};
 // A node is online when registered, enabled and heard from within three heartbeat intervals:
-// the rule of node lists, cluster and overview counts, and node_deadlines.
+// the rule of node lists, cluster and overview counts, and Redis presence deadlines.
 inline constexpr std::chrono::seconds online_window{3 * agent_heartbeat_interval};
 
 // last_heartbeat_at within the online window.

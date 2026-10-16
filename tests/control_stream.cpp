@@ -26,7 +26,6 @@
 #include <asio/write.hpp>
 
 #include "node/control/authenticate.h"
-#include "node/control/log_delivery.h"
 #include "node/control/transport_config.h"
 #include "node/proto/control_protocol.h"
 #include "node/proto/control_reply.h"
@@ -41,8 +40,6 @@ enum class expected_result : std::uint8_t {
     protocol_error,
     authenticated,
     authentication_rejected,
-    delivered,
-    delivery_rejected,
 };
 
 class web_socket_origin final {
@@ -121,20 +118,6 @@ ruvia::task<int> exercise(ruvia::websocket_client& client, expected_result expec
     co_await client.connect();
     const auto connection = client.with_options({});
     try {
-        if (expected == expected_result::delivered || expected == expected_result::delivery_rejected) {
-            flexedge::node::node_log_buffer logs;
-            (void)logs.node("info", "test", "retained until acknowledged");
-            try {
-                co_await flexedge::node::deliver_logs(connection, logs, "node", 1);
-                co_return expected == expected_result::delivered&& logs.queued_events() == 0 && logs.retained_events() == 0 ? 0 : 6;
-            } catch (const std::runtime_error& error) {
-                const auto retry = logs.take("node");
-                co_return expected == expected_result::delivery_rejected&& std::string_view(error.what()) == "control plane did not acknowledge log delivery" &&
-                        logs.queued_events() == 1 && logs.retained_events() == 1 && retry.has_value()
-                    ? 0
-                    : 7;
-            }
-        }
         if (expected == expected_result::authenticated ||
             expected == expected_result::authentication_rejected) {
             flexedge::node::v2::ClientEnvelope authentication;
@@ -168,8 +151,7 @@ ruvia::task<int> exercise(ruvia::websocket_client& client, expected_result expec
 int run_case(std::uint8_t opcode, std::string payload, expected_result expected) {
     web_socket_origin origin(opcode, std::move(payload),
         expected == expected_result::authenticated ||
-            expected == expected_result::authentication_rejected ||
-            expected == expected_result::delivered || expected == expected_result::delivery_rejected);
+            expected == expected_result::authentication_rejected);
     ruvia::event_loop_pool loops({.loop_count_ = 1});
     const auto loop = loops.loop(0);
     ruvia::websocket_client client(
@@ -298,15 +280,15 @@ ruvia::task<bool> watch_signal(service::node_dispatch::fanout::hub::subscription
 // One Web Worker's delivery state, as its reader sees it.
 struct worker_states final {
     service::live_resource::hub live_;
-    service::live_resource::node_deadlines deadlines_;
+    service::log_ingest::fanout::hub logs_;
     service::node_dispatch::fanout::hub dispatch_;
 
     template <typename state_type>
     state_type& worker_state() {
         if constexpr (std::is_same_v<state_type, service::live_resource::hub>) {
             return live_;
-        } else if constexpr (std::is_same_v<state_type, service::live_resource::node_deadlines>) {
-            return deadlines_;
+        } else if constexpr (std::is_same_v<state_type, service::log_ingest::fanout::hub>) {
+            return logs_;
         } else {
             return dispatch_;
         }
@@ -385,21 +367,6 @@ void verify_heartbeat_schedule() {
 }
 
 int main() {
-    flexedge::node::v2::ServerEnvelope delivery_reply;
-    delivery_reply.set_request_id("logs-1");
-    delivery_reply.mutable_log_delivery_ack();
-    if (run_case(0x2, delivery_reply.SerializeAsString(), expected_result::delivered)) {
-        return 14;
-    }
-    delivery_reply.set_request_id("wrong");
-    if (run_case(0x2, delivery_reply.SerializeAsString(), expected_result::delivery_rejected)) {
-        return 15;
-    }
-    delivery_reply.set_request_id("logs-1");
-    delivery_reply.mutable_heartbeat_ack();
-    if (run_case(0x2, delivery_reply.SerializeAsString(), expected_result::delivery_rejected)) {
-        return 16;
-    }
     flexedge::node::v2::ServerEnvelope authentication_reply;
     authentication_reply.set_request_id("auth");
     authentication_reply.mutable_welcome()->set_node_id("node");

@@ -30,7 +30,7 @@
 #include "support/postgres_test.h"
 #include "support/recorded_notifications.h"
 
-// Tasks as operations (docs/task-center.md)
+// Tasks as operations
 // on the real schema: migration 0025 (fresh install, upgrade with retained
 // rows, repeated run, rejected drift), a server without task tracking on the
 // new schema, ownership through markers and release targets (merge, cancel,
@@ -1335,8 +1335,8 @@ int main() {
     const auto& all = service::config::schema_migrations;
     try {
         const auto through_traces = migrations_through("0024_task_attempt_traces");
-        require(all.size() == through_traces.size() + 1 && all.back().id() == "0025_operation_tasks",
-            "0025 is the newest migration");
+        require(all.size() == through_traces.size() + 3 && all[all.size() - 3].id() == "0025_operation_tasks" && all[all.size() - 2].id() == "0026_notification_outbox" && all.back().id() == "0027_node_report_receipt",
+            "0025 is followed by the notification outbox and durable node report receipts");
         if (test_support::run_postgres_test(*base, recreate_databases) != 0 ||
             // New database: the full baseline, then a repeated run is a no-op.
             migrate(fresh, all, all.size(), "fresh install") != 0 || migrate(fresh, all, 0, "fresh repeat") != 0 ||
@@ -1345,7 +1345,7 @@ int main() {
             migrate(upgrade, through_traces, through_traces.size(), "0024 install") != 0 ||
             test_support::run_postgres_test(upgrade, insert_upgrade_rows) != 0 ||
             test_support::run_postgres_test(upgrade, record_upgrade_fingerprint) != 0 ||
-            migrate(upgrade, all, 1, "0025 upgrade") != 0 || migrate(upgrade, all, 0, "upgrade repeat") != 0 ||
+            migrate(upgrade, all, 3, "0025, outbox and node receipts upgrade") != 0 || migrate(upgrade, all, 0, "upgrade repeat") != 0 ||
             test_support::run_postgres_test(upgrade, verify_schema) != 0 ||
             test_support::run_postgres_test(upgrade, verify_upgraded_rows) != 0 ||
             test_support::run_postgres_test(upgrade, verify_old_server) != 0 ||

@@ -26,7 +26,6 @@
 
 #include "common/file_digest.h"
 #include "node/control/control_channel.h"
-#include "node/control/log_channel.h"
 #include "node/control/transport_config.h"
 #include "node/data/data_plane.h"
 #include "node/proto/control_protocol.h"
@@ -99,6 +98,7 @@ int main(int argc, char* argv[]) {
         flexedge::node::data_plane data_plane(worker_loops, loop, runtime, log_buffer);
         ruvia::stop_source stop_source;
         std::atomic<bool> shutting_down{};
+        std::atomic<bool> restart_requested{};
         const auto request_stop = [&](std::string_view reason) {
             if (!shutting_down.exchange(true)) {
                 std::cerr << "flexedge node " << reason << '\n';
@@ -123,9 +123,9 @@ int main(int argc, char* argv[]) {
                     return updater_logs.node(level, category, message);
                 },
             .request_restart_ =
-                [&, binary_path] {
-                    data_plane.request_stop_accepting();
-                    reexec_node(binary_path, argv);
+                [&] {
+                    restart_requested = true;
+                    request_stop("upgrade restart requested");
                 },
         });
         auto control_web_socket = web_socket;
@@ -138,25 +138,21 @@ int main(int argc, char* argv[]) {
                 .stop_token_ = stop_source.token(),
             },
             flexedge::node::state_store{state_directory, credentials.secret()}, credentials, runtime,
-            data_plane, log_buffer, self_updater);
-        flexedge::node::log_channel log_channel(loop,
-            {
-                .web_socket_ = std::move(web_socket),
-                .stop_token_ = stop_source.token(),
-            },
-            credentials, log_buffer, std::move(log_queued_receiver));
+            data_plane, log_buffer, self_updater, std::move(log_queued_receiver));
         flexedge::node::loop_shutdown loop_shutdown(worker_loops, control_loops);
         worker_loops.start();
         control_loops.start();
         data_plane.start();
         auto task = loop.start(channel.run());
-        auto log_task = loop.start(log_channel.run());
         try {
             task.get();
         } catch (...) {
             loop_shutdown.stop_and_join();
             if (!shutting_down.load()) {
                 throw;
+            }
+            if (restart_requested.load()) {
+                reexec_node(binary_path, argv);
             }
             return 0;
         }
@@ -165,9 +161,11 @@ int main(int argc, char* argv[]) {
             while (!data_plane.drained() && std::chrono::steady_clock::now() < drain_deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
-            log_task.get();
         }
         loop_shutdown.stop_and_join();
+        if (restart_requested.load()) {
+            reexec_node(binary_path, argv);
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "flexedge node failed: " << error.what() << '\n';

@@ -4,17 +4,17 @@
 
 #include <cstdint>
 
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/certificate/config_mapper.h"
 #include "service/features/certificate/queue.h"
-#include "service/features/live_resource/notifications.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/node_dispatch/queue.h"
 #include "service/features/sync_runtime/state.h"
 
 namespace service::certificate_issuance::worker_detail {
 
 // Expired material leaves the consumer clusters: the system task 「证书过期」.
-inline ruvia::task<void> expire_certificates(service::background::worker_context& context) {
+inline ruvia::task<void> expire_certificates(service::background::task_context& context) {
     const auto expired = co_await context.db().query(
         "SELECT tenant_id, id FROM sys_certificate WHERE deleted_at IS NULL AND "
         "issued_revision > 0 AND expires_at <= NOW() AND status <> 'expired' ORDER BY sort ASC");
@@ -33,13 +33,13 @@ inline ruvia::task<void> expire_certificates(service::background::worker_context
             co_await service::node_dispatch::enqueue_certificate_consumers(transaction, tenant_id, certificate_id,
                 origin);
         }
-        co_await transaction.commit();
         if (!updated.empty()) {
             service::live_resource::notifications::resource_notification notification(tenant_id);
             notification.node_config().changed(service::live_resource::resource::certificates, certificate_id);
             origin.add_changes(notification);
-            co_await service::live_resource::notify(context, notification);
+            (void)co_await service::live_resource::enqueue_notification(transaction, notification);
         }
+        co_await transaction.commit();
     }
     co_return;
 }
@@ -47,7 +47,7 @@ inline ruvia::task<void> expire_certificates(service::background::worker_context
 // A lost marker of the current issuance revision is re-created; the subtask
 // of that revision keeps the work.
 inline ruvia::task<void>
-reconcile_missing_issuance_markers(service::background::worker_context& context) {
+reconcile_missing_issuance_markers(service::background::task_context& context) {
     const auto missing = co_await context.db().query(
         "SELECT tenant_id, id, issuance_revision FROM sys_certificate certificate WHERE "
         "certificate.deleted_at IS NULL AND certificate.issued_revision < "
@@ -71,20 +71,20 @@ reconcile_missing_issuance_markers(service::background::worker_context& context)
                                                                       : service::sync_runtime::marker_operation::renew,
                 origin);
         }
-        co_await transaction.commit();
         if (changed) {
             service::live_resource::notifications::resource_notification notification(tenant_id);
             notification.changed(service::live_resource::resource::certificates, row[1].value().value_or(""));
             origin.add_changes(notification);
-            co_await service::live_resource::notify(context, notification);
+            (void)co_await service::live_resource::enqueue_notification(transaction, notification);
         }
+        co_await transaction.commit();
     }
     co_return;
 }
 
 // Certificates expiring within 30 days with automatic renewal: each renewal
 // is the system task 「自动续期」.
-inline ruvia::task<void> schedule_auto_renewals(service::background::worker_context& context) {
+inline ruvia::task<void> schedule_auto_renewals(service::background::task_context& context) {
     const auto candidates = co_await context.db().query(
         "SELECT tenant_id, id FROM sys_certificate WHERE deleted_at IS NULL AND expires_at "
         "<= NOW() + INTERVAL '30 days' AND status IN ('valid', 'expired') ORDER BY sort ASC");
@@ -124,17 +124,16 @@ inline ruvia::task<void> schedule_auto_renewals(service::background::worker_cont
             service::operation::action::system_certificate_auto_renew, "certificate", certificate_id);
         co_await enqueue_certificate_revision(transaction, tenant_id, certificate_id, issuance_revision,
             service::sync_runtime::marker_operation::renew, origin);
-        co_await transaction.commit();
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.changed(service::live_resource::resource::certificates, certificate_id);
         origin.add_changes(notification);
-        co_await service::live_resource::notify(context, notification);
+        co_await service::live_resource::commit_and_notify(transaction, context, notification);
     }
     co_return;
 }
 
 inline ruvia::task<void>
-reconcile_certificate_maintenance(service::background::worker_context& context) {
+reconcile_certificate_maintenance(service::background::task_context& context) {
     co_await expire_certificates(context);
     co_await reconcile_missing_issuance_markers(context);
     co_await schedule_auto_renewals(context);

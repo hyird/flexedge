@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/certificate/acme_types.h"
 #include "service/features/certificate/attempt_detail.h"
 #include "service/features/certificate/task.h"
@@ -19,7 +19,7 @@
 namespace service::certificate_issuance::worker_detail {
 
 inline ruvia::task<bool>
-mark_issuance_started(service::background::worker_context& context, const certificate_task& task,
+mark_issuance_started(service::background::task_context& context, const certificate_task& task,
     const service::sync_runtime::running_marker_lease& lease) {
     auto transaction = co_await context.db().begin_transaction();
     const auto updated = co_await transaction.execute(
@@ -40,7 +40,7 @@ mark_issuance_started(service::background::worker_context& context, const certif
 }
 
 inline ruvia::task<void>
-persist_issued_certificate(service::background::worker_context& context, service::attempt_trace::recorder& trace,
+persist_issued_certificate(service::background::task_context& context, service::attempt_trace::recorder& trace,
     const certificate_task& task,
     const service::sync_runtime::running_marker_lease& lease,
     const issued_certificate& issued, const certificate_attempt& attempt) {
@@ -94,7 +94,7 @@ persist_issued_certificate(service::background::worker_context& context, service
     co_return;
 }
 
-inline ruvia::task<void> fail_certificate_task(service::background::worker_context& context,
+inline ruvia::task<void> fail_certificate_task(service::background::task_context& context,
     service::attempt_trace::recorder& trace, const certificate_task& task, std::string_view error,
     bool permanent, std::string_view detail) {
     const auto message = service::sync_runtime::attempt_error(trace, error);

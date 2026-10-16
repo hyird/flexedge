@@ -20,8 +20,10 @@
 #include <vector>
 
 #include "node/control/authenticate.h"
+#include "node/control/channel_log.h"
 #include "node/control/connect.h"
 #include "node/control/control_stream.h"
+#include "node/control/log_delivery.h"
 #include "node/data/data_plane.h"
 #include "node/proto/artifact.h"
 #include "node/proto/control_protocol.h"
@@ -47,7 +49,7 @@ class control_channel final {
 public:
     control_channel(ruvia::event_loop loop, control_channel_config config, state_store store,
         node_credentials& credentials, runtime_state& runtime, data_plane& data_plane,
-        node_log_buffer& logs, self_updater& updater)
+        node_log_buffer& logs, self_updater& updater, ruvia::channel_receiver<bool> queued)
         : loop_(std::move(loop)),
           config_(std::move(config)),
           store_(std::move(store)),
@@ -55,45 +57,52 @@ public:
           runtime_(runtime),
           data_plane_(data_plane),
           logs_(logs),
-          updater_(updater) {}
+          updater_(updater),
+          channel_log_(logs, "control"),
+          log_delivery_(logs, std::move(queued)) {}
 
     ruvia::task<void> run() {
         const auto worker = loop_.handle();
-        auto retry_delay = std::chrono::seconds(1);
         while (!config_.stop_token_.stop_requested()) {
-            std::string error_text;
             try {
                 ruvia::websocket_client client(loop_, config_.web_socket_);
-                co_await run_session(client);
-                retry_delay = std::chrono::seconds(1);
+                std::exception_ptr failure;
+                try {
+                    co_await run_session(client);
+                } catch (...) {
+                    failure = std::current_exception();
+                }
+                co_await client.shutdown();
+                if (failure) {
+                    std::rethrow_exception(failure);
+                }
             } catch (const control_stream_ended&) {
-                retry_delay = std::chrono::seconds(1);
+                if (!config_.stop_token_.stop_requested()) {
+                    last_error_ = "control plane closed the connection";
+                    channel_log_.disconnected();
+                }
             } catch (const ruvia::websocket_client_error& error) {
-                error_text = error.what();
+                if (!config_.stop_token_.stop_requested()) {
+                    last_error_ = error.what();
+                    channel_log_.failed(error);
+                }
             } catch (const std::exception& error) {
-                error_text = error.what();
+                if (!config_.stop_token_.stop_requested()) {
+                    last_error_ = error.what();
+                    channel_log_.failed(error.what(), channel_failure_kind::permanent);
+                }
             }
             if (config_.stop_token_.stop_requested()) {
                 co_return;
             }
-            if (!error_text.empty()) {
-                last_error_ = error_text;
-                std::cerr << "flexedge node control channel failed: " << error_text << '\n';
-                logs_.node("error", "control", error_text);
-            }
-            const auto slept = co_await ruvia::sleep_for(worker, retry_delay, config_.stop_token_);
+            const auto slept = co_await ruvia::sleep_for(worker, channel_log_.retry_delay(), config_.stop_token_);
             if (slept == ruvia::timer_sleep_result::stop_requested) {
                 co_return;
             }
-            retry_delay = (std::min)(retry_delay * 2, std::chrono::seconds(30));
         }
     }
 
 private:
-    static std::string serialize(const v2::ClientEnvelope& envelope) {
-        return serialize_artifact(envelope);
-    }
-
     static bool differs(std::int64_t node_spec_revision, std::string_view release_id,
         std::string_view manifest_digest, std::int64_t desired_node_spec_revision,
         std::string_view desired_release_id, std::string_view desired_manifest_digest) {
@@ -106,6 +115,7 @@ private:
         envelope.set_request_id(std::move(request_id));
         auto* value = envelope.mutable_authenticate();
         value->set_require_apply_ack(true);
+        value->set_multiplex_logs(true);
         value->set_node_id(credentials_.node_id());
         value->set_secret(credentials_.secret());
         value->set_applied_node_spec_revision(runtime_.applied_node_spec_revision());
@@ -121,9 +131,8 @@ private:
             "control plane did not authenticate the device");
     }
 
-    ruvia::task<v2::ClientEnvelope> heartbeat(std::string_view node_id, std::uint64_t sequence) {
+    ruvia::task<v2::ClientEnvelope> heartbeat(std::string_view node_id) {
         v2::ClientEnvelope envelope;
-        envelope.set_request_id("heartbeat-" + std::to_string(sequence));
         auto* value = envelope.mutable_heartbeat();
         value->set_node_id(node_id);
         value->set_applied_node_spec_revision(runtime_.applied_node_spec_revision());
@@ -155,9 +164,8 @@ private:
         co_return envelope;
     }
 
-    v2::ClientEnvelope release_probe(std::uint64_t sequence, std::uint32_t wait_seconds) {
+    v2::ClientEnvelope release_probe(std::uint32_t wait_seconds) {
         v2::ClientEnvelope envelope;
-        envelope.set_request_id("release-probe-" + std::to_string(sequence));
         auto* probe = envelope.mutable_release_probe();
         probe->set_wait_seconds(wait_seconds);
         probe->set_applied_node_spec_revision(runtime_.applied_node_spec_revision());
@@ -169,7 +177,6 @@ private:
     static v2::ClientEnvelope node_release_request(std::string_view node_id, std::string_view digest,
         std::uint64_t offset) {
         v2::ClientEnvelope envelope;
-        envelope.set_request_id("node-release-" + std::to_string(offset));
         auto* payload = envelope.mutable_node_release_request();
         payload->set_node_id(node_id);
         payload->set_digest_sha256(digest);
@@ -177,7 +184,7 @@ private:
         return envelope;
     }
 
-    ruvia::task<void> update_node_release(const ruvia::websocket_client_handle& connection,
+    ruvia::task<void> update_node_release(control_stream& connection,
         std::string_view node_id, std::string_view digest) {
         if (!updater_.update_available(digest)) {
             co_return;
@@ -187,9 +194,9 @@ private:
             std::uint64_t total_bytes{};
             std::string version;
             for (;;) {
-                const auto request = node_release_request(node_id, digest, offset);
-                co_await connection.binary(serialize(request));
-                const auto response = co_await read_server_envelope(connection);
+                auto request = node_release_request(node_id, digest, offset);
+                auto replies = connection.send(request);
+                const auto response = co_await replies.receive();
                 if (response.request_id() != request.request_id() ||
                     !response.has_node_release_chunk()) {
                     throw std::runtime_error("control plane did not return a node release chunk");
@@ -226,11 +233,10 @@ private:
         }
     }
 
-    ruvia::task<void> receive_desired_state(const ruvia::websocket_client_handle& client,
+    ruvia::task<void> receive_desired_state(control_stream& client,
         std::string_view node_id,
-        std::string_view expected_request_id) {
-        const auto envelope = co_await read_server_envelope(client);
-        if (envelope.request_id() != expected_request_id || !envelope.has_desired_state()) {
+        v2::ServerEnvelope envelope) {
+        if (!envelope.has_desired_state()) {
             throw std::runtime_error("control plane did not send desired state");
         }
         const auto& desired = envelope.desired_state();
@@ -271,8 +277,6 @@ private:
         }
         for (std::size_t offset = 0; offset < missing.size(); offset += 64) {
             v2::ClientEnvelope request;
-            request.set_request_id(envelope.request_id() + "-objects-" +
-                                   std::to_string(offset / 64));
             auto* payload = request.mutable_object_request();
             payload->set_node_id(node_id);
             payload->set_release_id(desired.release().content().release_id());
@@ -280,8 +284,8 @@ private:
             for (auto index = offset; index < end; ++index) {
                 payload->add_digest_sha256(missing[index]);
             }
-            co_await client.binary(serialize(request));
-            const auto response = co_await read_server_envelope(client);
+            auto replies = client.send(request);
+            const auto response = co_await replies.receive();
             if (response.request_id() != request.request_id() || !response.has_object_batch() ||
                 response.object_batch().release_id() != desired.release().content().release_id()) {
                 throw std::runtime_error("control plane did not return requested objects");
@@ -306,7 +310,6 @@ private:
         }
 
         v2::ClientEnvelope acknowledgement;
-        acknowledgement.set_request_id(envelope.request_id());
         auto* result = acknowledgement.mutable_apply_result();
         result->set_node_id(node_id);
         result->set_node_spec_revision(desired.node_spec().content().revision());
@@ -316,8 +319,8 @@ private:
         if (!failure) {
             last_error_.clear();
         }
-        co_await client.binary(serialize(acknowledgement));
-        const auto committed = co_await read_server_envelope(client);
+        auto committed_reply = client.send(acknowledgement);
+        const auto committed = co_await committed_reply.receive();
         if (!matches_apply_result_ack(committed, acknowledgement.request_id(), *result)) {
             throw std::runtime_error("control plane did not confirm committed apply result");
         }
@@ -326,12 +329,12 @@ private:
         }
     }
 
-    ruvia::task<void> process_release_probe(const ruvia::websocket_client_handle& connection,
-        std::string_view node_id, std::uint64_t& sequence,
+    ruvia::task<void> process_release_probe(control_stream& connection,
+        std::string_view node_id,
         std::uint32_t wait_seconds) {
-        const auto request = release_probe(++sequence, wait_seconds);
-        co_await connection.binary(serialize(request));
-        const auto acknowledgement = co_await read_server_envelope(connection);
+        auto request = release_probe(wait_seconds);
+        auto replies = connection.send(request);
+        const auto acknowledgement = co_await replies.receive();
         if (!matches_release_probe_ack(acknowledgement, request.request_id())) {
             throw std::runtime_error("control plane did not acknowledge release probe");
         }
@@ -339,18 +342,17 @@ private:
         if (differs(runtime_.applied_node_spec_revision(), runtime_.active_release_id(),
                 runtime_.active_manifest_digest(), value.desired_node_spec_revision(),
                 value.desired_release_id(), value.desired_manifest_digest())) {
-            co_await receive_desired_state(connection, node_id, request.request_id());
+            co_await receive_desired_state(connection, node_id, co_await replies.receive());
         }
         co_await update_node_release(connection, node_id, value.node_binary_sha256());
         co_return;
     }
 
     ruvia::task<std::chrono::seconds>
-    process_heartbeat(const ruvia::websocket_client_handle& connection, std::string_view node_id,
-        std::uint64_t& sequence) {
-        const auto request = co_await heartbeat(node_id, ++sequence);
-        co_await connection.binary(serialize(request));
-        const auto acknowledgement = co_await read_server_envelope(connection);
+    process_heartbeat(control_stream& connection, std::string_view node_id) {
+        auto request = co_await heartbeat(node_id);
+        auto replies = connection.send(request);
+        const auto acknowledgement = co_await replies.receive();
         if (!matches_heartbeat_ack(acknowledgement, request.request_id())) {
             throw std::runtime_error("control plane did not acknowledge heartbeat");
         }
@@ -361,20 +363,26 @@ private:
         co_return interval;
     }
 
-    ruvia::task<void> run_control_loop(const ruvia::websocket_client_handle& connection,
+    ruvia::task<void> run_control_loop(control_stream& connection,
         const v2::Welcome& welcome) {
         const auto& node_id = welcome.node_id();
         auto interval = std::chrono::seconds(
             (std::max)(welcome.heartbeat_interval_seconds(), std::uint32_t{1}));
-        std::uint64_t heartbeat_sequence{};
-        std::uint64_t release_probe_sequence{};
-        auto next_heartbeat = std::chrono::steady_clock::now();
+        interval = co_await process_heartbeat(connection, node_id);
+        if (!config_.stop_token_.stop_requested()) {
+            channel_log_.recovered();
+        }
+        auto next_heartbeat = std::chrono::steady_clock::now() + interval;
+        connection.spawn_owned(log_delivery_.run(connection, node_id));
         for (;;) {
             if (config_.stop_token_.stop_requested()) {
                 co_return;
             }
             if (std::chrono::steady_clock::now() >= next_heartbeat) {
-                interval = co_await process_heartbeat(connection, node_id, heartbeat_sequence);
+                interval = co_await process_heartbeat(connection, node_id);
+                if (!config_.stop_token_.stop_requested()) {
+                    channel_log_.recovered();
+                }
                 next_heartbeat = std::chrono::steady_clock::now() + interval;
             }
             const auto watch_seconds =
@@ -382,9 +390,9 @@ private:
             if (watch_seconds == 0) {
                 continue;
             }
-            // One outstanding watch owns the read path. A committed change wakes it;
-            // the deadline leaves room for heartbeats without interleaving object replies.
-            co_await process_release_probe(connection, node_id, release_probe_sequence, watch_seconds);
+            // The watch owns only its request mailbox; log acknowledgements
+            // continue through the same connection while this request waits.
+            co_await process_release_probe(connection, node_id, watch_seconds);
         }
     }
 
@@ -443,19 +451,35 @@ private:
         if (!valid_welcome(welcome)) {
             throw std::runtime_error("control plane sent invalid welcome state");
         }
+        if (!welcome.multiplex_logs()) {
+            throw std::runtime_error("control plane does not support multiplexed node sessions; upgrade the control plane before this node");
+        }
         const auto& node_id = welcome.node_id();
         if (persistent.active_.has_node_spec() &&
             persistent.active_.node_spec().content().node_id() != node_id) {
             throw std::runtime_error("persisted state belongs to another node");
         }
-        if (differs(runtime_.applied_node_spec_revision(), runtime_.active_release_id(),
-                runtime_.active_manifest_digest(), welcome.desired_node_spec_revision(),
-                welcome.desired_release_id(), welcome.desired_manifest_digest())) {
-            co_await receive_desired_state(connection, node_id, "authenticate");
+        const auto worker = loop_.handle();
+        control_stream stream(worker, connection, config_.stop_token_);
+        std::exception_ptr failure;
+        try {
+            auto initial = stream.expect("authenticate");
+            stream.start();
+            if (differs(runtime_.applied_node_spec_revision(), runtime_.active_release_id(),
+                    runtime_.active_manifest_digest(), welcome.desired_node_spec_revision(),
+                    welcome.desired_release_id(), welcome.desired_manifest_digest())) {
+                co_await receive_desired_state(stream, node_id, co_await initial.receive());
+            }
+            co_await update_node_release(stream, node_id, welcome.node_binary_sha256());
+            last_error_.clear();
+            co_await run_control_loop(stream, welcome);
+        } catch (...) {
+            failure = std::current_exception();
         }
-        co_await update_node_release(connection, node_id, welcome.node_binary_sha256());
-        last_error_.clear();
-        co_await run_control_loop(connection, welcome);
+        co_await stream.shutdown();
+        if (failure) {
+            std::rethrow_exception(failure);
+        }
     }
 
     ruvia::event_loop loop_;
@@ -466,6 +490,8 @@ private:
     data_plane& data_plane_;
     node_log_buffer& logs_;
     self_updater& updater_;
+    channel_log channel_log_;
+    log_delivery log_delivery_;
     std::string last_error_;
 };
 

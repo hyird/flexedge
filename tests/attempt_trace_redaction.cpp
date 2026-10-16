@@ -41,7 +41,7 @@ void require(bool condition, std::string_view message) {
 }
 
 // Typed views of the stored trace, written from the contract
-// (docs/task-center.md) rather than from the producer's models.
+// rather than from the producer's models.
 RUVIA_MODEL(pair_input, RUVIA_REQUIRED_FIELD(name, ruvia::string), RUVIA_REQUIRED_FIELD(value, ruvia::string),
     RUVIA_REQUIRED_FIELD(redacted, ruvia::bool_value));
 RUVIA_MODEL(body_input, RUVIA_REQUIRED_FIELD(content_type, ruvia::string), RUVIA_REQUIRED_FIELD(format, ruvia::string),

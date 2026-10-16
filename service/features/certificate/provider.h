@@ -59,15 +59,15 @@ inline std::string percent_encode(std::string_view value) {
 template <typename runtime_type>
 ruvia::task<service::outbound_http::buffered_response>
 send_provider_request(runtime_type& context, service::attempt_trace::recorder& trace,
+    const service::outbound_http::quota_scope& scope,
     service::attempt_trace::outbound_operation operation, const ruvia::http_client_config& config,
     ruvia::http_known_method method, std::string_view target,
     std::span<const ruvia::http_header_view> headers,
     std::optional<std::string_view> body = std::nullopt) {
     try {
         const auto alias = service::config::outbound_origin_alias(config);
-        auto&& client = context.get_http_client(alias);
         co_return co_await service::outbound_http::send_buffered(
-            client, {.origin_alias_ = alias, .operation_ = operation}, trace,
+            context, scope, {.origin_alias_ = alias, .operation_ = operation}, trace,
             {
                 .method_ = ruvia::known_http_method_token(method),
                 .target_ = target,
@@ -95,9 +95,9 @@ send_provider_request(runtime_type& context, service::attempt_trace::recorder& t
 
 template <typename runtime_type>
 ruvia::task<void> verify_acme_directory(runtime_type& context, service::attempt_trace::recorder& trace,
-    const acme_settings& settings) {
+    const acme_settings& settings, const service::outbound_http::quota_scope& scope) {
     const std::array headers{ruvia::http_header_view{"accept", "application/json"}};
-    const auto response = co_await send_provider_request(context, trace,
+    const auto response = co_await send_provider_request(context, trace, scope,
         service::attempt_trace::outbound_operation::acme_directory, service::config::acme_origin(settings.host_),
         ruvia::http_known_method::get, settings.directory_target_, headers);
     const std::optional<acme_directory_input> parsed =
@@ -132,14 +132,15 @@ parse_zero_ssl_eab(runtime_type& context, service::attempt_trace::recorder& trac
 
 template <typename runtime_type>
 ruvia::task<eab_credentials> fetch_zero_ssl_eab_by_email(runtime_type& context,
-    service::attempt_trace::recorder& trace, std::string_view account_email) {
+    service::attempt_trace::recorder& trace, std::string_view account_email,
+    const service::outbound_http::quota_scope& scope) {
     trace.register_secret(account_email);
     const auto body = "email=" + percent_encode(account_email);
     const std::array headers{
         ruvia::http_header_view{"accept", "application/json"},
         ruvia::http_header_view{"content-type", "application/x-www-form-urlencoded"},
     };
-    const auto response = co_await send_provider_request(context, trace,
+    const auto response = co_await send_provider_request(context, trace, scope,
         service::attempt_trace::outbound_operation::zerossl_eab_by_email,
         service::config::get_outbound_origins().zero_ssl_api_, ruvia::http_known_method::post,
         "/acme/eab-credentials-email", headers, body);
@@ -149,13 +150,14 @@ ruvia::task<eab_credentials> fetch_zero_ssl_eab_by_email(runtime_type& context,
 
 template <typename runtime_type>
 ruvia::task<eab_credentials> fetch_zero_ssl_eab_by_access_key(runtime_type& context,
-    service::attempt_trace::recorder& trace, std::string_view access_key) {
+    service::attempt_trace::recorder& trace, std::string_view access_key,
+    const service::outbound_http::quota_scope& scope) {
     trace.register_secret(access_key);
     service::utils::sensitive_string encoded_access_key(percent_encode(access_key));
     service::utils::sensitive_string target("/acme/eab-credentials?access_key=" +
                                             std::string(encoded_access_key.view()));
     const std::array headers{ruvia::http_header_view{"accept", "application/json"}};
-    const auto response = co_await send_provider_request(context, trace,
+    const auto response = co_await send_provider_request(context, trace, scope,
         service::attempt_trace::outbound_operation::zerossl_eab_by_access_key,
         service::config::get_outbound_origins().zero_ssl_api_, ruvia::http_known_method::post, target.view(),
         headers);

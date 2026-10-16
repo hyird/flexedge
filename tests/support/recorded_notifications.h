@@ -30,10 +30,7 @@ struct recorded_notifications final {
     std::nullptr_t redis() {
         return nullptr;
     }
-    recorded_notifications& resource_notifications() {
-        return *this;
-    }
-    ruvia::task<void> send(std::nullptr_t, const service::live_resource::notifications::resource_notification& value) {
+    ruvia::task<void> record_committed_notification( const service::live_resource::notifications::resource_notification& value) {
         bool committed = true;
         for (const auto& attempt : value.task_attempts_) {
             const auto rows = co_await handle_.query("SELECT count(*) FROM sys_sync_event WHERE id = $1",

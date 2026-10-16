@@ -1,9 +1,9 @@
 #pragma once
 
 #include <ruvia/core/task.h>
-#include <ruvia/web/context.h>
 #include <ruvia/web/model_json.h>
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -24,7 +24,7 @@
 #include "service/features/attempt_trace/trace_store.h"
 #include "service/features/cluster_dns/projection.h"
 #include "service/features/live_resource/node_runtime.h"
-#include "service/features/live_resource/notifications.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/node_dispatch/apply_history.h"
 #include "service/features/node_dispatch/protocol.h"
 #include "service/features/node_dispatch/queue.h"
@@ -37,9 +37,19 @@ namespace service::agent {
 
 class agent_command_service final {
 public:
-    ruvia::task<agent_principal> authenticate(ruvia::context& c, const std::string& agent_id,
+    template <typename runtime_type>
+    ruvia::task<agent_principal> authenticate(runtime_type& c, const std::string& agent_id,
         std::string_view secret) {
         auto transaction = co_await c.db().begin_transaction();
+        const auto verified_hash = service::utils::token_hash(secret);
+        co_return co_await authenticate_hashed(c, transaction, agent_id, verified_hash,
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(), true);
+    }
+
+    template <typename runtime_type>
+    ruvia::task<agent_principal> authenticate_hashed(runtime_type& c, ruvia::db_transaction& transaction,
+        const std::string& agent_id, std::string_view verified_hash, std::int64_t received_unix_ms,
+        bool commit = false) {
         const auto candidates = co_await transaction.query(
             "SELECT id, cluster_id, tenant_id, registration_status, node_secret_hash FROM "
             "sys_node WHERE agent_id = $1 AND deleted_at IS NULL LIMIT 1",
@@ -48,7 +58,7 @@ public:
             service::common::throw_app_error(agent_unauthorized);
         }
         const auto stored_hash = candidates.front()[4].value();
-        if (!stored_hash || !service::utils::token_hash_matches(secret, *stored_hash)) {
+        if (!stored_hash || !hash_matches(verified_hash, *stored_hash)) {
             service::common::throw_app_error(agent_unauthorized);
         }
         const auto initial_status = candidates.front()[3].value().value_or("");
@@ -67,7 +77,7 @@ public:
             service::common::throw_app_error(agent_unauthorized);
         }
         const auto current_hash = rows.front()[4].value();
-        if (!current_hash || !service::utils::token_hash_matches(secret, *current_hash)) {
+        if (!current_hash || !hash_matches(verified_hash, *current_hash)) {
             service::common::throw_app_error(agent_unauthorized);
         }
         // Work an agent's authentication causes is a system task: the first
@@ -81,11 +91,11 @@ public:
         if (rows.front()[3].value().value_or("") == "pending") {
             const auto updated = co_await transaction.execute(
                 "UPDATE sys_node SET registration_status = 'registered', registered_at = NOW(), "
-                "last_heartbeat_at = NOW(), desired_release_id = (SELECT current_release_id FROM "
+                "last_heartbeat_at = to_timestamp($3::double precision / 1000.0), desired_release_id = (SELECT current_release_id FROM "
                 "sys_cluster WHERE tenant_id = sys_node.tenant_id AND id = "
                 "sys_node.cluster_id), updated_at = NOW() WHERE id = $1 "
                 "AND agent_id = $2 AND registration_status = 'pending' AND deleted_at IS NULL",
-                rows.front()[0].value().value_or(""), agent_id);
+                rows.front()[0].value().value_or(""), agent_id, received_unix_ms);
             if (updated.affected_rows() != 1) {
                 service::common::throw_app_error(agent_unauthorized);
             }
@@ -108,18 +118,23 @@ public:
             .tenant_id_ = std::string(rows.front()[2].value().value_or("")),
             .agent_id_ = agent_id,
         };
-        co_await transaction.commit();
         service::live_resource::notifications::resource_notification notification(result.tenant_id_);
         notification.node_config()
             .node_seen(result.node_id_)
             .changed(service::live_resource::resource::nodes, result.node_id_)
             .changed(service::live_resource::resource::clusters, result.cluster_id_);
         origin.add_changes(notification);
-        co_await service::live_resource::notify(c, notification);
+        notification.node_seen_unix_ms_ = received_unix_ms;
+        if (commit) {
+            co_await service::live_resource::commit_and_notify(transaction, c, notification);
+        } else {
+            (void)co_await service::live_resource::enqueue_notification(transaction, notification);
+        }
         co_return result;
     }
 
-    ruvia::task<flexedge::node::v2::DesiredState> desired_state(ruvia::context& c,
+    template <typename runtime_type>
+    ruvia::task<flexedge::node::v2::DesiredState> desired_state(runtime_type& c,
         const agent_principal& principal) {
         const auto& node_id = principal.node_id_;
         auto transaction = co_await c.db().begin_transaction();
@@ -145,15 +160,34 @@ public:
         co_return result;
     }
 
-    ruvia::task<void> heartbeat(ruvia::context& c, const agent_principal& principal,
+    template <typename runtime_type>
+    ruvia::task<void> heartbeat(runtime_type& c, const agent_principal& principal,
         const heartbeat_report& report) {
+        auto transaction = co_await c.db().begin_transaction();
+        co_await heartbeat(c, transaction, principal, report,
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(), true);
+    }
+
+    template <typename runtime_type>
+    ruvia::task<void> heartbeat(runtime_type& c, ruvia::db_transaction& transaction,
+        const agent_principal& principal, const heartbeat_report& report,
+        std::int64_t received_unix_ms, bool commit = false) {
         if (report.node_id_ != principal.node_id_) {
             service::common::throw_app_error(agent_unauthorized);
         }
         const auto runtime_json = heartbeat_runtime_json(c, report);
-        auto transaction = co_await c.db().begin_transaction();
-        const auto update = co_await update_heartbeat(transaction, principal, report, runtime_json);
+        const auto update = co_await update_heartbeat(transaction, principal, report, runtime_json, received_unix_ms);
         if (!update) {
+            const auto newer = co_await transaction.query(
+                "SELECT 1 FROM sys_node WHERE tenant_id=$1 AND id=$2 AND agent_id=$3 "
+                "AND deleted_at IS NULL AND registration_status='registered' AND last_heartbeat_at >= to_timestamp($4::double precision/1000.0)",
+                principal.tenant_id_, principal.node_id_, principal.agent_id_, received_unix_ms);
+            if (!newer.empty()) {
+                if (commit) {
+                    co_await transaction.commit();
+                }
+                co_return;
+            }
             service::common::throw_app_error(revision_invalid);
         }
         const auto target_changed = co_await service::node_dispatch::mark_node_target_applied(transaction, principal.tenant_id_, report.active_release_id_, report.node_id_);
@@ -180,12 +214,12 @@ public:
                  report.applied_node_spec_revision_, c.pool())) {
             recorded.push_back(std::move(attempt));
         }
-        co_await transaction.commit();
         // One notification per heartbeat: the online window, the runtime and
         // origin patches, and the transitions this report caused.
         using service::live_resource::resource;
         service::live_resource::notifications::resource_notification notification(principal.tenant_id_);
         notification.node_runtime(principal.node_id_, service::live_resource::runtime_patch(c, report, *update));
+        notification.node_seen_unix_ms_ = received_unix_ms;
         service::live_resource::add_origin_runtime(c, notification, report, *update);
         if (update->became_online_) {
             notification.changed(resource::nodes, principal.node_id_)
@@ -196,16 +230,30 @@ public:
             add_apply_change(notification, principal);
         }
         add_recorded_attempts(notification, recorded);
-        co_await service::live_resource::notify(c, notification);
+        if (commit) {
+            co_await service::live_resource::commit_and_notify(transaction, c, notification);
+        } else {
+            (void)co_await service::live_resource::enqueue_notification(transaction, notification);
+        }
         co_return;
     }
 
     // `elapsed_milliseconds`: time since this control connection sent the
     // desired state the result answers, when known. `trace` is the attempt
     // trace of this apply; it is stored after the result commits.
-    ruvia::task<void> record_apply_result(ruvia::context& c, const agent_principal& principal,
+    template <typename runtime_type>
+    ruvia::task<void> record_apply_result(runtime_type& c, const agent_principal& principal,
         const flexedge::node::v2::ApplyResult& result,
         std::optional<std::int64_t> elapsed_milliseconds, service::attempt_trace::recorder& trace) {
+        auto transaction = co_await c.db().begin_transaction();
+        co_await record_apply_result(c, transaction, principal, result, elapsed_milliseconds, trace.finish(), true);
+    }
+
+    template <typename runtime_type>
+    ruvia::task<void> record_apply_result(runtime_type& c, ruvia::db_transaction& transaction,
+        const agent_principal& principal, const flexedge::node::v2::ApplyResult& result,
+        std::optional<std::int64_t> elapsed_milliseconds,
+        const std::optional<service::attempt_trace::stored_trace>& trace, bool commit = false) {
         const auto& node_id = principal.node_id_;
         std::vector<service::node_dispatch::recorded_node_attempt> recorded;
         if (result.applied()) {
@@ -219,7 +267,6 @@ public:
                 .error_ = {},
                 .retryable_ = false,
                 .elapsed_milliseconds_ = elapsed_milliseconds};
-            auto transaction = co_await c.db().begin_transaction();
             if (!(co_await record_applied_deployment(transaction, principal, result.node_spec_revision(),
                     result.release_id(), result.manifest_digest()))) {
                 service::common::throw_app_error(revision_invalid);
@@ -236,13 +283,11 @@ public:
                      applied, result.node_spec_revision(), c.pool())) {
                 recorded.push_back(std::move(attempt));
             }
-            co_await transaction.commit();
-            co_await store_apply_trace(c, principal, recorded, trace);
-            co_await notify_apply_change(c, principal, target_changed, recorded);
+            const auto notification = apply_notification(principal, target_changed, recorded);
+            co_await finish_apply(c, transaction, principal, recorded, trace, notification, commit);
             co_return;
         }
         const auto phase = flexedge::node::v2::ApplyPhase_Name(result.failed_phase());
-        auto transaction = co_await c.db().begin_transaction();
         const apply_failure_report failure{.revision_ = result.node_spec_revision(),
             .release_id_ = result.release_id(),
             .manifest_digest_ = result.manifest_digest(),
@@ -280,31 +325,35 @@ public:
                 recorded.push_back(std::move(attempt));
             }
         }
-        co_await transaction.commit();
-        co_await store_apply_trace(c, principal, recorded, trace);
-        co_await notify_apply_change(c, principal, target_changed, recorded);
+        const auto notification = apply_notification(principal, target_changed, recorded);
+        co_await finish_apply(c, transaction, principal, recorded, trace, notification, commit);
         co_return;
     }
 
 private:
-    // The trace is stored on its own after the apply result committed, with
-    // the first attempt it recorded (the release target's, else the node
-    // configuration's); a trace that cannot be stored is logged and leaves
-    // the result unchanged.
-    static ruvia::task<void> store_apply_trace(ruvia::context& c, const agent_principal& principal,
+    static bool hash_matches(std::string_view actual, std::string_view expected) {
+        return actual.size() == expected.size() && CRYPTO_memcmp(actual.data(), expected.data(), actual.size()) == 0;
+    }
+
+    // Immutable traces and their attempts commit together. A retried report
+    // cannot commit the attempt and lose the only copy of its trace.
+    template <typename runtime_type>
+    static ruvia::task<void> finish_apply(runtime_type& c, ruvia::db_transaction& transaction,
+        const agent_principal& principal,
         const std::vector<service::node_dispatch::recorded_node_attempt>& recorded,
-        service::attempt_trace::recorder& trace) {
-        if (recorded.empty()) {
-            co_return;
+        const std::optional<service::attempt_trace::stored_trace>& trace,
+        const service::live_resource::notifications::resource_notification& notification, bool commit) {
+        if (trace && !recorded.empty()) {
+            const auto& first = recorded.front();
+            co_await service::attempt_trace::insert_attempt_trace(transaction,
+                {.tenant_id_ = principal.tenant_id_, .task_id_ = first.task_id_, .resource_id_ = principal.node_id_, .version_ = first.version_},
+                first.event_id_, *trace);
         }
-        const auto& first = recorded.front();
-        auto db = c.db();
-        co_await service::attempt_trace::store_attempt_trace(db,
-            {.tenant_id_ = principal.tenant_id_,
-                .task_id_ = first.task_id_,
-                .resource_id_ = principal.node_id_,
-                .version_ = first.version_},
-            first.event_id_, trace);
+        const auto id = co_await service::live_resource::enqueue_notification(transaction, notification);
+        if (commit) {
+            co_await transaction.commit();
+            co_await service::live_resource::wake_committed_notification(c, id, notification);
+        }
     }
 
     // Task history wording of the node's failure phase.
@@ -342,14 +391,14 @@ private:
         }
     }
 
-    static ruvia::task<void> notify_apply_change(ruvia::context& c, const agent_principal& principal,
+    static service::live_resource::notifications::resource_notification apply_notification(const agent_principal& principal,
         bool target_changed, const std::vector<service::node_dispatch::recorded_node_attempt>& recorded) {
         service::live_resource::notifications::resource_notification notification(principal.tenant_id_);
         if (target_changed || !recorded.empty()) {
             add_apply_change(notification, principal);
         }
         add_recorded_attempts(notification, recorded);
-        co_await service::live_resource::notify(c, notification);
+        return notification;
     }
 };
 

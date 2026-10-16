@@ -3,7 +3,7 @@
 #include "ruvia/web/model.h"
 #include "ruvia/web/model_object.h"
 
-// Task center contract (build/operation-tasks/contract.md, docs/task-center.md):
+// Task center contract:
 // a task is one user operation or system action, its subtasks the background
 // work it caused. Times are `YYYY-MM-DDTHH:MM:SS.ffffff+00` or "" when unknown.
 namespace service::task {
@@ -85,8 +85,8 @@ RUVIA_MODEL(operation_detail_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
     RUVIA_REQUIRED_FIELD(message, ruvia::string), RUVIA_REQUIRED_FIELD(data, operation_detail_dto));
 
 // `attempt` numbers the attempts of one subtask from 1. `detail` is the
-// stored attempt detail document (its `kind` selects the shape in
-// docs/task-center.md); `trace` the step summary with `attempt_id`.
+// stored attempt detail document (`kind` selects its shape);
+// `trace` is the step summary with `attempt_id`.
 RUVIA_MODEL(attempt_dto, RUVIA_REQUIRED_FIELD(attempt, ruvia::int64), RUVIA_REQUIRED_FIELD(outcome, ruvia::string),
     RUVIA_REQUIRED_FIELD(error, ruvia::string), RUVIA_REQUIRED_FIELD(started_at, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("emitted_at", emitted_at, ruvia::string),

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <ruvia/core/channel.h>
 #include <ruvia/core/stop_token.h>
 #include <ruvia/core/task.h>
 #include <ruvia/core/timer.h>
@@ -48,8 +47,6 @@ inline constexpr std::size_t max_origin_patches{64};
 inline constexpr std::size_t max_runtime_bytes{8 * 1024};
 inline constexpr std::size_t max_origin_bytes{16 * 1024};
 inline constexpr std::size_t max_entry_bytes{256 * 1024};
-// Owed recoveries a producer remembers before it owes every tenant one.
-inline constexpr std::size_t max_owed_tenants{256};
 inline constexpr std::string_view all_tenants{"*"};
 
 [[nodiscard]] inline constexpr std::string_view resource_name(resource value) {
@@ -113,6 +110,7 @@ struct resource_notification final {
     // A heartbeat or registration of this node was accepted: its online
     // window restarts. The runtime and origin patches belong to this node.
     std::string node_id_;
+    std::int64_t node_seen_unix_ms_{};
     std::string node_runtime_;
     std::vector<origin_runtime_change> origin_runtime_;
     // Node control channels of the tenant re-read their desired state.
@@ -142,10 +140,12 @@ struct resource_notification final {
     }
     resource_notification& node_seen(std::string_view node_id) {
         node_id_ = std::string(node_id);
+        node_seen_unix_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
         return *this;
     }
     resource_notification& node_runtime(std::string_view node_id, std::string payload) {
-        node_id_ = std::string(node_id);
+        node_seen(node_id);
         node_runtime_ = std::move(payload);
         return *this;
     }
@@ -283,6 +283,7 @@ inline std::vector<std::string_view> split(std::string_view value, char separato
     }
     if (!value.node_id_.empty()) {
         fields.emplace_back("node_id", value.node_id_);
+        fields.emplace_back("node_seen_unix_ms", std::to_string(value.node_seen_unix_ms_));
     }
     if (!value.node_runtime_.empty()) {
         fields.emplace_back("node_runtime", value.node_runtime_);
@@ -337,6 +338,10 @@ inline std::vector<std::string_view> split(std::string_view value, char separato
             }
         } else if (name == "node_id") {
             value.node_id_ = std::string(field);
+        } else if (name == "node_seen_unix_ms") {
+            const auto seen = detail::parse_integer<std::int64_t>(field);
+            if (!seen || *seen < 0) return std::nullopt;
+            value.node_seen_unix_ms_ = *seen;
         } else if (name == "node_runtime") {
             value.node_runtime_ = std::string(field);
         } else if (name.starts_with(detail::origin_field_prefix)) {
@@ -374,22 +379,6 @@ inline std::vector<std::string_view> split(std::string_view value, char separato
     return decode(pairs);
 }
 
-inline ruvia::task<void> publish(ruvia::redis_handle redis, const resource_notification& value) {
-    const auto fields = encode(value);
-    const auto maximum_entries = std::to_string(max_entries);
-    std::vector<std::string_view> arguments{"XADD", stream_key, "MAXLEN", "~", maximum_entries, "*"};
-    arguments.reserve(arguments.size() + fields.size() * 2);
-    for (const auto& [name, field] : fields) {
-        arguments.push_back(name);
-        arguments.push_back(field);
-    }
-    const auto result =
-        co_await redis.command(std::span<const std::string_view>(arguments.data(), arguments.size()));
-    service::utils::require_redis_success(result, "could not publish resource notification");
-    if (result.kind() != ruvia::redis_value::kind_type::string || result.string().empty()) {
-        throw std::runtime_error("unexpected resource notification publish reply");
-    }
-}
 
 struct entry final {
     std::string id_;
@@ -470,138 +459,4 @@ inline ruvia::task<read_batch> read(ruvia::redis_handle redis, std::string_view 
         "XREAD", "BLOCK", block_ms, "COUNT", count, "STREAMS", stream_key, cursor));
 }
 
-// Owed recoveries are retried from the first 1 s, doubling up to 30 s, while
-// anything is owed; nothing waits on a timer otherwise.
-inline constexpr auto owed_retry_initial_delay = std::chrono::seconds(1);
-inline constexpr auto owed_retry_maximum_delay = std::chrono::seconds(30);
-
-// Owned by one worker (Web Worker state, or the background worker context):
-// sends that worker's notifications on that worker's Redis connection. A
-// committed operation never fails because of its notification; a failed send
-// is logged and the tenant is owed a recovery. The owed recovery entries are
-// appended before the next notification, or by `retry_owed` (which the worker
-// runs for its lifetime) once Redis answers again, whichever comes first.
-// Readers that lost the stream themselves recover on reconnect and skip owed
-// recoveries older than that.
-class sender final {
-public:
-    ruvia::task<void> send(ruvia::redis_handle redis, const resource_notification& value) {
-        if (value.empty()) {
-            co_return;
-        }
-        try {
-            const auto handle = redis.with_options({.timeout_ = send_timeout});
-            co_await publish_owed(handle);
-            co_await publish(handle, bounded(value));
-        } catch (const std::exception& error) {
-            owe(value.tenant_id_);
-            service::logging::error(std::string("Resource notification could not be sent; subscribers recover once "
-                                                "it is retried: ") +
-                                    error.what());
-        }
-    }
-
-    // Runs on the owning worker for its lifetime. Waits without a timer while
-    // nothing is owed; while something is owed, appends the owed recovery
-    // entries with bounded backoff until Redis accepts them. Ends when `stop`
-    // is requested.
-    template <typename context_type>
-    ruvia::task<void> retry_owed(context_type& context, ruvia::stop_token stop) {
-        auto [signal, receiver] = ruvia::make_channel<std::uint64_t>(context.worker(), {.capacity_ = 1});
-        owed_signal_.emplace(std::move(signal));
-        auto delay = std::chrono::duration_cast<std::chrono::milliseconds>(owed_retry_initial_delay);
-        while (!stop.stop_requested()) {
-            if (!owed_until_) {
-                const auto woken = co_await receiver.receive(stop);
-                if (!woken.has_value()) {
-                    break;
-                }
-                delay = std::chrono::duration_cast<std::chrono::milliseconds>(owed_retry_initial_delay);
-                continue;
-            }
-            if (co_await ruvia::sleep_for(context.worker(), delay, stop) == ruvia::timer_sleep_result::stop_requested) {
-                break;
-            }
-            try {
-                co_await publish_owed(context.redis().with_options({.timeout_ = send_timeout, .stop_token_ = stop}));
-                delay = std::chrono::duration_cast<std::chrono::milliseconds>(owed_retry_initial_delay);
-            } catch (const std::exception&) {
-                delay = std::min(delay * 2, std::chrono::duration_cast<std::chrono::milliseconds>(owed_retry_maximum_delay));
-            }
-        }
-        owed_signal_.reset();
-    }
-
-    [[nodiscard]] bool owes() const noexcept {
-        return owed_until_.has_value();
-    }
-
-private:
-    // Appends one recovery entry per owed tenant; throws when Redis fails.
-    ruvia::task<void> publish_owed(ruvia::redis_handle handle) {
-        if (!owed_until_) {
-            co_return;
-        }
-        // Copies: other sends of this worker may run while this one is
-        // suspended. Tenants stay owed until their recovery is sent.
-        const auto until = *owed_until_;
-        const auto generation = owed_generation_;
-        const auto tenants = owed_tenants_;
-        for (const auto& tenant : tenants) {
-            resource_notification recovery(tenant);
-            recovery.missed_until_ = until;
-            co_await publish(handle, recovery);
-        }
-        // A failure while suspended is owed again: keep everything for the
-        // next attempt, which covers it as well.
-        if (owed_generation_ == generation) {
-            owed_tenants_.clear();
-            owed_until_.reset();
-        }
-    }
-
-    void owe(std::string_view tenant) {
-        ++owed_generation_;
-        owed_until_ =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
-                .count();
-        if (owed_signal_) {
-            (void)owed_signal_->send(owed_generation_);
-        }
-        if (!owed_tenants_.empty() && owed_tenants_.front() == all_tenants) {
-            return;
-        }
-        if (std::find(owed_tenants_.begin(), owed_tenants_.end(), tenant) != owed_tenants_.end()) {
-            return;
-        }
-        if (owed_tenants_.size() >= max_owed_tenants) {
-            owed_tenants_.assign(1, std::string(all_tenants));
-            return;
-        }
-        owed_tenants_.emplace_back(tenant);
-    }
-
-    std::vector<std::string> owed_tenants_;
-    std::optional<std::int64_t> owed_until_;
-    std::uint64_t owed_generation_{};
-    // Wakes `retry_owed` when a send fails; absent while it is not running.
-    std::optional<ruvia::channel_sender<std::uint64_t>> owed_signal_;
-};
-
 }  // namespace service::live_resource::notifications
-
-namespace service::live_resource {
-
-// Sends the committed changes of one operation from the calling worker:
-// request and Web Worker job contexts use their worker's sender state, the
-// background worker context its own sender. Call only after the commit.
-template <typename context_type>
-ruvia::task<void> notify(context_type& context, const notifications::resource_notification& value) {
-    if constexpr (requires { context.resource_notifications(); }) {
-        co_await context.resource_notifications().send(context.redis(), value);
-    } else {
-        co_await context.template worker_state<notifications::sender>().send(context.redis(), value);
-    }
-}
-
-}  // namespace service::live_resource

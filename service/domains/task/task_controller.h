@@ -16,7 +16,7 @@
 
 namespace service::task {
 
-// Task center (docs/task-center.md): tasks are user operations and system
+// Task center: tasks are user operations and system
 // actions, subtasks the background work they caused.
 class task_controller final {
 public:

@@ -1,29 +1,17 @@
 #pragma once
 
-#include <ruvia/core/channel.h>
-#include <ruvia/core/task.h>
-#include <ruvia/core/worker_wait_result.h>
-#include <ruvia/web/context.h>
-#include <ruvia/web/db/db_query.h>
 #include <ruvia/web/model_json.h>
 
-#include <algorithm>
-#include <chrono>
-#include <optional>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#include <vector>
 
 #include "ruvia/web/model.h"
 
 #include "service/domains/agent/agent_types.h"
 #include "service/domains/agent/heartbeat_store.h"
-#include "service/domains/node/node_connection.h"
 #include "service/domains/node/node_types.h"
 #include "service/domains/website/website_types.h"
-#include "service/features/live_resource/fanout.h"
 #include "service/features/live_resource/notifications.h"
 #include "service/features/node_runtime/mapper.h"
 
@@ -40,7 +28,8 @@ RUVIA_MODEL(
     RUVIA_REQUIRED_FIELD_NAME("origin_states", origin_states,
         ruvia::array<service::website::website_origin_runtime_dto>));
 
-inline std::string runtime_patch(ruvia::context& c, const service::agent::heartbeat_report& report,
+template <typename runtime_type>
+std::string runtime_patch(runtime_type& c, const service::agent::heartbeat_report& report,
     const service::agent::heartbeat_update& update) {
     service::node::node_runtime_dto runtime({.resource_ = c.pool()});
     runtime.set<"registration_status">("registered");
@@ -72,7 +61,8 @@ inline std::string runtime_patch(ruvia::context& c, const service::agent::heartb
 
 // Adds the origin-runtime patch of every website this heartbeat (or the
 // node's previous report) covers to the heartbeat's notification.
-inline void add_origin_runtime(ruvia::context& c, notifications::resource_notification& notification,
+template <typename runtime_type>
+void add_origin_runtime(runtime_type& c, notifications::resource_notification& notification,
     const service::agent::heartbeat_report& report, const service::agent::heartbeat_update& update) {
     std::unordered_set<std::string> websites;
     for (const auto& state : report.origin_health_) {
@@ -110,93 +100,6 @@ inline void add_origin_runtime(ruvia::context& c, notifications::resource_notifi
         }
         const auto json = ruvia::to_json(patch, {.resource_ = c.pool()});
         notification.origin_runtime(website, std::string(json.data(), json.size()));
-    }
-}
-
-// Deadline-driven transitions, not periodic database polling. Every Web
-// Worker owns one instance (Ruvia worker state): each heartbeat notification
-// its reader delivers replaces one deadline, and only an actual expiration
-// wakes that worker's node projections.
-class node_deadlines final {
-    struct entry {
-        std::string tenant_;
-        std::chrono::steady_clock::time_point deadline_;
-    };
-
-public:
-    void touch(std::string_view tenant, std::string_view node,
-        std::chrono::steady_clock::duration remaining = service::node::online_window) {
-        auto& entry = entries_[std::string(node)];
-        entry.tenant_ = std::string(tenant);
-        entry.deadline_ = std::max(entry.deadline_, std::chrono::steady_clock::now() + remaining);
-        if (sender_) {
-            (void)sender_->send(1);
-        }
-    }
-
-    // Runs on its worker for the worker's lifetime: expires deadlines and
-    // delivers each offline transition to the worker's own hub.
-    template <typename context_type>
-    ruvia::task<void> run(context_type& context) {
-        auto [sender, receiver] = ruvia::make_channel<std::uint64_t>(context.worker(), {.capacity_ = 1});
-        sender_.emplace(std::move(sender));
-        auto& hub_value = get_hub(context);
-        while (!context.get_stop_token().stop_requested()) {
-            const auto now = std::chrono::steady_clock::now();
-            std::vector<std::pair<std::string, std::string>> expired;
-            std::optional<std::chrono::steady_clock::time_point> earliest;
-            for (auto it = entries_.begin(); it != entries_.end();) {
-                if (it->second.deadline_ <= now) {
-                    expired.emplace_back(it->second.tenant_, it->first);
-                    it = entries_.erase(it);
-                    continue;
-                }
-                earliest = earliest ? std::min(*earliest, it->second.deadline_) : it->second.deadline_;
-                ++it;
-            }
-            for (const auto& [tenant, node] : expired) {
-                hub_value.publish(tenant, resource::nodes, node);
-            }
-            // Without deadlines this only waits for the next touch.
-            const auto wait = earliest ? *earliest - now : std::chrono::steady_clock::duration(std::chrono::hours(1));
-            const auto signal = co_await receiver.receive_for(wait, context.get_stop_token());
-            if (!signal.has_value() && signal.status() != ruvia::worker_wait_status::timed_out) {
-                break;
-            }
-        }
-        sender_.reset();
-    }
-
-private:
-    std::unordered_map<std::string, entry> entries_;
-    std::optional<ruvia::channel_sender<std::uint64_t>> sender_;
-};
-
-template <typename context_type>
-node_deadlines& get_node_deadlines(context_type& context) {
-    return context.template worker_state<node_deadlines>();
-}
-
-// Online nodes after a restart get the rest of their window from the stored heartbeat.
-template <typename context_t_type>
-inline ruvia::task<void> seed_node_deadlines(context_t_type& context) {
-    ruvia::db_query query;
-    const auto heard_seconds_ago = query.call("date_part",
-        {query.value("epoch"), query.binary(query.call("now"), ruvia::db_binary_operator::subtract,
-                                   query.column("last_heartbeat_at", "node"))});
-    query.select({query.column("tenant_id", "node"), query.column("id", "node"), heard_seconds_ago})
-        .from("sys_node", "node")
-        .where(query.unary(ruvia::db_unary_operator::is_null, query.column("deleted_at", "node")))
-        .and_where(service::node::node_online_predicate(query, "node"));
-    const auto rows = co_await context.db().query(query);
-    auto& deadlines = get_node_deadlines(context);
-    for (const auto& row : rows) {
-        const auto heard = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::duration<double>(row[2].template as<double>().value_or(0)));
-        const auto remaining =
-            std::max(std::chrono::milliseconds(1),
-                std::chrono::duration_cast<std::chrono::milliseconds>(service::node::online_window) - heard);
-        deadlines.touch(row[0].value().value_or(""), row[1].value().value_or(""), remaining);
     }
 }
 

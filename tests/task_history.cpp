@@ -42,7 +42,7 @@ void require(bool condition, std::string_view message) {
 }
 
 // Typed views of the history response, written from the contract
-// (docs/task-center.md) rather than from the producer's models.
+// rather than from the producer's models.
 RUVIA_MODEL(dns_record_input, RUVIA_REQUIRED_FIELD(name, ruvia::string), RUVIA_REQUIRED_FIELD(type, ruvia::string),
     RUVIA_REQUIRED_FIELD(line_code, ruvia::string), RUVIA_REQUIRED_FIELD(content, ruvia::string),
     RUVIA_REQUIRED_FIELD(ttl, ruvia::int64), RUVIA_REQUIRED_FIELD(priority, ruvia::int64, RUVIA_NULLABLE),

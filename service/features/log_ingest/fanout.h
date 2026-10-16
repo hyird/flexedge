@@ -3,7 +3,6 @@
 #include <ruvia/core/channel.h>
 #include <ruvia/core/stop_token.h>
 #include <ruvia/core/task.h>
-#include <ruvia/core/timer.h>
 #include <ruvia/core/worker_handle.h>
 #include <ruvia/core/worker_wait_result.h>
 
@@ -12,7 +11,6 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
-#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -22,12 +20,10 @@
 
 #include "service/features/live_resource/fanout.h"
 #include "service/features/log_ingest/notifications.h"
-#include "service/features/logging/logger.h"
 
 namespace service::log_ingest::fanout {
 
 inline constexpr auto sse_heartbeat_interval = std::chrono::seconds(15);
-inline constexpr auto reader_retry_delay = std::chrono::seconds(1);
 inline constexpr std::size_t subscriber_signal_capacity{1};
 
 // Worker-local log tail wakeups: every Web Worker owns one (Ruvia worker
@@ -128,8 +124,18 @@ public:
         if (std::exchange(ready_, true)) {
             return;
         }
+        recover();
+    }
+
+    // A restored Redis reader wakes each of this worker's own tails once.
+    // Tails resume from their persisted database cursor, so stream trimming
+    // during the outage does not leave a connected tail permanently stale.
+    void recover(std::optional<std::string_view> tenant = std::nullopt) {
         const auto signal = next_signal_++;
-        for (const auto& [_, subscribers] : subscribers_) {
+        for (const auto& [topic, subscribers] : subscribers_) {
+            if (tenant && topic.tenant_id_ != *tenant) {
+                continue;
+            }
             for (const auto& subscriber : subscribers) {
                 (void)subscriber.sender_.send(signal);
             }
@@ -209,46 +215,6 @@ void deliver(context_type& context, const notifications::notification& notificat
             service::live_resource::traffic_refresh_interval);
     }
     get_hub(context).publish(notification);
-}
-
-template <typename context_t_type>
-inline ruvia::task<void> run(context_t_type& context) {
-    std::string cursor;
-    bool initialized{};
-    while (!context.get_stop_token().stop_requested()) {
-        bool retry{};
-        try {
-            if (!initialized) {
-                cursor = co_await notifications::current_cursor(context.redis());
-                get_hub(context).mark_ready();
-                initialized = true;
-            }
-            auto batch = co_await notifications::read(context.redis(), cursor);
-            if (batch.cursor_) {
-                cursor = *batch.cursor_;
-            }
-            for (const auto& notification : batch.notifications_) {
-                deliver(context, notification);
-            }
-        } catch (const std::exception& error) {
-            if (!context.get_stop_token().stop_requested()) {
-                service::logging::error("Log notification fanout failure: " +
-                                        std::string(error.what()));
-                retry = true;
-            }
-        } catch (...) {
-            if (!context.get_stop_token().stop_requested()) {
-                service::logging::error("Log notification fanout failed with unknown error");
-                retry = true;
-            }
-        }
-        if (retry &&
-            co_await ruvia::sleep_for(context.worker(), reader_retry_delay,
-                context.get_stop_token()) ==
-                ruvia::timer_sleep_result::stop_requested) {
-            co_return;
-        }
-    }
 }
 
 }  // namespace service::log_ingest::fanout

@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <string_view>
 
-// Wire shape and bounds of one attempt trace (docs/task-center.md "执行跟踪").
+// Wire shape and bounds of one attempt trace.
 // The trace is diagnostic data stored next to the attempt record; it never
 // holds configuration versions, credentials or key material.
 namespace service::attempt_trace {

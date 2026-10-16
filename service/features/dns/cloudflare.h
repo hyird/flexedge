@@ -193,6 +193,9 @@ template <typename envelope_type>
 
 class cloudflare_client final {
 public:
+    explicit cloudflare_client(service::outbound_http::quota_scope scope = {})
+        : scope_(std::move(scope)) {}
+
     template <typename runtime_type>
     ruvia::task<std::vector<cloudflare_zone>> verify_token(runtime_type& c, service::attempt_trace::recorder& trace,
         std::string_view token, std::string_view account_id) const {
@@ -476,7 +479,6 @@ private:
         // The token of every request is the attempt's credential: whatever the
         // reply or an error echoes of it is redacted.
         trace.register_secret(token);
-        auto&& client = c.get_http_client(service::config::cloudflare_origin_alias);
         service::utils::sensitive_string authorization("Bearer " + std::string(token));
         std::array<ruvia::http_header_view, 3> headers{
             ruvia::http_header_view{"authorization", authorization.view()},
@@ -486,7 +488,7 @@ private:
         const auto header_count = body ? headers.size() : headers.size() - 1;
         try {
             co_return co_await service::outbound_http::send_buffered(
-                client, {.origin_alias_ = service::config::cloudflare_origin_alias, .operation_ = operation, .subject_ = subject},
+                c, scope_, {.origin_alias_ = service::config::cloudflare_origin_alias, .operation_ = operation, .subject_ = subject},
                 trace,
                 {
                     .method_ = ruvia::known_http_method_token(method),
@@ -676,11 +678,7 @@ private:
         }
         return result;
     }
+    service::outbound_http::quota_scope scope_;
 };
-
-inline const cloudflare_client& get_cloudflare_client() {
-    static const cloudflare_client client;
-    return client;
-}
 
 }  // namespace service::dns

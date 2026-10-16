@@ -19,10 +19,10 @@
 namespace {
 
 using service::live_resource::snapshot;
-using service::live_resource::snapshot_cache;
 using service::live_resource::snapshot_read_scope;
+using service::live_resource::snapshot_reads;
 
-snapshot_cache snapshots;
+snapshot_reads snapshots;
 std::atomic<unsigned> aggregate_queries_started{};
 std::atomic<unsigned> short_follower_queries_started{};
 using steady_clock = std::chrono::steady_clock;
@@ -85,7 +85,7 @@ private:
     ruvia::task<ruvia::http_response> short_budget(ruvia::context& context) {
         auto lease = snapshots.subscribe({"test-tenant", service::live_resource::resource::nodes,
             "short", "snapshot-budget"});
-        const auto deadline = snapshot_cache::clock::now() + std::chrono::milliseconds(250);
+        const auto deadline = snapshot_reads::clock::now() + std::chrono::milliseconds(250);
         try {
             (void)co_await service::live_resource::read_snapshot_until(
                 context, lease, deadline, [](snapshot_read_scope& scope) -> ruvia::task<std::string> {
@@ -104,7 +104,7 @@ private:
             "late-result", "snapshot-budget"});
         try {
             (void)co_await service::live_resource::read_snapshot_until(
-                context, lease, snapshot_cache::clock::now() + std::chrono::milliseconds(250),
+                context, lease, snapshot_reads::clock::now() + std::chrono::milliseconds(250),
                 [](snapshot_read_scope& scope) -> ruvia::task<std::string> {
                     (void)co_await ruvia::sleep_for(scope.worker(), std::chrono::milliseconds(800));
                     co_return "late-result-must-not-publish";
@@ -133,7 +133,7 @@ private:
         }
         try {
             const auto result = co_await service::live_resource::read_snapshot_until(
-                context, lease, snapshot_cache::clock::now() + budget,
+                context, lease, snapshot_reads::clock::now() + budget,
                 [leader](snapshot_read_scope& scope) -> ruvia::task<std::string> {
                     if (leader) {
                         short_follower_leader_started_at = steady_clock::now();
@@ -207,7 +207,7 @@ private:
     }
 
     ruvia::task<ruvia::http_response> owner(ruvia::context& context) {
-        snapshot_read_scope scope(context, snapshot_cache::clock::now() + std::chrono::seconds(2));
+        snapshot_read_scope scope(context, snapshot_reads::clock::now() + std::chrono::seconds(2));
         const bool borrowed_owners = scope.pool() == context.pool() &&
                                      &scope.worker() == &context.worker();
         co_await scope.stop_and_join();
@@ -215,7 +215,7 @@ private:
     }
 
     ruvia::task<ruvia::http_response> ticket_generation(ruvia::context& context) {
-        snapshot_cache cache;
+        snapshot_reads cache;
         auto lease = cache.subscribe({"generation-test", service::live_resource::resource::nodes,
             "same-entry", "ticket-generation"});
         auto first = lease.read(context.worker());

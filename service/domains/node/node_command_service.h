@@ -22,7 +22,7 @@
 #include "service/features/cluster_dns/projection.h"
 #include "service/features/dns_sync/line.h"
 #include "service/features/dns_sync/mapper.h"
-#include "service/features/live_resource/notifications.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/node_config/model.h"
 #include "service/features/node_dispatch/queue.h"
 #include "service/features/node_dispatch/target_store.h"
@@ -72,13 +72,12 @@ public:
             co_await service::node_dispatch::ensure_cluster_release(transaction, tenant_id, cluster_id, origin);
             co_await replace_endpoint_claims(transaction, tenant_id, node_id, stored_config.endpoints_);
             co_await service::cluster_dns::reconcile_cluster(transaction, tenant_id, cluster_id, origin);
-            co_await transaction.commit();
             service::live_resource::notifications::resource_notification notification(tenant_id);
             notification.node_config()
                 .changed(service::live_resource::resource::nodes, node_id)
                 .changed(service::live_resource::resource::clusters, cluster_id);
             origin.add_changes(notification);
-            co_await service::live_resource::notify(c, notification);
+            co_await service::live_resource::commit_and_notify(transaction, c, notification);
             result.set<"id">(node_id);
             result.set<"node_id">(agent_id);
             result.set<"secret">(secret.view());
@@ -177,7 +176,6 @@ public:
             if (status == "disabled") {
                 co_await service::node_dispatch::exclude_pending_node_targets(transaction, tenant_id, id, origin);
             }
-            co_await transaction.commit();
             service::live_resource::notifications::resource_notification notification(tenant_id);
             notification.node_config()
                 .changed(service::live_resource::resource::nodes, id)
@@ -186,7 +184,7 @@ public:
                 notification.changed(service::live_resource::resource::clusters, previous_cluster_id);
             }
             origin.add_changes(notification);
-            co_await service::live_resource::notify(c, notification);
+            co_await service::live_resource::commit_and_notify(transaction, c, notification);
             co_return origin.operation_id();
         } catch (const ruvia::db_error& error) {
             if (service::common::is_unique_constraint_violation(error, "uk_node_name") ||
@@ -224,13 +222,12 @@ public:
         co_await service::cluster_dns::reconcile_cluster(transaction, tenant_id, cluster_id, origin);
         co_await service::node_dispatch::exclude_pending_node_targets(transaction, tenant_id, id, origin);
         co_await service::node_dispatch::cancel_node_config(transaction, tenant_id, id, origin);
-        co_await transaction.commit();
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.node_config()
             .changed(service::live_resource::resource::nodes, id)
             .changed(service::live_resource::resource::clusters, cluster_id);
         origin.add_changes(notification);
-        co_await service::live_resource::notify(c, notification);
+        co_await service::live_resource::commit_and_notify(transaction, c, notification);
         co_return origin.operation_id();
     }
 
@@ -285,13 +282,12 @@ public:
         co_await service::cluster_dns::reconcile_cluster(transaction, tenant_id, cluster_id, origin);
         co_await service::node_dispatch::exclude_pending_node_targets(transaction, tenant_id, id, origin);
         co_await service::node_dispatch::cancel_node_config(transaction, tenant_id, id, origin);
-        co_await transaction.commit();
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.node_config()
             .changed(service::live_resource::resource::nodes, id)
             .changed(service::live_resource::resource::clusters, cluster_id);
         origin.add_changes(notification);
-        co_await service::live_resource::notify(c, notification);
+        co_await service::live_resource::commit_and_notify(transaction, c, notification);
         node_credentials_dto result(ruvia::model_options{.resource_ = c.pool()});
         result.set<"id">(id);
         result.set<"node_id">(agent_id);

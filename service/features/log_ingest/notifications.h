@@ -61,20 +61,6 @@ struct read_batch final {
     std::optional<std::string> cursor_;
 };
 
-inline ruvia::task<void> publish(ruvia::redis_handle redis, log_resource_type resource_type,
-    std::string_view tenant_id, std::string_view resource_id) {
-    if (tenant_id.empty() || resource_id.empty()) {
-        co_return;
-    }
-    const auto maximum_entries = std::to_string(max_entries);
-    const auto result = co_await redis.command(
-        "XADD", stream_key, "MAXLEN", "~", maximum_entries, "*", "tenant_id", tenant_id,
-        "resource_type", resource_type_name(resource_type), "resource_id", resource_id);
-    require_redis_success(result, "could not publish log notification");
-    if (result.kind() != ruvia::redis_value::kind_type::string || result.string().empty()) {
-        throw std::runtime_error("unexpected log notification publish reply");
-    }
-}
 
 inline std::string current_entry_id(const ruvia::redis_value& value) {
     require_redis_success(value, "could not read log notification cursor");

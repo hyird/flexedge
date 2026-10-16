@@ -16,6 +16,7 @@
 
 #include "service/features/attempt_trace/outbound_policy.h"
 #include "service/features/attempt_trace/recorder.h"
+#include "service/features/outbound_http/quota.h"
 #include "service/utils/sensitive_string.h"
 
 namespace service::outbound_http {
@@ -76,10 +77,13 @@ private:
 // The single outbound HTTP path of background attempts. Every request and its
 // response or transport failure is captured by the attempt's recorder (after
 // redaction) before the result is returned or the error rethrown unchanged.
-template <typename client_type>
-ruvia::task<buffered_response> send_buffered(client_type& client, const service::attempt_trace::outbound_call& call,
+template <typename runtime_type>
+ruvia::task<buffered_response> send_buffered(runtime_type& context, const quota_scope& scope,
+    const service::attempt_trace::outbound_call& call,
     service::attempt_trace::recorder& trace, const ruvia::http_client_request_view& request,
     ruvia::operation_options options = {}) {
+    co_await acquire_quota(context, call.origin_alias_, scope);
+    auto&& client = context.get_http_client(call.origin_alias_);
     const auto token = trace.begin_http(call, request);
     std::optional<buffered_response> result;
     try {

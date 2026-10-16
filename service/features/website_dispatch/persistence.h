@@ -8,15 +8,15 @@
 #include <string>
 #include <string_view>
 
-#include "service/features/background/worker_pool.h"
-#include "service/features/live_resource/notifications.h"
+#include "service/features/background/task_context.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/website_dispatch/task.h"
 
 namespace service::website_dispatch::detail {
 
-inline ruvia::task<void> reconcile_markers(service::background::worker_context& context) {
+inline ruvia::task<void> reconcile_markers(service::background::task_context& context) {
     auto db = context.db();
     const auto missing = co_await db.query(
         "SELECT website.tenant_id, website.id, website.revision FROM sys_website website WHERE "
@@ -39,15 +39,15 @@ inline ruvia::task<void> reconcile_markers(service::background::worker_context& 
                 service::sync_runtime::marker_resource_type::website, website_id,
                 service::sync_runtime::marker_operation::apply, revision, origin);
         }
-        co_await transaction.commit();
-        co_await service::sync_runtime::notify_origin(context, tenant_id, origin);
+        co_await service::sync_runtime::commit_origin(transaction, context, tenant_id, origin);
     }
     co_return;
 }
 
 inline ruvia::task<std::optional<website_marker>>
-claim(service::background::worker_context& context) {
-    const auto rows = co_await context.db().query(
+claim(service::background::task_context& context) {
+    auto transaction = co_await context.db().begin_transaction();
+    const auto rows = co_await transaction.query(
         "WITH candidate AS (SELECT marker.id FROM sys_sync_task marker INNER JOIN sys_website "
         "website ON website.tenant_id = marker.tenant_id AND website.id = marker.resource_id "
         "WHERE marker.resource_type = 'website' AND NOT marker.is_done AND "
@@ -61,6 +61,7 @@ claim(service::background::worker_context& context) {
             service::sync_runtime::claimed_owner_columns("marker"),
         context.lease_owner());
     if (rows.empty()) {
+        co_await transaction.commit();
         co_return std::nullopt;
     }
     const auto claimed_at = std::chrono::steady_clock::now();
@@ -70,7 +71,7 @@ claim(service::background::worker_context& context) {
     if (!owner.operation_id_.empty()) {
         notification.changed(service::live_resource::resource::operations, owner.operation_id_);
     }
-    co_await service::live_resource::notify(context, notification);
+    co_await service::live_resource::commit_and_notify(transaction, context, notification);
     co_return website_marker{
         .id_ = std::string(row[0].value().value_or("")),
         .tenant_id_ = std::string(row[1].value().value_or("")),
@@ -81,7 +82,7 @@ claim(service::background::worker_context& context) {
     };
 }
 
-inline ruvia::task<void> fail_website_marker(service::background::worker_context& context,
+inline ruvia::task<void> fail_website_marker(service::background::task_context& context,
     service::attempt_trace::recorder& trace, const website_marker& marker, std::string_view error,
     std::string_view detail) {
     const auto message = service::sync_runtime::attempt_error(trace, error);

@@ -19,7 +19,7 @@ RUVIA_MODEL(
     RUVIA_REQUIRED_FIELD_NAME("certificate_failed_count", certificate_failed_count, ruvia::int64));
 
 // Task state is not part of the overview: its widgets read the task list
-// once (docs/task-center.md).
+// once.
 RUVIA_MODEL(overview_data_dto, RUVIA_REQUIRED_FIELD(resources, overview_resource_counts_dto),
     RUVIA_REQUIRED_FIELD(issues, overview_issue_counts_dto));
 

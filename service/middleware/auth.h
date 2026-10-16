@@ -12,6 +12,7 @@
 #include "service/domains/auth/auth_error.h"
 #include "service/domains/auth/auth_session_read_service.h"
 #include "service/domains/auth/session_cookie.h"
+#include "service/middleware/rate_limit.h"
 
 namespace service::middleware {
 
@@ -36,6 +37,7 @@ public:
             service::common::throw_app_error(service::auth::auth_error::session_invalid);
         }
         const auto binding = c.bind_request_state(*authenticated);
+        co_await require_principal_budget(c, *authenticated);
         co_await next();
     }
 };

@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/certificate/acme_types.h"
 #include "service/features/certificate/provider_config_mapper.h"
 #include "service/features/certificate/task.h"
@@ -32,7 +32,7 @@ struct certificate_work final {
     std::int64_t dns_minimum_record_ttl_;
 };
 
-inline ruvia::task<certificate_work> load_work(service::background::worker_context& context,
+inline ruvia::task<certificate_work> load_work(service::background::task_context& context,
     const certificate_task& task) {
     const auto rows = co_await context.db().query(
         "SELECT certificate.tenant_id, certificate.subject_alt_names[1], "

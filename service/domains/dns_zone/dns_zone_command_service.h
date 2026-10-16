@@ -19,7 +19,7 @@
 #include "service/features/dns_sync/line.h"
 #include "service/features/dns_sync/mapper.h"
 #include "service/features/dns_sync/queue.h"
-#include "service/features/live_resource/notifications.h"
+#include "service/features/live_resource/notification_outbox.h"
 
 namespace service::dns_zone {
 
@@ -71,11 +71,10 @@ public:
             (void)co_await origin.require_operation(transaction, tenant_id);
             co_await service::dns_sync::enqueue_zone_revision(transaction, tenant_id, zone_id,
                 inserted.front()[1].as<std::int64_t>().value_or(1), origin);
-            co_await transaction.commit();
             service::live_resource::notifications::resource_notification notification(tenant_id);
             notification.changed(service::live_resource::resource::dns_zones, zone_id);
             origin.add_changes(notification);
-            co_await service::live_resource::notify(c, notification);
+            co_await service::live_resource::commit_and_notify(transaction, c, notification);
             co_return origin.operation_id();
         } catch (const ruvia::db_error& error) {
             if (service::common::is_unique_constraint_violation(error, "uk_dns_zone_domain")) {
@@ -130,8 +129,7 @@ public:
         const auto desired_revision = rows.front()[1].as<std::int64_t>().value_or(1);
         (void)co_await origin.require_operation(transaction, tenant_id);
         co_await service::dns_sync::enqueue_zone_revision(transaction, tenant_id, id, desired_revision, origin);
-        co_await transaction.commit();
-        co_await notify(c, tenant_id, id, origin);
+        co_await commit_changes(transaction, c, tenant_id, id, origin);
         co_return origin.operation_id();
     }
 
@@ -160,8 +158,7 @@ public:
             conflict_policy == "remote"  ? service::sync_runtime::marker_operation::sync_remote
             : conflict_policy == "local" ? service::sync_runtime::marker_operation::sync_local
                                          : service::sync_runtime::marker_operation::sync);
-        co_await transaction.commit();
-        co_await notify(c, tenant_id, id, origin);
+        co_await commit_changes(transaction, c, tenant_id, id, origin);
         co_return origin.operation_id();
     }
 
@@ -200,8 +197,7 @@ public:
         (void)co_await origin.require_operation(transaction, tenant_id);
         (void)co_await service::dns_sync::enqueue_zone_deletion(transaction, tenant_id, id, desired_revision,
             origin);
-        co_await transaction.commit();
-        co_await notify(c, tenant_id, id, origin);
+        co_await commit_changes(transaction, c, tenant_id, id, origin);
         co_return origin.operation_id();
     }
 
@@ -215,12 +211,12 @@ private:
             .summary_ = std::move(summary)});
     }
 
-    static ruvia::task<void> notify(ruvia::context& c, const std::string& tenant_id, const std::string& id,
+    static ruvia::task<void> commit_changes(ruvia::db_transaction& transaction, ruvia::context& c, const std::string& tenant_id, const std::string& id,
         const service::operation::work_origin& origin) {
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.changed(service::live_resource::resource::dns_zones, id);
         origin.add_changes(notification);
-        co_await service::live_resource::notify(c, notification);
+        co_await service::live_resource::commit_and_notify(transaction, c, notification);
     }
 
     // `{"record_counts":{...}}`: records added, changed and removed by the

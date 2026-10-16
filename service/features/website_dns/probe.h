@@ -18,7 +18,7 @@
 #include "ruvia/web/model.h"
 
 #include "service/config/outbound.h"
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/outbound_http/client.h"
 
 namespace service::website_dns {
@@ -69,16 +69,15 @@ inline std::string probe_name(std::string_view hostname, std::string_view websit
 }
 
 // The answer data of `answer_type` records for one DoH query of `query_name`.
-inline ruvia::task<std::vector<std::string>> resolve_answers(service::background::worker_context& context,
+inline ruvia::task<std::vector<std::string>> resolve_answers(service::background::task_context& context,
     service::attempt_trace::recorder& trace, std::string_view hostname, std::string_view query_name,
-    std::string_view query_type, std::int64_t answer_type) {
-    auto&& client = context.get_http_client(service::config::ali_dns_doh_origin_alias);
+    std::string_view query_type, std::int64_t answer_type, const service::outbound_http::quota_scope& scope) {
     std::array<ruvia::http_header_view, 1> headers{
         ruvia::http_header_view{"accept", "application/dns-json"}};
     const auto target = "/resolve?name=" + std::string(query_name) + "&type=" + std::string(query_type) +
                         "&cd=0&do=0";
     const auto response = co_await service::outbound_http::send_buffered(
-        client,
+        context, scope,
         {.origin_alias_ = service::config::ali_dns_doh_origin_alias,
             .operation_ = service::attempt_trace::outbound_operation::doh_resolve,
             .subject_ = hostname},
@@ -112,11 +111,11 @@ inline ruvia::task<std::vector<std::string>> resolve_answers(service::background
     co_return result;
 }
 
-inline ruvia::task<probe_result> probe_cname(service::background::worker_context& context,
+inline ruvia::task<probe_result> probe_cname(service::background::task_context& context,
     service::attempt_trace::recorder& trace, std::string_view hostname, std::string_view expected_target,
-    std::string_view website_domain_id) {
+    std::string_view website_domain_id, const service::outbound_http::quota_scope& scope) {
     auto query_name = probe_name(hostname, website_domain_id);
-    auto answers = co_await resolve_answers(context, trace, hostname, query_name, "CNAME", dns_type_cname);
+    auto answers = co_await resolve_answers(context, trace, hostname, query_name, "CNAME", dns_type_cname, scope);
     const auto expected = normalize_dns_name(expected_target);
     probe_result result{.matched_ = false,
         .query_name_ = std::move(query_name),
@@ -130,10 +129,11 @@ inline ruvia::task<probe_result> probe_cname(service::background::worker_context
 }
 
 // The A and AAAA answers for a name whose CNAME query came back empty.
-inline ruvia::task<std::vector<std::string>> probe_addresses(service::background::worker_context& context,
-    service::attempt_trace::recorder& trace, std::string_view hostname, std::string_view query_name) {
-    auto result = co_await resolve_answers(context, trace, hostname, query_name, "A", dns_type_a);
-    auto ipv6 = co_await resolve_answers(context, trace, hostname, query_name, "AAAA", dns_type_aaaa);
+inline ruvia::task<std::vector<std::string>> probe_addresses(service::background::task_context& context,
+    service::attempt_trace::recorder& trace, std::string_view hostname, std::string_view query_name,
+    const service::outbound_http::quota_scope& scope) {
+    auto result = co_await resolve_answers(context, trace, hostname, query_name, "A", dns_type_a, scope);
+    auto ipv6 = co_await resolve_answers(context, trace, hostname, query_name, "AAAA", dns_type_aaaa, scope);
     result.insert(result.end(), std::make_move_iterator(ipv6.begin()), std::make_move_iterator(ipv6.end()));
     co_return result;
 }

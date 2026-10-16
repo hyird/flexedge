@@ -8,7 +8,7 @@
 #include <string_view>
 #include <utility>
 
-#include "service/features/background/worker_pool.h"
+#include "service/features/background/task_context.h"
 #include "service/features/certificate/provider_runtime_credentials.h"
 #include "service/features/dns_sync/queue.h"
 #include "service/features/provider_verification/failure.h"
@@ -20,7 +20,7 @@
 
 namespace service::provider_verification::detail {
 
-inline ruvia::task<void> reconcile(service::background::worker_context& context) {
+inline ruvia::task<void> reconcile(service::background::task_context& context) {
     const auto rows = co_await context.db().query(
         "SELECT marker.tenant_id, marker.id, marker.resource_id, provider.verification_generation "
         "FROM sys_sync_task marker INNER JOIN sys_provider provider ON provider.tenant_id = "
@@ -33,14 +33,13 @@ inline ruvia::task<void> reconcile(service::background::worker_context& context)
         auto transaction = co_await context.db().begin_transaction();
         const auto provider_id = std::string(row[2].value().value_or(""));
         co_await service::provider_verification::mark_current(transaction, tenant_id, provider_id, origin);
-        co_await transaction.commit();
-        co_await service::sync_runtime::notify_origin(context, tenant_id, origin);
+        co_await service::sync_runtime::commit_origin(transaction, context, tenant_id, origin);
     }
     co_return;
 }
 
 inline ruvia::task<std::optional<std::string>>
-load_current_runtime(service::background::worker_context& context, const verification_task& task) {
+load_current_runtime(service::background::task_context& context, const verification_task& task) {
     const auto lease = service::sync_runtime::make_running_lease(
         task.tenant_id_, task.id_, task.generation_, context.lease_owner(), task.claimed_at_,
         service::sync_runtime::marker_resource_type::provider, task.provider_id_);
@@ -61,7 +60,7 @@ load_current_runtime(service::background::worker_context& context, const verific
     co_return std::nullopt;
 }
 
-inline ruvia::task<void> complete_verification(service::background::worker_context& context,
+inline ruvia::task<void> complete_verification(service::background::task_context& context,
     service::attempt_trace::recorder& trace, const verification_task& task,
     verification_result result, std::string_view detail) {
     const bool dns = task.kind_ == "dns";
@@ -125,7 +124,7 @@ inline ruvia::task<void> complete_verification(service::background::worker_conte
     co_return;
 }
 
-inline ruvia::task<void> fail_verification(service::background::worker_context& context,
+inline ruvia::task<void> fail_verification(service::background::task_context& context,
     service::attempt_trace::recorder& trace, const verification_task& task, std::string_view error,
     bool permanent, std::string_view detail) {
     const auto message = service::sync_runtime::attempt_error(trace, error);

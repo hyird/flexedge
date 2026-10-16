@@ -271,6 +271,9 @@ inline std::int64_t aliyun_page_count(const envelope_type& envelope, std::size_t
 
 class aliyun_client final {
 public:
+    explicit aliyun_client(service::outbound_http::quota_scope scope = {})
+        : scope_(std::move(scope)) {}
+
     template <typename runtime_type>
     ruvia::task<std::vector<aliyun_domain>> verify_access_key(runtime_type& c, service::attempt_trace::recorder& trace,
         std::string_view access_key_id, std::string_view access_key_secret) const {
@@ -433,14 +436,13 @@ private:
         // reply or an error echoes of them is redacted.
         trace.register_secret(access_key_id);
         trace.register_secret(access_key_secret);
-        auto&& client = c.get_http_client(service::config::aliyun_dns_origin_alias);
         const auto target = "/?" + signed_query(action, params, access_key_id, access_key_secret);
         std::array<ruvia::http_header_view, 1> headers{
             ruvia::http_header_view{"accept", "application/json"},
         };
         try {
             co_return co_await service::outbound_http::send_buffered(
-                client, {.origin_alias_ = service::config::aliyun_dns_origin_alias, .operation_ = operation, .subject_ = subject},
+                c, scope_, {.origin_alias_ = service::config::aliyun_dns_origin_alias, .operation_ = operation, .subject_ = subject},
                 trace,
                 {
                     .method_ = ruvia::known_http_method_token(ruvia::http_known_method::get),
@@ -604,11 +606,7 @@ private:
         aliyun_error_code fallback_code, std::string_view fallback_message) {
         throw detail::aliyun_reply_error(trace, body, fallback_code, fallback_message, c.pool());
     }
+    service::outbound_http::quota_scope scope_;
 };
-
-inline const aliyun_client& get_aliyun_client() {
-    static const aliyun_client client;
-    return client;
-}
 
 }  // namespace service::dns

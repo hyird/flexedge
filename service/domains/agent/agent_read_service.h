@@ -1,7 +1,6 @@
 #pragma once
 
 #include <ruvia/core/task.h>
-#include <ruvia/web/context.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -24,7 +23,8 @@ namespace service::agent {
 
 class agent_read_service final {
 public:
-    ruvia::task<bool> is_current(ruvia::context& c, const agent_principal& principal) const {
+    template <typename runtime_type>
+    ruvia::task<bool> is_current(runtime_type& c, const agent_principal& principal) const {
         const auto rows = co_await c.db().query(
             "SELECT 1 FROM sys_node WHERE tenant_id = $1 AND id = $2 AND cluster_id = $3 AND "
             "agent_id = $4 AND registration_status = 'registered' AND deleted_at IS NULL LIMIT 1",
@@ -32,7 +32,8 @@ public:
         co_return !rows.empty();
     }
 
-    ruvia::task<service::agent::desired_summary> desired_summary(ruvia::context& c,
+    template <typename runtime_type>
+    ruvia::task<service::agent::desired_summary> desired_summary(runtime_type& c,
         const agent_principal& principal) const {
         auto db = c.db();
         auto summary = co_await find_desired_summary(db, principal);
@@ -42,8 +43,9 @@ public:
         co_return std::move(*summary);
     }
 
+    template <typename runtime_type>
     ruvia::task<flexedge::node::v2::ObjectBatch>
-    objects(ruvia::context& c, const agent_principal& principal, std::string_view release_id,
+    objects(runtime_type& c, const agent_principal& principal, std::string_view release_id,
         const google::protobuf::RepeatedPtrField<std::string>& requested) const {
         std::unordered_set<std::string> missing;
         missing.reserve(static_cast<std::size_t>(requested.size()));

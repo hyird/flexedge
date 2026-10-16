@@ -19,7 +19,7 @@
 #include "service/features/certificate/dns_challenge.h"
 #include "service/features/certificate/queue.h"
 #include "service/features/dns/registry.h"
-#include "service/features/live_resource/notifications.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/sync_runtime/state.h"
 
 namespace service::certificate {
@@ -100,8 +100,7 @@ public:
         (void)co_await origin.require_operation(transaction, tenant_id);
         (void)co_await service::certificate_issuance::enqueue_certificate_revision(
             transaction, tenant_id, certificate_id, 1, service::sync_runtime::marker_operation::issue, origin);
-        co_await transaction.commit();
-        co_await notify(c, tenant_id, certificate_id, origin);
+        co_await commit_changes(transaction, c, tenant_id, certificate_id, origin);
         co_return origin.operation_id();
     }
 
@@ -135,8 +134,7 @@ public:
         }
         auto origin = start(c, service::operation::action::certificate_update, id);
         (void)co_await origin.require_operation(transaction, tenant_id);
-        co_await transaction.commit();
-        co_await notify(c, tenant_id, id, origin);
+        co_await commit_changes(transaction, c, tenant_id, id, origin);
         co_return origin.operation_id();
     }
 
@@ -169,8 +167,7 @@ public:
         (void)co_await origin.require_operation(transaction, tenant_id);
         (void)co_await service::certificate_issuance::enqueue_certificate_revision(
             transaction, tenant_id, id, issuance_revision, service::sync_runtime::marker_operation::renew, origin);
-        co_await transaction.commit();
-        co_await notify(c, tenant_id, id, origin);
+        co_await commit_changes(transaction, c, tenant_id, id, origin);
         co_return origin.operation_id();
     }
 
@@ -211,8 +208,7 @@ public:
             transaction, tenant_id, dns_zone_id, id, origin);
         co_await service::sync_runtime::remove_marker(
             transaction, tenant_id, service::sync_runtime::marker_resource_type::certificate, id, origin);
-        co_await transaction.commit();
-        co_await notify(c, tenant_id, id, origin);
+        co_await commit_changes(transaction, c, tenant_id, id, origin);
         co_return origin.operation_id();
     }
 
@@ -226,12 +222,12 @@ private:
             .summary_ = "{}"});
     }
 
-    static ruvia::task<void> notify(ruvia::context& c, const std::string& tenant_id, const std::string& id,
+    static ruvia::task<void> commit_changes(ruvia::db_transaction& transaction, ruvia::context& c, const std::string& tenant_id, const std::string& id,
         const service::operation::work_origin& origin) {
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.changed(service::live_resource::resource::certificates, id);
         origin.add_changes(notification);
-        co_await service::live_resource::notify(c, notification);
+        co_await service::live_resource::commit_and_notify(transaction, c, notification);
     }
 
     static std::string

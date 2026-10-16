@@ -1,6 +1,8 @@
 #pragma once
 
+#include <ruvia/core/channel.h>
 #include <ruvia/core/task.h>
+#include <ruvia/core/task_scope.h>
 #include <ruvia/web/context.h>
 #include <ruvia/web/controller.h>
 #include <ruvia/web/websocket.h>
@@ -26,9 +28,8 @@
 #include "node/proto/control_reply.h"
 #include "node/proto/edge_control.pb.h"
 #include "service/common/http.h"
-#include "service/domains/agent/agent_command_service.h"
+#include "service/domains/agent/agent_channel_service.h"
 #include "service/domains/agent/agent_protocol.h"
-#include "service/domains/agent/agent_read_service.h"
 #include "service/domains/agent/agent_report_mapper.h"
 #include "service/domains/agent/agent_transport.h"
 #include "service/domains/node/node_connection.h"
@@ -85,6 +86,44 @@ private:
 
     class web_socket_session_ended final {};
 
+    class response_lane final {
+    public:
+        explicit response_lane(const ruvia::worker_handle& worker) {
+            auto [sender, receiver] = ruvia::make_channel<bool>(worker, {.capacity_ = 1});
+            available_ = std::move(sender);
+            waiting_.emplace(std::move(receiver));
+            (void)available_.send(true);
+        }
+        ruvia::task<void> write(ruvia::context& context, std::string_view bytes) {
+            if (!(co_await waiting_->receive(context.get_stop_token())).has_value()) {
+                throw web_socket_session_ended{};
+            }
+            struct release final {
+                ruvia::channel_sender<bool>& sender_;
+                ~release() {
+                    (void)sender_.send(true);
+                }
+            } release_value{available_};
+            co_await context.get_websocket().binary(bytes);
+        }
+        ruvia::task<void> close(ruvia::websocket& socket, ruvia::websocket_close_options options) {
+            if (!(co_await waiting_->receive()).has_value()) {
+                co_return;
+            }
+            struct release final {
+                ruvia::channel_sender<bool>& sender_;
+                ~release() {
+                    (void)sender_.send(true);
+                }
+            } release_value{available_};
+            co_await socket.close(std::move(options));
+        }
+
+    private:
+        ruvia::channel_sender<bool> available_;
+        std::optional<ruvia::channel_receiver<bool>> waiting_;
+    };
+
     struct authenticated_session final {
         std::string request_id_;
         agent_principal principal_;
@@ -94,6 +133,9 @@ private:
         std::string active_manifest_digest_;
         std::uint32_t heartbeat_interval_{};
         bool require_apply_ack_{};
+        bool multiplex_logs_{};
+        std::unique_ptr<response_lane> responses_;
+        ruvia::stop_token stop_;
         // Release of the last desired state sent on this connection and when it
         // was sent (monotonic), timing the node's next apply result for it.
         std::string dispatched_release_id_;
@@ -141,13 +183,13 @@ private:
     }
 
     static ruvia::task<void> send(ruvia::context& c,
-        const flexedge::node::v2::ServerEnvelope& envelope) {
+        const flexedge::node::v2::ServerEnvelope& envelope, const authenticated_session& session) {
         std::string bytes;
         if (!envelope.SerializeToString(&bytes)) {
             service::common::throw_app_error(artifact_invalid);
         }
         try {
-            co_await c.get_websocket().binary(bytes);
+            co_await session.responses_->write(c, bytes);
         } catch (const std::system_error& error) {
             if (get_web_socket_session_ended(error.code())) {
                 throw web_socket_session_ended{};
@@ -178,13 +220,24 @@ private:
         }
     }
 
+    static ruvia::task<void> close_authenticated(ruvia::context& context,
+        const authenticated_session& session, ruvia::websocket_close_options options) {
+        try {
+            co_await session.responses_->close(context.get_websocket(), std::move(options));
+        } catch (const std::system_error& error) {
+            if (!get_web_socket_session_ended(error.code())) {
+                throw;
+            }
+        }
+    }
+
     ruvia::task<void> push_desired_state(ruvia::context& c, std::string_view request_id,
         authenticated_session& session) {
-        auto desired = co_await get_agent_command_service().desired_state(c, session.principal_);
+        auto desired = co_await get_agent_channel_service().desired_state(c, session.principal_, session.stop_);
         flexedge::node::v2::ServerEnvelope response;
         response.set_request_id(request_id);
         *response.mutable_desired_state() = std::move(desired);
-        co_await send(c, response);
+        co_await send(c, response, session);
         record_dispatch(session, response);
     }
 
@@ -296,33 +349,34 @@ private:
         return elapsed;
     }
 
-    ruvia::task<void> serve_log_ingest(ruvia::context& c, const agent_principal& principal) {
+    ruvia::task<void> serve_log_ingest(ruvia::context& c, const authenticated_session& session) {
+        const auto& principal = session.principal_;
         auto& ws = c.get_websocket();
         while (const auto message = co_await read(ws)) {
             flexedge::node::v2::ClientEnvelope incoming;
             if (!parse_client_envelope(*message, incoming) ||
                 !valid_request_id(incoming.request_id()) || !incoming.has_log_delivery()) {
-                co_await close(ws, {.code_ = 1003, .reason_ = "log delivery required"});
+                co_await close_authenticated(c, session, {.code_ = 1003, .reason_ = "log delivery required"});
                 co_return;
             }
             const auto& delivery = incoming.log_delivery();
             if (!service::log_ingest::valid_delivery(delivery, principal.node_id_)) {
-                co_await close(ws, {.code_ = 1008, .reason_ = "invalid log delivery"});
+                co_await close_authenticated(c, session, {.code_ = 1008, .reason_ = "invalid log delivery"});
                 co_return;
             }
-            if (!co_await get_agent_read_service().is_current(c, principal)) {
-                co_await close(ws, {.code_ = 1008, .reason_ = "agent credentials expired"});
+            if (!co_await get_agent_channel_service().is_current(c, principal)) {
+                co_await close_authenticated(c, session, {.code_ = 1008, .reason_ = "agent credentials expired"});
                 co_return;
             }
             if (!co_await service::log_ingest::enqueue(c, principal.tenant_id_, principal.node_id_,
                     principal.agent_id_, delivery)) {
-                co_await close(ws, {.code_ = 1011, .reason_ = "log queue unavailable"});
+                co_await close_authenticated(c, session, {.code_ = 1011, .reason_ = "log queue unavailable"});
                 co_return;
             }
             flexedge::node::v2::ServerEnvelope acknowledgement;
             acknowledgement.set_request_id(incoming.request_id());
             acknowledgement.mutable_log_delivery_ack();
-            co_await send(c, acknowledgement);
+            co_await send(c, acknowledgement, session);
         }
     }
 
@@ -338,7 +392,7 @@ private:
         auto* serialized_secret = envelope.mutable_authenticate()->mutable_secret();
         OPENSSL_cleanse(serialized_secret->data(), serialized_secret->size());
         serialized_secret->clear();
-        auto principal = co_await get_agent_command_service().authenticate(c, agent_id, secret.view());
+        auto principal = co_await get_agent_channel_service().authenticate(c, agent_id, secret.view());
         co_return authenticated_session{
             .request_id_ = envelope.request_id(),
             .principal_ = std::move(principal),
@@ -348,6 +402,9 @@ private:
             .active_manifest_digest_ = active_manifest_digest,
             .heartbeat_interval_ = heartbeat_interval_seconds,
             .require_apply_ack_ = authentication.require_apply_ack(),
+            .multiplex_logs_ = authentication.multiplex_logs(),
+            .responses_ = std::make_unique<response_lane>(c.worker()),
+            .stop_ = c.get_stop_token(),
             .dispatched_release_id_ = {},
             .dispatched_at_ = {},
         };
@@ -359,24 +416,24 @@ private:
         welcome.mutable_welcome()->set_node_id(session.principal_.node_id_);
         welcome.mutable_welcome()->set_node_binary_sha256(
             service::node_release::current()->binary().digest());
-        co_await send(c, welcome);
-        co_await serve_log_ingest(c, session.principal_);
+        co_await send(c, welcome, session);
+        co_await serve_log_ingest(c, session);
     }
 
     ruvia::task<bool> handle_object_request(ruvia::context& c, const authenticated_session& session,
         const flexedge::node::v2::ClientEnvelope& incoming) {
         const auto& request = incoming.object_request();
         if (!valid_object_request(request) || request.node_id() != session.principal_.node_id_) {
-            co_await close(c.get_websocket(), {.code_ = 1008, .reason_ = "invalid object request"});
+            co_await close_authenticated(c, session, {.code_ = 1008, .reason_ = "invalid object request"});
             co_return false;
         }
         const auto received_at = std::chrono::steady_clock::now();
-        auto objects = co_await get_agent_read_service().objects(
+        auto objects = co_await get_agent_channel_service().objects(
             c, session.principal_, request.release_id(), request.digest_sha256());
         flexedge::node::v2::ServerEnvelope response;
         response.set_request_id(incoming.request_id());
         *response.mutable_object_batch() = std::move(objects);
-        co_await send(c, response);
+        co_await send(c, response, session);
         if (session.apply_trace_ && session.dispatched_release_id_ == request.release_id()) {
             auto& trace = *session.apply_trace_;
             auto step = trace.begin_step(service::attempt_trace::step_code::serve_objects);
@@ -403,22 +460,22 @@ private:
         const flexedge::node::v2::ClientEnvelope& incoming) {
         const auto& probe = incoming.release_probe();
         if (probe.wait_seconds() > flexedge::node::release_watch_maximum_seconds) {
-            co_await close(c.get_websocket(), {.code_ = 1008, .reason_ = "invalid watch deadline"});
+            co_await close_authenticated(c, session, {.code_ = 1008, .reason_ = "invalid watch deadline"});
             co_return false;
         }
         // Subscribe before reading: a commit between the query and wait remains queued.
         auto subscription = service::node_dispatch::fanout::get_hub(c).subscribe(
             c.worker(), session.principal_.tenant_id_);
-        auto desired = co_await get_agent_read_service().desired_summary(c, session.principal_);
+        auto desired = co_await get_agent_channel_service().desired_summary(c, session.principal_, session.stop_);
         const auto known_revision = probe.applied_node_spec_revision() > 0
                                         ? probe.applied_node_spec_revision()
                                         : session.applied_node_spec_revision_;
-        const auto& known_release = probe.applied_node_spec_revision() > 0
-                                        ? probe.active_release_id()
-                                        : session.active_release_id_;
-        const auto& known_digest = probe.applied_node_spec_revision() > 0
-                                       ? probe.active_manifest_digest()
-                                       : session.active_manifest_digest_;
+        const auto known_release = probe.applied_node_spec_revision() > 0
+                                       ? probe.active_release_id()
+                                       : session.active_release_id_;
+        const auto known_digest = probe.applied_node_spec_revision() > 0
+                                      ? probe.active_manifest_digest()
+                                      : session.active_manifest_digest_;
         const auto deadline =
             std::chrono::steady_clock::now() + std::chrono::seconds(probe.wait_seconds());
         while (!differs(known_revision, known_release, known_digest, desired)) {
@@ -426,21 +483,21 @@ private:
             if (remaining <= std::chrono::steady_clock::duration::zero()) {
                 break;
             }
-            const auto signal = co_await subscription.receive_for(remaining, c.get_stop_token());
+            const auto signal = co_await subscription.receive_for(remaining, session.stop_);
             if (!signal.has_value() && signal.status() != ruvia::worker_wait_status::timed_out) {
                 co_return false;
             }
-            desired = co_await get_agent_read_service().desired_summary(c, session.principal_);
+            desired = co_await get_agent_channel_service().desired_summary(c, session.principal_, session.stop_);
         }
         std::optional<flexedge::node::v2::DesiredState> state;
         if (differs(known_revision, known_release, known_digest, desired)) {
-            state = co_await get_agent_command_service().desired_state(c, session.principal_);
+            state = co_await get_agent_channel_service().desired_state(c, session.principal_, session.stop_);
         }
         const auto replies = flexedge::node::release_probe_replies(
             incoming.request_id(), service::node_release::current()->binary().digest(),
             desired.node_spec_revision_, desired.release_id_, desired.manifest_digest_, std::move(state));
         for (const auto& reply : replies) {
-            co_await send(c, reply);
+            co_await send(c, reply, session);
             if (reply.has_desired_state()) {
                 record_dispatch(session, reply);
             }
@@ -454,13 +511,13 @@ private:
         const flexedge::node::v2::ClientEnvelope& incoming) {
         const auto& request = incoming.node_release_request();
         if (!valid_node_release_request(request) || request.node_id() != session.principal_.node_id_) {
-            co_await close(c.get_websocket(), {.code_ = 1008, .reason_ = "invalid node release request"});
+            co_await close_authenticated(c, session, {.code_ = 1008, .reason_ = "invalid node release request"});
             co_return false;
         }
 
         if (!transfer) {
             if (request.offset() != 0) {
-                co_await close(c.get_websocket(),
+                co_await close_authenticated(c, session,
                     {.code_ = 1008, .reason_ = "node release offset invalid"});
                 co_return false;
             }
@@ -468,7 +525,7 @@ private:
             const auto total_bytes = release->binary().size();
             if (release->binary().digest() != request.digest_sha256() || total_bytes == 0 ||
                 total_bytes > flexedge::node::maximum_node_release_bytes) {
-                co_await close(c.get_websocket(), {.code_ = 1011, .reason_ = "node release unavailable"});
+                co_await close_authenticated(c, session, {.code_ = 1011, .reason_ = "node release unavailable"});
                 co_return false;
             }
             transfer.emplace(
@@ -479,7 +536,7 @@ private:
         if (transfer->digest_ != request.digest_sha256() ||
             request.offset() != transfer->next_offset_ || total_bytes == 0 ||
             total_bytes > flexedge::node::maximum_node_release_bytes) {
-            co_await close(c.get_websocket(),
+            co_await close_authenticated(c, session,
                 {.code_ = 1008, .reason_ = "node release transfer invalid"});
             co_return false;
         }
@@ -488,7 +545,7 @@ private:
             return release->binary().contents_range(offset, flexedge::node::node_release_chunk_bytes);
         })).value();
         if (bytes.empty()) {
-            co_await close(c.get_websocket(), {.code_ = 1011, .reason_ = "node release read failed"});
+            co_await close_authenticated(c, session, {.code_ = 1011, .reason_ = "node release read failed"});
             co_return false;
         }
 
@@ -504,7 +561,7 @@ private:
         if (transfer->next_offset_ == total_bytes) {
             transfer.reset();
         }
-        co_await send(c, response);
+        co_await send(c, response, session);
         co_return true;
     }
 
@@ -512,7 +569,7 @@ private:
         const flexedge::node::v2::ClientEnvelope& incoming) {
         const auto& result = incoming.apply_result();
         if (!valid_apply_result(result) || result.node_id() != session.principal_.node_id_) {
-            co_await close(c.get_websocket(), {.code_ = 1008, .reason_ = "invalid apply result"});
+            co_await close_authenticated(c, session, {.code_ = 1008, .reason_ = "invalid apply result"});
             co_return false;
         }
         // Recording the trace never changes how the result is recorded.
@@ -539,9 +596,9 @@ private:
                                       .bytes_ = static_cast<std::int64_t>(incoming.ByteSizeLong()),
                                       .fields_ = fields},
             std::chrono::steady_clock::now());
-        co_await get_agent_command_service().record_apply_result(c, session.principal_, result,
-            take_dispatch_elapsed(session, result.release_id()), trace);
         step.complete();
+        co_await get_agent_channel_service().record_apply_result(c, session.principal_, result,
+            take_dispatch_elapsed(session, result.release_id()), trace, session.stop_);
         if (result.applied()) {
             session.applied_node_spec_revision_ = result.node_spec_revision();
             session.active_release_id_ = result.release_id();
@@ -556,7 +613,7 @@ private:
             ack->set_release_id(result.release_id());
             ack->set_manifest_digest(result.manifest_digest());
             ack->set_applied(result.applied());
-            co_await send(c, reply);
+            co_await send(c, reply, session);
         }
         co_return true;
     }
@@ -564,35 +621,73 @@ private:
     ruvia::task<bool> handle_heartbeat(ruvia::context& c, const authenticated_session& session,
         const flexedge::node::v2::ClientEnvelope& incoming) {
         if (!incoming.has_heartbeat() || !valid_heartbeat(incoming.heartbeat())) {
-            co_await close(c.get_websocket(), {.code_ = 1008, .reason_ = "invalid heartbeat"});
+            co_await close_authenticated(c, session, {.code_ = 1008, .reason_ = "invalid heartbeat"});
             co_return false;
         }
         const auto& value = incoming.heartbeat();
         if (value.node_id() != session.principal_.node_id_) {
-            co_await close(c.get_websocket(), {.code_ = 1008, .reason_ = "node mismatch"});
+            co_await close_authenticated(c, session, {.code_ = 1008, .reason_ = "node mismatch"});
             co_return false;
         }
-        co_await get_agent_command_service().heartbeat(c, session.principal_, to_heartbeat_report(value));
+        co_await get_agent_channel_service().heartbeat(c, session.principal_, value, session.stop_);
         flexedge::node::v2::ServerEnvelope acknowledgement;
         acknowledgement.set_request_id(incoming.request_id());
         auto* ack = acknowledgement.mutable_heartbeat_ack();
         ack->set_next_interval_seconds(session.heartbeat_interval_);
         ack->set_node_binary_sha256(service::node_release::current()->binary().digest());
-        co_await send(c, acknowledgement);
+        co_await send(c, acknowledgement, session);
         co_return true;
     }
 
-    ruvia::task<void> serve_control_messages(ruvia::context& c, authenticated_session& session) {
+    ruvia::task<void> run_release_watch(ruvia::context& c, authenticated_session& session,
+        flexedge::node::v2::ClientEnvelope incoming, ruvia::task_scope& operations,
+        bool& watching, std::exception_ptr& failure) {
+        try {
+            if (!co_await handle_release_probe(c, session, incoming) && !session.stop_.stop_requested()) {
+                throw web_socket_session_ended{};
+            }
+        } catch (...) {
+            if (!session.stop_.stop_requested()) {
+                failure = std::current_exception();
+            }
+            operations.request_stop();
+            c.get_websocket().abort();
+        }
+        watching = false;
+    }
+
+    ruvia::task<bool> ingest_logs(ruvia::context& c, const authenticated_session& session,
+        const flexedge::node::v2::ClientEnvelope& incoming) {
+        const auto& principal = session.principal_;
+        if (!service::log_ingest::valid_delivery(incoming.log_delivery(), principal.node_id_) ||
+            !co_await get_agent_channel_service().is_current(c, principal)) {
+            co_await close_authenticated(c, session, {.code_ = 1008, .reason_ = "invalid log delivery"});
+            co_return false;
+        }
+        if (!co_await service::log_ingest::enqueue(c, principal.tenant_id_, principal.node_id_,
+                principal.agent_id_, incoming.log_delivery())) {
+            co_await close_authenticated(c, session, {.code_ = 1011, .reason_ = "log queue unavailable"});
+            co_return false;
+        }
+        flexedge::node::v2::ServerEnvelope acknowledgement;
+        acknowledgement.set_request_id(incoming.request_id());
+        acknowledgement.mutable_log_delivery_ack();
+        co_await send(c, acknowledgement, session);
+        co_return true;
+    }
+
+    ruvia::task<void> read_control_messages(ruvia::context& c, authenticated_session& session,
+        ruvia::task_scope& operations, bool& watching, std::exception_ptr& failure) {
         auto& ws = c.get_websocket();
         std::optional<node_release_transfer> release_transfer;
         while (const auto message = co_await read(ws)) {
             flexedge::node::v2::ClientEnvelope incoming;
             if (!parse_client_envelope(*message, incoming)) {
-                co_await close(ws, {.code_ = 1003, .reason_ = "protobuf binary required"});
+                co_await close_authenticated(c, session, {.code_ = 1003, .reason_ = "protobuf binary required"});
                 co_return;
             }
             if (!valid_request_id(incoming.request_id())) {
-                co_await close(ws, {.code_ = 1008, .reason_ = "invalid request id"});
+                co_await close_authenticated(c, session, {.code_ = 1008, .reason_ = "invalid request id"});
                 co_return;
             }
             if (incoming.has_object_request()) {
@@ -602,7 +697,16 @@ private:
                 continue;
             }
             if (incoming.has_release_probe()) {
-                if (!co_await handle_release_probe(c, session, incoming)) {
+                if (watching || incoming.release_probe().wait_seconds() > flexedge::node::release_watch_maximum_seconds) {
+                    co_await close_authenticated(c, session, {.code_ = 1008, .reason_ = "invalid concurrent watch"});
+                    co_return;
+                }
+                watching = true;
+                operations.spawn(run_release_watch(c, session, std::move(incoming), operations, watching, failure));
+                continue;
+            }
+            if (incoming.has_log_delivery()) {
+                if (!session.multiplex_logs_ || !co_await ingest_logs(c, session, incoming)) {
                     co_return;
                 }
                 continue;
@@ -625,8 +729,28 @@ private:
         }
     }
 
+    ruvia::task<void> serve_control_messages(ruvia::context& c, authenticated_session& session) {
+        ruvia::task_scope operations(c.worker());
+        session.stop_ = ruvia::combine_stop_tokens(c.get_stop_token(), operations.get_stop_token());
+        bool watching{};
+        std::exception_ptr failure;
+        try {
+            co_await read_control_messages(c, session, operations, watching, failure);
+        } catch (...) {
+            if (!failure) {
+                failure = std::current_exception();
+            }
+        }
+        operations.request_stop();
+        c.get_websocket().abort();
+        co_await operations.join();
+        if (failure) {
+            std::rethrow_exception(failure);
+        }
+    }
+
     ruvia::task<void> serve_control_session(ruvia::context& c, authenticated_session session) {
-        const auto desired = co_await get_agent_read_service().desired_summary(c, session.principal_);
+        const auto desired = co_await get_agent_channel_service().desired_summary(c, session.principal_, session.stop_);
         flexedge::node::v2::ServerEnvelope welcome;
         welcome.set_request_id(session.request_id_);
         auto* payload = welcome.mutable_welcome();
@@ -636,7 +760,8 @@ private:
         payload->set_desired_manifest_digest(desired.manifest_digest_);
         payload->set_heartbeat_interval_seconds(session.heartbeat_interval_);
         payload->set_node_binary_sha256(service::node_release::current()->binary().digest());
-        co_await send(c, welcome);
+        payload->set_multiplex_logs(session.multiplex_logs_);
+        co_await send(c, welcome, session);
         if (differs(session.applied_node_spec_revision_, session.active_release_id_,
                 session.active_manifest_digest_, desired)) {
             co_await push_desired_state(c, session.request_id_, session);

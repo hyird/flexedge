@@ -94,6 +94,17 @@ int main() {
         peer_fanout.publish(node_notification);
         REQUIRE(peer_loop.start(receive(node, std::chrono::seconds(1))).get().has_value());
 
+        // Reconnection wakes every tail owned by this reader once, allowing
+        // each tail to refill missing rows from its own database cursor.
+        access_fanout.recover();
+        access_fanout.recover();
+        REQUIRE(access_loop.start(receive(access, std::chrono::seconds(1))).get().has_value());
+        REQUIRE(access_loop.start(receive(other_topic, std::chrono::seconds(1))).get().has_value());
+        REQUIRE(access_loop.start(receive(access, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::worker_wait_status::timed_out);
+        REQUIRE(peer_loop.start(receive(peer_access, std::chrono::milliseconds(20))).get().status() ==
+                ruvia::worker_wait_status::timed_out);
+
         // Closing a subscriber removes its receiver; later events reach only a new lease.
         const notification closing_notification{.id_ = "4-0",
             .tenant_id_ = "tenant-a",
