@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { getRouteApi, Link } from '@tanstack/react-router'
+import { getRouteApi } from '@tanstack/react-router'
 import { ArrowLeft, Cubes3, Gear, Globe, Server } from '@gravity-ui/icons'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Skeleton } from '@heroui/react'
@@ -19,6 +19,7 @@ import { PageTabs } from '@/components/page-tabs'
 import { StatusChip } from '@/components/status-chip'
 import { watchClusterNodeTransitions } from '@/features/nodes/data'
 import { ClusterConfig } from './cluster-config'
+import { ClusterLifecycleActions } from './cluster-lifecycle-actions'
 import { ClusterNodes } from './cluster-nodes'
 import { ClusterWebsites } from './cluster-websites'
 import { clusterSnapshotKey, clusterSnapshotQuery } from './data'
@@ -59,13 +60,9 @@ function ClusterSummary({ cluster }: { cluster: Cluster }) {
         </KPI.Header>
         <KPI.Content className='content-start'>
           <dd className='min-w-0 truncate'>
-            <Link
-              to='/dns-zones/$zoneId'
-              params={{ zoneId: cluster.dns_zone_id }}
-              className='link font-mono text-base font-medium'
-            >
+            <Mono className='text-base font-medium'>
               {cluster.dns_zone_domain}
-            </Link>
+            </Mono>
           </dd>
         </KPI.Content>
       </KPI>
@@ -148,10 +145,13 @@ export function ClusterDetailLayout() {
             </span>,
           ]}
           actions={
-            <LinkButton href='/clusters'>
-              <ArrowLeft />
-              返回
-            </LinkButton>
+            <>
+              <LinkButton href='/clusters'>
+                <ArrowLeft />
+                返回
+              </LinkButton>
+              <ClusterLifecycleActions cluster={cluster} />
+            </>
           }
         />
       ) : (

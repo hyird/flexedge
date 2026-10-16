@@ -14,7 +14,6 @@ import {
   clusterFormValues,
   type ClusterFormValues,
 } from './cluster-form'
-import { ClusterLifecycleActions } from './cluster-lifecycle-actions'
 import { clusterSnapshotKey, clusterSnapshotQuery, saveCluster } from './data'
 import type { Cluster } from './types'
 
@@ -100,7 +99,6 @@ function ClusterConfigEditor({
         <Section title='基本信息'>
           <div className='flex flex-col gap-4'>
             <ClusterBasicFields form={form} disabled={mutation.isPending} />
-            <ClusterLifecycleActions cluster={server} />
           </div>
         </Section>
         <Section title='接入域名'>

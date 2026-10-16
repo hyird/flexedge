@@ -9,7 +9,7 @@ import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { clusterSnapshotKey, removeCluster } from './data'
 import type { Cluster } from './types'
 
-/** `删除集群` at the bottom of the 配置 tab's basic card: a centered
+/** Header action next to 返回: a centered
  * confirmation states the consequence, then the page returns to the list. */
 export function ClusterLifecycleActions({ cluster }: { cluster: Cluster }) {
   const client = useQueryClient()
@@ -17,12 +17,7 @@ export function ClusterLifecycleActions({ cluster }: { cluster: Cluster }) {
   const [removing, setRemoving] = useState(false)
   return (
     <>
-      <Button
-        size='sm'
-        variant='danger-soft'
-        className='self-start'
-        onPress={() => setRemoving(true)}
-      >
+      <Button size='sm' variant='danger-soft' onPress={() => setRemoving(true)}>
         <TrashBin />
         删除集群
       </Button>

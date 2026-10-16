@@ -23,8 +23,8 @@ const policyCopy: Record<
   },
 }
 
-/** Sync, conflict resolution and removal of a zone, offered on the detail
- * page's 概览 tab. Render `dialogs` once in the page. Live streams push the
+/** Sync, conflict resolution and removal of a zone on the detail page.
+ * Render `dialogs` once in the page. Live streams push the
  * resulting state; option snapshots are only marked stale. */
 export function useZoneCommands({
   onRemoved,

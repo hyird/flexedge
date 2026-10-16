@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getRouteApi, Link } from '@tanstack/react-router'
+import { getRouteApi } from '@tanstack/react-router'
 import {
   ArrowLeft,
   ChartLine,
@@ -35,6 +35,7 @@ import {
   websiteName,
   websiteStatusReserve,
 } from './website-display'
+import { WebsiteLifecycleActions } from './website-lifecycle-actions'
 import { WebsiteOverview } from './website-overview'
 import { WebsiteSettingsPage } from './website-settings'
 import { WebsiteTraffic } from './website-traffic'
@@ -51,8 +52,8 @@ const tabItems = [
 /** `/websites/$websiteId`: header, in-page tabs and the active tab. The tab is
  * component state that never touches the URL; each navigation to the page
  * starts on the overview, and `openTab` (links inside tabs) may seed the
- * opened tab's starting values. The header's only action leads back to the
- * list; deleting lives in the settings tab (`WebsiteLifecycleActions`).
+ * opened tab's starting values. The header keeps the return and delete
+ * actions together across tabs.
  * One live stream per page: the overview and settings tabs subscribe to the
  * website detail stream and the header reuses it; traffic and logs keep
  * their own stream, so the header reads the detail once (or reuses the last
@@ -132,67 +133,68 @@ export function WebsiteDetailLayout() {
       <WebsiteSettingsPage key={tabKey} initial={view.initial} />
     )
   return (
-    <Page>
-      <DetailHeader
-        icon={<Globe />}
-        title={name}
-        status={
-          <StatusChip status={website.status} reserve={websiteStatusReserve} />
-        }
-        meta={[
-          <Link
-            key='cluster'
-            to='/clusters/$clusterId'
-            params={{ clusterId: website.cluster_id }}
-            className='link'
-          >
-            {website.cluster_name || '未知集群'}
-          </Link>,
-          <Mono key='access'>{website.access_domain}</Mono>,
-          <span key='deploy' className='inline-flex items-center gap-1.5'>
+    <WebsiteContext
+      value={{
+        website,
+        refresh,
+        openTab,
+        markDeleted: () => setDeleted(true),
+      }}
+    >
+      <Page>
+        <DetailHeader
+          icon={<Globe />}
+          title={name}
+          status={
             <StatusChip
-              status={website.runtime.deploy_status}
-              reserve={deployStatusReserve}
+              status={website.status}
+              reserve={websiteStatusReserve}
             />
-            <span className='tabular-nums'>
-              {website.runtime.synced_node_count}/
-              {website.runtime.target_node_count} 节点
-            </span>
-          </span>,
-        ]}
-        actions={
-          <LinkButton href='/websites'>
-            <ArrowLeft />
-            返回
-          </LinkButton>
-        }
-      />
-      {!deleted && (
-        <QueryNotice
-          query={query}
-          onRetry={() => void query.refetch()}
-          title={liveTab ? '实时状态已中断' : '网站信息刷新失败'}
+          }
+          meta={[
+            <span key='cluster'>{website.cluster_name || '未知集群'}</span>,
+            <Mono key='access'>{website.access_domain}</Mono>,
+            <span key='deploy' className='inline-flex items-center gap-1.5'>
+              <StatusChip
+                status={website.runtime.deploy_status}
+                reserve={deployStatusReserve}
+              />
+              <span className='tabular-nums'>
+                {website.runtime.synced_node_count}/
+                {website.runtime.target_node_count} 节点
+              </span>
+            </span>,
+          ]}
+          actions={
+            <>
+              <LinkButton href='/websites'>
+                <ArrowLeft />
+                返回
+              </LinkButton>
+              <WebsiteLifecycleActions />
+            </>
+          }
         />
-      )}
-      <PageTabs
-        label='网站详情'
-        items={tabItems}
-        selected={tab}
-        guard={tabGuard}
-        onSelectionChange={(next) => setView({ tab: next, initial: undefined })}
-      >
-        <WebsiteContext
-          value={{
-            website,
-            refresh,
-            openTab,
-            markDeleted: () => setDeleted(true),
-          }}
+        {!deleted && (
+          <QueryNotice
+            query={query}
+            onRetry={() => void query.refetch()}
+            title={liveTab ? '实时状态已中断' : '网站信息刷新失败'}
+          />
+        )}
+        <PageTabs
+          label='网站详情'
+          items={tabItems}
+          selected={tab}
+          guard={tabGuard}
+          onSelectionChange={(next) =>
+            setView({ tab: next, initial: undefined })
+          }
         >
           {content}
-        </WebsiteContext>
-      </PageTabs>
-    </Page>
+        </PageTabs>
+      </Page>
+    </WebsiteContext>
   )
 }
 

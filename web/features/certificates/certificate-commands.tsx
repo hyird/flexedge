@@ -12,7 +12,7 @@ import {
 } from './data'
 import type { Certificate } from './types'
 
-/** Renew, download and delete for the certificate detail page's cards.
+/** Renew, download and delete for the certificate detail page.
  * Render `dialogs` once. Live streams push resulting state; option snapshots
  * (e.g. the website editor's usable certificates) are only marked stale, and
  * the detail page's referencing-websites snapshot re-reads once. */

@@ -1,5 +1,6 @@
-import { ArrowLeft, Globe } from '@gravity-ui/icons'
-import { Link } from '@heroui/react'
+import { useNavigate } from '@tanstack/react-router'
+import { ArrowLeft, Globe, TrashBin } from '@gravity-ui/icons'
+import { Button } from '@heroui/react'
 import { useArrivalState } from '@/lib/history-state'
 import { useTabSwitchGuard } from '@/lib/unsaved-changes'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
@@ -16,6 +17,7 @@ import {
   zoneSyncStatusLabels,
 } from './dns-zone-display'
 import { useZoneDetail } from './use-zone-detail'
+import { useZoneCommands } from './zone-commands'
 import { ZoneLines } from './zone-lines'
 import { ZoneOverview } from './zone-overview'
 import { ZoneRecords } from './zone-records'
@@ -29,8 +31,14 @@ const tabs = [
 
 /** `/dns-zones/$zoneId` with in-page tabs kept in component state; every
  * arrival starts on 概览 and switching tabs never touches the URL. Sync,
- * conflicts and removal live on 概览; records are edited on 记录. */
+ * conflicts live on 概览; removal is beside 返回 and records are edited on 记录. */
 export function ZoneDetailLayout() {
+  const navigate = useNavigate()
+  const commands = useZoneCommands({
+    // The zone is gone, so a pending guard has nothing left to protect.
+    onRemoved: () =>
+      void navigate({ to: '/dns-zones', replace: true, ignoreBlocker: true }),
+  })
   const tabGuard = useTabSwitchGuard()
   const [tab, setTab, arrivalKey] = useArrivalState<ZoneTab>(() => 'overview')
   // The layout's query is the zone's live detail stream; every tab reads the
@@ -77,24 +85,28 @@ export function ZoneDetailLayout() {
           />
         }
         meta={[
-          <Link
-            key='provider'
-            href='/providers'
-            routerOptions={{
-              state: { providers: { q: zone.dns_provider_name } },
-            }}
-          >
+          <span key='provider'>
             {zone.dns_provider_name} · {providerLabel(zone.dns_provider)}
-          </Link>,
+          </span>,
           <span key='synced'>
             最近同步 <RelativeTime value={zone.last_synced_at} />
           </span>,
         ]}
         actions={
-          <LinkButton href='/dns-zones'>
-            <ArrowLeft />
-            返回
-          </LinkButton>
+          <>
+            <LinkButton href='/dns-zones'>
+              <ArrowLeft />
+              返回
+            </LinkButton>
+            <Button
+              size='sm'
+              variant='danger-soft'
+              onPress={() => commands.remove(zone)}
+            >
+              <TrashBin />
+              移除域名
+            </Button>
+          </>
         }
       />
       <PageTabs
@@ -111,9 +123,10 @@ export function ZoneDetailLayout() {
         ) : tab === 'lines' ? (
           <ZoneLines key={arrivalKey} />
         ) : (
-          <ZoneOverview key={arrivalKey} />
+          <ZoneOverview key={arrivalKey} commands={commands} />
         )}
       </PageTabs>
+      {commands.dialogs}
     </Page>
   )
 }

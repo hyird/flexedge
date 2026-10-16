@@ -16,7 +16,6 @@ import {
   nodeInputFromForm,
   type NodeFormValues,
 } from './node-form'
-import { NodeLifecycleActions } from './node-lifecycle-actions'
 import type { Node } from './types'
 
 const route = getRouteApi('/_authenticated/nodes/$nodeId')
@@ -104,7 +103,6 @@ function NodeConfigEditor({
           form={form}
           variant='page'
           disabled={mutation.isPending}
-          basicFooter={<NodeLifecycleActions node={node} />}
         />
       </form>
       <NodeCredentialActions node={node} />
@@ -129,8 +127,8 @@ function NodeConfigEditor({
 }
 
 /** Node detail config tab: in-page editor with a sticky save bar and a
- * navigation guard while there are unsaved changes, `删除节点` under the basic
- * fields and the `接入凭据` card (reveal / reset). */
+ * navigation guard while there are unsaved changes and the `接入凭据` card
+ * (reveal / reset). */
 export function NodeConfig() {
   const { nodeId } = route.useParams()
   const query = useQuery(nodeQuery(nodeId))

@@ -9,7 +9,7 @@ import {
   ShieldCheck,
   TrashBin,
 } from '@gravity-ui/icons'
-import { Alert, Button, Label, Link, ProgressBar } from '@heroui/react'
+import { Alert, Button, Label, ProgressBar } from '@heroui/react'
 import { formatDate } from '@/lib/format'
 import { useListSearch } from '@/lib/list-search'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
@@ -107,10 +107,20 @@ export function CertificateDetailPage() {
           </span>,
         ]}
         actions={
-          <LinkButton href='/certificates'>
-            <ArrowLeft className='size-4' />
-            返回
-          </LinkButton>
+          <>
+            <LinkButton href='/certificates'>
+              <ArrowLeft className='size-4' />
+              返回
+            </LinkButton>
+            <Button
+              size='sm'
+              variant='danger-soft'
+              onPress={() => commands.remove(certificate)}
+            >
+              <TrashBin />
+              删除证书
+            </Button>
+          </>
         }
       />
       {certificate.last_error && (
@@ -223,26 +233,11 @@ export function CertificateDetailPage() {
               },
               {
                 label: '证书供应商',
-                value: (
-                  <Link
-                    href='/providers'
-                    routerOptions={{
-                      state: {
-                        providers: { tab: 'certificate', q: providerName },
-                      },
-                    }}
-                  >
-                    {providerName}
-                  </Link>
-                ),
+                value: providerName,
               },
               {
                 label: '托管域名',
-                value: (
-                  <Link href={`/dns-zones/${certificate.dns_zone_id}`}>
-                    <Mono>{certificate.dns_zone_domain}</Mono>
-                  </Link>
-                ),
+                value: <Mono>{certificate.dns_zone_domain}</Mono>,
               },
               {
                 label: '最近签发',
@@ -284,15 +279,6 @@ export function CertificateDetailPage() {
               },
             ]}
           />
-          <Button
-            size='sm'
-            variant='danger-soft'
-            className='self-start'
-            onPress={() => commands.remove(certificate)}
-          >
-            <TrashBin />
-            删除证书
-          </Button>
         </Section>
       </div>
       <ReferencingWebsites certificate={certificate} />

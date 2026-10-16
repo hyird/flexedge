@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { getRouteApi, Link } from '@tanstack/react-router'
+import { getRouteApi } from '@tanstack/react-router'
 import { ArrowLeft, ChartLine, FileText, Gear, Server } from '@gravity-ui/icons'
 import { ApiBusinessError } from '@/lib/api-response'
 import { useArrivalState } from '@/lib/history-state'
@@ -14,6 +14,7 @@ import { StatusChip } from '@/components/status-chip'
 import { nodeQuery, nodeSnapshotQuery } from './data'
 import { NodeConfig } from './node-config'
 import { NodeConnectionChip } from './node-connection-chip'
+import { NodeLifecycleActions } from './node-lifecycle-actions'
 import { NodeLogs } from './node-logs'
 import { NodeOverview } from './node-overview'
 import { nodeStatusLabels } from './node-status'
@@ -30,8 +31,8 @@ const tabs = [
 type Tab = (typeof tabs)[number]['id']
 
 /** `/nodes/$nodeId` with in-page tabs held in component state (the URL never
- * changes), overview first. The header's only action leads back to the list;
- * credentials and deletion live in the config tab. One live stream per page:
+ * changes), overview first. The header holds return and delete actions;
+ * credentials live in the config tab. One live stream per page:
  * the overview and config tabs share `/api/nodes/:id/stream` with this header,
  * while the logs tab owns the log stream and the header reads the node once
  * (re-read after writes). */
@@ -69,16 +70,7 @@ export function NodeDetailLayout() {
           title={node.name}
           status={<NodeConnectionChip runtime={node.runtime} />}
           meta={[
-            <span key='cluster'>
-              集群{' '}
-              <Link
-                to='/clusters/$clusterId'
-                params={{ clusterId: node.cluster_id }}
-                className='link'
-              >
-                {node.cluster_name}
-              </Link>
-            </span>,
+            <span key='cluster'>集群 {node.cluster_name}</span>,
             <span key='version'>
               Agent <Mono>{node.runtime.agent_version || '—'}</Mono>
             </span>,
@@ -89,10 +81,13 @@ export function NodeDetailLayout() {
             />,
           ]}
           actions={
-            <LinkButton href='/nodes'>
-              <ArrowLeft />
-              返回
-            </LinkButton>
+            <>
+              <LinkButton href='/nodes'>
+                <ArrowLeft />
+                返回
+              </LinkButton>
+              <NodeLifecycleActions node={node} />
+            </>
           }
         />
       ) : (

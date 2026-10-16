@@ -1,8 +1,7 @@
-import { useNavigate } from '@tanstack/react-router'
-import { ArrowsRotateRight, TrashBin } from '@gravity-ui/icons'
+import { ArrowsRotateRight } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
-import { Alert, Button, Link } from '@heroui/react'
+import { Alert, Button } from '@heroui/react'
 import { formatDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { DataTable } from '@/components/data-table'
@@ -15,20 +14,18 @@ import { dnsLinePath } from './dns-lines'
 import { displaySyncStatus, zoneSyncStatusLabels } from './dns-zone-display'
 import type { DnsZone } from './types'
 import { useZoneDetail } from './use-zone-detail'
-import { useZoneCommands } from './zone-commands'
+import type { useZoneCommands } from './zone-commands'
 
 type Conflict = DnsZone['runtime']['conflicts'][number]
 
 /** The 概览 tab: sync state, conflicts (the only place to resolve them),
- * 立即同步 next to the sync details and 移除域名 at the bottom of them. */
-export function ZoneOverview() {
+ * and 立即同步 next to the sync details. */
+export function ZoneOverview({
+  commands,
+}: {
+  commands: ReturnType<typeof useZoneCommands>
+}) {
   const zone = useZoneDetail().data
-  const navigate = useNavigate()
-  const commands = useZoneCommands({
-    // The zone is gone, so a pending guard has nothing left to protect.
-    onRemoved: () =>
-      void navigate({ to: '/dns-zones', replace: true, ignoreBlocker: true }),
-  })
   if (!zone) return null
   const failedRecords = zone.runtime.record_states.filter(
     (state) => state.sync_status === 'failed'
@@ -180,16 +177,7 @@ export function ZoneOverview() {
             },
             {
               label: 'DNS 账号',
-              value: (
-                <Link
-                  href='/providers'
-                  routerOptions={{
-                    state: { providers: { q: zone.dns_provider_name } },
-                  }}
-                >
-                  {zone.dns_provider_name}
-                </Link>
-              ),
+              value: zone.dns_provider_name,
             },
             { label: '平台', value: providerLabel(zone.dns_provider) },
             {
@@ -220,17 +208,7 @@ export function ZoneOverview() {
             { label: '域名 ID', value: <Mono>{zone.id}</Mono> },
           ]}
         />
-        <Button
-          size='sm'
-          variant='danger-soft'
-          className='self-start'
-          onPress={() => commands.remove(zone)}
-        >
-          <TrashBin className='size-4' />
-          移除域名
-        </Button>
       </Section>
-      {commands.dialogs}
     </>
   )
 }

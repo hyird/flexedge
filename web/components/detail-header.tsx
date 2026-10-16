@@ -15,8 +15,8 @@ export function DetailHeaderSkeleton() {
 }
 
 /** Resource detail header: icon tile, visible title, status chip,
- * a meta line of short facts or cross-resource links, and actions (only
- * `返回`; page actions live in the cards they act on). Followed by
+ * a meta line of short facts or cross-resource links, and actions (`返回`
+ * followed by the resource deletion action). Followed by
  * `PageTabs` when the detail has tabs.
  *
  * The layout never depends on the current state: title and status share one

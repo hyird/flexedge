@@ -1,6 +1,5 @@
 import { type ReactNode } from 'react'
-import { ArrowUpRightFromSquare } from '@gravity-ui/icons'
-import { Button, Checkbox, Link, Tooltip } from '@heroui/react'
+import { Button, Checkbox, Tooltip } from '@heroui/react'
 import { Field, Notice } from '@/components/forms'
 
 /** Integer input bound to a number draft value; an empty box is kept as NaN
@@ -74,31 +73,6 @@ export function FieldNotice({ children }: { children?: ReactNode }) {
     <div data-field-error tabIndex={-1} className='outline-none'>
       <Notice>{children}</Notice>
     </div>
-  )
-}
-
-/** Link to another console page in a new window, so the unsaved draft here
- * stays intact (create a certificate, inspect a cluster, edit a policy). */
-export function NewWindowLink({
-  href,
-  children,
-}: {
-  href: string
-  children: ReactNode
-}) {
-  return (
-    <Link
-      href={href}
-      target='_blank'
-      rel='noopener noreferrer'
-      className='text-[13px]'
-    >
-      {children}
-      <span className='sr-only'>（在新窗口打开）</span>
-      <Link.Icon className='ms-1 size-3'>
-        <ArrowUpRightFromSquare />
-      </Link.Icon>
-    </Link>
   )
 }
 

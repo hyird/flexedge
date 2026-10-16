@@ -21,8 +21,8 @@ type WebsiteDetailContext = {
   markDeleted: () => void
 }
 
-/** Provided by the detail layout, which renders tabs only after the first
- * frame, so the value is always present inside a tab. */
+/** Provided by the detail layout after the first frame, so the value is
+ * present for the header actions and the selected tab. */
 export const WebsiteContext = createContext<WebsiteDetailContext | null>(null)
 
 function useDetailContext() {

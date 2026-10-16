@@ -36,7 +36,6 @@ import {
   CheckOption,
   FieldNotice,
   IconAction,
-  NewWindowLink,
   NumberField,
 } from './settings-controls'
 import type { Website, WebsiteOrigin } from './types'
@@ -46,7 +45,6 @@ import {
   websiteHostnames,
   type WebsiteFormValues,
 } from './website-form'
-import { WebsiteLifecycleActions } from './website-lifecycle-actions'
 import type { WebsiteFormErrors } from './website-sections'
 
 export type WebsiteSectionProps = {
@@ -88,12 +86,7 @@ function RefreshOptions({
   )
 }
 
-export function BasicSection({
-  values,
-  errors,
-  update,
-  website,
-}: WebsiteSectionProps) {
+export function BasicSection({ values, errors, update }: WebsiteSectionProps) {
   const clusters = useQuery(clusterOptionsQuery)
   const cluster = clusters.data?.find((item) => item.id === values.cluster_id)
   return (
@@ -138,12 +131,6 @@ export function BasicSection({
               }
             />
             <div className='flex flex-wrap items-center gap-x-4 gap-y-1'>
-              {cluster && (
-                <NewWindowLink href={`/clusters/${cluster.id}`}>
-                  查看集群
-                </NewWindowLink>
-              )}
-              <NewWindowLink href='/clusters?create=1'>创建集群</NewWindowLink>
               <RefreshOptions
                 label='刷新集群'
                 isPending={clusters.isFetching}
@@ -152,7 +139,6 @@ export function BasicSection({
             </div>
           </div>
         </div>
-        {website && <WebsiteLifecycleActions />}
       </div>
     </Section>
   )
@@ -322,17 +308,12 @@ export function DomainsSection({
       actions={
         <>
           {hasManaged && (
-            <>
-              <NewWindowLink href='/dns-zones?create=1'>
-                添加托管域名
-              </NewWindowLink>
-              <IconAction
-                label='刷新托管域名'
-                icon={<ArrowRotateLeft className='size-3.5' />}
-                isPending={zones.isFetching}
-                onPress={() => void zones.refetch()}
-              />
-            </>
+            <IconAction
+              label='刷新托管域名'
+              icon={<ArrowRotateLeft className='size-3.5' />}
+              isPending={zones.isFetching}
+              onPress={() => void zones.refetch()}
+            />
           )}
           <Button
             size='sm'
@@ -479,16 +460,11 @@ export function HttpsSection({
             title='绑定证书'
             description='可选择多张可用证书覆盖网站域名。'
             actions={
-              <>
-                <NewWindowLink href='/certificates?create=1'>
-                  申请证书
-                </NewWindowLink>
-                <RefreshOptions
-                  label='刷新证书'
-                  isPending={certificates.isFetching}
-                  onRefresh={() => void certificates.refetch()}
-                />
-              </>
+              <RefreshOptions
+                label='刷新证书'
+                isPending={certificates.isFetching}
+                onRefresh={() => void certificates.refetch()}
+              />
             }
           >
             <div className='flex flex-col gap-3'>
@@ -539,11 +515,6 @@ export function HttpsSection({
                               : '证书不可用，请取消绑定并选择可用证书'}
                         </span>
                       )}
-                      <span className='ml-auto'>
-                        <NewWindowLink href={`/certificates/${certificate.id}`}>
-                          详情
-                        </NewWindowLink>
-                      </span>
                     </li>
                   ))}
                 </ul>
