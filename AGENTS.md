@@ -99,4 +99,4 @@ build/                    # 构建、生成文件、临时探针与过程记录
 - 后端：Release 构建与相关 CTest；数据库、Redis、迁移在隔离实例验证执行、回滚与幂等。
 - 前端：`bun run lint`、`typecheck`、`test`、`build`，并用真实浏览器验证页面与 SSE 行为。
 - 如实区分已验证、未验证与 mock 结果，不以单平台冒充 CI 通过。
-- 控制面 `edge.a-z.xin` / `flexedge.service` / `/opt/flexedge` / 端口 `1102`，节点 `flexedge-node.service`；切换前备份，失败立即回滚，凭据不入仓库。
+- 切换前备份，失败立即回滚，凭据不入仓库。
