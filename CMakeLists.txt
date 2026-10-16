@@ -534,11 +534,6 @@ install(FILES "${FLEXEDGE_NODE_RELEASE_MANIFEST}"
     DESTINATION .
     COMPONENT Server
 )
-install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/licenses/route-engine-notices.md"
-    "${CMAKE_CURRENT_SOURCE_DIR}/licenses/hiredis.txt"
-    DESTINATION licenses
-    COMPONENT Server
-)
 if(FLEXEDGE_BUILD_WEB)
     install(FILES "${FLEXEDGE_WEB_OUTPUT_DIR}/index.html"
         DESTINATION web

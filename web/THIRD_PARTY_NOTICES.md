@@ -1,8 +1,6 @@
 # Third-party notices
 
-The route preview uses RE2JS (MIT). Its complete license and the native RE2
-license are included in `licenses/route-engine-notices.md` and distributed under
-`licenses/route-engine-notices.md` in the Server package.
+The route preview uses RE2JS (MIT).
 
 The console now uses HeroUI OSS and HeroUI Pro, with layout and interaction
 informed by the local UltraTerminal frontend. HeroUI Pro is distributed under

@@ -26,7 +26,6 @@ endif()
 
 set(EXPECTED_FILES
     "install-node.sh"
-    "licenses/route-engine-notices.md"
     "node${EXECUTABLE_SUFFIX}"
     "node-release.manifest"
     "server${EXECUTABLE_SUFFIX}"

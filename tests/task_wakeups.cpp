@@ -43,7 +43,8 @@ class redis_inspector final {
 public:
     using reply_type = std::unique_ptr<redisReply, decltype(&freeReplyObject)>;
     explicit redis_inspector(const ruvia::redis_config& config)
-        : connection_(redisConnectWithTimeout(config.host_.c_str(), config.port_, timeval{2, 0}), &redisFree) {
+        : database_(std::to_string(config.database_)),
+          connection_(redisConnectWithTimeout(config.host_.c_str(), config.port_, timeval{2, 0}), &redisFree) {
         require(connection_ && connection_->err == 0, "could not connect isolated Redis inspector");
         require(redisSetTimeout(connection_.get(), timeval{2, 0}) == REDIS_OK, "could not bound inspection timeout");
         if (!config.password_.empty()) {
@@ -53,8 +54,7 @@ public:
                 (void)request({"AUTH", config.username_, config.password_});
             }
         }
-        const auto database = std::to_string(config.database_);
-        (void)request({"SELECT", database});
+        (void)request({"SELECT", database_});
     }
 
     reply_type request(std::initializer_list<std::string_view> arguments) {
@@ -80,7 +80,7 @@ public:
             const auto newline = remaining.find('\n');
             auto line = remaining.substr(0, newline);
             std::string id;
-            bool blocked{}, xread{};
+            bool blocked{}, xread{}, same_database{};
             while (!line.empty()) {
                 const auto space = line.find(' ');
                 const auto field = line.substr(0, space);
@@ -93,12 +93,17 @@ public:
                 if (field == "cmd=xread") {
                     xread = true;
                 }
+                if (field.starts_with("db=")) {
+                    same_database = field.substr(3) == database_;
+                }
                 if (space == std::string_view::npos) {
                     break;
                 }
                 line.remove_prefix(space + 1);
             }
-            if (blocked) {
+            // CLIENT LIST spans every logical database on the server. A
+            // candidate service may legitimately block in another database.
+            if (blocked && same_database) {
                 require(xread, "only the combined notification reader may block");
                 ids.push_back(std::move(id));
             }
@@ -111,6 +116,7 @@ public:
     }
 
 private:
+    const std::string database_;
     std::unique_ptr<redisContext, decltype(&redisFree)> connection_;
 };
 
@@ -293,11 +299,19 @@ int main() {
             }
             app.stop();
         });
-        app.run();
+        std::exception_ptr run_failure;
+        try {
+            app.run();
+        } catch (...) {
+            run_failure = std::current_exception();
+        }
         producer.request_stop();
         producer.join();
         if (failure) {
             std::rethrow_exception(failure);
+        }
+        if (run_failure) {
+            std::rethrow_exception(run_failure);
         }
         require(observed.joined_.load(std::memory_order_acquire) == 2, "shutdown must join both readers and all local task waits");
         require(inspector.blocked_readers().empty(), "shutdown must leave no blocked reader connection");

@@ -1,5 +1,7 @@
 #include "service/domains/agent/heartbeat_store.h"
 
+#include <cstdint>
+#include <source_location>
 #include <stdexcept>
 
 #include "service/domains/agent/apply_result_store.h"
@@ -8,15 +10,18 @@
 #include "service/domains/agent/release_objects_store.h"
 #include "support/postgres_test.h"
 namespace {
-void require(bool condition) {
+void require(bool condition, std::source_location location = std::source_location::current()) {
     if (!condition) {
-        throw std::runtime_error("heartbeat storage invariant failed");
+        throw std::runtime_error("heartbeat storage invariant failed at line " +
+                                 std::to_string(location.line()));
     }
 }
 ruvia::task<void> verify(ruvia::db_client& client) {
     co_await client.connect();
     auto db = client.handle();
     auto tx = co_await db.begin_transaction();
+    const auto clock = co_await tx.query("SELECT (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint");
+    auto received_unix_ms = clock[0][0].as<std::int64_t>().value();
     (void)co_await tx.execute("CREATE TEMP TABLE sys_node (id text,tenant_id text,cluster_id text,agent_id text,node_spec_revision bigint,applied_node_spec_revision bigint,registration_status text,active_release_id text,active_manifest_digest text,runtime jsonb,last_heartbeat_at timestamptz,updated_at timestamptz,deleted_at timestamptz,status text,name text,revision bigint) ON COMMIT DROP");
     (void)co_await tx.execute("CREATE TEMP TABLE sys_cluster_release (id text,tenant_id text,cluster_id text,manifest_digest text) ON COMMIT DROP");
     (void)co_await tx.execute("INSERT INTO sys_node VALUES ('n','t','c','agent',3,2,'registered','r','digest','{}',NULL,NULL,NULL,'enabled','QA',1)");
@@ -61,7 +66,8 @@ ruvia::task<void> verify(ruvia::db_client& client) {
             (void)co_await tx.execute("UPDATE sys_node SET registration_status='pending'");
         }
         const auto before = co_await tx.query("SELECT row_to_json(n)::text FROM sys_node n");
-        require(!(co_await service::agent::update_heartbeat(tx, identity, input, "{\"health\":\"ok\"}")));
+        require(!(co_await service::agent::update_heartbeat(tx, identity, input,
+            "{\"health\":\"ok\"}", ++received_unix_ms)));
         const auto after = co_await tx.query("SELECT row_to_json(n)::text FROM sys_node n");
         require(before[0][0].value() == after[0][0].value());
         (void)co_await tx.execute("ROLLBACK TO SAVEPOINT scenario");
@@ -70,31 +76,41 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     for (const auto revision : {2, 3}) {
         auto input = report;
         input.applied_node_spec_revision_ = revision;
-        const auto update = co_await service::agent::update_heartbeat(tx, principal, input, "{\"health\":\"ok\"}");
+        const auto update = co_await service::agent::update_heartbeat(tx, principal, input,
+            "{\"health\":\"ok\"}", ++received_unix_ms);
         require(update.has_value());
         require(update->status_ == "enabled");
         require(update->became_online_ == (revision == 2));
-        const auto rows = co_await tx.query("SELECT applied_node_spec_revision,runtime->>'health',last_heartbeat_at IS NOT NULL FROM sys_node");
-        require(rows[0][0].as<int>() == revision && rows[0][1].value() == "ok" && rows[0][2].as<bool>().value());
+        const auto rows = co_await tx.query("SELECT applied_node_spec_revision,runtime->>'health',(EXTRACT(EPOCH FROM last_heartbeat_at) * 1000)::bigint FROM sys_node");
+        require(rows[0][0].as<int>() == revision && rows[0][1].value() == "ok" &&
+                rows[0][2].as<std::int64_t>() == received_unix_ms);
     }
     auto repeated_report = report;
     repeated_report.applied_node_spec_revision_ = 3;
+    const auto before_delayed = co_await tx.query("SELECT row_to_json(n)::text FROM sys_node n");
+    for (const auto delayed_at : {received_unix_ms, received_unix_ms - 1, received_unix_ms - 30'000}) {
+        require(!(co_await service::agent::update_heartbeat(tx, principal, repeated_report,
+            "{\"health\":\"stale\"}", delayed_at)));
+        const auto after_delayed = co_await tx.query("SELECT row_to_json(n)::text FROM sys_node n");
+        require(before_delayed[0][0].value() == after_delayed[0][0].value());
+    }
     auto repeated = co_await service::agent::update_heartbeat(tx, principal, repeated_report,
-        "{\"health\":\"ok\"}");
+        "{\"health\":\"ok\"}", ++received_unix_ms);
     require(repeated.has_value() && !repeated->became_online_);
     // Coming online follows the 15 second window of node_connection.h, inside one transaction
     // so both statements share NOW().
     (void)co_await tx.execute("UPDATE sys_node SET last_heartbeat_at = NOW() - INTERVAL '14 seconds'");
     const auto within_window = co_await service::agent::update_heartbeat(tx, principal, repeated_report,
-        "{\"health\":\"ok\"}");
+        "{\"health\":\"ok\"}", ++received_unix_ms);
     require(within_window.has_value() && !within_window->became_online_);
     (void)co_await tx.execute("UPDATE sys_node SET last_heartbeat_at = NOW() - INTERVAL '16 seconds'");
     const auto after_window = co_await service::agent::update_heartbeat(tx, principal, repeated_report,
-        "{\"health\":\"ok\"}");
+        "{\"health\":\"ok\"}", ++received_unix_ms);
     require(after_window.has_value() && after_window->became_online_);
     auto stale_report = report;
     stale_report.applied_node_spec_revision_ = 1;
-    require(!(co_await service::agent::update_heartbeat(tx, principal, stale_report, "{}")));
+    require(!(co_await service::agent::update_heartbeat(tx, principal, stale_report, "{}",
+        ++received_unix_ms)));
     (void)co_await tx.execute("ALTER TABLE sys_node ADD COLUMN desired_release_id text DEFAULT 'r', ADD COLUMN last_apply_phase text DEFAULT 'qa', ADD COLUMN last_apply_error_code text DEFAULT 'qa', ADD COLUMN last_apply_error text DEFAULT 'qa', ADD COLUMN last_apply_retryable boolean DEFAULT true");
     (void)co_await tx.execute("UPDATE sys_node SET deleted_at=NOW()");
     const auto deleted_before = co_await tx.query("SELECT row_to_json(n)::text FROM sys_node n");
