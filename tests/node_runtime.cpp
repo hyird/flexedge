@@ -1,3 +1,4 @@
+#include <ruvia/core/channel.h>
 #include <ruvia/core/event_loop.h>
 #include <ruvia/core/event_loop_pool.h>
 #include <ruvia/core/task.h>
@@ -12,6 +13,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <iostream>
 #include <memory>
@@ -49,6 +51,8 @@
 #include "node/proto/schema_version.h"
 #include "node/runtime/connected_clients.h"
 #include "node/runtime/http_redirect.h"
+#include "node/runtime/log_producer.h"
+#include "node/runtime/loop_shutdown.h"
 #include "node/runtime/node_credentials.h"
 #include "node/runtime/runtime_metrics.h"
 #include "node/runtime/runtime_state.h"
@@ -73,6 +77,11 @@ static_assert(!std::is_move_assignable_v<flexedge::node::compiled_config>);
 static_assert(!std::is_copy_constructible_v<flexedge::node::tls_context_set>);
 static_assert(!std::is_move_constructible_v<flexedge::node::tls_context_set>);
 static_assert(!std::is_move_assignable_v<flexedge::node::tls_context_set>);
+static_assert(!std::is_copy_constructible_v<flexedge::node::log_producer>);
+static_assert(std::is_same_v<flexedge::node::owned_log_batch,
+    std::unique_ptr<const flexedge::node::log_batch>>);
+static_assert(std::is_same_v<decltype(std::declval<const flexedge::node::log_batch&>().value()),
+    const flexedge::node::v2::LogDelivery&>);
 
 using flexedge::testing::snapshot;
 using flexedge::testing::TestConfig;
@@ -91,17 +100,238 @@ void apply(flexedge::node::runtime_state& runtime, TestConfig value) {
 using flexedge::testing::request;
 using flexedge::testing::waitUntil;
 
-std::vector<flexedge::node::v2::NodeLog> drain_node_logs(flexedge::node::node_log_buffer& buffer) {
+ruvia::task<void> flush_logs(flexedge::node::log_producer& logs) {
+    (void)logs.flush();
+    co_return;
+}
+
+ruvia::task<std::vector<flexedge::node::v2::NodeLog>> receive_node_logs(
+    ruvia::channel_receiver<flexedge::node::owned_log_batch>& receiver) {
     std::vector<flexedge::node::v2::NodeLog> result;
-    while (auto delivery = buffer.take("node-log-test")) {
-        for (const auto& event : delivery->value().events()) {
+    for (;;) {
+        auto batch = co_await receiver.receive_for(std::chrono::milliseconds(10));
+        if (!batch.has_value()) {
+            break;
+        }
+        for (const auto& event : batch.value()->value().events()) {
             if (event.has_node_log()) {
                 result.push_back(event.node_log());
             }
         }
-        buffer.acknowledge(std::move(*delivery));
     }
-    return result;
+    co_return result;
+}
+
+ruvia::task<void> verify_log_producer(flexedge::node::log_producer& logs,
+    std::function<void(flexedge::node::log_producer&)> verify) {
+    verify(logs);
+    co_return;
+}
+
+ruvia::task<flexedge::node::owned_log_batch> receive_log_batch(
+    ruvia::channel_receiver<flexedge::node::owned_log_batch>& receiver) {
+    auto result = co_await receiver.receive_for(std::chrono::seconds(1));
+    REQUIRE(result.has_value());
+    co_return std::move(result).take_value();
+}
+
+ruvia::task<void> append_worker_logs(flexedge::node::log_producer& logs,
+    std::string category, std::size_t count) {
+    const auto before = logs.snapshot();
+    REQUIRE(before.queued_events_ == 0);
+    for (std::size_t index = 0; index < count; ++index) {
+        REQUIRE(logs.node("info", category, std::to_string(index)));
+    }
+    REQUIRE(logs.flush());
+    REQUIRE(logs.queued_events() == 0);
+    REQUIRE(logs.dropped_events() == 0);
+    const auto after = logs.snapshot();
+    REQUIRE(after.published_events_ == before.published_events_ + count);
+    REQUIRE(after.queued_events_ == 0);
+    REQUIRE(after.dropped_events_ == 0);
+    co_return;
+}
+
+ruvia::task<void> publish_temporary_logs(ruvia::event_loop owner,
+    ruvia::channel_sender<flexedge::node::owned_log_batch> sender) {
+    flexedge::node::log_producer logs(std::move(owner), std::move(sender));
+    REQUIRE(logs.node("info", "lifetime", "owned by receiver"));
+    REQUIRE(logs.flush());
+    const auto production = logs.snapshot();
+    REQUIRE(production.published_events_ == 1);
+    REQUIRE(production.queued_events_ == 0);
+    REQUIRE(production.dropped_events_ == 0);
+    co_return;
+}
+
+void require_log_batch_bounds(const flexedge::node::log_batch& batch) {
+    auto wire = batch.value();
+    wire.set_node_id(std::string(32, 'a'));
+    REQUIRE(wire.ByteSizeLong() <= flexedge::node::log_contract::max_delivery_bytes);
+}
+
+void verify_log_batches() {
+    using namespace flexedge::node;
+    ruvia::event_loop_pool workers({.loop_count_ = 2});
+    ruvia::event_loop_pool control({.loop_count_ = 1});
+    const auto owner = control.loop(0);
+    auto [sender, receiver] =
+        ruvia::make_channel<owned_log_batch>(owner.handle(), {.capacity_ = 32});
+    log_producer first_logs(workers.loop(0), sender);
+    log_producer second_logs(workers.loop(1), sender);
+    auto [bounded_sender, bounded_receiver] =
+        ruvia::make_channel<owned_log_batch>(owner.handle(), {.capacity_ = 1});
+    log_producer bounded_logs(workers.loop(0), bounded_sender);
+    loop_shutdown shutdown(workers, control);
+    workers.start();
+    control.start();
+
+    workers.loop(0).start(verify_log_producer(first_logs, [](log_producer& logs) {
+                       REQUIRE(logs.access({
+                           .website_id_ = "89cbd310-6e73-4e47-b020-0863ed440880",
+                           .client_ip_ = "192.0.2.1",
+                           .protocol_ = "HTTP/1.1",
+                           .method_ = "GET",
+                           .host_ = "www.example.com",
+                           .target_ = "/",
+                           .status_code_ = 200,
+                           .user_agent_ = "test-agent",
+                           .referer_ = "https://example.com/",
+                           .request_headers_ = "Host: www.example.com\n",
+                           .request_body_ = "payload",
+                           .tls_fingerprint_ = "ja3:0123456789abcdef0123456789abcdef",
+                           .response_headers_ = "Content-Type: text/plain\n",
+                           .query_string_ = "debug=1",
+                           .cookies_ = "sid=abc",
+                       }));
+                       REQUIRE(logs.node("warning", "control", "batched event"));
+                       REQUIRE(logs.queued_events() == 2);
+                       const auto production = logs.snapshot();
+                       REQUIRE(production.published_events_ == 0);
+                       REQUIRE(production.queued_events_ == 2);
+                       REQUIRE(production.dropped_events_ == 0);
+                       // Both records seal together in the deferred flush after this turn.
+                   }))
+        .get();
+    auto delivery = owner.start(receive_log_batch(receiver)).get();
+    REQUIRE(delivery->value().node_id().empty());
+    REQUIRE(delivery->value().events_size() == 2);
+    const auto& access = delivery->value().events(0).access_log();
+    REQUIRE(!access.id().empty());
+    REQUIRE(access.request_headers().find("Host:") != std::string::npos);
+    REQUIRE(access.request_body() == "payload");
+    REQUIRE(access.tls_fingerprint().starts_with("ja3:"));
+    REQUIRE(access.response_headers().find("Content-Type:") != std::string::npos);
+    REQUIRE(access.query_string() == "debug=1");
+    REQUIRE(access.cookies() == "sid=abc");
+    REQUIRE(delivery->value().events(1).node_log().message() == "batched event");
+    const auto immutable_bytes = delivery->value().SerializeAsString();
+
+    workers.loop(0).start(publish_temporary_logs(workers.loop(0), sender)).get();
+    auto temporary = owner.start(receive_log_batch(receiver)).get();
+    REQUIRE(temporary->value().events_size() == 1);
+    REQUIRE(temporary->value().events(0).node_log().message() == "owned by receiver");
+    REQUIRE(delivery->value().SerializeAsString() == immutable_bytes);
+
+    workers.loop(0).start(append_worker_logs(first_logs, "load", 600)).get();
+    auto full_batch = owner.start(receive_log_batch(receiver)).get();
+    auto partial_batch = owner.start(receive_log_batch(receiver)).get();
+    REQUIRE(full_batch->value().events_size() == 512);
+    REQUIRE(partial_batch->value().events_size() == 88);
+    require_log_batch_bounds(*full_batch);
+    require_log_batch_bounds(*partial_batch);
+
+    // A full channel drops only the new batch and leaves the accepted payload intact.
+    workers.loop(0).start(verify_log_producer(bounded_logs, [](log_producer& logs) {
+                       REQUIRE(logs.node("info", "capacity", "accepted"));
+                       REQUIRE(logs.flush());
+                       REQUIRE(logs.node("info", "capacity", "rejected"));
+                       REQUIRE(!logs.flush());
+                       REQUIRE(logs.queued_events() == 0);
+                       REQUIRE(logs.dropped_events() == 1);
+                       const auto production = logs.snapshot();
+                       REQUIRE(production.published_events_ == 1);
+                       REQUIRE(production.queued_events_ == 0);
+                       REQUIRE(production.dropped_events_ == 1);
+                   }))
+        .get();
+    auto accepted = owner.start(receive_log_batch(bounded_receiver)).get();
+    REQUIRE(accepted->value().events_size() == 1);
+    REQUIRE(accepted->value().events(0).node_log().message() == "accepted");
+    workers.loop(0).start(verify_log_producer(bounded_logs, [](log_producer& logs) {
+                       REQUIRE(logs.node("info", "capacity", "after drain"));
+                       REQUIRE(logs.flush());
+                       REQUIRE(logs.dropped_events() == 1);
+                       const auto production = logs.snapshot();
+                       REQUIRE(production.published_events_ == 2);
+                       REQUIRE(production.queued_events_ == 0);
+                       REQUIRE(production.dropped_events_ == 1);
+                   }))
+        .get();
+    auto after_drain = owner.start(receive_log_batch(bounded_receiver)).get();
+    REQUIRE(after_drain->value().events(0).node_log().message() == "after drain");
+
+    // Each worker builds its own batches; only immutable ownership crosses the channel.
+    auto first = workers.loop(0).start(append_worker_logs(first_logs, "worker-0", 2000));
+    auto second = workers.loop(1).start(append_worker_logs(second_logs, "worker-1", 2000));
+    first.get();
+    second.get();
+    std::array<std::size_t, 2> observed{};
+    for (std::size_t batch_index = 0; batch_index < 8; ++batch_index) {
+        auto batch = owner.start(receive_log_batch(receiver)).get();
+        REQUIRE(batch->value().events_size() <= static_cast<int>(log_contract::max_delivery_events));
+        require_log_batch_bounds(*batch);
+        const auto& category = batch->value().events(0).node_log().category();
+        REQUIRE(category == "worker-0" || category == "worker-1");
+        const auto worker_index = category == "worker-0" ? std::size_t{0} : std::size_t{1};
+        for (const auto& event : batch->value().events()) {
+            REQUIRE(event.has_node_log());
+            REQUIRE(event.node_log().category() == category);
+            REQUIRE(event.node_log().message() == std::to_string(observed[worker_index]++));
+        }
+    }
+    REQUIRE(observed[0] == 2000);
+    REQUIRE(observed[1] == 2000);
+
+    // Large access events split by wire bytes before reaching the event-count limit.
+    workers.loop(0).start(verify_log_producer(first_logs, [](log_producer& logs) {
+                       for (std::size_t index = 0; index < 2; ++index) {
+                           REQUIRE(logs.access({
+                               .website_id_ = "89cbd310-6e73-4e47-b020-0863ed440880",
+                               .client_ip_ = "192.0.2.1",
+                               .protocol_ = "HTTP/1.1",
+                               .method_ = "POST",
+                               .host_ = "www.example.com",
+                               .target_ = "/upload",
+                               .status_code_ = 200,
+                               .user_agent_ = {},
+                               .referer_ = {},
+                               .request_headers_ = {},
+                               .request_body_ = std::string(2 * 1024 * 1024, 'x'),
+                               .tls_fingerprint_ = {},
+                               .response_headers_ = {},
+                               .query_string_ = {},
+                               .cookies_ = {},
+                           }));
+                       }
+                       REQUIRE(logs.flush());
+                       REQUIRE(logs.dropped_events() == 0);
+                   }))
+        .get();
+    for (std::size_t index = 0; index < 2; ++index) {
+        auto batch = owner.start(receive_log_batch(receiver)).get();
+        REQUIRE(batch->value().events_size() == 1);
+        const auto& bounded_access = batch->value().events(0).access_log();
+        REQUIRE(bounded_access.request_body().size() == log_producer::max_request_body_bytes);
+        REQUIRE(bounded_access.request_body_truncated());
+        require_log_batch_bounds(*batch);
+    }
+    REQUIRE(delivery->value().SerializeAsString() == immutable_bytes);
+    v2::Website website_log_policy;
+    REQUIRE(!website_log_policy.access_log_enabled());
+    website_log_policy.set_access_log_enabled(true);
+    REQUIRE(website_log_policy.access_log_enabled());
+    shutdown.stop_and_join();
 }
 
 bool accept_until_stopped(asio::ip::tcp::acceptor& acceptor, asio::ip::tcp::socket& socket,
@@ -464,163 +694,7 @@ int main(int argc, char* argv[]) {
                 std::filesystem::perms::none);
 #endif
 
-        flexedge::node::node_log_buffer delivery_buffer;
-        delivery_buffer.access({
-            .website_id_ = "89cbd310-6e73-4e47-b020-0863ed440880",
-            .client_ip_ = "192.0.2.1",
-            .protocol_ = "HTTP/1.1",
-            .method_ = "GET",
-            .host_ = "www.example.com",
-            .target_ = "/",
-            .status_code_ = 200,
-            .user_agent_ = "test-agent",
-            .referer_ = "https://example.com/",
-            .request_headers_ = "Host: www.example.com\n",
-            .request_body_ = "payload",
-            .tls_fingerprint_ = "ja3:0123456789abcdef0123456789abcdef",
-            .response_headers_ = "Content-Type: text/plain\n",
-            .query_string_ = "debug=1",
-            .cookies_ = "sid=abc",
-        });
-        delivery_buffer.node("warning", "control", "retry delivery");
-        REQUIRE(delivery_buffer.pending());
-        auto first_delivery = delivery_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d");
-        REQUIRE(first_delivery && first_delivery->value().events_size() == 2);
-        REQUIRE(first_delivery->value().events(0).has_access_log());
-        REQUIRE(first_delivery->value().events(1).has_node_log());
-        const auto access_log_id = first_delivery->value().events(0).access_log().id();
-        REQUIRE(first_delivery->value().events(0).access_log().request_headers().find("Host:") !=
-                std::string::npos);
-        REQUIRE(first_delivery->value().events(0).access_log().request_body() == "payload");
-        REQUIRE(
-            first_delivery->value().events(0).access_log().tls_fingerprint().starts_with("ja3:"));
-        REQUIRE(first_delivery->value().events(0).access_log().response_headers().find(
-                    "Content-Type:") != std::string::npos);
-        REQUIRE(first_delivery->value().events(0).access_log().query_string() == "debug=1");
-        REQUIRE(first_delivery->value().events(0).access_log().cookies() == "sid=abc");
-        delivery_buffer.restore(std::move(*first_delivery));
-        auto retried_delivery = delivery_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d");
-        REQUIRE(retried_delivery && retried_delivery->value().events_size() == 2);
-        REQUIRE(retried_delivery->value().events(0).access_log().id() == access_log_id);
-        REQUIRE(delivery_buffer.pending());
-        delivery_buffer.acknowledge(std::move(*retried_delivery));
-
-        flexedge::node::v2::Website website_log_policy;
-        REQUIRE(!website_log_policy.access_log_enabled());
-        website_log_policy.set_access_log_enabled(true);
-        REQUIRE(website_log_policy.access_log_enabled());
-
-        flexedge::node::node_log_buffer high_volume_buffer;
-        for (std::size_t index = 0; index < 600; ++index) {
-            high_volume_buffer.node("info", "load", "event-" + std::to_string(index));
-        }
-        auto high_volume_first = high_volume_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d");
-        REQUIRE(high_volume_first && high_volume_first->value().events_size() == 512);
-        REQUIRE(high_volume_first->value().ByteSizeLong() <= 1024 * 1024);
-        high_volume_buffer.acknowledge(std::move(*high_volume_first));
-        auto high_volume_second = high_volume_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d");
-        REQUIRE(high_volume_second && high_volume_second->value().events_size() == 88);
-        high_volume_buffer.acknowledge(std::move(*high_volume_second));
-        REQUIRE(!high_volume_buffer.pending());
-
-        flexedge::node::node_log_buffer concurrent_buffer(4);
-        std::vector<std::thread> producers;
-        for (std::size_t worker = 0; worker < 4; ++worker) {
-            const auto producer = concurrent_buffer.worker_producer(worker);
-            producers.emplace_back([producer, worker] {
-                for (std::size_t index = 0; index < 2000; ++index) {
-                    producer.node("info", "load",
-                        "worker-" + std::to_string(worker) + '-' + std::to_string(index));
-                }
-            });
-        }
-        for (auto& producer : producers) {
-            producer.join();
-        }
-        REQUIRE(concurrent_buffer.queued_events() == 8000);
-        REQUIRE(concurrent_buffer.dropped_events() == 0);
-        for (std::size_t index = 0; index < 512; ++index) {
-            concurrent_buffer.node("info", "load", "overflow-" + std::to_string(index));
-        }
-        REQUIRE(concurrent_buffer.queued_events() == 8512);
-        REQUIRE(concurrent_buffer.dropped_events() == 0);
-        auto retained_delivery = concurrent_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d");
-        REQUIRE(retained_delivery && retained_delivery->value().events_size() == 512);
-        REQUIRE(!concurrent_buffer.node("info", "load", "must-not-reuse-in-flight-capacity"));
-        concurrent_buffer.restore(std::move(*retained_delivery));
-        REQUIRE(concurrent_buffer.queued_events() == 8512);
-        std::size_t delivered_events{};
-        while (auto delivery = concurrent_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d")) {
-            REQUIRE(delivery->value().ByteSizeLong() <= 1024 * 1024);
-            delivered_events += static_cast<std::size_t>(delivery->value().events_size());
-            concurrent_buffer.acknowledge(std::move(*delivery));
-        }
-        REQUIRE(delivered_events == 8512);
-        REQUIRE(concurrent_buffer.dropped_events() == 1);
-
-        flexedge::node::node_log_buffer interleaved_buffer(1);
-        const auto interleaved_producer = interleaved_buffer.worker_producer(0);
-        std::atomic_bool interleaved_producer_done{};
-        std::atomic<std::size_t> interleaved_accepted{};
-        std::atomic<std::size_t> interleaved_delivered{};
-        std::thread interleaved_consumer([&] {
-            while (!interleaved_producer_done.load(std::memory_order_acquire) ||
-                   interleaved_buffer.pending()) {
-                if (auto delivery =
-                        interleaved_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d")) {
-                    interleaved_delivered.fetch_add(
-                        static_cast<std::size_t>(delivery->value().events_size()),
-                        std::memory_order_relaxed);
-                    interleaved_buffer.acknowledge(std::move(*delivery));
-                } else {
-                    std::this_thread::yield();
-                }
-            }
-        });
-        std::thread interleaved_writer([&] {
-            for (std::size_t index = 0; index < 4096; ++index) {
-                if (interleaved_producer.node("info", "load",
-                        "interleaved-" + std::to_string(index))) {
-                    interleaved_accepted.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
-            interleaved_producer_done.store(true, std::memory_order_release);
-        });
-        interleaved_writer.join();
-        interleaved_consumer.join();
-        REQUIRE(interleaved_accepted == 4096);
-        REQUIRE(interleaved_delivered == interleaved_accepted.load());
-        REQUIRE(interleaved_buffer.dropped_events() == 0);
-        REQUIRE(!interleaved_buffer.pending());
-
-        flexedge::node::node_log_buffer control_drain_buffer(1);
-        const auto background_logs = control_drain_buffer.background_producer();
-        REQUIRE(background_logs.node("info", "upgrade", "upgrade completed"));
-        REQUIRE(control_drain_buffer.retained_events() == 1);
-        auto control_delivery = control_drain_buffer.take("576369c6-946e-4dee-8434-9b8909d72dbd5");
-        REQUIRE(control_delivery.has_value());
-        REQUIRE(control_drain_buffer.retained_events() == 1);
-        control_drain_buffer.acknowledge(std::move(*control_delivery));
-        REQUIRE(control_drain_buffer.retained_events() == 0);
-        REQUIRE(!control_drain_buffer.pending());
-
-        flexedge::node::node_log_buffer priority_buffer(4);
-        const auto first_priority_producer = priority_buffer.worker_producer(0);
-        const auto second_priority_producer = priority_buffer.worker_producer(1);
-        for (std::size_t index = 0; index < 512; ++index) {
-            REQUIRE(first_priority_producer.node("info", "access", "first-" + std::to_string(index)));
-            REQUIRE(
-                second_priority_producer.node("info", "access", "second-" + std::to_string(index)));
-        }
-        auto first_priority_delivery = priority_buffer.take("576369c6-946e-4dee-8434-9b8909d72dbd5");
-        REQUIRE(first_priority_delivery && first_priority_delivery->value().events_size() == 512);
-        priority_buffer.acknowledge(std::move(*first_priority_delivery));
-        const auto priority_logs = priority_buffer.background_producer();
-        REQUIRE(priority_logs.node("info", "upgrade", "upgrade completed"));
-        auto priority_delivery = priority_buffer.take("576369c6-946e-4dee-8434-9b8909d72dbd5");
-        REQUIRE(priority_delivery && priority_delivery->value().events_size() == 512);
-        REQUIRE(priority_delivery->value().events(0).node_log().category() == "upgrade");
-        priority_buffer.acknowledge(std::move(*priority_delivery));
+        verify_log_batches();
 
         const auto updater_binary_path = credentials_root / "node";
         {
@@ -699,33 +773,6 @@ int main(int argc, char* argv[]) {
             REQUIRE(!entry.path().filename().string().starts_with(".node.upgrade."));
         }
 #endif
-
-        flexedge::node::node_log_buffer bounded_body_buffer;
-        bounded_body_buffer.access({
-            .website_id_ = "89cbd310-6e73-4e47-b020-0863ed440880",
-            .client_ip_ = "192.0.2.1",
-            .protocol_ = "HTTP/1.1",
-            .method_ = "POST",
-            .host_ = "www.example.com",
-            .target_ = "/upload",
-            .status_code_ = 200,
-            .user_agent_ = {},
-            .referer_ = {},
-            .request_headers_ = {},
-            .request_body_ = std::string(2 * 1024 * 1024, 'x'),
-            .tls_fingerprint_ = {},
-            .response_headers_ = {},
-            .query_string_ = {},
-            .cookies_ = {},
-        });
-        auto bounded_body_delivery = bounded_body_buffer.take("cd45a676-4a24-44b5-8974-ceba6d7cc94d");
-        REQUIRE(bounded_body_delivery && bounded_body_delivery->value().events_size() == 1);
-        const auto& bounded_access = bounded_body_delivery->value().events(0).access_log();
-        REQUIRE(bounded_access.request_body().size() ==
-                flexedge::node::node_log_buffer::max_request_body_bytes);
-        REQUIRE(bounded_access.request_body_truncated());
-        REQUIRE(bounded_body_delivery->value().ByteSizeLong() <= 1024 * 1024);
-        bounded_body_buffer.acknowledge(std::move(*bounded_body_delivery));
 
         REQUIRE(flexedge::node::accepts_event_stream("text/event-stream"));
         REQUIRE(flexedge::node::accepts_event_stream(
@@ -1105,15 +1152,16 @@ int main(int argc, char* argv[]) {
             flexedge::node::maximum_request_buffer_bytes);
         flexedge::node::buffered_bytes_budget response_buffers(
             flexedge::node::maximum_response_buffer_bytes);
-        flexedge::node::node_log_buffer log_buffer(2);
-        auto first_worker_logs = log_buffer.worker_producer(0);
-        auto second_worker_logs = log_buffer.worker_producer(1);
+        auto [log_sender, log_receiver] =
+            ruvia::make_channel<flexedge::node::owned_log_batch>(control_loops.loop(0).handle(), {.capacity_ = 128});
+        flexedge::node::log_producer first_worker_logs(loops.loop(0), log_sender);
+        flexedge::node::log_producer second_worker_logs(loops.loop(1), log_sender);
         flexedge::node::runtime_metrics_sampler metrics_sampler;
         (void)metrics_sampler.sample(std::uint64_t{0});
         const auto session_context = [&](flexedge::node::origin_health_supervisor& health,
                                          flexedge::node::worker_metrics& metrics,
                                          flexedge::node::connected_clients& clients,
-                                         flexedge::node::node_log_buffer::producer& logs,
+                                         flexedge::node::log_producer& logs,
                                          flexedge::node::origin_connection_pool& origin_connections,
                                          flexedge::node::buffered_bytes_budget& requests) {
             return flexedge::node::http_session_context{
@@ -1150,15 +1198,21 @@ int main(int argc, char* argv[]) {
         start(first_listener);
         start(second_listener);
         start(constrained_listener);
+        flexedge::node::loop_shutdown shutdown(loops, control_loops);
         loops.start();
         control_loops.start();
+        const auto collect_node_logs = [&] {
+            loops.loop(0).start(flush_logs(first_worker_logs)).get();
+            loops.loop(1).start(flush_logs(second_worker_logs)).get();
+            return control_loops.loop(0).start(receive_node_logs(log_receiver)).get();
+        };
         // Each worker owns its counters; a separate control loop collects their immutable
         // copies, as the heartbeat does.
         const std::array connected_workers{
             flexedge::node::worker_counters{
-                .loop_ = loops.loop(0), .metrics_ = &first_metrics, .clients_ = &first_clients},
+                .loop_ = loops.loop(0), .metrics_ = &first_metrics, .clients_ = &first_clients, .logs_ = &first_worker_logs},
             flexedge::node::worker_counters{
-                .loop_ = loops.loop(1), .metrics_ = &second_metrics, .clients_ = &second_clients},
+                .loop_ = loops.loop(1), .metrics_ = &second_metrics, .clients_ = &second_clients, .logs_ = &second_worker_logs},
         };
         const auto load_of = [&](std::span<const flexedge::node::worker_counters> workers) {
             const auto owner = control_loops.loop(0);
@@ -1247,12 +1301,12 @@ int main(int argc, char* argv[]) {
         const auto no_route_response = request(port, "unknown.example.com");
         REQUIRE(no_route_response.starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
         REQUIRE(connections_reach(0));
-        (void)drain_node_logs(log_buffer);
+        (void)collect_node_logs();
         // Invalid incoming Host values are request errors, not broken node configuration.
         for (const auto& host : {std::string("."), std::string(254, 'a')}) {
             REQUIRE(request(port, host).starts_with("HTTP/1.1 400 Bad Request\r\n"));
             REQUIRE(connections_reach(0));
-            const auto entries = drain_node_logs(log_buffer);
+            const auto entries = collect_node_logs();
             REQUIRE(entries.size() == 1);
             REQUIRE(entries.front().level() == "warning");
             REQUIRE(entries.front().category() == "http1");
@@ -1304,7 +1358,7 @@ int main(int argc, char* argv[]) {
             client_reset = true;
             reset_origin.join();
             REQUIRE(connections_reach(0));
-            const auto entries = drain_node_logs(log_buffer);
+            const auto entries = collect_node_logs();
             REQUIRE(entries.size() == 1);
             REQUIRE(entries.front().level() == "info");
             REQUIRE(entries.front().message().starts_with(buffered
@@ -1338,7 +1392,7 @@ int main(int argc, char* argv[]) {
             REQUIRE(request(port).starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
             reset_origin.join();
             REQUIRE(connections_reach(0));
-            const auto entries = drain_node_logs(log_buffer);
+            const auto entries = collect_node_logs();
             REQUIRE(entries.size() == 1);
             REQUIRE(entries.front().level() == "error");
             REQUIRE(entries.front().message().starts_with("origin response head read failed:"));
@@ -1346,6 +1400,9 @@ int main(int argc, char* argv[]) {
         const auto observed_load = load_of(connected_workers);
         REQUIRE(observed_load && observed_load->connection_count_ == 0 &&
                 observed_load->traffic_out_bytes_ > 0);
+        REQUIRE(observed_load->logs_.published_events_ > 0);
+        REQUIRE(observed_load->logs_.queued_events_ == 0);
+        REQUIRE(observed_load->logs_.dropped_events_ == 0);
         const auto observed_metrics = metrics_sampler.sample(observed_load->traffic_out_bytes_);
         REQUIRE(observed_metrics.traffic_out_bps_ > 0);
         REQUIRE(observed_metrics.cpu_usage_ >= 0 && observed_metrics.cpu_usage_ <= 1);

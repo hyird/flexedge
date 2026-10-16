@@ -30,7 +30,7 @@
 #include "node/proto/control_reply.h"
 #include "node/proto/edge_control.pb.h"
 #include "node/runtime/config_activation.h"
-#include "node/runtime/log_buffer.h"
+#include "node/runtime/log_producer.h"
 #include "node/runtime/node_credentials.h"
 #include "node/runtime/runtime_metrics.h"
 #include "node/runtime/runtime_state.h"
@@ -50,7 +50,9 @@ class control_channel final {
 public:
     control_channel(ruvia::event_loop loop, control_channel_config config, state_store store,
         node_credentials& credentials, runtime_state& runtime, data_plane& data_plane,
-        node_log_buffer& logs, self_updater& updater, ruvia::channel_receiver<bool> queued)
+        log_producer& logs, self_updater& updater,
+        ruvia::channel_receiver<owned_log_batch> data_logs,
+        ruvia::channel_receiver<owned_log_batch> control_logs)
         : loop_(std::move(loop)),
           config_(std::move(config)),
           store_(std::move(store)),
@@ -60,9 +62,34 @@ public:
           logs_(logs),
           updater_(updater),
           channel_log_(logs, "control"),
-          log_delivery_(logs, std::move(queued)) {}
+          log_delivery_(logs, std::move(data_logs), std::move(control_logs)) {}
 
     ruvia::task<void> run() {
+        const auto worker = loop_.handle();
+        ruvia::task_scope operations(worker);
+        config_.stop_token_ = ruvia::combine_stop_tokens(config_.stop_token_, operations.get_stop_token());
+        std::exception_ptr failure;
+        try {
+            operations.spawn(log_delivery_.receive_batches(config_.stop_token_));
+            operations.spawn(run_connections());
+        } catch (...) {
+            failure = std::current_exception();
+            operations.request_stop();
+        }
+        try {
+            co_await operations.join();
+        } catch (...) {
+            if (!failure) {
+                failure = std::current_exception();
+            }
+        }
+        if (failure) {
+            std::rethrow_exception(failure);
+        }
+    }
+
+private:
+    ruvia::task<void> run_connections() {
         const auto worker = loop_.handle();
         while (!config_.stop_token_.stop_requested()) {
             try {
@@ -158,8 +185,12 @@ private:
         value->set_health(
             last_error_.empty() && report.origin_health_->all_healthy() ? "healthy" : "degraded");
         value->set_last_error(last_error_);
-        value->set_queued_log_events(logs_.queued_events());
-        value->set_dropped_log_events(logs_.dropped_events());
+        if (report.load_) {
+            data_log_production_ = report.load_->logs_;
+        }
+        const auto control_logs = logs_.snapshot();
+        value->set_queued_log_events(log_delivery_.queued_events(data_log_production_, control_logs));
+        value->set_dropped_log_events(data_log_production_.dropped_events_ + control_logs.dropped_events_);
         for (const auto& origin : report.origin_health_->reports()) {
             auto* item = value->add_origin_health();
             item->set_website_id(origin.website_id_);
@@ -496,12 +527,13 @@ private:
     node_credentials& credentials_;
     runtime_state& runtime_;
     data_plane& data_plane_;
-    node_log_buffer& logs_;
+    log_producer& logs_;
     self_updater& updater_;
     channel_log channel_log_;
     log_delivery log_delivery_;
     std::string last_error_;
     runtime_metrics_sampler metrics_sampler_;
+    log_production_snapshot data_log_production_{};
 };
 
 }  // namespace flexedge::node

@@ -3,6 +3,7 @@
 #include <ruvia/core/channel.h>
 #include <ruvia/core/event_loop_pool.h>
 #include <ruvia/core/stop_token.h>
+#include <ruvia/core/timer.h>
 #include <ruvia/http/http1_server_request_parser.h>
 #include <ruvia/http/websocket_handshake.h>
 
@@ -20,6 +21,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -28,6 +30,7 @@
 
 #include "common/file_digest.h"
 #include "node/control/transport_config.h"
+#include "node/runtime/log_producer.h"
 #include "node/runtime/loop_shutdown.h"
 #include "node/runtime/secure_file.h"
 #include "node/runtime/state_cipher.h"
@@ -124,6 +127,7 @@ enum class session_behavior {
     disconnect_transport_after_heartbeat,
     delay_first_log_ack,
     lose_first_log_ack,
+    disconnect_before_log_ack,
     reorder_log_ack,
     no_multiplexing,
     healthy,
@@ -177,6 +181,8 @@ public:
     std::vector<flexedge::node::v2::ClientEnvelope::PayloadCase> received_order_;
     std::vector<std::string> delivered_batches_;
     std::atomic<std::size_t> heartbeats_while_logs_unacknowledged_{};
+    std::atomic<std::size_t> acknowledged_log_batches_{};
+    std::atomic<std::size_t> acknowledged_log_events_{};
     std::exception_ptr failure_;
 
 private:
@@ -290,6 +296,7 @@ private:
         value->set_multiplex_logs(behavior != session_behavior::no_multiplexing);
         send(socket, welcome);
         std::optional<flexedge::node::v2::ServerEnvelope> delayed_log_ack;
+        std::size_t delayed_log_event_count{};
         std::optional<flexedge::node::v2::ServerEnvelope> delayed_heartbeat_ack;
         std::size_t log_batches{};
         for (;;) {
@@ -323,6 +330,8 @@ private:
                     if (behavior == session_behavior::delay_first_log_ack && heartbeats_while_logs_unacknowledged_ >= 2) {
                         send(socket, *delayed_log_ack);
                         delayed_log_ack.reset();
+                        ++acknowledged_log_batches_;
+                        acknowledged_log_events_ += delayed_log_event_count;
                     }
                 }
                 ++heartbeats_;
@@ -345,11 +354,23 @@ private:
                 acknowledgement.mutable_log_delivery_ack();
                 delivered_batches_.push_back(incoming.log_delivery().SerializeAsString());
                 ++log_batches;
+                if (behavior == session_behavior::disconnect_before_log_ack) {
+                    for (const auto& event : incoming.log_delivery().events()) {
+                        if (event.has_node_log()) {
+                            received_logs_.push_back(event.node_log());
+                        }
+                    }
+                    ++batches_;
+                    return;
+                }
                 if (log_batches == 1 && (behavior == session_behavior::delay_first_log_ack || behavior == session_behavior::lose_first_log_ack)) {
                     delayed_log_ack = acknowledgement;
+                    delayed_log_event_count = static_cast<std::size_t>(incoming.log_delivery().events_size());
                 } else {
                     send(socket, acknowledgement);
                     delayed_log_ack.reset();
+                    ++acknowledged_log_batches_;
+                    acknowledged_log_events_ += static_cast<std::size_t>(incoming.log_delivery().events_size());
                 }
                 if (delayed_heartbeat_ack) {
                     send(socket, *delayed_heartbeat_ack);
@@ -415,6 +436,34 @@ struct node_start final {
     std::vector<std::string> state_logs_;
 };
 
+using log_channel = std::pair<ruvia::channel_sender<flexedge::node::owned_log_batch>,
+    ruvia::channel_receiver<flexedge::node::owned_log_batch>>;
+
+log_channel make_log_channel(const ruvia::event_loop& loop, std::size_t capacity = 6) {
+    return ruvia::make_channel<flexedge::node::owned_log_batch>(loop.handle(), {.capacity_ = capacity});
+}
+
+// The error-policy fixtures capture the producer's output directly. Delivery is
+// exercised separately against the real WebSocket, including acknowledgement loss.
+ruvia::task<std::vector<flexedge::node::v2::NodeLog>> drain_node_logs(
+    flexedge::node::log_producer& logs,
+    ruvia::channel_receiver<flexedge::node::owned_log_batch>& receiver) {
+    (void)logs.flush();
+    std::vector<flexedge::node::v2::NodeLog> result;
+    for (;;) {
+        auto received = co_await receiver.receive_for(std::chrono::milliseconds(0));
+        if (!received.has_value()) {
+            co_return result;
+        }
+        const auto delivery = std::move(received).take_value();
+        for (const auto& event : delivery->value().events()) {
+            if (event.has_node_log()) {
+                result.push_back(event.node_log());
+            }
+        }
+    }
+}
+
 // Starts the real control channel over a state directory and reports whether it reached
 // the control plane transport.
 node_start start_node(const std::filesystem::path& root, const std::filesystem::path& state) {
@@ -429,10 +478,13 @@ node_start start_node(const std::filesystem::path& root, const std::filesystem::
     ruvia::event_loop_pool workers({.loop_count_ = 1});
     ruvia::event_loop_pool control({.loop_count_ = 1});
     flexedge::node::runtime_state runtime;
-    auto [queued_sender, queued_receiver] = ruvia::make_channel<bool>(control.loop(0).handle(), {.capacity_ = 1});
-    flexedge::node::node_log_buffer logs(1, [queued_sender] { (void)queued_sender.send(true); });
+    const auto loop = control.loop(0);
+    auto [data_sender, data_receiver] = make_log_channel(loop, 62);
+    auto [control_sender, control_receiver] = make_log_channel(loop);
+    auto [captured_sender, captured_receiver] = make_log_channel(loop, 64);
+    flexedge::node::log_producer logs(loop, std::move(captured_sender));
     {
-        flexedge::node::data_plane plane(workers, control.loop(0), runtime, logs);
+        flexedge::node::data_plane plane(workers, loop, runtime, data_sender);
         flexedge::node::self_updater updater({
             .binary_path_ = binary_path,
             .current_version_ = std::string(flexedge::node::node_version),
@@ -449,7 +501,7 @@ node_start start_node(const std::filesystem::path& root, const std::filesystem::
                 .stop_token_ = stop_source.token(),
             },
             flexedge::node::state_store{state, credentials.secret()}, credentials, runtime, plane,
-            logs, updater, std::move(queued_receiver));
+            logs, updater, std::move(data_receiver), std::move(control_receiver));
         flexedge::node::loop_shutdown shutdown(workers, control);
         workers.start();
         control.start();
@@ -458,15 +510,13 @@ node_start start_node(const std::filesystem::path& root, const std::filesystem::
         stop_source.request_stop();
         task.get();
         result.applied_node_spec_revision_ = runtime.applied_node_spec_revision();
-        shutdown.stop_and_join();
-        plane.request_stop_accepting();
-    }
-    if (const auto delivery = logs.take(node_id); delivery) {
-        for (const auto& event : delivery->value().events()) {
-            if (event.has_node_log() && event.node_log().category() == "state") {
-                result.state_logs_.push_back(event.node_log().message());
+        for (const auto& entry : loop.start(drain_node_logs(logs, captured_receiver)).get()) {
+            if (entry.category() == "state") {
+                result.state_logs_.push_back(entry.message());
             }
         }
+        shutdown.stop_and_join();
+        plane.request_stop_accepting();
     }
     return result;
 }
@@ -492,19 +542,6 @@ bool logged(const node_start& start, std::string_view text) {
     return false;
 }
 
-std::vector<flexedge::node::v2::NodeLog> drain_node_logs(flexedge::node::node_log_buffer& logs) {
-    std::vector<flexedge::node::v2::NodeLog> result;
-    while (auto delivery = logs.take(node_id)) {
-        for (const auto& event : delivery->value().events()) {
-            if (event.has_node_log()) {
-                result.push_back(event.node_log());
-            }
-        }
-        logs.acknowledge(std::move(*delivery));
-    }
-    return result;
-}
-
 std::size_t count_logs(const std::vector<flexedge::node::v2::NodeLog>& logs,
     std::string_view category, std::string_view level, std::string_view message = {}) {
     return static_cast<std::size_t>(std::count_if(logs.begin(), logs.end(), [&](const auto& entry) {
@@ -513,7 +550,9 @@ std::size_t count_logs(const std::vector<flexedge::node::v2::NodeLog>& logs,
     }));
 }
 
-void verify_channel_log_policy() {
+ruvia::task<void> verify_channel_log_policy_on_worker(
+    ruvia::channel_receiver<flexedge::node::owned_log_batch>& receiver,
+    flexedge::node::log_producer& logs) {
     using namespace flexedge::node;
     using code_type = ruvia::websocket_client_error::code_type;
     for (const auto code : {code_type::timeout, code_type::cancelled, code_type::resolve_failed,
@@ -524,10 +563,9 @@ void verify_channel_log_policy() {
              code_type::protocol_error, code_type::message_too_large}) {
         REQUIRE(classify_channel_failure(code) == channel_failure_kind::permanent);
     }
-    node_log_buffer logs;
     channel_log log(logs, "control");
     log.recovered();
-    REQUIRE(!logs.pending());
+    REQUIRE(logs.queued_events() == 0);
     log.failed("connection refused", channel_failure_kind::transient);
     REQUIRE(log.retry_delay() == std::chrono::seconds(1));
     log.failed("connection refused", channel_failure_kind::transient);
@@ -543,7 +581,7 @@ void verify_channel_log_policy() {
     REQUIRE(log.retry_delay() == std::chrono::seconds(1));
     log.failed("invalid credentials", channel_failure_kind::permanent);
     log.recovered();
-    const auto entries = drain_node_logs(logs);
+    const auto entries = co_await drain_node_logs(logs, receiver);
     REQUIRE(count_logs(entries, "control", "warning") == 13);
     REQUIRE(count_logs(entries, "control", "error") == 1);
     REQUIRE(count_logs(entries, "control", "info", "connection restored") == 2);
@@ -557,9 +595,26 @@ void verify_channel_log_policy() {
         "WebSocket transport ended before peer Close with invalid frame"));
     log.failed(ruvia::websocket_client_error(code_type::invalid_config,
         "WebSocket transport ended before peer Close"));
-    const auto next_outage = drain_node_logs(logs);
+    const auto next_outage = co_await drain_node_logs(logs, receiver);
     REQUIRE(count_logs(next_outage, "control", "warning") == 2);
     REQUIRE(count_logs(next_outage, "control", "error") == 3);
+}
+
+void verify_channel_log_policy() {
+    ruvia::event_loop_pool loops({.loop_count_ = 1});
+    const auto loop = loops.loop(0);
+    auto [sender, receiver] = make_log_channel(loop);
+    flexedge::node::log_producer logs(loop, std::move(sender));
+    loops.start();
+    try {
+        loop.start(verify_channel_log_policy_on_worker(receiver, logs)).get();
+    } catch (...) {
+        loops.stop();
+        loops.join();
+        throw;
+    }
+    loops.stop();
+    loops.join();
 }
 
 void verify_control_reconnect(const std::filesystem::path& root,
@@ -579,10 +634,14 @@ void verify_control_reconnect(const std::filesystem::path& root,
     ruvia::event_loop_pool workers({.loop_count_ = 1});
     ruvia::event_loop_pool control({.loop_count_ = 1});
     flexedge::node::runtime_state runtime;
-    auto [queued_sender, queued_receiver] = ruvia::make_channel<bool>(control.loop(0).handle(), {.capacity_ = 1});
-    flexedge::node::node_log_buffer logs(1, [queued_sender] { (void)queued_sender.send(true); });
+    const auto loop = control.loop(0);
+    auto [data_sender, data_receiver] = make_log_channel(loop, 62);
+    auto [control_sender, control_receiver] = make_log_channel(loop);
+    auto [captured_sender, captured_receiver] = make_log_channel(loop, 64);
+    flexedge::node::log_producer logs(loop, std::move(captured_sender));
+    std::vector<flexedge::node::v2::NodeLog> entries;
     {
-        flexedge::node::data_plane plane(workers, control.loop(0), runtime, logs);
+        flexedge::node::data_plane plane(workers, loop, runtime, data_sender);
         flexedge::node::self_updater updater({
             .binary_path_ = binary,
             .current_version_ = std::string(flexedge::node::node_version),
@@ -595,7 +654,7 @@ void verify_control_reconnect(const std::filesystem::path& root,
             {.web_socket_ = flexedge::node::control_transport_config(
                  "ws://127.0.0.1:" + std::to_string(origin.port())),
                 .stop_token_ = stop_source.token()},
-            store, credentials, runtime, plane, logs, updater, std::move(queued_receiver));
+            store, credentials, runtime, plane, logs, updater, std::move(data_receiver), std::move(control_receiver));
         flexedge::node::loop_shutdown shutdown(workers, control);
         workers.start();
         control.start();
@@ -606,6 +665,7 @@ void verify_control_reconnect(const std::filesystem::path& root,
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         stop_source.request_stop();
         task.get();
+        entries = loop.start(drain_node_logs(logs, captured_receiver)).get();
         shutdown.stop_and_join();
         plane.request_stop_accepting();
         origin.stop();
@@ -614,8 +674,6 @@ void verify_control_reconnect(const std::filesystem::path& root,
         }
         REQUIRE(connected);
     }
-    auto entries = drain_node_logs(logs);
-    entries.insert(entries.end(), origin.received_logs_.begin(), origin.received_logs_.end());
     REQUIRE(origin.connections_ == expected_connections);
     REQUIRE(origin.received_heartbeats_.size() >= expected_heartbeats);
     for (const auto& heartbeat : origin.received_heartbeats_) {
@@ -643,12 +701,12 @@ void verify_multiplexed_logs(const std::filesystem::path& root, bool retry, bool
     ruvia::event_loop_pool workers({.loop_count_ = 1});
     ruvia::event_loop_pool control({.loop_count_ = 1});
     const auto loop = control.loop(0);
-    auto [queued_sender, queued_receiver] = ruvia::make_channel<bool>(loop.handle(), {.capacity_ = 1});
-    flexedge::node::node_log_buffer logs(1, [queued_sender] { (void)queued_sender.send(true); });
-    logs.node("info", "startup", "initial event");
+    auto [data_sender, data_receiver] = make_log_channel(loop, 62);
+    auto [control_sender, control_receiver] = make_log_channel(loop);
+    flexedge::node::log_producer logs(loop, std::move(control_sender));
     ruvia::stop_source stop_source;
     flexedge::node::runtime_state runtime;
-    flexedge::node::data_plane plane(workers, loop, runtime, logs);
+    flexedge::node::data_plane plane(workers, loop, runtime, data_sender);
     flexedge::node::self_updater updater({
         .binary_path_ = root / "node",
         .current_version_ = std::string(flexedge::node::node_version),
@@ -660,13 +718,19 @@ void verify_multiplexed_logs(const std::filesystem::path& root, bool retry, bool
         {.web_socket_ = flexedge::node::control_transport_config(
              "ws://127.0.0.1:" + std::to_string(origin.port())),
             .stop_token_ = stop_source.token()},
-        store, credentials, runtime, plane, logs, updater, std::move(queued_receiver));
+        store, credentials, runtime, plane, logs, updater, std::move(data_receiver), std::move(control_receiver));
     flexedge::node::loop_shutdown shutdown(workers, control);
     workers.start();
     control.start();
+    const auto queue_initial_log = [&logs]() -> ruvia::task<void> {
+        REQUIRE(logs.node("info", "startup", "initial event"));
+        REQUIRE(logs.flush());
+        co_return;
+    };
+    loop.start(queue_initial_log()).get();
     auto task = loop.start(channel.run());
     const auto delivered = origin.wait_until([&] {
-        return cancel ? origin.batches_.load() >= 1 && origin.heartbeats_.load() >= 2 : origin.batches_.load() >= (retry ? 2 : 1) && logs.retained_events() == 0;
+        return cancel ? origin.batches_.load() >= 1 && origin.heartbeats_.load() >= 2 : origin.acknowledged_log_batches_.load() >= 1 && origin.batches_.load() >= (retry ? 2 : 1);
     },
         std::chrono::seconds(12));
     // A normal drained batch must leave the channel idle, including after recovery.
@@ -682,12 +746,10 @@ void verify_multiplexed_logs(const std::filesystem::path& root, bool retry, bool
     }
     REQUIRE(delivered);
     if (cancel) {
-        REQUIRE(logs.retained_events() > 0);
-        REQUIRE(logs.take(node_id).has_value());
+        REQUIRE(origin.acknowledged_log_batches_ == 0);
         REQUIRE(origin.connections_ == 1);
         return;
     }
-    REQUIRE(logs.retained_events() == 0);
     REQUIRE(origin.connections_ == 1);
     REQUIRE(origin.heartbeats_while_logs_unacknowledged_ >= 2);
     REQUIRE(!origin.received_order_.empty() && origin.received_order_.front() == flexedge::node::v2::ClientEnvelope::kHeartbeat);
@@ -700,6 +762,164 @@ void verify_multiplexed_logs(const std::filesystem::path& root, bool retry, bool
     REQUIRE(count_logs(origin.received_logs_, "log", "info", "connection restored") == (retry ? 1 : 0));
     REQUIRE(std::none_of(origin.received_logs_.begin(), origin.received_logs_.end(),
         [](const auto& entry) { return entry.category() == "log-ingest"; }));
+}
+
+ruvia::task<void> run_log_delivery_session(const ruvia::event_loop& loop,
+    ruvia::websocket_client_config config, flexedge::node::log_delivery& delivery,
+    ruvia::stop_token stop) {
+    ruvia::websocket_client client(loop, std::move(config));
+    co_await client.connect();
+    const auto connection = client.with_options({.stop_token_ = stop});
+    flexedge::node::v2::ClientEnvelope authentication;
+    authentication.set_request_id("authenticate");
+    auto* identity = authentication.mutable_authenticate();
+    identity->set_node_id(node_id);
+    identity->set_secret(node_secret);
+    identity->set_multiplex_logs(true);
+    (void)co_await flexedge::node::authenticate_control_envelope(connection,
+        std::move(authentication), "delivery fixture did not authenticate");
+    const auto worker = loop.handle();
+    flexedge::node::control_stream stream(worker, connection, stop);
+    std::exception_ptr failure;
+    try {
+        stream.start();
+        stream.spawn_owned(delivery.run(stream, std::string(node_id)));
+        (void)co_await ruvia::sleep_for(worker, std::chrono::seconds(20), stream.get_stop_token());
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    co_await stream.shutdown();
+    co_await client.shutdown();
+    if (failure) {
+        std::rethrow_exception(failure);
+    }
+}
+
+// Reuse the same delivery owner across two real authenticated sessions. A
+// disconnected or cancelled session must not replace the unacknowledged wire batch.
+void verify_replayed_delivery(const std::filesystem::path& root, bool cancel) {
+    constexpr auto offline_events = 8192;
+    const auto config = offline_config();
+    channel_origin origin(config.active, flexedge::crypto::file_sha256(root / "node"),
+        {cancel ? session_behavior::lose_first_log_ack : session_behavior::disconnect_before_log_ack,
+            session_behavior::healthy});
+    ruvia::event_loop_pool loops({.loop_count_ = 1});
+    const auto loop = loops.loop(0);
+    auto [data_sender, data_receiver] = make_log_channel(loop, 62);
+    auto [control_sender, control_receiver] = make_log_channel(loop);
+    flexedge::node::log_producer logs(loop, std::move(control_sender));
+    flexedge::node::log_producer data_logs(loop, std::move(data_sender));
+    flexedge::node::log_delivery delivery(logs, std::move(data_receiver), std::move(control_receiver));
+    loops.start();
+    ruvia::stop_source receiving_stop;
+    ruvia::stop_source resumed_receiving_stop;
+    auto receiving = loop.start(delivery.receive_batches(receiving_stop.token()));
+    try {
+        const auto queue_initial_log = [&logs]() -> ruvia::task<void> {
+            REQUIRE(logs.node("info", "startup", "retained across sessions"));
+            REQUIRE(logs.flush());
+            co_return;
+        };
+        loop.start(queue_initial_log()).get();
+        const auto queue_offline_log = [&data_logs](std::string message) -> ruvia::task<void> {
+            REQUIRE(data_logs.node("info", "offline", message));
+            REQUIRE(data_logs.flush());
+            REQUIRE(data_logs.dropped_events() == 0);
+            co_return;
+        };
+        // Each producer call seals a single-event batch. Keeping more than the
+        // ingress capacity while disconnected requires the control-owned backlog.
+        for (int index = 0; index < offline_events; ++index) {
+            loop.start(queue_offline_log("offline event " + std::to_string(index))).get();
+        }
+        REQUIRE(origin.connections_ == 0);
+        const auto transport = flexedge::node::control_transport_config(
+            "ws://127.0.0.1:" + std::to_string(origin.port()));
+        ruvia::stop_source first_stop;
+        auto first = loop.start(run_log_delivery_session(loop, transport, delivery, first_stop.token()));
+        const auto first_received = origin.wait_until([&] { return origin.batches_.load() >= 1; },
+            std::chrono::seconds(5));
+        const auto cancelled_at = std::chrono::steady_clock::now();
+        if (cancel || !first_received) {
+            first_stop.request_stop();
+        }
+        first.get();
+        REQUIRE(std::chrono::steady_clock::now() - cancelled_at < std::chrono::seconds(2));
+        REQUIRE(first_received);
+        REQUIRE(origin.acknowledged_log_batches_ == 0);
+        loop.start(queue_offline_log("between sessions")).get();
+        const auto finish_ingress_handoff = [&loop]() -> ruvia::task<void> {
+            const auto worker = loop.handle();
+            (void)co_await ruvia::sleep_for(worker, std::chrono::milliseconds(1));
+        };
+        loop.start(finish_ingress_handoff()).get();
+        // The data budget is full and the last accepted batch is waiting for
+        // ACK capacity. Cancelling intake must retain that owned batch too.
+        receiving_stop.request_stop();
+        receiving.get();
+        receiving = loop.start(delivery.receive_batches(resumed_receiving_stop.token()));
+
+        ruvia::stop_source second_stop;
+        auto second = loop.start(run_log_delivery_session(loop, transport, delivery, second_stop.token()));
+        const auto replayed = origin.wait_until([&] { return origin.acknowledged_log_events_.load() >= offline_events + 2; },
+            std::chrono::seconds(5));
+        // With no producer input an acknowledged delivery must stay idle.
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        second_stop.request_stop();
+        second.get();
+        REQUIRE(replayed);
+        const auto verify_stale_data_snapshot = [&delivery, &logs]() -> ruvia::task<void> {
+            REQUIRE(delivery.queued_events({}, logs.snapshot()) == 0);
+            REQUIRE(logs.node("info", "control", "queued after acknowledged data"));
+            REQUIRE(logs.flush());
+            REQUIRE(delivery.queued_events({}, logs.snapshot()) == 1);
+            co_return;
+        };
+        loop.start(verify_stale_data_snapshot()).get();
+    } catch (...) {
+        receiving_stop.request_stop();
+        resumed_receiving_stop.request_stop();
+        if (receiving.valid()) {
+            receiving.get();
+        }
+        loops.stop();
+        loops.join();
+        origin.stop();
+        throw;
+    }
+    receiving_stop.request_stop();
+    resumed_receiving_stop.request_stop();
+    receiving.get();
+    loops.stop();
+    loops.join();
+    origin.stop();
+    if (origin.failure_) {
+        std::rethrow_exception(origin.failure_);
+    }
+    REQUIRE(origin.connections_ == 2);
+    REQUIRE(origin.delivered_batches_.size() >= 2);
+    REQUIRE(origin.delivered_batches_.size() == origin.acknowledged_log_batches_ + 1);
+    REQUIRE(origin.acknowledged_log_events_ == offline_events + 2);
+    REQUIRE(origin.delivered_batches_[0] == origin.delivered_batches_[1]);
+    REQUIRE(!origin.received_logs_.empty());
+    REQUIRE(origin.received_logs_[0].category() == "startup");
+    std::unordered_map<std::string, std::string> event_ids;
+    for (const auto& event : origin.received_logs_) {
+        REQUIRE(!event.id().empty());
+        const auto [position, inserted] = event_ids.emplace(event.message(), event.id());
+        REQUIRE(inserted || position->second == event.id());
+    }
+    REQUIRE(event_ids.size() == offline_events + 2);
+    bool combined{};
+    for (const auto& bytes : origin.delivered_batches_) {
+        flexedge::node::v2::LogDelivery wire;
+        REQUIRE(wire.ParseFromString(bytes));
+        REQUIRE(wire.node_id() == node_id);
+        REQUIRE(wire.events_size() <= static_cast<int>(flexedge::node::log_contract::max_delivery_events));
+        REQUIRE(bytes.size() <= flexedge::node::log_contract::max_delivery_bytes);
+        combined = combined || wire.events_size() > 1;
+    }
+    REQUIRE(combined);
 }
 
 ruvia::task<void> verify_priority_session(ruvia::websocket_client& client) {
@@ -945,6 +1165,8 @@ int main() {
         verify_multiplexed_logs(root, false);
         verify_multiplexed_logs(root, true);
         verify_multiplexed_logs(root, false, true);
+        verify_replayed_delivery(root, false);
+        verify_replayed_delivery(root, true);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

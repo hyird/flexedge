@@ -10,7 +10,7 @@
 #include <string_view>
 #include <utility>
 
-#include "node/runtime/log_buffer.h"
+#include "node/runtime/log_producer.h"
 
 namespace flexedge::node {
 
@@ -44,7 +44,7 @@ inline channel_failure_kind classify_channel_failure(ruvia::websocket_client_err
 // a new TCP connection or a normal batch close does not.
 class channel_log final {
 public:
-    channel_log(node_log_buffer& logs, std::string category)
+    channel_log(log_producer& logs, std::string category)
         : logs_(logs),
           category_(std::move(category)) {}
 
@@ -89,7 +89,7 @@ private:
         logs_.node(level, category_, message);
     }
 
-    node_log_buffer& logs_;
+    log_producer& logs_;
     std::string category_;
     std::size_t failure_count_{};
 };

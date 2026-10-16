@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -28,7 +29,7 @@
 #include "node/control/transport_config.h"
 #include "node/data/data_plane.h"
 #include "node/proto/control_protocol.h"
-#include "node/runtime/log_buffer.h"
+#include "node/runtime/log_producer.h"
 #include "node/runtime/node_credentials.h"
 #include "node/runtime/self_updater.h"
 #include "node/runtime/upgrade_record.h"
@@ -65,6 +66,15 @@ std::filesystem::path executable_path(std::string_view fallback) {
     std::_Exit(EXIT_FAILURE);
 }
 
+ruvia::task<void> run_node_channel(flexedge::node::control_channel& channel,
+    flexedge::node::log_producer& logs, std::optional<flexedge::node::upgrade_record> upgrade) {
+    if (upgrade) {
+        logs.node("info", "upgrade", upgrade->message());
+    }
+    logs.node("info", "runtime", std::string("flexedge node ") + std::string(flexedge::node::node_version) + " starting");
+    co_await channel.run();
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -78,23 +88,19 @@ int main(int argc, char* argv[]) {
         ruvia::event_loop_pool worker_loops;
         const auto loop = control_loops.loop(0);
         flexedge::node::runtime_state runtime;
-        auto [log_queued_sender, log_queued_receiver] =
-            ruvia::make_channel<bool>(loop.handle(), {.capacity_ = 1});
-        flexedge::node::node_log_buffer log_buffer(worker_loops.loop_count(),
-            [log_queued_sender] { (void)log_queued_sender.send(true); });
-        const auto updater_logs = log_buffer.background_producer();
+        auto [data_log_sender, data_log_receiver] =
+            ruvia::make_channel<flexedge::node::owned_log_batch>(loop.handle(),
+                {.capacity_ = flexedge::node::data_log_channel_capacity});
+        auto [control_log_sender, control_log_receiver] =
+            ruvia::make_channel<flexedge::node::owned_log_batch>(loop.handle(),
+                {.capacity_ = flexedge::node::control_log_channel_capacity});
+        flexedge::node::log_producer control_logs(loop, std::move(control_log_sender));
         const std::filesystem::path state_directory{"./state"};
         const auto binary_path = executable_path(argv[0]);
         auto credentials = flexedge::node::node_credentials::load(argv[2]);
-        if (const auto upgrade = flexedge::node::take_pending_upgrade_record(
-                state_directory / "pending-upgrade", flexedge::crypto::file_sha256(binary_path))) {
-            log_buffer.node("info", "upgrade", upgrade->message());
-        }
-        std::string startup_log{"flexedge node "};
-        startup_log.append(flexedge::node::node_version);
-        startup_log.append(" starting");
-        log_buffer.node("info", "runtime", startup_log);
-        flexedge::node::data_plane data_plane(worker_loops, loop, runtime, log_buffer);
+        auto startup_upgrade = flexedge::node::take_pending_upgrade_record(
+            state_directory / "pending-upgrade", flexedge::crypto::file_sha256(binary_path));
+        flexedge::node::data_plane data_plane(worker_loops, loop, runtime, data_log_sender);
         ruvia::stop_source stop_source;
         std::atomic<bool> shutting_down{};
         std::atomic<bool> restart_requested{};
@@ -117,9 +123,9 @@ int main(int argc, char* argv[]) {
             .current_version_ = std::string(flexedge::node::node_version),
             .upgrade_record_path_ = state_directory / "pending-upgrade",
             .node_log_ =
-                [updater_logs](std::string_view level, std::string_view category,
+                [&control_logs](std::string_view level, std::string_view category,
                     std::string_view message) {
-                    return updater_logs.node(level, category, message);
+                    return control_logs.node(level, category, message);
                 },
             .request_restart_ =
                 [&] {
@@ -137,12 +143,13 @@ int main(int argc, char* argv[]) {
                 .stop_token_ = stop_source.token(),
             },
             flexedge::node::state_store{state_directory, credentials.secret()}, credentials, runtime,
-            data_plane, log_buffer, self_updater, std::move(log_queued_receiver));
+            data_plane, control_logs, self_updater,
+            std::move(data_log_receiver), std::move(control_log_receiver));
         flexedge::node::loop_shutdown loop_shutdown(worker_loops, control_loops);
         worker_loops.start();
         control_loops.start();
         data_plane.start();
-        auto task = loop.start(channel.run());
+        auto task = loop.start(run_node_channel(channel, control_logs, std::move(startup_upgrade)));
         try {
             task.get();
         } catch (...) {

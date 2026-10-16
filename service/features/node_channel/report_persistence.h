@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 
+#include "service/features/background/stream_consumers.h"
 #include "service/features/background/work_available.h"
 #include "service/features/live_resource/notification_outbox.h"
 #include "service/features/logging/logger.h"
@@ -164,25 +165,6 @@ if remaining > 0 then redis.call('SET',KEYS[4],remaining) else redis.call('DEL',
 return 1
 )lua"};
 
-inline ruvia::task<void> clean_report_consumers(ruvia::redis_handle redis) {
-    constexpr std::string_view script{R"lua(
-local consumers=redis.call('XINFO','CONSUMERS',KEYS[1],ARGV[1])
-for _,fields in ipairs(consumers) do
-    local name,pending,idle
-    for i=1,#fields,2 do
-        if fields[i]=='name' then name=fields[i+1] end
-        if fields[i]=='pending' then pending=tonumber(fields[i+1]) end
-        if fields[i]=='idle' then idle=tonumber(fields[i+1]) end
-    end
-    if name and pending==0 and idle and idle>=300000 then redis.call('XGROUP','DELCONSUMER',KEYS[1],ARGV[1],name) end
-end
-return 1
-)lua"};
-    const std::array keys{report_queue::stream_key};
-    const std::array args{report_queue::group};
-    service::utils::require_redis_success(co_await redis.eval(script, keys, args), "could not clean idle node report consumers");
-}
-
 // Completion retains a budgeted Redis cleanup record until this transaction
 // commits. Process loss before or after either commit is safe to retry.
 template <typename context_type>
@@ -281,6 +263,7 @@ ruvia::task<void> run_reports(context_type& context) {
     const auto consumer = service::utils::random_token();
     std::string receipt_cursor;
     auto next_orphan_cleanup = std::chrono::steady_clock::now();
+    auto next_consumer_cleanup = next_orphan_cleanup;
     bool initialized{};
     while (!context.get_stop_token().stop_requested()) {
         bool failed{};
@@ -288,6 +271,12 @@ ruvia::task<void> run_reports(context_type& context) {
             if (!initialized) {
                 co_await report_queue::initialize(context.redis());
                 initialized = true;
+            }
+            if (std::chrono::steady_clock::now() >= next_consumer_cleanup) {
+                (void)co_await service::background::stream_consumers::remove_idle(
+                    context.redis(), report_queue::stream_key, report_queue::group, consumer);
+                next_consumer_cleanup = std::chrono::steady_clock::now() +
+                                        service::background::stream_consumers::cleanup_interval;
             }
             (void)co_await clean_report_receipts(context);
             if (std::chrono::steady_clock::now() >= next_orphan_cleanup) {
@@ -298,7 +287,8 @@ ruvia::task<void> run_reports(context_type& context) {
                 co_await persist_claim(context, consumer, *entry);
                 continue;
             }
-            co_await clean_report_consumers(context.redis());
+            (void)co_await service::background::stream_consumers::remove_empty(
+                context.redis(), report_queue::stream_key, report_queue::group, consumer);
             const auto duration = co_await report_queue::idle_wait(context.redis());
             (void)co_await own.receive_for(duration, context.get_stop_token());
         } catch (const std::exception&) {

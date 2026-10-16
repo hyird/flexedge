@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "node/runtime/connected_clients.h"
+#include "node/runtime/log_producer.h"
 
 namespace flexedge::node {
 
@@ -77,6 +78,7 @@ struct worker_counters final {
     ruvia::event_loop loop_;
     worker_metrics* metrics_{};
     const connected_clients* clients_{};
+    const log_producer* logs_{};
 };
 
 // Load of all data workers at one moment.
@@ -85,6 +87,7 @@ struct data_plane_load final {
     std::uint64_t traffic_out_bytes_{};
     // Distinct client IP addresses with an open connection on any worker.
     std::int64_t connected_ip_count_{};
+    log_production_snapshot logs_{};
 };
 
 inline constexpr auto worker_report_timeout = std::chrono::seconds(2);
@@ -102,16 +105,18 @@ inline ruvia::task<std::optional<data_plane_load>> collect_worker_load(ruvia::wo
         std::int64_t connection_count_{};
         std::uint64_t traffic_out_bytes_{};
         std::vector<connected_clients::address_key> addresses_;
+        log_production_snapshot logs_{};
     };
     auto [sender, receiver] =
         ruvia::make_channel<worker_load>(std::move(owner), {.capacity_ = workers.size()});
     for (const auto& worker : workers) {
         const auto posted = worker.loop_.post(
-            [sender, metrics = worker.metrics_, clients = worker.clients_] {
+            [sender, metrics = worker.metrics_, clients = worker.clients_, logs = worker.logs_] {
                 try {
                     (void)sender.send({.connection_count_ = metrics->connection_count(),
                         .traffic_out_bytes_ = metrics->traffic_out_bytes(),
-                        .addresses_ = clients->snapshot()});
+                        .addresses_ = clients->snapshot(),
+                        .logs_ = logs ? logs->snapshot() : log_production_snapshot{}});
                 } catch (...) {
                     // Without this worker's copy no load is reported; closing ends the wait now.
                     sender.close();
@@ -131,6 +136,9 @@ inline ruvia::task<std::optional<data_plane_load>> collect_worker_load(ruvia::wo
         const auto& load = copy.value();
         result.connection_count_ += load.connection_count_;
         result.traffic_out_bytes_ += load.traffic_out_bytes_;
+        result.logs_.published_events_ += load.logs_.published_events_;
+        result.logs_.queued_events_ += load.logs_.queued_events_;
+        result.logs_.dropped_events_ += load.logs_.dropped_events_;
         addresses.insert(addresses.end(), load.addresses_.begin(), load.addresses_.end());
     }
     std::ranges::sort(addresses);

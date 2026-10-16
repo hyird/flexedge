@@ -1,5 +1,7 @@
 #include "node/runtime/config_activation.h"
 
+#include <ruvia/core/channel.h>
+
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -10,6 +12,7 @@
 #include <vector>
 
 #include "node/runtime/apply_trace.h"
+#include "node/runtime/log_producer.h"
 #include "node/runtime/loop_shutdown.h"
 #include "tests/support/config_fixture.h"
 #include "tests/support/http_client.h"
@@ -198,8 +201,9 @@ int main() {
         ruvia::event_loop_pool workers({.loop_count_ = 1});
         ruvia::event_loop_pool control({.loop_count_ = 1});
         flexedge::node::runtime_state activation_runtime;
-        flexedge::node::node_log_buffer activation_logs(1);
-        flexedge::node::data_plane plane(workers, control.loop(0), activation_runtime, activation_logs);
+        auto [log_sender, log_receiver] = ruvia::make_channel<flexedge::node::owned_log_batch>(
+            control.loop(0).handle(), {.capacity_ = 32});
+        flexedge::node::data_plane plane(workers, control.loop(0), activation_runtime, log_sender);
         flexedge::node::state_store good_store(state_directory / "activation-good", std::string(state_secret));
         const auto bad_directory = state_directory / "activation-bad";
         std::filesystem::create_directories(bad_directory);

@@ -10,7 +10,7 @@
 
 #include "node/data/http1_request_reader.h"
 #include "node/proto/edge_control.pb.h"
-#include "node/runtime/log_buffer.h"
+#include "node/runtime/log_producer.h"
 
 namespace flexedge::node {
 
@@ -18,7 +18,7 @@ namespace flexedge::node {
 // records it at most once, when the response status is known.
 class access_log_capture final {
 public:
-    access_log_capture(node_log_buffer::producer& logs, bool secure, std::string tls_fingerprint)
+    access_log_capture(log_producer& logs, bool secure, std::string tls_fingerprint)
         : logs_(logs),
           tls_fingerprint_(std::move(tls_fingerprint)),
           secure_(secure) {}
@@ -50,7 +50,7 @@ public:
         if (!response_headers_enabled_ || !response_headers_.empty()) {
             return;
         }
-        response_headers_ = header_block(response_fields(wire), node_log_buffer::max_response_headers_bytes);
+        response_headers_ = header_block(response_fields(wire), log_producer::max_response_headers_bytes);
     }
 
     void record(std::uint32_t status_code, std::uint64_t response_bytes,
@@ -97,7 +97,7 @@ private:
     }
 
     static std::string request_header_block(const http1_request_reader& parsed) {
-        constexpr auto maximum = node_log_buffer::max_request_headers_bytes;
+        constexpr auto maximum = log_producer::max_request_headers_bytes;
         std::string result;
         for (const auto& header : parsed.request().headers()) {
             append_bounded(result, header.name(), maximum);
@@ -196,8 +196,8 @@ private:
             request_headers_ = request_header_block(parsed);
         }
         if (website.access_log_request_body() && parsed.has_body() && body) {
-            request_body_truncated_ = body->size() > node_log_buffer::max_request_body_bytes;
-            request_body_.assign(body->substr(0, node_log_buffer::max_request_body_bytes));
+            request_body_truncated_ = body->size() > log_producer::max_request_body_bytes;
+            request_body_.assign(body->substr(0, log_producer::max_request_body_bytes));
         }
     }
 
@@ -209,7 +209,7 @@ private:
         return range >= 1 && range <= 5 && status_code_ranges_[range - 1];
     }
 
-    node_log_buffer::producer& logs_;
+    log_producer& logs_;
     std::chrono::steady_clock::time_point started_at_{std::chrono::steady_clock::now()};
     std::string website_id_;
     std::string method_;

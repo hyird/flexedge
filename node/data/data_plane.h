@@ -23,7 +23,7 @@
 #include "node/data/worker_metrics.h"
 #include "node/runtime/compiled_config.h"
 #include "node/runtime/connected_clients.h"
-#include "node/runtime/log_buffer.h"
+#include "node/runtime/log_producer.h"
 
 namespace flexedge::node {
 
@@ -68,11 +68,10 @@ private:
 class data_plane final {
 public:
     data_plane(ruvia::event_loop_pool& loops, ruvia::event_loop owner, runtime_state& runtime,
-        node_log_buffer& logs)
+        ruvia::channel_sender<owned_log_batch> logs)
         : loops_(loops),
           owner_(std::move(owner)),
           runtime_(runtime),
-          logs_(logs),
           health_supervisor_(origin_health_supervisor::create(owner_, runtime_, health_probe_tls_)),
           stop_registration_(owner_.on_stop([this]() -> ruvia::task<void> {
               {
@@ -86,11 +85,11 @@ public:
         workers_.reserve(loops_.loop_count());
         counters_.reserve(loops_.loop_count());
         for (std::size_t index = 0; index < loops_.loop_count(); ++index) {
-            workers_.push_back(std::make_unique<worker_state>(loops_.loop(index).executor(),
-                logs_.worker_producer(index)));
+            workers_.push_back(std::make_unique<worker_state>(loops_.loop(index), logs));
             counters_.push_back({.loop_ = loops_.loop(index),
                 .metrics_ = &workers_.back()->metrics_,
-                .clients_ = &workers_.back()->clients_});
+                .clients_ = &workers_.back()->clients_,
+                .logs_ = &workers_.back()->logs_});
         }
     }
 
@@ -247,15 +246,15 @@ public:
 
 private:
     struct worker_state final {
-        worker_state(asio::any_io_executor executor, node_log_buffer::producer producer)
-            : origin_connections_(std::move(executor), origin_tls_),
-              logs_(producer) {}
+        worker_state(ruvia::event_loop loop, ruvia::channel_sender<owned_log_batch> logs)
+            : origin_connections_(loop.executor(), origin_tls_),
+              logs_(std::move(loop), std::move(logs)) {}
 
         worker_metrics metrics_;
         connected_clients clients_;
         origin_tls_context origin_tls_;
         origin_connection_pool origin_connections_;
-        node_log_buffer::producer logs_;
+        log_producer logs_;
     };
 
     [[nodiscard]] http_session_context session_context(std::size_t worker_index) noexcept {
@@ -326,7 +325,6 @@ private:
     bool stop_queued_{};
     bool owner_stopping_{};
     runtime_state& runtime_;
-    node_log_buffer& logs_;
     origin_tls_context health_probe_tls_;
     tls_context_registry tls_contexts_;
     std::shared_ptr<origin_health_supervisor> health_supervisor_;

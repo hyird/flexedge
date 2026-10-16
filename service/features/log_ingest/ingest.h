@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "service/features/background/stream_consumers.h"
 #include "service/features/background/work_available.h"
 #include "service/features/live_resource/notification_outbox.h"
 #include "service/features/live_resource/redis_snapshot_cache.h"
@@ -376,6 +377,7 @@ inline ruvia::task<void> run_worker(context_t_type& context, std::string consume
     const auto own = service::background::work_available::subscribe(context, work_type);
     bool initialized{};
     auto next_recovery = std::chrono::steady_clock::now();
+    auto next_consumer_cleanup = next_recovery;
     while (!context.get_stop_token().stop_requested()) {
         bool failed{};
         try {
@@ -384,6 +386,11 @@ inline ruvia::task<void> run_worker(context_t_type& context, std::string consume
                 initialized = true;
             }
             const auto now = std::chrono::steady_clock::now();
+            if (now >= next_consumer_cleanup) {
+                (void)co_await service::background::stream_consumers::remove_idle(
+                    context.redis(), queue::stream_key, queue::consumer_group, consumer);
+                next_consumer_cleanup = now + service::background::stream_consumers::cleanup_interval;
+            }
             if (now >= next_recovery) {
                 co_await recover_stale(context, consumer);
                 next_recovery = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -397,6 +404,8 @@ inline ruvia::task<void> run_worker(context_t_type& context, std::string consume
                 (void)co_await process(context, consumer, std::move(entries));
                 continue;
             }
+            (void)co_await service::background::stream_consumers::remove_empty(
+                context.redis(), queue::stream_key, queue::consumer_group, consumer);
             // Only a wait deadline is local; Redis retains every retry record.
             // New deliveries wake immediately, retries use their real deadline,
             // and abandoned claims retain the existing recovery cadence.

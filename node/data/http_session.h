@@ -40,7 +40,7 @@
 #include "node/data/worker_metrics.h"
 #include "node/runtime/connected_clients.h"
 #include "node/runtime/http_redirect.h"
-#include "node/runtime/log_buffer.h"
+#include "node/runtime/log_producer.h"
 #include "node/runtime/runtime_state.h"
 
 namespace flexedge::node {
@@ -51,7 +51,7 @@ struct http_session_context final {
     origin_health_supervisor& health_;
     worker_metrics& metrics_;
     connected_clients& clients_;
-    node_log_buffer::producer& logs_;
+    log_producer& logs_;
     origin_connection_pool& origin_connections_;
     buffered_bytes_budget& request_buffers_;
     buffered_bytes_budget& response_buffers_;

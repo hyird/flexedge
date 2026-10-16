@@ -432,6 +432,11 @@ if(BUILD_TESTING)
         SOURCES tests/log_ingest_queue.cpp
         LIBRARIES ruvia::web
     )
+    flexedge_add_test(stream_consumers
+        SOURCES tests/stream_consumers.cpp
+        LIBRARIES ruvia::web
+    )
+    set_tests_properties(flexedge_stream_consumers PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90 RUN_SERIAL TRUE)
     flexedge_add_test(log_delivery
         SOURCES tests/log_delivery.cpp
         LIBRARIES flexedge_log_ingest_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto
