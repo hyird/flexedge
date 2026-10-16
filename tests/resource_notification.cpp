@@ -3,6 +3,7 @@
 #include <ruvia/core/worker_wait_result.h>
 #include <ruvia/web/redis/redis_client.h>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -42,7 +43,7 @@ ruvia::task<bool> signalled(live::hub::subscription& subscription, std::chrono::
     co_return (co_await subscription.receive_for(timeout, {})).has_value();
 }
 
-ruvia::task<std::vector<notifications::entry>> exchange(ruvia::redis_client& redis) {
+ruvia::task<std::vector<notifications::resource_notification>> exchange(ruvia::redis_client& redis) {
     const auto handle = redis.handle();
     constexpr std::string_view first_id{"resource-notification-qa-first"};
     constexpr std::string_view second_id{"resource-notification-qa-second"};
@@ -53,7 +54,10 @@ ruvia::task<std::vector<notifications::entry>> exchange(ruvia::redis_client& red
     for (const auto key : cache::keys) {
         (void)co_await handle.command("DEL", key);
     }
-    const auto cursor = co_await notifications::current_cursor(handle);
+    const std::array keys{notifications::stream_key};
+    std::array<live::notification_cursor, 1> cursors;
+    const auto heads = co_await live::read_notification_batch(handle, keys, cursors, true);
+    live::accept_notification_cursor(cursors[0], heads.array()[1].array()[0]);
 
     const live::snapshot_key tenant_a{"tenant-a", live::resource::overview, "", live::query_key("overview")};
     const live::snapshot_key tenant_b{"tenant-b", live::resource::overview, "", live::query_key("overview")};
@@ -92,12 +96,23 @@ ruvia::task<std::vector<notifications::entry>> exchange(ruvia::redis_client& red
     const auto other = notifications::encode(
         std::move(notifications::resource_notification("tenant-b").changed(live::resource::nodes, "node-b")));
     co_await service::node_presence::resource_relay::publish(handle, second_id, live::outbox::pack(other));
-    const auto first_reader = co_await notifications::read(handle, cursor);
-    const auto second_reader = co_await notifications::read(handle, cursor);
-    require(first_reader.entries_.size() == 2 && second_reader.entries_.size() == 2 &&
-                first_reader.entries_.front().id_ == second_reader.entries_.front().id_ &&
-                first_reader.entries_.back().id_ == second_reader.entries_.back().id_,
+    const auto first_reader = co_await live::read_notification_batch(handle, keys, cursors, false);
+    const auto second_reader = co_await live::read_notification_batch(handle, keys, cursors, false);
+    const auto first_entries = first_reader.array()[1].array()[0].array()[1].array();
+    const auto second_entries = second_reader.array()[1].array()[0].array()[1].array();
+    require(first_entries.size() == 2 && second_entries.size() == 2 &&
+                first_entries.front().array()[0].string() == second_entries.front().array()[0].string() &&
+                first_entries.back().array()[0].string() == second_entries.back().array()[0].string(),
         "two independent Web Worker cursors each receive the broadcast exactly once");
+    std::vector<notifications::resource_notification> events;
+    for (const auto& entry : first_entries) {
+        auto notification = notifications::stream::parse(entry);
+        require(notification.has_value(), "all event fields decode");
+        events.push_back(std::move(*notification));
+    }
+    live::accept_notification_cursor(cursors[0], first_reader.array()[1].array()[0]);
+    const auto drained = co_await live::read_notification_batch(handle, keys, cursors, false);
+    require(drained.array()[1].array()[0].array()[1].array().empty(), "a drained reader does not repeat events");
 
     (void)co_await handle.command("DEL", notifications::stream_key);
     (void)co_await handle.command("SET", notifications::stream_key, "wrong-type-fixture");
@@ -111,13 +126,15 @@ ruvia::task<std::vector<notifications::entry>> exchange(ruvia::redis_client& red
         "failed publication does not falsely record successful deduplication");
     (void)co_await handle.command("DEL", notifications::stream_key);
     co_await service::node_presence::resource_relay::publish(handle, failed_id, payload);
-    require((co_await notifications::read(handle, "0-0")).entries_.size() == 1,
+    const std::array<live::notification_cursor, 1> fresh_cursors{};
+    const auto repaired = co_await live::read_notification_batch(handle, keys, fresh_cursors, false);
+    require(repaired.array()[1].array()[0].array()[1].array().size() == 1,
         "the persisted event can be published after repairing Redis");
     (void)co_await handle.command("DEL", notifications::stream_key, first_key, second_key, failed_key);
     for (const auto key : cache::keys) {
         (void)co_await handle.command("DEL", key);
     }
-    co_return first_reader.entries_;
+    co_return events;
 }
 
 }  // namespace
@@ -134,12 +151,12 @@ int main() {
         loops.start();
         first.start(redis.connect()).get();
         const auto entries = first.start(exchange(redis)).get();
-        require(entries.size() == 2 && entries.front().notification_ && entries.back().notification_, "all event fields decode");
-        const auto& attempt = *entries.front().notification_;
+        require(entries.size() == 2, "both published events decode");
+        const auto& attempt = entries.front();
         require(attempt.task_attempts_.size() == 1 && attempt.task_attempts_[0].task_id_ == "task-a" &&
                     attempt.task_attempts_[0].notice_.event_id_ == 42 && attempt.changes_.size() == 2 &&
                     attempt.changes_[0].resource_ == live::resource::tasks && attempt.changes_[0].id_ == "task-a" &&
-                    entries.back().notification_->tenant_id_ == "tenant-b",
+                    entries.back().tenant_id_ == "tenant-b",
             "task attempt and tenant scope round trip");
 
         worker_states worker_a, worker_b;

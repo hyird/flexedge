@@ -19,6 +19,7 @@
 #include "service/config/outbound.h"
 #include "service/domains/overview/overview_types.h"
 #include "service/features/certificate/worker.h"
+#include "service/features/dns/driver.h"
 #include "service/features/dns/record_reconciliation.h"
 #include "service/features/dns/registry.h"
 #include "service/features/dns_sync/worker.h"
@@ -248,6 +249,13 @@ int run_architecture_tests() {
     static_assert(service::dns::find_dns_provider("cloudflare")->supports_proxy_);
     static_assert(service::dns::find_dns_provider("aliyun")->supports_routing_lines_);
     static_assert(service::dns::find_dns_provider("unknown") == nullptr);
+    const service::dns::dns_provider_driver cloudflare_driver("cloudflare");
+    const service::dns::dns_provider_driver aliyun_driver("aliyun");
+    REQUIRE(!cloudflare_driver.supports_routing_lines() && cloudflare_driver.minimum_record_ttl() == 1);
+    REQUIRE(aliyun_driver.supports_routing_lines() && aliyun_driver.minimum_record_ttl() == 600);
+    REQUIRE(cloudflare_driver.record_names().remote_record_name("@", "example.com") == "example.com");
+    REQUIRE(aliyun_driver.record_names().remote_record_name("@", "example.com") == "@");
+    REQUIRE(throws_runtime_error([] { (void)service::dns::dns_provider_driver("unknown"); }));
     struct reconciliation_test_record final {
         std::string id_;
         bool desired_;

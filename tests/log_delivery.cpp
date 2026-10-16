@@ -6,6 +6,7 @@
 #include <ruvia/web/redis/redis_client.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -17,6 +18,7 @@
 #include <string_view>
 #include <vector>
 
+#include "service/features/live_resource/notification_reader.h"
 #include "service/features/log_ingest/notifications.h"
 #include "service/features/log_ingest/worker.h"
 #include "service/features/logging/logger.h"
@@ -428,7 +430,13 @@ ruvia::task<void> verify(delivery_context& context) {
     (void)co_await db.execute("UPDATE sys_notification_outbox SET available_at=now()");
     co_await deliver_notifications(context);
     co_await check_counts(context, 1, 1, 0);
-    require((co_await ingest::notifications::read(context.redis(), "0-0")).notifications_.size() == 2,
+    const std::array notification_keys{ingest::notifications::stream_key};
+    const std::array<live::notification_cursor, 1> notification_cursors{};
+    const auto notification_batch = co_await live::read_notification_batch(
+        context.redis(), notification_keys, notification_cursors, false);
+    const auto notifications = notification_batch.array()[1].array()[0].array()[1].array();
+    require(notifications.size() == 2 && ingest::notifications::stream::parse(notifications[0]) &&
+                ingest::notifications::stream::parse(notifications[1]),
         "recovered publication emits the committed access and node notifications");
 
     (void)co_await db.execute("CREATE FUNCTION reject_log() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'permanent QA log constraint' USING ERRCODE='23514'; END $$");

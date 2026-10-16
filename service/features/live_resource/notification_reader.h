@@ -42,6 +42,7 @@
 namespace service::live_resource {
 
 inline constexpr auto notification_retry_delay = std::chrono::seconds(1);
+inline constexpr auto notification_read_timeout = std::chrono::seconds(20);
 
 struct notification_cursor final {
     std::string id_{"0-0"};
@@ -242,7 +243,7 @@ public:
         while (!context.get_stop_token().stop_requested()) {
             bool retry{};
             try {
-                const auto redis = context.redis().with_options({.timeout_ = notifications::read_timeout,
+                const auto redis = context.redis().with_options({.timeout_ = notification_read_timeout,
                     .stop_token_ = context.get_stop_token()});
                 auto current_generation = co_await service::background::work_available::generation(redis);
                 if (!generation.empty() && current_generation != generation) {

@@ -3,7 +3,6 @@
 #include <ruvia/core/task.h>
 #include <ruvia/web/context.h>
 
-#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -22,8 +21,7 @@
 
 namespace service::dns {
 
-// Every supported DNS provider: a client with the same operations and its own
-// record rules. A new provider is one client and one alternative here.
+// Supported DNS clients share operations while keeping their own record rules.
 using dns_provider_client = std::variant<cloudflare_client, aliyun_client>;
 
 // Outcome of reconciling one desired record: the provider record id it now
@@ -56,14 +54,14 @@ public:
     template <typename runtime_type>
     ruvia::task<std::vector<provider_zone>> verify(runtime_type& c, service::attempt_trace::recorder& trace,
         std::string_view account_id, std::string_view secret) const {
-        co_return co_await std::visit(
+        return std::visit(
             [&](const auto& client) { return client.verify(c, trace, account_id, secret); }, client_);
     }
 
     template <typename runtime_type>
     ruvia::task<provider_zone> find_zone(runtime_type& c, service::attempt_trace::recorder& trace,
         std::string_view account_id, std::string_view secret, std::string_view domain) const {
-        co_return co_await std::visit(
+        return std::visit(
             [&](const auto& client) { return client.find_zone(c, trace, account_id, secret, domain); }, client_);
     }
 
@@ -71,7 +69,7 @@ public:
     ruvia::task<std::vector<provider_record>> list_records(runtime_type& c, service::attempt_trace::recorder& trace,
         std::string_view account_id, std::string_view secret, std::string_view zone_id,
         std::string_view domain) const {
-        co_return co_await std::visit(
+        return std::visit(
             [&](const auto& client) { return client.list_records(c, trace, account_id, secret, zone_id, domain); },
             client_);
     }
@@ -79,7 +77,7 @@ public:
     template <typename runtime_type>
     ruvia::task<std::vector<provider_line>> list_lines(runtime_type& c, service::attempt_trace::recorder& trace,
         std::string_view account_id, std::string_view secret, std::string_view domain) const {
-        co_return co_await std::visit(
+        return std::visit(
             [&](const auto& client) { return client.list_lines(c, trace, account_id, secret, domain); }, client_);
     }
 
@@ -110,7 +108,7 @@ public:
     ruvia::task<void> delete_record(runtime_type& c, service::attempt_trace::recorder& trace,
         std::string_view account_id, std::string_view secret, std::string_view zone_id, std::string_view record_id,
         std::string_view subject) const {
-        co_await std::visit(
+        return std::visit(
             [&](const auto& client) {
                 return client.delete_record(c, trace, account_id, secret, zone_id, record_id, subject);
             },
@@ -118,19 +116,15 @@ public:
     }
 
 private:
-    template <std::size_t index = 0>
     [[nodiscard]] static dns_provider_client make_client(std::string_view provider,
         service::outbound_http::quota_scope scope) {
-        if constexpr (index == std::variant_size_v<dns_provider_client>) {
-            throw std::invalid_argument("不支持的 DNS 服务商类型");
-        } else {
-            using client_type = std::variant_alternative_t<index, dns_provider_client>;
-            static_assert(find_dns_provider(client_type::code) != nullptr, "every DNS client is a registered provider");
-            if (client_type::code == provider) {
-                return dns_provider_client(std::in_place_index<index>, std::move(scope));
-            }
-            return make_client<index + 1>(provider, std::move(scope));
+        if (provider == cloudflare_client::code) {
+            return dns_provider_client(std::in_place_type<cloudflare_client>, std::move(scope));
         }
+        if (provider == aliyun_client::code) {
+            return dns_provider_client(std::in_place_type<aliyun_client>, std::move(scope));
+        }
+        throw std::invalid_argument("不支持的 DNS 服务商类型");
     }
 
     // Reuses, updates or creates the provider record for `desired`, by the

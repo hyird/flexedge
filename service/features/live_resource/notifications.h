@@ -1,8 +1,5 @@
 #pragma once
 
-#include <ruvia/core/stop_token.h>
-#include <ruvia/core/task.h>
-#include <ruvia/core/timer.h>
 #include <ruvia/web/redis/redis.h>
 
 #include <algorithm>
@@ -10,7 +7,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <exception>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -20,8 +16,6 @@
 #include <vector>
 
 #include "service/features/live_resource/fanout.h"
-#include "service/features/logging/logger.h"
-#include "service/utils/redis_reply.h"
 
 // Committed resource changes travel through one Redis stream. Every producer
 // (Web Worker request, agent control connection, background worker) appends
@@ -35,9 +29,6 @@ inline constexpr std::string_view stream_key{"flexedge:resource-notifications:v1
 // Readers follow the stream head and consume entries as they arrive; the cap
 // only bounds Redis memory (about 0.6 KB per entry).
 inline constexpr std::int64_t max_entries{10000};
-inline constexpr std::uint64_t read_batch_size{128};
-inline constexpr auto read_block = std::chrono::seconds(15);
-inline constexpr auto read_timeout = std::chrono::seconds(20);
 // A producer never waits long on Redis: the business result is committed.
 inline constexpr auto send_timeout = std::chrono::seconds(1);
 // Per-entry bounds. Beyond them a notification degrades to plain changes or
@@ -141,7 +132,8 @@ struct resource_notification final {
     resource_notification& node_seen(std::string_view node_id) {
         node_id_ = std::string(node_id);
         node_seen_unix_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
+            std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
         return *this;
     }
     resource_notification& node_runtime(std::string_view node_id, std::string payload) {
@@ -336,7 +328,9 @@ inline std::vector<std::string_view> split(std::string_view value, char separato
             value.node_id_ = std::string(field);
         } else if (name == "node_seen_unix_ms") {
             const auto seen = detail::parse_integer<std::int64_t>(field);
-            if (!seen || *seen < 0) return std::nullopt;
+            if (!seen || *seen < 0) {
+                return std::nullopt;
+            }
             value.node_seen_unix_ms_ = *seen;
         } else if (name == "node_runtime") {
             value.node_runtime_ = std::string(field);
@@ -384,84 +378,5 @@ struct stream final {
         return parse_fields(entry.array()[1].array());
     }
 };
-
-struct entry final {
-    std::string id_;
-    std::optional<resource_notification> notification_;
-};
-
-struct read_batch final {
-    std::vector<entry> entries_;
-    std::optional<std::string> cursor_;
-};
-
-inline std::string current_entry_id(const ruvia::redis_value& value) {
-    service::utils::require_redis_success(value, "could not read resource notification cursor");
-    if (value.null()) {
-        return "0-0";
-    }
-    if (value.kind() != ruvia::redis_value::kind_type::array) {
-        throw std::runtime_error("unexpected resource notification cursor reply");
-    }
-    const auto entries = value.array();
-    if (entries.empty()) {
-        return "0-0";
-    }
-    const auto item = entries.front().array();
-    if (item.size() != 2 || item.front().kind() != ruvia::redis_value::kind_type::string) {
-        throw std::runtime_error("unexpected resource notification cursor entry");
-    }
-    return std::string(item.front().string());
-}
-
-// The newest entry id: a reader starting now skips older entries, which its
-// fresh subscriptions already observe through their initial snapshots.
-inline ruvia::task<std::string> current_cursor(ruvia::redis_handle redis) {
-    co_return current_entry_id(co_await redis.command("XREVRANGE", stream_key, "+", "-", "COUNT", "1"));
-}
-
-inline read_batch parse_read_result(const ruvia::redis_value& value) {
-    service::utils::require_redis_success(value, "could not read resource notifications");
-    read_batch output;
-    if (value.null()) {
-        return output;
-    }
-    if (value.kind() != ruvia::redis_value::kind_type::array) {
-        throw std::runtime_error("unexpected resource notification read reply");
-    }
-    const auto streams = value.array();
-    if (streams.empty()) {
-        return output;
-    }
-    if (streams.size() != 1 || streams.front().kind() != ruvia::redis_value::kind_type::array) {
-        throw std::runtime_error("unexpected resource notification read reply");
-    }
-    const auto stream = streams.front().array();
-    if (stream.size() != 2 || stream[0].kind() != ruvia::redis_value::kind_type::string ||
-        stream[0].string() != stream_key || stream[1].kind() != ruvia::redis_value::kind_type::array) {
-        throw std::runtime_error("unexpected resource notification stream reply");
-    }
-    const auto entries = stream[1].array();
-    output.entries_.reserve(entries.size());
-    for (const auto& item : entries) {
-        if (item.kind() != ruvia::redis_value::kind_type::array || item.array().size() != 2 ||
-            item.array()[0].kind() != ruvia::redis_value::kind_type::string ||
-            item.array()[1].kind() != ruvia::redis_value::kind_type::array) {
-            throw std::runtime_error("unexpected resource notification entry");
-        }
-        const auto parts = item.array();
-        output.cursor_ = std::string(parts[0].string());
-        output.entries_.push_back({std::string(parts[0].string()), parse_fields(parts[1].array())});
-    }
-    return output;
-}
-
-inline ruvia::task<read_batch> read(ruvia::redis_handle redis, std::string_view cursor) {
-    const auto block_ms = std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(read_block).count());
-    const auto count = std::to_string(read_batch_size);
-    const auto redis_with_timeout = redis.with_options({.timeout_ = read_timeout});
-    co_return parse_read_result(co_await redis_with_timeout.command(
-        "XREAD", "BLOCK", block_ms, "COUNT", count, "STREAMS", stream_key, cursor));
-}
 
 }  // namespace service::live_resource::notifications

@@ -163,12 +163,12 @@ int main() {
             return 77;
         }
         const auto& migrations = service::config::schema_migrations;
-        require(migrations.size() == 2 && migrations[0].id() == "0001_initial" &&
+        require(migrations.size() >= 2 && migrations[0].id() == "0001_initial" &&
                     migrations[1].id() == "0002_log_event_lookup",
-            "baseline is followed by one append-only migration");
+            "the log index migration follows the installation baseline");
         const auto baseline = std::span<const ruvia::db_migration>(migrations).first(1);
         const test_support::postgres_test_database fresh(*config), upgrade(*config), conflict(*config);
-        migrate(fresh, migrations, 2);
+        migrate(fresh, migrations, migrations.size());
         require(fresh.run(verify_indexes) == 0, "fresh install");
         require(fresh.run(insert_logs) == 0 && fresh.run(verify_preserved) == 0,
             "chunks created after installation inherit the identity indexes");
@@ -176,7 +176,7 @@ int main() {
         require(fresh.run(verify_indexes) == 0, "repeat installation");
         migrate(upgrade, baseline, 1);
         require(upgrade.run(insert_logs) == 0, "prepare existing baseline with logs");
-        migrate(upgrade, migrations, 1);
+        migrate(upgrade, migrations, migrations.size() - baseline.size());
         require(upgrade.run(verify_indexes) == 0 && upgrade.run(verify_preserved) == 0, "upgrade an existing installation");
         migrate(upgrade, migrations, 0);
         require(upgrade.run(verify_preserved) == 0, "repeat upgrade preserves data");
@@ -184,7 +184,7 @@ int main() {
         require(conflict.run(insert_logs) == 0 && conflict.run(create_conflict) == 0, "prepare schema drift");
         require_rejected(conflict, migrations);
         require(conflict.run(verify_rollback) == 0, "failed upgrade rolls back atomically");
-        migrate(conflict, migrations, 1);
+        migrate(conflict, migrations, migrations.size() - baseline.size());
         require(conflict.run(verify_indexes) == 0 && conflict.run(verify_preserved) == 0, "retry original migration after removing conflict");
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

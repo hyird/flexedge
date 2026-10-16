@@ -37,8 +37,8 @@ int main() {
         // Every Web Worker owns its hub; its reader delivers only to it.
         service::log_ingest::fanout::hub access_fanout;
         service::log_ingest::fanout::hub peer_fanout;
-        REQUIRE(service::log_ingest::notifications::resource_type_name(log_resource_type::access) == "access");
-        REQUIRE(service::log_ingest::notifications::resource_type_name(log_resource_type::node) == "node");
+        REQUIRE(service::log_ingest::notifications::parse_resource_type("access") == log_resource_type::access);
+        REQUIRE(service::log_ingest::notifications::parse_resource_type("node") == log_resource_type::node);
         REQUIRE(service::log_ingest::notifications::parse_resource_type("invalid") == std::nullopt);
 
         auto access = access_fanout.subscribe(access_loop.handle(), log_resource_type::access, "tenant-a", "website-a");
