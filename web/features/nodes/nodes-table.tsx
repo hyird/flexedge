@@ -72,13 +72,7 @@ export function NodesTable({
       isRowHeader: true,
       minWidth: 130,
       cell: (node) => (
-        <Link
-          to='/nodes/$nodeId'
-          params={{ nodeId: node.id }}
-          className='link block truncate font-medium'
-        >
-          {node.name}
-        </Link>
+        <span className='block truncate font-medium'>{node.name}</span>
       ),
     },
     {
@@ -256,12 +250,10 @@ export function NodesTable({
         onRefresh={() => query.refetch()}
         isRefreshing={query.isFetching && !query.isPending}
         actions={
-          clusterId === undefined ? undefined : (
-            <Button size='sm' onPress={() => onCreatingChange(true)}>
-              <Plus className='size-4' />
-              添加节点
-            </Button>
-          )
+          <Button size='sm' onPress={() => onCreatingChange(true)}>
+            <Plus className='size-4' />
+            添加节点
+          </Button>
         }
       />
       <DataTable

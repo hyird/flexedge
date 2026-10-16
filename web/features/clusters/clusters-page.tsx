@@ -53,13 +53,7 @@ export function ClustersPage() {
       isRowHeader: true,
       minWidth: 180,
       cell: (cluster) => (
-        <Link
-          to='/clusters/$clusterId'
-          params={{ clusterId: cluster.id }}
-          className='link block truncate font-medium'
-        >
-          {cluster.name}
-        </Link>
+        <span className='block truncate font-medium'>{cluster.name}</span>
       ),
     },
     {
@@ -87,13 +81,9 @@ export function ClustersPage() {
       header: '节点在线',
       minWidth: 120,
       cell: (cluster) => (
-        <Link
-          to='/clusters/$clusterId'
-          params={{ clusterId: cluster.id }}
-          className='link text-sm whitespace-nowrap tabular-nums'
-        >
+        <span className='text-sm whitespace-nowrap tabular-nums'>
           {cluster.online_node_count} / {cluster.node_count}
-        </Link>
+        </span>
       ),
     },
     {
@@ -129,7 +119,6 @@ export function ClustersPage() {
     <Page
       title='集群'
       description='按集群组织边缘节点；每个集群拥有一个接入域名，网站通过 CNAME 接入。'
-      actions={createButton}
     >
       <ListToolbar
         search={{
@@ -169,6 +158,7 @@ export function ClustersPage() {
         onClearFilters={() => void list.clearFilters(clusterFilterKeys)}
         onRefresh={() => query.refetch()}
         isRefreshing={query.isFetching && !query.isPending}
+        actions={createButton}
       />
       <DataTable
         label='集群列表'

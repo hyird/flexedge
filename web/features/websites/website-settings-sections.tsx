@@ -474,11 +474,11 @@ export function HttpsSection({
                 onRetry={() => void certificates.refetch()}
               />
               {options.length > 0 && (
-                <ul className='divide-y divide-border rounded-xl border border-border'>
+                <ul className='divide-y divide-separator'>
                   {options.map((certificate) => (
                     <li
                       key={certificate.id}
-                      className='flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2'
+                      className='flex flex-wrap items-center gap-x-4 gap-y-1 py-3'
                     >
                       <CheckOption
                         selected={values.certificate_ids.includes(
@@ -580,9 +580,9 @@ function OriginGroupList({
   const [renameError, setRenameError] = useState('')
   const groups = collectOriginGroups(values.origins)
   return (
-    <ul className='divide-y divide-border rounded-xl border border-border'>
+    <ul className='divide-y divide-separator'>
       {groups.map((group) => (
-        <li key={group.name} className='flex flex-col gap-2 px-3 py-2'>
+        <li key={group.name} className='flex flex-col gap-2 py-3'>
           {renaming === group.name ? (
             <div className='flex flex-wrap items-start gap-2'>
               <div className='min-w-48 flex-1'>
@@ -647,7 +647,7 @@ function OriginGroupList({
         </li>
       ))}
       {groups.length === 0 && (
-        <li className='px-3 py-3 text-sm text-muted'>
+        <li className='py-3 text-sm text-muted'>
           还没有源站组，添加源站时填写源站组名称。
         </li>
       )}
@@ -756,7 +756,7 @@ export function OriginsSection({
               className='flex flex-col gap-3 rounded-xl border border-border p-3 sm:p-4'
             >
               <div className='flex items-center justify-between gap-3'>
-                <h3 className='min-w-0 truncate text-sm font-medium'>
+                <h3 className='subsection-title min-w-0 truncate'>
                   源站 {index + 1}
                   {origin.host && (
                     <Mono className='ml-2 text-muted'>
@@ -1044,7 +1044,7 @@ export function CompressionSection({
             </div>
             <div className='flex flex-col gap-2'>
               <div>
-                <h3 className='text-sm font-medium'>压缩算法优先级</h3>
+                <h3 className='subsection-title'>压缩算法优先级</h3>
                 <p className='text-xs text-muted'>
                   按列表顺序选择客户端支持的第一个算法。
                 </p>
@@ -1174,7 +1174,7 @@ export function LogsSection({ values, errors, update }: WebsiteSectionProps) {
         {values.access_log_enabled && (
           <>
             <div role='group' aria-labelledby='access-log-fields'>
-              <h3 id='access-log-fields' className='text-sm font-medium'>
+              <h3 id='access-log-fields' className='subsection-title'>
                 记录内容
               </h3>
               <div className='grid gap-x-6 sm:grid-cols-2 xl:grid-cols-4'>
@@ -1189,7 +1189,7 @@ export function LogsSection({ values, errors, update }: WebsiteSectionProps) {
               </div>
             </div>
             <div role='group' aria-labelledby='access-log-status'>
-              <h3 id='access-log-status' className='text-sm font-medium'>
+              <h3 id='access-log-status' className='subsection-title'>
                 记录的状态码
               </h3>
               <div className='flex flex-wrap gap-x-6'>

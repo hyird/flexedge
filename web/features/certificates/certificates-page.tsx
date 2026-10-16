@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { Link, getRouteApi } from '@tanstack/react-router'
+import { getRouteApi } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button } from '@heroui/react'
@@ -64,13 +64,9 @@ export function CertificatesPage() {
       minWidth: 240,
       cell: (item) => (
         <div className='flex min-w-0 items-center gap-2'>
-          <Link
-            to='/certificates/$certificateId'
-            params={{ certificateId: item.id }}
-            className='link min-w-0 font-medium'
-          >
-            <Mono truncate>{item.domains[0] ?? item.id}</Mono>
-          </Link>
+          <Mono truncate className='min-w-0 font-medium'>
+            {item.domains[0] ?? item.id}
+          </Mono>
           {item.domains.length > 1 && (
             <span
               className='shrink-0 text-xs text-muted tabular-nums'
@@ -165,7 +161,6 @@ export function CertificatesPage() {
     <Page
       title='证书'
       description='通过 DNS-01 验证签发的 HTTPS 证书：有效期、自动续期与向边缘节点的分发。'
-      actions={createAction}
     >
       <ListToolbar
         search={{
@@ -205,6 +200,7 @@ export function CertificatesPage() {
         onClearFilters={() => void list.clearFilters(filterKeys)}
         onRefresh={() => query.refetch()}
         isRefreshing={query.isRefetching}
+        actions={createAction}
       />
       <DataTable
         label='证书'

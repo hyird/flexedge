@@ -319,18 +319,7 @@ export function WebsiteOverview() {
       </Section>
 
       <div className='grid gap-6 lg:grid-cols-2'>
-        <Section
-          title='绑定证书'
-          actions={
-            <Button
-              size='sm'
-              variant='tertiary'
-              onPress={() => openTab('settings', { section: 'https' })}
-            >
-              管理 HTTPS
-            </Button>
-          }
-        >
+        <Section title='绑定证书'>
           {!config.https_enabled ? (
             <EmptyState
               size='sm'

@@ -391,7 +391,7 @@ function RuleEditor({
         </div>
 
         <div className='flex flex-col gap-3'>
-          <h4 className='text-sm font-semibold'>匹配条件</h4>
+          <h4 className='subsection-title'>匹配条件</h4>
           <div className='grid gap-4 sm:grid-cols-[10rem_minmax(0,1fr)]'>
             <Choice
               label='路径匹配'
@@ -553,7 +553,7 @@ function RuleEditor({
         </div>
 
         <div className='flex flex-col gap-3'>
-          <h4 className='text-sm font-semibold'>
+          <h4 className='subsection-title'>
             {rule.action === 'redirect'
               ? '跳转'
               : rule.action === 'rewrite'
@@ -754,7 +754,7 @@ export function WebsiteRouteEditor({
         onSelectionChange={(key) =>
           onViewChange({ ...view, phase: key as Phase, selectedId: null })
         }
-        className='w-full min-w-0'
+        className='w-full min-w-0 gap-4'
       >
         <Tabs.ListContainer>
           <Tabs.List aria-label='规则阶段'>
@@ -774,7 +774,7 @@ export function WebsiteRouteEditor({
             })}
           </Tabs.List>
         </Tabs.ListContainer>
-        <Tabs.Panel id={phase} className='flex flex-col gap-4 pt-3'>
+        <Tabs.Panel id={phase} className='m-0 flex flex-col gap-4 p-0'>
           <div className='flex flex-wrap items-baseline justify-between gap-2'>
             <p className='text-[13px] text-muted'>
               {routeTabs[phase].description}
@@ -834,18 +834,7 @@ export function WebsiteRouteEditor({
                 <Section>
                   <EmptyState
                     title={routeTabs[phase].empty}
-                    description='规则可按路径、域名、请求方法和请求头条件处理请求。'
-                    action={
-                      <Button
-                        size='sm'
-                        variant='tertiary'
-                        isDisabled={rules.length >= routeRuleLimit}
-                        onPress={addRule}
-                      >
-                        <Plus className='size-4' />
-                        添加规则
-                      </Button>
-                    }
+                    description='从规则列表添加规则，按路径、域名、请求方法和请求头条件处理请求。'
                   />
                 </Section>
               )}

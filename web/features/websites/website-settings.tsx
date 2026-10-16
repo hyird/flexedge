@@ -213,7 +213,7 @@ function SectionNav({
         id={section}
         ref={panelRef}
         style={panelStyle}
-        className='min-w-0 flex-1'
+        className='m-0 min-w-0 flex-1 p-0'
       >
         <TabPanelHoldContext value={hold}>{children}</TabPanelHoldContext>
       </Tabs.Panel>

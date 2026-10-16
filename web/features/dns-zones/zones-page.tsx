@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { Link, getRouteApi } from '@tanstack/react-router'
+import { getRouteApi } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button } from '@heroui/react'
@@ -63,13 +63,9 @@ export function DnsZonesPage() {
       isRowHeader: true,
       minWidth: 220,
       cell: (zone) => (
-        <Link
-          to='/dns-zones/$zoneId'
-          params={{ zoneId: zone.id }}
-          className='link font-medium'
-        >
-          <Mono>{zone.domain}</Mono>
-        </Link>
+        <Mono truncate className='font-medium'>
+          {zone.domain}
+        </Mono>
       ),
     },
     {
@@ -147,7 +143,6 @@ export function DnsZonesPage() {
     <Page
       title='域名管理'
       description='托管在 DNS 账号中的域名：自定义记录、系统自动记录与解析线路的同步状态。'
-      actions={createAction}
     >
       <ListToolbar
         search={{
@@ -184,6 +179,7 @@ export function DnsZonesPage() {
         onClearFilters={() => void list.clearFilters(filterKeys)}
         onRefresh={() => query.refetch()}
         isRefreshing={query.isRefetching}
+        actions={createAction}
       />
       <DataTable
         label='域名管理'
