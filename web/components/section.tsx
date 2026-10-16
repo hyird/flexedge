@@ -24,13 +24,24 @@ export function Section({
   return (
     <Card className={cn('min-w-0', className)}>
       {(title || actions) && (
-        <Card.Header className='flex flex-row flex-wrap items-start justify-between gap-x-4 gap-y-2'>
+        <Card.Header
+          className={cn(
+            'grid grid-cols-1 items-start gap-x-4 gap-y-2',
+            actions && 'sm:grid-cols-[minmax(0,1fr)_auto]'
+          )}
+        >
           <div className='flex min-w-0 flex-col gap-0.5'>
-            {title && <Card.Title>{title}</Card.Title>}
+            {title && (
+              <div className='flex min-h-8 items-center'>
+                <Card.Title>{title}</Card.Title>
+              </div>
+            )}
             {description && <Card.Description>{description}</Card.Description>}
           </div>
           {actions && (
-            <div className='flex flex-wrap items-center gap-2'>{actions}</div>
+            <div className='flex min-h-8 flex-wrap items-center gap-2'>
+              {actions}
+            </div>
           )}
         </Card.Header>
       )}

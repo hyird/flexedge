@@ -43,7 +43,9 @@ function Group({
     <section aria-label={title} className='flex flex-col gap-3'>
       <div className='flex flex-wrap items-start justify-between gap-3'>
         <div className='flex flex-col gap-0.5'>
-          <h3 className='text-sm font-semibold'>{title}</h3>
+          <div className='flex min-h-8 items-center'>
+            <h3 className='subsection-title'>{title}</h3>
+          </div>
           {description && (
             <p className='text-[13px] text-muted'>{description}</p>
           )}

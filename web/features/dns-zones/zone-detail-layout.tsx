@@ -1,5 +1,5 @@
 import { useNavigate } from '@tanstack/react-router'
-import { ArrowLeft, Globe, TrashBin } from '@gravity-ui/icons'
+import { ArrowLeft, TrashBin } from '@gravity-ui/icons'
 import { Button } from '@heroui/react'
 import { useArrivalState } from '@/lib/history-state'
 import { useTabSwitchGuard } from '@/lib/unsaved-changes'
@@ -76,7 +76,6 @@ export function ZoneDetailLayout() {
         title='实时连接中断，显示的是最后一次收到的数据'
       />
       <DetailHeader
-        icon={<Globe />}
         title={zone.domain}
         status={
           <StatusChip

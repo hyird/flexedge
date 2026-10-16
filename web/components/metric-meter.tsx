@@ -36,7 +36,7 @@ export function MetricMeter({
       }
       className={cn('w-28 gap-1', className)}
     >
-      <Meter.Output className='text-xs font-normal text-muted' />
+      <Meter.Output className='col-span-full col-start-1 justify-self-start text-xs font-normal text-muted' />
       <Meter.Track>
         <Meter.Fill />
       </Meter.Track>

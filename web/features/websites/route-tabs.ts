@@ -19,15 +19,13 @@ export const routeTabs = {
 } as const
 
 /** Route editor view state. It lives with the settings draft so switching
- * groups and returning keeps the selected phase, rule and preview request. */
+ * groups and returning keeps the selected phase and rule. */
 export type RouteEditorView = {
   phase: keyof typeof routeTabs
   selectedId: string | null
-  preview: { method: string; host: string; target: string; headers: string }
 }
 
 export const initialRouteEditorView: RouteEditorView = {
   phase: 'proxy',
   selectedId: null,
-  preview: { method: 'GET', host: '', target: '/', headers: '' },
 }

@@ -103,19 +103,19 @@ public:
         auto& daily = result.template ensure<"daily">();
         append_buckets(daily, daily_rows);
 
-        // `countries` is required: without an installed GeoIP database it stays an empty array.
+        // Both rankings use every IP in the window before applying their own top 10.
+        // Missing IPs or ASN metadata still contribute to the unknown ASN total.
         auto& countries = result.template ensure<"countries">();
+        auto& asns = result.template ensure<"asns">();
         const auto& geo_database = service::geoip::get_xdb_database();
-        if (geo_database.available()) {
-            const auto country_ip_rows = co_await c.db().query(
-                "SELECT access.client_ip::text, COUNT(*)::bigint, "
-                "COALESCE(SUM(access.response_bytes), 0)::bigint FROM sys_website_access_log "
-                "access WHERE access.tenant_id = $1 AND access.website_id = $2 AND "
-                "access.occurred_at >= $3::timestamptz - INTERVAL '24 hours' AND "
-                "access.client_ip IS NOT NULL GROUP BY access.client_ip",
-                tenant_id, id, as_of);
-            append_countries(countries, country_ip_rows, geo_database);
-        }
+        const auto geographic_ip_rows = co_await c.db().query(
+            "SELECT access.client_ip::text, COUNT(*)::bigint, "
+            "COALESCE(SUM(access.response_bytes), 0)::bigint FROM sys_website_access_log "
+            "access WHERE access.tenant_id = $1 AND access.website_id = $2 AND "
+            "access.occurred_at >= $3::timestamptz - INTERVAL '24 hours' "
+            "GROUP BY access.client_ip",
+            tenant_id, id, as_of);
+        append_geographic_rankings(countries, asns, geographic_ip_rows, geo_database);
         co_await append_ranking(
             c, result.template ensure<"status_codes">(),
             "SELECT access.status_code::text, COUNT(*)::bigint, "
@@ -229,33 +229,15 @@ private:
         co_return;
     }
 
-    template <typename output_type, typename rows_type>
-    static void append_countries(output_type& output, const rows_type& rows,
-        const service::geoip::xdb_database& geo_database) {
-        struct country_total final {
-            std::int64_t request_count_{};
-            std::int64_t response_bytes_{};
-        };
-        std::unordered_map<std::string, country_total> countries;
-        for (const auto& row : rows) {
-            const auto ip = row[0].value();
-            if (!ip) {
-                continue;
-            }
-            const auto country = geo_database.country(*ip);
-            if (!country) {
-                continue;
-            }
-            auto& total = countries[*country];
-            total.request_count_ += row[1].template as<std::int64_t>().value_or(0);
-            total.response_bytes_ += row[2].template as<std::int64_t>().value_or(0);
-        }
-        std::vector<std::pair<std::string, country_total>> ordered_countries;
-        ordered_countries.reserve(countries.size());
-        for (const auto& country : countries) {
-            ordered_countries.emplace_back(country.first, country.second);
-        }
-        std::ranges::sort(ordered_countries, [](const auto& left, const auto& right) {
+    struct ranking_total final {
+        std::int64_t request_count_{};
+        std::int64_t response_bytes_{};
+    };
+
+    template <typename output_type>
+    static void append_ordered_totals(output_type& output,
+        std::vector<std::pair<std::string, ranking_total>> totals) {
+        std::ranges::sort(totals, [](const auto& left, const auto& right) {
             if (left.second.request_count_ != right.second.request_count_) {
                 return left.second.request_count_ > right.second.request_count_;
             }
@@ -264,14 +246,63 @@ private:
             }
             return left.first < right.first;
         });
-        const auto count = std::min<std::size_t>(ordered_countries.size(), 10);
+        const auto count = std::min<std::size_t>(totals.size(), 10);
         for (std::size_t index = 0; index < count; ++index) {
-            const auto& country = ordered_countries[index];
+            const auto& total = totals[index];
             auto& item = output.emplace_back();
-            item.template set<"label">(country.first);
-            item.template set<"request_count">(country.second.request_count_);
-            item.template set<"response_bytes">(country.second.response_bytes_);
+            item.template set<"label">(total.first);
+            item.template set<"request_count">(total.second.request_count_);
+            item.template set<"response_bytes">(total.second.response_bytes_);
         }
+    }
+
+    template <typename country_output_type, typename asn_output_type, typename rows_type>
+    static void append_geographic_rankings(country_output_type& countries_output,
+        asn_output_type& asns_output, const rows_type& rows,
+        const service::geoip::xdb_database& geo_database) {
+        struct asn_total final {
+            ranking_total traffic_;
+            std::string as_name_;
+        };
+        std::unordered_map<std::string, ranking_total> countries;
+        std::unordered_map<std::string, asn_total> asns;
+        for (const auto& row : rows) {
+            const auto ip = row[0].value();
+            const auto location = ip ? geo_database.lookup(*ip) : std::nullopt;
+            const auto request_count = row[1].template as<std::int64_t>().value_or(0);
+            const auto response_bytes = row[2].template as<std::int64_t>().value_or(0);
+            if (location && !location->country_.empty()) {
+                auto& country = countries[location->country_];
+                country.request_count_ += request_count;
+                country.response_bytes_ += response_bytes;
+            }
+
+            const bool has_asn = location && !location->asn_.empty();
+            auto& asn = asns[has_asn ? location->asn_ : "未知 ASN"];
+            asn.traffic_.request_count_ += request_count;
+            asn.traffic_.response_bytes_ += response_bytes;
+            // Group by ASN, even if records contain different organization names.
+            // Choose the first nonempty name lexically so row order cannot change labels.
+            if (has_asn && !location->as_name_.empty() &&
+                (asn.as_name_.empty() || location->as_name_ < asn.as_name_)) {
+                asn.as_name_ = location->as_name_;
+            }
+        }
+
+        std::vector<std::pair<std::string, ranking_total>> country_totals;
+        country_totals.reserve(countries.size());
+        for (const auto& [country, total] : countries) {
+            country_totals.emplace_back(country, total);
+        }
+        append_ordered_totals(countries_output, std::move(country_totals));
+
+        std::vector<std::pair<std::string, ranking_total>> asn_totals;
+        asn_totals.reserve(asns.size());
+        for (const auto& [asn, total] : asns) {
+            asn_totals.emplace_back(
+                total.as_name_.empty() ? asn : asn + " " + total.as_name_, total.traffic_);
+        }
+        append_ordered_totals(asns_output, std::move(asn_totals));
     }
 };
 

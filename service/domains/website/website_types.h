@@ -125,6 +125,7 @@ RUVIA_MODEL(
     RUVIA_REQUIRED_FIELD_NAME("status_codes", status_codes,
         ruvia::array<website_dashboard_ranking_dto>),
     RUVIA_REQUIRED_FIELD(methods, ruvia::array<website_dashboard_ranking_dto>),
+    RUVIA_REQUIRED_FIELD(asns, ruvia::array<website_dashboard_ranking_dto>),
     RUVIA_REQUIRED_FIELD(countries, ruvia::array<website_dashboard_ranking_dto>),
     RUVIA_REQUIRED_FIELD(hosts, ruvia::array<website_dashboard_ranking_dto>),
     RUVIA_REQUIRED_FIELD(referers, ruvia::array<website_dashboard_ranking_dto>),

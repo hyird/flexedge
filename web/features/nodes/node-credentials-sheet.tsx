@@ -63,7 +63,7 @@ export function NodeCredentialsSheet({
           </Alert>
           <div className='flex flex-col gap-1.5'>
             <div className='flex items-center justify-between gap-2'>
-              <p className='text-sm font-semibold'>安装命令</p>
+              <h3 className='subsection-title'>安装命令</h3>
               <CopyButton value={command} label='复制安装命令' />
             </div>
             <pre

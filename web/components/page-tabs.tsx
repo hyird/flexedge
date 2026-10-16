@@ -5,6 +5,7 @@ import {
   useTabSwitchGuard,
   type TabSwitchGuard,
 } from '@/lib/unsaved-changes'
+import { cn } from '@/lib/utils'
 import { UnsavedChangesDialog } from './save-bar'
 import { TabPanelHoldContext, useTabPanelHold } from './tab-panel-hold'
 
@@ -31,6 +32,7 @@ export function PageTabs<T extends string>({
   onSelectionChange,
   guard,
   children,
+  fit = false,
 }: {
   /** Accessible name of the tab list, e.g. `网站详情`. */
   label: string
@@ -39,6 +41,8 @@ export function PageTabs<T extends string>({
   onSelectionChange: (tab: T) => void
   guard?: TabSwitchGuard
   children: ReactNode
+  /** Constrain the selected panel to the page's remaining height. */
+  fit?: boolean
 }) {
   const ownGuard = useTabSwitchGuard()
   const active = guard ?? ownGuard
@@ -62,9 +66,12 @@ export function PageTabs<T extends string>({
       onSelectionChange={(key) => {
         if (key !== selected) active.request(() => onSelectionChange(key as T))
       }}
-      className='-mt-2 flex w-full min-w-0 flex-1 flex-col gap-6'
+      className={cn(
+        '-mt-2 flex w-full min-w-0 flex-1 flex-col gap-6',
+        fit && 'min-h-0'
+      )}
     >
-      <Tabs.ListContainer>
+      <Tabs.ListContainer className='shrink-0'>
         <Tabs.List aria-label={label}>
           {items.map((item) => (
             <Tabs.Tab
@@ -84,8 +91,11 @@ export function PageTabs<T extends string>({
       <Tabs.Panel
         id={selected}
         ref={panelRef}
-        style={panelStyle}
-        className='flex min-w-0 flex-1 flex-col gap-6 p-0'
+        style={fit ? undefined : panelStyle}
+        className={cn(
+          'flex min-w-0 flex-1 flex-col gap-6 p-0',
+          fit && 'min-h-0'
+        )}
       >
         <TabPanelHoldContext value={hold}>
           <TabLeaveGuardContext value={active.dirtyRef}>

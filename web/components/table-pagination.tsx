@@ -36,9 +36,9 @@ export function TablePagination({
               if (typeof key === 'string') onPageSizeChange(Number(key))
             }}
             variant='secondary'
-            className='w-28'
+            className='w-32 shrink-0'
           >
-            <Select.Trigger className='min-h-8'>
+            <Select.Trigger className='min-h-8 whitespace-nowrap'>
               <Select.Value />
               <Select.Indicator />
             </Select.Trigger>

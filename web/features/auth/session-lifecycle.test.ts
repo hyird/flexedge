@@ -213,7 +213,7 @@ test('malformed successful login responses cannot replace the current session', 
       data: { code: 0, message: '', data },
     })
     await expect(login(client, 'admin', 'password')).rejects.toThrow(
-      'FlexEdge 服务响应格式不正确'
+      '服务响应格式不正确'
     )
     expect(client.getQueryData(['session'])).toEqual(user)
     expect(client.getQueryData(['websites'])).toEqual(['existing'])
@@ -232,7 +232,7 @@ test('malformed current-user data never authenticates or enters the session cach
     data: { code: 0, message: '', data: { ...user, status: false } },
   })
   await expect(ensureAuthenticatedSession(client)).rejects.toThrow(
-    'FlexEdge 服务响应格式不正确'
+    '服务响应格式不正确'
   )
   expect(client.getQueryData(['session'])).toBeUndefined()
   let stopped = false

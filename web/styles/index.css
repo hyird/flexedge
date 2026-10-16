@@ -55,13 +55,41 @@
   }
 }
 
-/* Shared surface treatment uses the documented HeroUI component slots. */
+/* 同级标题共用字体、字重和行高，不依赖各组件不同的默认值。 */
+@utility page-title {
+  @apply m-0 font-sans text-2xl leading-8 font-semibold tracking-tight text-foreground;
+}
+
+@utility subsection-title {
+  @apply m-0 font-sans text-sm leading-6 font-semibold text-foreground;
+}
+
+/* Shared typography and surfaces use the documented HeroUI component slots. */
 @layer components {
+  /* A root gutter is outside the paintable viewport. Release it for sheets,
+     retaining the same page width while fixed overlays reach the window edge.
+     React Aria also sets this property inline when it locks page scrolling. */
+  html[data-sheet-viewport-ready]:has(.sheet__backdrop) {
+    scrollbar-gutter: auto !important;
+    width: calc(100% - var(--viewport-scrollbar-width, 0px));
+  }
+  .card__title,
+  .widget__title {
+    @apply m-0 font-sans text-sm leading-6 font-semibold text-foreground;
+  }
+  .sheet__heading,
+  .alert-dialog__heading,
+  .popover__heading {
+    @apply m-0 font-sans text-lg leading-7 font-semibold text-foreground;
+  }
   .widget {
     @apply overflow-hidden bg-surface shadow-surface;
   }
   .widget > .widget__content {
     @apply m-0 rounded-none bg-transparent shadow-none;
+  }
+  .widget__header {
+    @apply mt-0 min-h-12 pt-4;
   }
   /* Tables keep one scroll viewport so the sticky header and body columns
      stay aligned; narrow screens scroll horizontally inside it. */
@@ -75,7 +103,19 @@
     overscroll-behavior: contain;
     scroll-padding-block-start: 2.5rem;
   }
+  .data-grid--fit {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .data-grid--fit .table__scroll-container {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+  }
   .data-grid .table__column {
+    white-space: nowrap;
     position: sticky;
     top: 0;
     z-index: 3;

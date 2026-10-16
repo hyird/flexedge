@@ -16,7 +16,6 @@ import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { useLiveLogs } from '@/features/logs/use-live-logs'
-import { AccessLogAsnCell, AccessLogAsnDetail } from './access-log-asn'
 import { accessLogStatusTone, filterAccessLogs } from './access-log-filter'
 import { parseAccessLogs, type AccessLog } from './access-log-schema'
 import {
@@ -24,6 +23,8 @@ import {
   accessLogStatusClasses,
   type AccessLogsSearch,
 } from './access-log-search'
+import { ClientIpTooltip } from './client-ip-tooltip'
+import { formatClientLocation } from './client-location'
 import { websiteAccessLogHistoryQuery } from './data'
 import { useWebsite } from './website-context'
 
@@ -125,15 +126,29 @@ export function AccessLogs() {
     },
     {
       id: 'client',
-      header: '客户端',
+      header: 'IP',
       minWidth: 130,
-      cell: (log) => <Mono>{log.client_ip || '—'}</Mono>,
+      cell: (log) => (
+        <ClientIpTooltip
+          asn={log.client_ip_asn}
+          asName={log.client_ip_as_name}
+          label={log.client_ip || '—'}
+          className='block w-0 min-w-full truncate font-mono text-[13px] tabular-nums'
+        />
+      ),
     },
     {
-      id: 'asn',
-      header: 'ASN',
-      minWidth: 170,
-      cell: (log) => <AccessLogAsnCell log={log} />,
+      id: 'location',
+      header: 'IP 归属',
+      minWidth: 150,
+      cell: (log) => {
+        const location = formatClientLocation(log.client_ip_location)
+        return (
+          <span className='block w-0 min-w-full truncate' title={location}>
+            {location}
+          </span>
+        )
+      },
     },
     {
       id: 'node',
@@ -175,6 +190,8 @@ export function AccessLogs() {
   return (
     <Section
       title='访问日志'
+      className='access-logs min-h-0 flex-1 [&>.card__header]:shrink-0 [@media(max-height:700px)]:overflow-y-auto'
+      contentClassName='flex min-h-0 flex-1 flex-col [@media(max-height:700px)]:flex-none'
       description={
         history
           ? '按条件查询已入库的访问记录。'
@@ -197,7 +214,7 @@ export function AccessLogs() {
         </Segment>
       }
     >
-      <div className='flex flex-col gap-4'>
+      <div className='flex min-h-0 flex-1 flex-col gap-4'>
         {!website.config.access_log_enabled && (
           <p className='text-[13px] text-warning'>
             此网站未启用访问日志，节点不会上报新的请求记录。
@@ -284,6 +301,7 @@ export function AccessLogs() {
           }
         />
         <DataTable
+          fit
           label={history ? '历史访问日志' : '实时访问日志'}
           variant='secondary'
           columns={columns}
@@ -301,7 +319,7 @@ export function AccessLogs() {
           onRetry={() =>
             history ? void historyQuery.refetch() : live.reconnect()
           }
-          minWidth={1040}
+          minWidth={1020}
           empty={
             filtered
               ? {
@@ -394,9 +412,21 @@ function AccessLogDetail({ log }: { log: AccessLog }) {
               </Link>
             ),
           },
-          { label: '客户端 IP', value: <Mono>{log.client_ip || '—'}</Mono> },
-          { label: 'IP 归属', value: log.client_ip_location || '—' },
-          { label: 'ASN', value: <AccessLogAsnDetail log={log} /> },
+          {
+            label: 'IP',
+            value: (
+              <ClientIpTooltip
+                asn={log.client_ip_asn}
+                asName={log.client_ip_as_name}
+                label={log.client_ip || '—'}
+                className='font-mono text-[13px] tabular-nums'
+              />
+            ),
+          },
+          {
+            label: 'IP 归属',
+            value: formatClientLocation(log.client_ip_location),
+          },
           { label: '耗时', value: `${log.duration_ms} ms` },
           { label: '请求流量', value: formatBytes(log.request_bytes) },
           { label: '响应流量', value: formatBytes(log.response_bytes) },

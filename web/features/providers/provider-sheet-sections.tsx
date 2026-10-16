@@ -27,7 +27,7 @@ export function ProviderVerification({
   return (
     <div className='flex flex-col gap-3 border-t border-border pt-4'>
       <div className='flex items-center justify-between gap-2'>
-        <p className='text-sm font-semibold'>验证</p>
+        <h3 className='subsection-title'>验证</h3>
         <Button
           size='sm'
           variant='tertiary'

@@ -22,6 +22,7 @@ const dashboard = {
   status_codes: [{ label: '200', request_count: 1, response_bytes: 20 }],
   methods: [],
   countries: [],
+  asns: [],
   hosts: [],
   referers: [],
   paths: [],
@@ -31,6 +32,20 @@ const dashboard = {
 const encode = (data: unknown) => JSON.stringify({ code: 0, message: '', data })
 
 describe('website dashboard contract', () => {
+  it('preserves ASN totals independently of the capped client IP rankings', () => {
+    const asns = [
+      { label: 'AS4134 Chinanet', request_count: 123, response_bytes: 4096 },
+      { label: '未知 ASN', request_count: 7, response_bytes: 512 },
+    ]
+    expect(parseWebsiteDashboard(encode({ ...dashboard, asns })).asns).toEqual(
+      asns
+    )
+    expect(() =>
+      parseWebsiteDashboard(
+        encode({ ...dashboard, asns: [{ ...asns[0], request_count: '123' }] })
+      )
+    ).toThrow()
+  })
   it('preserves full AS names for both IP rankings and permits unavailable metadata', () => {
     const ip = {
       label: '203.0.113.1 · 中国',

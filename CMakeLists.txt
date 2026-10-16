@@ -415,6 +415,7 @@ if(BUILD_TESTING)
     flexedge_add_test(read_projection BIG_OBJECT
         SOURCES tests/read_projection.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto ZLIB::ZLIB
+        DRIVER tests/read_projection_test.py
     )
     set_tests_properties(flexedge_read_projection PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
     flexedge_add_test(logging

@@ -1,3 +1,4 @@
+import { useLayoutEffect } from 'react'
 import { Outlet, useRouter, type HistoryState } from '@tanstack/react-router'
 import {
   Spinner,
@@ -25,6 +26,27 @@ declare module 'react-aria-components' {
  * language. */
 export function RootLayout() {
   const router = useRouter()
+  useLayoutEffect(() => {
+    const root = document.documentElement
+    const property = '--viewport-scrollbar-width'
+    const previousWidth = root.style.getPropertyValue(property)
+    // Keep the page width when sheets release the root's reserved scrollbar
+    // gutter: browsers clip overlays painted into that gutter, even when fixed.
+    const updateScrollbarWidth = () => {
+      const width = window.innerWidth - root.getBoundingClientRect().width
+      root.style.setProperty(property, `${Math.max(0, width)}px`)
+    }
+    updateScrollbarWidth()
+    // Measure before releasing the gutter, including direct links to a sheet.
+    root.setAttribute('data-sheet-viewport-ready', '')
+    window.addEventListener('resize', updateScrollbarWidth)
+    return () => {
+      window.removeEventListener('resize', updateScrollbarWidth)
+      root.removeAttribute('data-sheet-viewport-ready')
+      if (previousWidth) root.style.setProperty(property, previousWidth)
+      else root.style.removeProperty(property)
+    }
+  }, [])
   return (
     <I18nProvider locale='zh-CN'>
       <AriaRouterProvider

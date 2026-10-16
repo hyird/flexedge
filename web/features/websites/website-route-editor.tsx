@@ -1,18 +1,12 @@
 import { type Key } from 'react'
 import { ArrowDown, ArrowUp, Copy, Plus, TrashBin } from '@gravity-ui/icons'
 import { Alert, Button, Chip, Label, ListBox, Tabs } from '@heroui/react'
-import {
-  Choice,
-  Field,
-  Notice,
-  TextAreaField,
-  Toggle,
-} from '@/components/forms'
+import { Choice, Field, TextAreaField, Toggle } from '@/components/forms'
 import { Mono } from '@/components/mono'
 import { EmptyState } from '@/components/page'
 import { Section } from '@/components/section'
 import { ArrayLines } from './array-lines'
-import { conflictingRouteIndexes, previewRoute } from './route-preview'
+import { conflictingRouteIndexes } from './route-conflicts'
 import { routeTabs, type RouteEditorView } from './route-tabs'
 import { CheckOption, FieldNotice, IconAction } from './settings-controls'
 import {
@@ -48,16 +42,6 @@ function ruleReference(rules: Rule[], index: number) {
   const rule = rules[index]
   if (!rule) return `规则 ${index + 1}`
   return `${routeTabs[rule.action].title} #${phasePosition(rules, index)}${rule.name ? ` ${rule.name}` : ''}`
-}
-
-function parsePreviewHeaders(text: string): Array<[string, string]> {
-  return text
-    .split('\n')
-    .filter((line) => line.includes(':'))
-    .map((line) => {
-      const at = line.indexOf(':')
-      return [line.slice(0, at).trim(), line.slice(at + 1).trim()]
-    })
 }
 
 function RuleList({
@@ -142,143 +126,6 @@ function RuleList({
           })}
         </ListBox>
       )}
-    </Section>
-  )
-}
-
-function RoutePreview({
-  rules,
-  defaultGroup,
-  view,
-  onViewChange,
-  onSelectRule,
-}: {
-  rules: Rule[]
-  defaultGroup: string
-  view: RouteEditorView
-  onViewChange: (view: RouteEditorView) => void
-  onSelectRule: (index: number) => void
-}) {
-  const { preview } = view
-  const setPreview = (patch: Partial<RouteEditorView['preview']>) =>
-    onViewChange({ ...view, preview: { ...preview, ...patch } })
-  const result = previewRoute(
-    rules,
-    preview.method,
-    preview.target,
-    preview.host,
-    [['host', preview.host], ...parsePreviewHeaders(preview.headers)]
-  )
-  const matched = result.index >= 0 ? rules[result.index] : undefined
-  const references = (indexes: number[] | undefined) =>
-    indexes?.length ? (
-      <span className='flex flex-wrap gap-1'>
-        {indexes.map((index) => (
-          <Button
-            key={index}
-            size='sm'
-            variant='tertiary'
-            className='h-6 px-1.5 text-xs'
-            onPress={() => onSelectRule(index)}
-          >
-            {ruleReference(rules, index)}
-          </Button>
-        ))}
-      </span>
-    ) : (
-      <span className='text-muted'>无</span>
-    )
-  return (
-    <Section
-      title='规则预览'
-      description='用当前草稿在本地模拟匹配，不向源站发送请求。'
-    >
-      <div className='flex flex-col gap-3'>
-        <div className='grid grid-cols-[7rem_minmax(0,1fr)] gap-2'>
-          <Choice
-            label='方法'
-            value={preview.method}
-            onChange={(method) => setPreview({ method })}
-            items={routeMethods.map((method) => ({
-              id: method,
-              label: method,
-            }))}
-          />
-          <Field
-            label='域名'
-            value={preview.host}
-            onChange={(host) => setPreview({ host })}
-            placeholder='www.example.com'
-            className='[&_input]:font-mono'
-          />
-        </div>
-        <Field
-          label='请求路径'
-          value={preview.target}
-          onChange={(target) => setPreview({ target })}
-          hint='可包含查询参数，如 /api/v1?id=1。'
-          className='[&_input]:font-mono'
-        />
-        <TextAreaField
-          label='模拟请求头'
-          value={preview.headers}
-          onChange={(headers) => setPreview({ headers })}
-          hint='每行 Header: value，Host 会自动加入。'
-          rows={2}
-        />
-        {result.error ? (
-          <Notice>{result.error}</Notice>
-        ) : (
-          <dl
-            aria-live='polite'
-            className='flex flex-col gap-2 rounded-xl bg-surface-secondary p-3 text-sm'
-          >
-            {matched?.action === 'redirect' ? (
-              <>
-                <div className='flex flex-col gap-0.5'>
-                  <dt className='text-xs text-muted'>结果</dt>
-                  <dd>
-                    {matched.redirect_status} 跳转（
-                    {ruleReference(rules, result.index)}）
-                  </dd>
-                </div>
-                <div className='flex flex-col gap-0.5'>
-                  <dt className='text-xs text-muted'>跳转地址</dt>
-                  <dd>
-                    <Mono className='break-all'>{result.target}</Mono>
-                  </dd>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className='flex flex-col gap-0.5'>
-                  <dt className='text-xs text-muted'>回源源站组</dt>
-                  <dd>
-                    {matched?.origin_group || defaultGroup || '—'}
-                    <span className='ml-1 text-xs text-muted'>
-                      {matched ? '' : '（默认源站组）'}
-                    </span>
-                  </dd>
-                </div>
-                <div className='flex flex-col gap-0.5'>
-                  <dt className='text-xs text-muted'>回源 URL</dt>
-                  <dd>
-                    <Mono className='break-all'>{result.target}</Mono>
-                  </dd>
-                </div>
-                <div className='flex flex-col gap-0.5'>
-                  <dt className='text-xs text-muted'>命中重写</dt>
-                  <dd>{references(result.rewrites)}</dd>
-                </div>
-                <div className='flex flex-col gap-0.5'>
-                  <dt className='text-xs text-muted'>命中路由</dt>
-                  <dd>{references(result.origins)}</dd>
-                </div>
-              </>
-            )}
-          </dl>
-        )}
-      </div>
     </Section>
   )
 }
@@ -696,8 +543,7 @@ function RuleEditor({
   )
 }
 
-/** Route rules at page width: phase tabs on top, then the phase's rule list
- * and the request preview in a sticky side column next to the rule editor. */
+/** Phase tabs followed by the rule list and selected rule editor. */
 export function WebsiteRouteEditor({
   rules,
   onChange,
@@ -806,10 +652,8 @@ export function WebsiteRouteEditor({
               </Alert.Content>
             </Alert>
           )}
-          {/* Narrow: list, editor, preview. Wide: list and preview share the
-              left column (preview sticky), the editor spans the right. */}
-          <div className='grid items-start gap-4 lg:grid-cols-[18rem_minmax(0,1fr)] lg:grid-rows-[auto_1fr]'>
-            <div className='min-w-0 lg:col-start-1 lg:row-start-1'>
+          <div className='grid items-start gap-4 lg:grid-cols-[18rem_minmax(0,1fr)]'>
+            <div className='min-w-0'>
               <RuleList
                 rules={rules}
                 phase={phase}
@@ -819,7 +663,7 @@ export function WebsiteRouteEditor({
                 onAdd={addRule}
               />
             </div>
-            <div className='min-w-0 lg:col-start-2 lg:row-span-2 lg:row-start-1'>
+            <div className='min-w-0'>
               {selected ? (
                 <RuleEditor
                   key={selected.id}
@@ -838,15 +682,6 @@ export function WebsiteRouteEditor({
                   />
                 </Section>
               )}
-            </div>
-            <div className='min-w-0 lg:sticky lg:top-4 lg:col-start-1 lg:row-start-2'>
-              <RoutePreview
-                rules={rules}
-                defaultGroup={defaultGroup}
-                view={view}
-                onViewChange={onViewChange}
-                onSelectRule={selectIndex}
-              />
             </div>
           </div>
         </Tabs.Panel>

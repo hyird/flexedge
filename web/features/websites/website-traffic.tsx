@@ -4,7 +4,7 @@ import { AreaChart } from '@heroui-pro/react/area-chart'
 import { BarChart } from '@heroui-pro/react/bar-chart'
 import { KPI } from '@heroui-pro/react/kpi'
 import { PieChart } from '@heroui-pro/react/pie-chart'
-import { Alert, Button, Label, Meter, Skeleton } from '@heroui/react'
+import { Alert, Button, Chip, Label, Meter, Skeleton } from '@heroui/react'
 import {
   formatBitsPerSecond,
   formatBytes,
@@ -16,11 +16,14 @@ import {
 import { cn } from '@/lib/utils'
 import { KpiQuantity } from '@/components/kpi-quantity'
 import { EmptyState } from '@/components/page'
+import { ClientIpTooltip } from './client-ip-tooltip'
+import { clientIpDisplay } from './client-location'
 import type {
   WebsiteDashboard,
   WebsiteDashboardClientIpRanking,
   WebsiteDashboardRanking,
 } from './dashboard-schema'
+import { todayTrafficStatistics } from './traffic-statistics'
 import { useWebsiteDashboard } from './use-website-dashboard'
 import { useOpenWebsiteTab, useWebsite } from './website-context'
 
@@ -94,7 +97,7 @@ function TrafficSkeleton() {
     >
       <div className='grid grid-cols-2 gap-3 lg:grid-cols-3 2xl:grid-cols-6'>
         {Array.from({ length: 6 }, (_, index) => (
-          <Skeleton key={index} className='h-24 rounded-2xl' />
+          <Skeleton key={index} className='h-26 rounded-2xl' />
         ))}
       </div>
       <div className='grid gap-6 xl:grid-cols-2'>
@@ -107,6 +110,9 @@ function TrafficSkeleton() {
 
 function TrafficContent({ data }: { data: WebsiteDashboard }) {
   const { summary } = data
+  const today = todayTrafficStatistics(data)
+  const monthPeakDifference =
+    summary.current_month_peak_bps - summary.previous_month_peak_bps
   const hourly = data.hourly.map((point) => ({
     label: formatDate(point.timestamp).slice(11, 16),
     time: formatDate(point.timestamp).slice(0, 16),
@@ -128,55 +134,85 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
   return (
     <>
       <div className='grid grid-cols-2 gap-3 lg:grid-cols-3 2xl:grid-cols-6'>
-        <KPI className='min-w-0'>
-          <KPI.Header>
+        <KPI className='h-26 min-w-0 gap-1 px-4 py-3'>
+          <KPI.Header className='mb-0'>
             <KPI.Title>当前带宽</KPI.Title>
           </KPI.Header>
-          <KPI.Content className='content-start'>
+          <KPI.Content className='min-h-0 grid-cols-1 content-start justify-items-start gap-y-1'>
             <KpiQuantity value={summary.current_bandwidth_bps} unit='bps' />
+            <Chip
+              size='sm'
+              color='success'
+              variant='soft'
+              className='text-xs whitespace-nowrap'
+            >
+              {summary.today_peak_bps > 0
+                ? `今日峰值的 ${formatPercent(summary.current_bandwidth_bps / summary.today_peak_bps)}`
+                : `今日峰值 ${formatBitsPerSecond(summary.today_peak_bps)}`}
+            </Chip>
           </KPI.Content>
         </KPI>
-        <KPI className='min-w-0'>
-          <KPI.Header>
+        <KPI className='h-26 min-w-0 gap-1 px-4 py-3'>
+          <KPI.Header className='mb-0'>
             <KPI.Title>今日峰值带宽</KPI.Title>
           </KPI.Header>
-          <KPI.Content className='content-start'>
+          <KPI.Content className='min-h-0 grid-cols-1 content-start justify-items-start gap-y-1'>
             <KpiQuantity value={summary.today_peak_bps} unit='bps' />
+            <Chip
+              size='sm'
+              color='success'
+              variant='soft'
+              className='text-xs whitespace-nowrap'
+            >
+              {summary.current_month_peak_bps > 0
+                ? `本月峰值的 ${formatPercent(summary.today_peak_bps / summary.current_month_peak_bps)}`
+                : `本月峰值 ${formatBitsPerSecond(summary.current_month_peak_bps)}`}
+            </Chip>
           </KPI.Content>
         </KPI>
-        <KPI className='min-w-0'>
-          <KPI.Header>
+        <KPI className='h-26 min-w-0 gap-1 px-4 py-3'>
+          <KPI.Header className='mb-0'>
             <KPI.Title>今日响应流量</KPI.Title>
           </KPI.Header>
-          <KPI.Content className='content-start'>
+          <KPI.Content className='min-h-0 grid-cols-1 content-start justify-items-start gap-y-1'>
             <KpiQuantity value={summary.today_response_bytes} unit='bytes' />
+            <Chip
+              size='sm'
+              color='success'
+              variant='soft'
+              className='text-xs whitespace-nowrap'
+            >
+              {formatNumber(today.requests, { compact: true })} 次请求
+            </Chip>
           </KPI.Content>
-          {daily.length > 1 && (
-            <KPI.Chart
-              data={daily}
-              dataKey='bytes'
-              color='var(--color-accent)'
-              height={40}
-              strokeWidth={1.5}
-            />
-          )}
         </KPI>
-        <KPI className='min-w-0'>
-          <KPI.Header>
+        <KPI className='h-26 min-w-0 gap-1 px-4 py-3'>
+          <KPI.Header className='mb-0'>
             <KPI.Title>今日独立 IP</KPI.Title>
           </KPI.Header>
-          <KPI.Content className='content-start'>
+          <KPI.Content className='min-h-0 grid-cols-1 content-start justify-items-start gap-y-1'>
             <KPI.Value value={summary.today_unique_ips} />
+            <Chip
+              size='sm'
+              color='success'
+              variant='soft'
+              className='text-xs whitespace-nowrap'
+            >
+              {today.requestsPerIp === undefined
+                ? '每 IP — 次'
+                : `每 IP ${new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 1 }).format(today.requestsPerIp)} 次`}
+            </Chip>
           </KPI.Content>
         </KPI>
-        <KPI className='min-w-0'>
-          <KPI.Header>
+        <KPI className='h-26 min-w-0 gap-1 px-4 py-3'>
+          <KPI.Header className='mb-0'>
             <KPI.Title>本月峰值带宽</KPI.Title>
           </KPI.Header>
-          <KPI.Content className='grid-cols-1 content-start justify-items-start gap-y-1'>
+          <KPI.Content className='min-h-0 grid-cols-1 content-start justify-items-start gap-y-1'>
             <KpiQuantity value={summary.current_month_peak_bps} unit='bps' />
-            {monthChange !== undefined && (
+            {monthChange !== undefined ? (
               <KPI.Trend
+                className='text-xs whitespace-nowrap'
                 trend={
                   monthChange > 0 ? 'up' : monthChange < 0 ? 'down' : 'neutral'
                 }
@@ -184,15 +220,34 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
                 {formatPercent(Math.abs(monthChange))}
                 <TrendChip.Suffix>较上月</TrendChip.Suffix>
               </KPI.Trend>
+            ) : (
+              <Chip
+                size='sm'
+                color='success'
+                variant='soft'
+                className='text-xs whitespace-nowrap'
+              >
+                较上月 +{formatBitsPerSecond(monthPeakDifference)}
+              </Chip>
             )}
           </KPI.Content>
         </KPI>
-        <KPI className='min-w-0'>
-          <KPI.Header>
+        <KPI className='h-26 min-w-0 gap-1 px-4 py-3'>
+          <KPI.Header className='mb-0'>
             <KPI.Title>上月峰值带宽</KPI.Title>
           </KPI.Header>
-          <KPI.Content className='content-start'>
+          <KPI.Content className='min-h-0 grid-cols-1 content-start justify-items-start gap-y-1'>
             <KpiQuantity value={summary.previous_month_peak_bps} unit='bps' />
+            <Chip
+              size='sm'
+              color='success'
+              variant='soft'
+              className='text-xs whitespace-nowrap'
+            >
+              {monthPeakDifference === 0
+                ? '与本月峰值相同'
+                : `${monthPeakDifference > 0 ? '低于' : '高于'}本月 ${formatBitsPerSecond(Math.abs(monthPeakDifference))}`}
+            </Chip>
           </KPI.Content>
         </KPI>
       </div>
@@ -429,15 +484,18 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
         <Ranking title='访问路径' data={data.paths} mono />
         <Ranking title='来源页面' data={data.referers} mono />
         <Ranking title='请求方法' data={data.methods} mono />
+        <Ranking title='ASN 分布' data={data.asns} mono />
         <Ranking
           title='客户端 IP · 按流量'
           data={data.client_ips_by_bytes}
           metric='bytes'
+          clientIps
           mono
         />
         <Ranking
           title='客户端 IP · 按请求'
           data={data.client_ips_by_requests}
+          clientIps
           mono
         />
       </div>
@@ -455,11 +513,13 @@ function Ranking({
   data,
   metric = 'requests',
   mono = false,
+  clientIps = false,
 }: {
   title: string
   data: RankingRow[]
   metric?: 'requests' | 'bytes'
   mono?: boolean
+  clientIps?: boolean
 }) {
   const value = (item: RankingRow) =>
     metric === 'bytes' ? item.response_bytes : item.request_count
@@ -472,40 +532,52 @@ function Ranking({
       <Widget.Content>
         {data.length ? (
           <ol className='flex flex-col gap-3'>
-            {data.slice(0, 8).map((item) => (
-              <li key={item.label}>
-                <Meter
-                  value={value(item)}
-                  maxValue={leader || 1}
-                  valueLabel={
-                    metric === 'bytes'
-                      ? `${formatBytes(item.response_bytes)} · ${formatNumber(item.request_count, { compact: true })} 次`
-                      : `${formatNumber(item.request_count)} · ${formatBytes(item.response_bytes)}`
-                  }
-                  size='sm'
-                  className='grid-cols-[minmax(0,1fr)_auto] gap-x-3'
-                >
-                  <Label
-                    title={[item.label, item.asn, item.as_name]
-                      .filter(Boolean)
-                      .join(' ')}
-                    className={cn(
-                      'max-w-full min-w-0 truncate font-normal',
-                      mono && 'font-mono text-[13px]'
-                    )}
+            {data.slice(0, 8).map((item) => {
+              const client = clientIpDisplay(item.label)
+              return (
+                <li key={item.label}>
+                  <Meter
+                    value={value(item)}
+                    maxValue={leader || 1}
+                    valueLabel={
+                      metric === 'bytes'
+                        ? `${formatBytes(item.response_bytes)} · ${formatNumber(item.request_count, { compact: true })} 次`
+                        : `${formatNumber(item.request_count)} · ${formatBytes(item.response_bytes)}`
+                    }
+                    size='sm'
+                    className='grid-cols-[minmax(0,1fr)_auto] gap-x-3'
                   >
-                    {item.label || '—'}
-                    {item.asn && (
-                      <span className='ml-2 text-muted'>{item.asn}</span>
+                    {clientIps ? (
+                      <ClientIpTooltip
+                        label={client.label}
+                        location={client.location ?? '未知'}
+                        asn={item.asn}
+                        asName={item.as_name}
+                        className='max-w-full min-w-0 truncate'
+                      >
+                        <Label className='block truncate font-mono text-[13px] font-normal'>
+                          {client.label}
+                        </Label>
+                      </ClientIpTooltip>
+                    ) : (
+                      <Label
+                        title={item.label}
+                        className={cn(
+                          'max-w-full min-w-0 truncate font-normal',
+                          mono && 'font-mono text-[13px]'
+                        )}
+                      >
+                        {item.label || '—'}
+                      </Label>
                     )}
-                  </Label>
-                  <Meter.Output className='text-xs font-normal text-muted' />
-                  <Meter.Track>
-                    <Meter.Fill />
-                  </Meter.Track>
-                </Meter>
-              </li>
-            ))}
+                    <Meter.Output className='text-xs font-normal text-muted' />
+                    <Meter.Track>
+                      <Meter.Fill />
+                    </Meter.Track>
+                  </Meter>
+                </li>
+              )
+            })}
           </ol>
         ) : (
           <EmptyState size='sm' title='暂无数据' />

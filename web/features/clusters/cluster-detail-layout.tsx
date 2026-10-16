@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import { ArrowLeft, Cubes3, Gear, Globe, Server } from '@gravity-ui/icons'
+import { ArrowLeft, Gear, Globe, Server } from '@gravity-ui/icons'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Skeleton } from '@heroui/react'
 import { ApiBusinessError } from '@/lib/api-response'
@@ -133,7 +133,6 @@ export function ClusterDetailLayout() {
     <Page>
       {cluster ? (
         <DetailHeader
-          icon={<Cubes3 />}
           title={cluster.name}
           status={
             <StatusChip status={cluster.status} reserve={clusterStatusLabels} />

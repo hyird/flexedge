@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <memory_resource>
 #include <optional>
 #include <stdexcept>
@@ -581,6 +582,110 @@ ruvia::task<void> verify_dashboard_without_geoip(read_context& c) {
     REQUIRE(json.find("\"countries\":[]") != std::string::npos);
 }
 
+ruvia::task<void> verify_dashboard_asns(read_context& c, ruvia::db_transaction& tx) {
+    constexpr std::string_view website{"00000000-0000-4000-8000-000000000113"};
+    constexpr std::string_view empty_website{"00000000-0000-4000-8000-000000000114"};
+    constexpr std::string_view other_website{"00000000-0000-4000-8000-000000000115"};
+    constexpr std::string_view as_of{"2026-10-03T12:00:00Z"};
+    for (const auto& [id, number] : {
+             std::pair{website, 13}, std::pair{empty_website, 14}, std::pair{other_website, 15}}) {
+        (void)co_await tx.execute(
+            "INSERT INTO sys_website (id, tenant_id, cluster_id, revision, config) VALUES ('" +
+            std::string(id) + "', '" + std::string(tenant_a) + "', '" + std::string(cluster_a) +
+            "', 1, '" + website_config(number, "asn.example", "ASN fixture", true) + "')");
+    }
+
+    std::string logs;
+    const auto add_log = [&](std::string_view ip, std::int64_t bytes,
+                             std::string_view log_website = {},
+                             std::string_view tenant = tenant_a,
+                             std::string_view node = node_online,
+                             std::string_view occurred_at = "2026-10-03T11:00:00Z") {
+        if (!logs.empty()) {
+            logs += ", ";
+        }
+        logs += "('" + std::string(tenant) + "', '" + std::string(occurred_at) + "', '" +
+                std::string(node) + "', '" + std::string(log_website.empty() ? website : log_website) + "', " +
+                (ip.empty() ? std::string{"NULL"} : "'" + std::string(ip) + "'") +
+                ", 'http/1.1', 'GET', 'asn.example', '/', 200, " + std::to_string(bytes) + ")";
+    };
+    // Twelve IPs each have two requests. They exclude every AS4134 IP from both
+    // existing top-10 client-IP rankings, but the four combined requests win by ASN.
+    for (int index = 10; index <= 21; ++index) {
+        const auto ip = "1.2." + std::to_string(index) + ".1";
+        const auto bytes = index == 21 ? 500 : 300;
+        add_log(ip, bytes);
+        add_log(ip, bytes);
+    }
+    add_log("1.2.3.1", 100);
+    add_log("1.2.7.1", 200);
+    add_log("1.2.8.1", 300);
+    add_log("2001:db8::1", 400);
+    // A missing address, missing ASN metadata and an unmapped address share one bucket.
+    add_log("", 11);
+    add_log("1.2.4.4", 13);
+    add_log("1.2.250.1", 17);
+    // These rows must never contribute: old window, another website, another tenant.
+    add_log("1.2.3.1", 100000, website, tenant_a, node_online, "2026-10-02T11:59:59Z");
+    add_log("1.2.3.1", 200000, other_website);
+    add_log("1.2.3.1", 300000, "00000000-0000-4000-8000-0000000001b1", tenant_b,
+        "00000000-0000-4000-8000-0000000000b9");
+    (void)co_await tx.execute(
+        "INSERT INTO sys_website_access_log (tenant_id, occurred_at, node_id, website_id, "
+        "client_ip, protocol, method, host, target, status_code, response_bytes) VALUES " +
+        logs);
+
+    const auto dashboard = co_await service::website::get_website_dashboard_service().dashboard(
+        c, std::string(tenant_a), std::string(website), as_of);
+    const auto& asns = dashboard.get<"asns">();
+    if (service::geoip::get_xdb_database().available()) {
+        REQUIRE(asns.size() == 10);
+        REQUIRE(asns[0].get<"label">().view() == "AS4134 Chinanet");
+        REQUIRE(integer(asns[0].get<"request_count">()) == 4);
+        REQUIRE(integer(asns[0].get<"response_bytes">()) == 1000);
+        REQUIRE(asns[1].get<"label">().view() == "未知 ASN");
+        REQUIRE(integer(asns[1].get<"request_count">()) == 3);
+        REQUIRE(integer(asns[1].get<"response_bytes">()) == 41);
+        // Response bytes break request-count ties; equal totals use the full label.
+        REQUIRE(asns[2].get<"label">().view() ==
+                "AS65021 A Complete Autonomous System Organization Name");
+        REQUIRE(integer(asns[2].get<"response_bytes">()) == 1000);
+        for (std::size_t index = 3; index < asns.size(); ++index) {
+            REQUIRE(asns[index].get<"label">().view() ==
+                    "AS650" + std::to_string(index + 7) + " Network " + std::to_string(index + 7));
+            REQUIRE(integer(asns[index].get<"request_count">()) == 2);
+            REQUIRE(integer(asns[index].get<"response_bytes">()) == 600);
+        }
+        REQUIRE(dashboard.get<"countries">().size() == 2);
+        REQUIRE(dashboard.get<"countries">()[0].get<"label">().view() == "中国");
+        REQUIRE(integer(dashboard.get<"countries">()[0].get<"request_count">()) == 28);
+    } else {
+        REQUIRE(asns.size() == 1);
+        REQUIRE(asns[0].get<"label">().view() == "未知 ASN");
+        REQUIRE(integer(asns[0].get<"request_count">()) == 31);
+        REQUIRE(integer(asns[0].get<"response_bytes">()) == 8641);
+        REQUIRE(dashboard.get<"countries">().empty());
+    }
+    for (const auto& ranking : {std::cref(dashboard.get<"client_ips_by_bytes">()),
+             std::cref(dashboard.get<"client_ips_by_requests">())}) {
+        REQUIRE(ranking.get().size() == 10);
+        for (const auto& ip : ranking.get()) {
+            REQUIRE(ip.get<"asn">().view() != "AS4134");
+        }
+    }
+    const auto empty = co_await service::website::get_website_dashboard_service().dashboard(
+        c, std::string(tenant_a), std::string(empty_website), as_of);
+    REQUIRE(empty.get<"asns">().empty());
+    REQUIRE(std::string(ruvia::to_json(empty)).find("\"asns\":[]") != std::string::npos);
+    try {
+        (void)co_await service::website::get_website_dashboard_service().dashboard(
+            c, std::string(tenant_b), std::string(website), as_of);
+        REQUIRE(false);
+    } catch (const ruvia::http_error& error) {
+        require_not_found(error, "16601");
+    }
+}
+
 // Daily buckets are console days (Asia/Shanghai), like 今日: as of 2026-10-02
 // 02:00 +08, a request at 10-01 23:30 +08 (15:30 UTC) and one at 10-02 00:30 +08
 // (16:30 UTC) fall into different buckets, and today's bucket equals 今日.
@@ -640,21 +745,28 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     co_await verify_overview_and_filters(c);
     co_await verify_details(c);
     co_await verify_online_window(c, tx);
-    co_await verify_dashboard_without_geoip(c);
+    if (!service::geoip::get_xdb_database().available()) {
+        co_await verify_dashboard_without_geoip(c);
+    }
     co_await verify_dashboard_console_days(c, tx);
+    co_await verify_dashboard_asns(c, tx);
     co_await tx.rollback();
 }
 
 }  // namespace
 
-int main() {
-    // The dashboard check needs the "no GeoIP database installed" configuration.
+int main(int argc, char** argv) {
+    const bool with_geoip = argc == 2 && std::string_view{argv[1]} == "with-xdb";
+    // The driver runs separate processes because the runtime database is loaded once.
+    if (!with_geoip) {
 #ifdef _WIN32
-    _putenv_s("FLEXEDGE_XDB_V4_PATH", "");
-    _putenv_s("FLEXEDGE_XDB_V6_PATH", "");
+        _putenv_s("FLEXEDGE_XDB_V4_PATH", "");
+        _putenv_s("FLEXEDGE_XDB_V6_PATH", "");
 #else
-    ::unsetenv("FLEXEDGE_XDB_V4_PATH");
-    ::unsetenv("FLEXEDGE_XDB_V6_PATH");
+        ::unsetenv("FLEXEDGE_XDB_V4_PATH");
+        ::unsetenv("FLEXEDGE_XDB_V6_PATH");
 #endif
+    }
+    REQUIRE(service::geoip::get_xdb_database().available() == with_geoip);
     return test_support::run_postgres_test(verify);
 }

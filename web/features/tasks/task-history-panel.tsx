@@ -234,9 +234,7 @@ function AttemptHeader({
   return (
     <div className='flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1'>
       <div className='flex shrink-0 items-center gap-2'>
-        <h3 className='m-0 text-sm font-medium whitespace-nowrap text-foreground'>
-          {title}
-        </h3>
+        <h3 className='subsection-title whitespace-nowrap'>{title}</h3>
         <StatusChip
           label={shown.label}
           tone={shown.tone}

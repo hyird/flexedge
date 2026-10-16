@@ -141,9 +141,8 @@ export function WebsiteDetailLayout() {
         markDeleted: () => setDeleted(true),
       }}
     >
-      <Page>
+      <Page fit={tab === 'logs'}>
         <DetailHeader
-          icon={<Globe />}
           title={name}
           status={
             <StatusChip
@@ -183,6 +182,7 @@ export function WebsiteDetailLayout() {
           />
         )}
         <PageTabs
+          fit={tab === 'logs'}
           label='网站详情'
           items={tabItems}
           selected={tab}

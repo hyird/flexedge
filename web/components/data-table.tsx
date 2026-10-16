@@ -83,6 +83,7 @@ export function DataTable<T extends object>({
   minWidth = 760,
   footer,
   variant = 'primary',
+  fit = false,
 }: {
   /** Accessible table name, also used in loading announcements. */
   label: string
@@ -105,23 +106,33 @@ export function DataTable<T extends object>({
   footer?: ReactNode
   /** Use `secondary` inside an existing Section or Widget surface. */
   variant?: 'primary' | 'secondary'
+  /** Fill the parent's remaining height, scrolling only the table body. */
+  fit?: boolean
 }) {
   // Tailwind cannot see runtime widths, so the class reads a CSS variable.
   const widthVariable = {
     '--data-table-min-width': `${minWidth}px`,
   } as CSSProperties
   return (
-    <div className='flex min-w-0 flex-col gap-3' style={widthVariable}>
+    <div
+      className={cn('flex min-w-0 flex-col gap-3', fit && 'min-h-0 flex-1')}
+      style={widthVariable}
+    >
       <QueryNotice
         query={{ isError: error !== undefined, error }}
         onRetry={onRetry}
       />
       {isLoading && !data?.length ? (
-        <div role='status' aria-label={`正在加载${label}`}>
+        <div
+          role='status'
+          aria-label={`正在加载${label}`}
+          className={fit ? 'flex min-h-0 flex-1 flex-col' : undefined}
+        >
           <Table
             variant='secondary'
             className={cn(
               'data-grid',
+              fit && 'data-grid--fit',
               tableClassName,
               variant === 'primary' &&
                 'overflow-hidden rounded-2xl bg-surface shadow-surface'
@@ -137,13 +148,34 @@ export function DataTable<T extends object>({
                     <Table.Column
                       key={column.id}
                       isRowHeader={index === 0}
+                      className={column.headerClassName}
+                      width={column.width}
+                      minWidth={column.minWidth}
+                      maxWidth={column.maxWidth}
                       aria-label={
                         typeof column.header === 'string'
                           ? column.header
                           : column.id
                       }
                     >
-                      <Skeleton className='h-3.5 w-20 rounded-md' />
+                      <span
+                        className='block'
+                        style={{
+                          minWidth:
+                            typeof column.width === 'number' ||
+                            column.minWidth !== undefined
+                              ? `calc(${typeof column.width === 'number' ? column.width : column.minWidth}px - 2rem)`
+                              : undefined,
+                        }}
+                      >
+                        <Skeleton
+                          className={cn(
+                            'h-3.5 w-20 max-w-full rounded-md',
+                            column.align === 'end' && 'ms-auto',
+                            column.align === 'center' && 'mx-auto'
+                          )}
+                        />
+                      </span>
                     </Table.Column>
                   ))}
                 </Table.Header>
@@ -151,8 +183,17 @@ export function DataTable<T extends object>({
                   {Array.from({ length: 6 }, (_, row) => (
                     <Table.Row key={row}>
                       {columns.map((column) => (
-                        <Table.Cell key={column.id}>
-                          <Skeleton className='h-3.5 w-3/4 rounded-md' />
+                        <Table.Cell
+                          key={column.id}
+                          className={column.cellClassName}
+                        >
+                          <Skeleton
+                            className={cn(
+                              'h-3.5 w-3/4 rounded-md',
+                              column.align === 'end' && 'ms-auto',
+                              column.align === 'center' && 'mx-auto'
+                            )}
+                          />
                         </Table.Cell>
                       ))}
                     </Table.Row>
@@ -171,6 +212,7 @@ export function DataTable<T extends object>({
           variant='secondary'
           className={cn(
             'min-w-0',
+            fit && 'data-grid--fit',
             tableClassName,
             variant === 'primary' &&
               'overflow-hidden rounded-2xl bg-surface shadow-surface'
@@ -185,7 +227,7 @@ export function DataTable<T extends object>({
             />
           )}
           footer={footer}
-          footerClassName='flex-wrap justify-between gap-3 px-3 pt-3 pb-2'
+          footerClassName='shrink-0 flex-wrap justify-between gap-3 px-3 pt-3 pb-2'
         />
       ) : null}
     </div>

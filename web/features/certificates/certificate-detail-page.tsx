@@ -6,7 +6,6 @@ import {
   ArrowLeft,
   ArrowsRotateRight,
   Gear,
-  ShieldCheck,
   TrashBin,
 } from '@gravity-ui/icons'
 import { Alert, Button, Label, ProgressBar } from '@heroui/react'
@@ -89,7 +88,6 @@ export function CertificateDetailPage() {
         title='实时连接中断，显示的是最后一次收到的数据'
       />
       <DetailHeader
-        icon={<ShieldCheck />}
         title={certificate.domains[0] ?? certificate.id}
         status={
           <StatusChip

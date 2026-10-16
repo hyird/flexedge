@@ -30,6 +30,7 @@ const websiteDashboardSchema = z.object({
   status_codes: z.array(ranking),
   methods: z.array(ranking),
   countries: z.array(ranking),
+  asns: z.array(ranking),
   hosts: z.array(ranking),
   referers: z.array(ranking),
   paths: z.array(ranking),

@@ -4459,6 +4459,10 @@ function dashboard() {
     status_codes: [ranking('200'), ranking('404', 12, 6144)],
     methods: [ranking('GET'), ranking('POST', 26, 8192)],
     countries: [ranking('台湾'), ranking('中国', 732, 67108864)],
+    asns: [
+      ranking('AS64500 QA Documentation Network'),
+      ranking('AS64501 QA Secondary Network', 12, 6144),
+    ],
     hosts: [ranking('qa.example.test')],
     referers: [ranking('直接访问')],
     paths: [ranking('/assets/app.js'), ranking('/api/status', 412, 131072)],

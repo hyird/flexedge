@@ -51,25 +51,6 @@ export function validCaptureTemplate(value: string, count: number) {
   return true
 }
 
-export function expandRouteCaptures(
-  value: string,
-  path: string,
-  pattern: RE2JS
-) {
-  if (!validCaptureTemplate(value, pattern.groupCount()))
-    throw new Error('捕获组引用不存在')
-  const matcher = pattern.matcher(path)
-  if (!matcher.find()) throw new Error('正则未匹配请求路径')
-  const result = value.replace(
-    /\$\$|\$\{([0-9])\}/g,
-    (token: string, group: string) =>
-      token === '$$' ? '$' : (matcher.group(Number(group)) ?? '')
-  )
-  if (byteLength(result) > 16384 || hasControl(result) || result.includes(' '))
-    throw new Error('替换结果过长或包含非法字符')
-  return result
-}
-
 export function validRouteCondition(condition: RouteCondition) {
   return (
     ['header', 'query'].includes(condition.source) &&
@@ -83,67 +64,4 @@ export function validRouteCondition(condition: RouteCondition) {
     (condition.source !== 'header' ||
       /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(condition.name))
   )
-}
-
-export function queryMatchValues(
-  target: string
-): Array<[string, string]> | undefined {
-  if (!target.includes('?')) return []
-  try {
-    return target
-      .slice(target.indexOf('?') + 1)
-      .split('&')
-      .filter(Boolean)
-      .map((part) => {
-        const equal = part.indexOf('=')
-        const key = equal < 0 ? part : part.slice(0, equal)
-        const value = equal < 0 ? '' : part.slice(equal + 1)
-        return [
-          decodeURIComponent(key.replace(/\+/g, ' ')),
-          decodeURIComponent(value.replace(/\+/g, ' ')),
-        ]
-      })
-  } catch {
-    return undefined
-  }
-}
-
-export function routeConditionMatches(
-  condition: RouteCondition,
-  headers: Array<[string, string]>,
-  query: Array<[string, string]> | undefined
-) {
-  if (condition.source === 'query' && !query) return false
-  const values =
-    condition.source === 'header'
-      ? headers
-          .filter(
-            ([name]) => name.toLowerCase() === condition.name.toLowerCase()
-          )
-          .map(([, value]) => value.replace(/^[ \t]+|[ \t]+$/g, ''))
-      : (query ?? [])
-          .filter(([name]) => name === condition.name)
-          .map(([, value]) => value)
-  if (condition.op === 'exists') return values.length > 0
-  if (condition.op === 'absent') return values.length === 0
-  if (condition.op === 'not_equals')
-    return values.length > 0 && !values.includes(condition.value)
-  return values.includes(condition.value)
-}
-
-export function previewHeaderValues(
-  text: string,
-  host: string
-): Array<[string, string]> {
-  const headers: Array<[string, string]> = [['host', host]]
-  for (const line of text.split('\n').filter((line) => line.trim())) {
-    const colon = line.indexOf(':')
-    if (colon <= 0) throw new Error('预览请求头请按每行 Header: value 填写')
-    const name = line.slice(0, colon).trim()
-    const value = line.slice(colon + 1).trim()
-    if (!validRouteCondition({ source: 'header', name, value, op: 'equals' }))
-      throw new Error('预览请求头格式不正确')
-    if (name.toLowerCase() !== 'host') headers.push([name, value])
-  }
-  return headers
 }

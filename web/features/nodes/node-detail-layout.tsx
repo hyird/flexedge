@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import { ArrowLeft, ChartLine, FileText, Gear, Server } from '@gravity-ui/icons'
+import { ArrowLeft, ChartLine, FileText, Gear } from '@gravity-ui/icons'
 import { ApiBusinessError } from '@/lib/api-response'
 import { useArrivalState } from '@/lib/history-state'
 import { useTabSwitchGuard } from '@/lib/unsaved-changes'
@@ -66,7 +66,6 @@ export function NodeDetailLayout() {
     <Page>
       {node ? (
         <DetailHeader
-          icon={<Server />}
           title={node.name}
           status={<NodeConnectionChip runtime={node.runtime} />}
           meta={[

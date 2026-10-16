@@ -73,9 +73,7 @@ export function TaskCenter() {
           aria-label='最近任务'
           className='flex flex-col gap-3 p-1'
         >
-          <Popover.Heading className='px-2 pt-2 text-sm font-semibold'>
-            最近任务
-          </Popover.Heading>
+          <Popover.Heading className='px-2 pt-2'>最近任务</Popover.Heading>
           <RecentTasks onNavigate={() => setOpen(false)} />
         </Popover.Dialog>
       </Popover.Content>

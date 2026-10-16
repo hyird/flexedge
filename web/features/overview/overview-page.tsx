@@ -19,6 +19,7 @@ import { KPI } from '@heroui-pro/react/kpi'
 import { Button, Chip, Link, Skeleton } from '@heroui/react'
 import {
   formatBitsPerSecond,
+  formatBytes,
   formatDate,
   formatNumber,
   ratioOf,
@@ -273,6 +274,29 @@ function OverviewKpis({
             height={64}
             strokeWidth={1.5}
             aria-label='过去 24 小时每小时请求数趋势'
+            tooltip={
+              <AreaChart.Tooltip
+                content={({ active, payload }) => {
+                  const point = payload?.[0]?.payload as
+                    OverviewTraffic['hourly'][number] | undefined
+                  if (!active || !point) return null
+                  return (
+                    <ChartTooltip>
+                      <ChartTooltip.Header>
+                        {formatDate(point.timestamp).slice(0, 16)}
+                      </ChartTooltip.Header>
+                      <ChartTooltip.Item>
+                        <ChartTooltip.Indicator color='var(--color-accent)' />
+                        <ChartTooltip.Label>请求数</ChartTooltip.Label>
+                        <ChartTooltip.Value>
+                          {formatNumber(point.request_count)} 次
+                        </ChartTooltip.Value>
+                      </ChartTooltip.Item>
+                    </ChartTooltip>
+                  )
+                }}
+              />
+            }
           />
         </KPI>
         <KPI className='min-w-0'>
@@ -295,6 +319,29 @@ function OverviewKpis({
             height={64}
             strokeWidth={1.5}
             aria-label='过去 24 小时每小时响应流量趋势'
+            tooltip={
+              <AreaChart.Tooltip
+                content={({ active, payload }) => {
+                  const point = payload?.[0]?.payload as
+                    OverviewTraffic['hourly'][number] | undefined
+                  if (!active || !point) return null
+                  return (
+                    <ChartTooltip>
+                      <ChartTooltip.Header>
+                        {formatDate(point.timestamp).slice(0, 16)}
+                      </ChartTooltip.Header>
+                      <ChartTooltip.Item>
+                        <ChartTooltip.Indicator color='var(--color-accent)' />
+                        <ChartTooltip.Label>响应流量</ChartTooltip.Label>
+                        <ChartTooltip.Value>
+                          {formatBytes(point.response_bytes)}
+                        </ChartTooltip.Value>
+                      </ChartTooltip.Item>
+                    </ChartTooltip>
+                  )
+                }}
+              />
+            }
           />
         </KPI>
       </div>

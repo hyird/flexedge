@@ -65,11 +65,11 @@ export function apiErrorMessage(error: unknown) {
     const message = error.response?.data?.message
     if (typeof message === 'string' && message) return message
     if (error.code === 'ECONNABORTED') return '请求超时，请稍后重试'
-    if (!error.response) return '无法连接 FlexEdge 服务'
+    if (!error.response) return '无法连接服务'
     if (error.response.status === 401) return '登录状态已失效，请重新登录'
     if (error.response.status === 403) return '当前账户没有操作权限'
     if (isRevisionConflict(error)) return '数据已被其他人更新，请重新加载后重试'
-    if (error.response.status >= 500) return 'FlexEdge 服务暂时不可用'
+    if (error.response.status >= 500) return '服务暂时不可用'
     if (error.response.status >= 400) return '请求未能完成，请检查输入后重试'
   }
   if (error instanceof Error && error.message) return error.message

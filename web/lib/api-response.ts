@@ -7,7 +7,7 @@ export type ApiResponse<T = unknown> = {
 }
 export class ApiProtocolError extends Error {
   constructor() {
-    super('FlexEdge 服务响应格式不正确')
+    super('服务响应格式不正确')
     this.name = 'ApiProtocolError'
   }
 }

@@ -7,32 +7,54 @@ import { cn } from '@/lib/utils'
 
 type PageHeaderProps = {
   title: ReactNode
+  status?: ReactNode
   description?: ReactNode
-  /** Primary and secondary page actions, right-aligned (wraps below on narrow screens). */
+  /** Primary and secondary page actions, aligned with the title row. */
   actions?: ReactNode
   /** Short facts under the title, e.g. counts or a live connection state. */
   meta?: ReactNode
 }
 
 /** Page title block following the official dashboard's heading hierarchy. */
-function PageHeader({ title, description, actions, meta }: PageHeaderProps) {
+export function PageHeader({
+  title,
+  status,
+  description,
+  actions,
+  meta,
+}: PageHeaderProps) {
   return (
-    <header className='flex flex-wrap items-center justify-between gap-x-6 gap-y-3'>
-      <div className='flex max-w-3xl min-w-0 flex-col gap-1'>
-        <h1 className='text-2xl font-semibold tracking-tight text-foreground'>
-          {title}
-        </h1>
+    <header
+      className={cn(
+        'grid grid-cols-1 items-start gap-x-6 gap-y-3',
+        actions && 'sm:grid-cols-[minmax(0,1fr)_auto]'
+      )}
+    >
+      <div className='flex min-w-0 flex-col gap-1'>
+        <div className='flex min-h-8 min-w-0 items-center gap-3'>
+          <h1
+            title={typeof title === 'string' ? title : undefined}
+            className='page-title min-w-0 truncate'
+          >
+            {title}
+          </h1>
+          {status && <span className='flex shrink-0'>{status}</span>}
+        </div>
         {description && (
-          <p className='text-sm leading-6 text-muted'>{description}</p>
+          <p className='max-w-3xl text-sm leading-6 text-muted'>
+            {description}
+          </p>
         )}
         {meta && (
-          <div className='mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted'>
+          <div className='mt-1 min-w-0 text-sm leading-6 text-muted'>
             {meta}
           </div>
         )}
       </div>
       {actions && (
-        <div className='flex flex-wrap items-center gap-2'>{actions}</div>
+        <div className='flex min-h-8 flex-wrap items-center gap-2'>
+          {actions}
+        </div>
       )}
     </header>
   )
@@ -44,12 +66,15 @@ function PageHeader({ title, description, actions, meta }: PageHeaderProps) {
 export function Page({
   children,
   width = 'default',
+  fit = false,
   title,
   ...header
 }: {
   children: ReactNode
   /** `default` caps content at 1400px; `full` uses the whole workspace width. */
   width?: 'default' | 'full'
+  /** Keep the page inside the viewport; its content owns scrolling. */
+  fit?: boolean
   title?: ReactNode
 } & Omit<PageHeaderProps, 'title'>) {
   return (
@@ -57,7 +82,10 @@ export function Page({
       className={cn(
         // Fills the workspace height so a trailing SaveBar (`mt-auto`) sits at
         // the viewport bottom even when the content is short.
-        'mx-auto flex min-h-[calc(100dvh-var(--workspace-content-offset))] w-full min-w-0 flex-col gap-6 px-4 pt-6 pb-10 sm:px-6',
+        'mx-auto flex w-full min-w-0 flex-col gap-6 px-4 pt-6 pb-10 sm:px-6',
+        fit
+          ? 'h-[calc(100dvh-var(--workspace-content-offset))] min-h-0 overflow-hidden'
+          : 'min-h-[calc(100dvh-var(--workspace-content-offset))]',
         width === 'default' && 'max-w-[1400px]'
       )}
     >

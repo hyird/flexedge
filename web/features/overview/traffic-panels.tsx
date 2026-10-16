@@ -91,6 +91,7 @@ export function BandwidthPanel({ query }: { query: TrafficQuery }) {
           <AreaChart
             data={trafficSeries(traffic.hourly)}
             height={260}
+            margin={{ top: 8, right: 0, bottom: 0, left: 0 }}
             aria-label='过去 24 小时平均出口带宽'
           >
             <defs>
@@ -121,7 +122,7 @@ export function BandwidthPanel({ query }: { query: TrafficQuery }) {
               minTickGap={24}
             />
             <AreaChart.YAxis
-              width={84}
+              width='auto'
               tickFormatter={(value: number) => formatBitsPerSecond(value)}
             />
             <AreaChart.Area
@@ -312,7 +313,7 @@ const topWebsiteColumns: DataGridColumn<TopWebsiteRow>[] = [
         size='sm'
         className='w-32 gap-1'
       >
-        <Meter.Output className='text-xs font-normal text-muted' />
+        <Meter.Output className='col-span-full col-start-1 justify-self-start text-xs font-normal text-muted' />
         <Meter.Track>
           <Meter.Fill />
         </Meter.Track>
