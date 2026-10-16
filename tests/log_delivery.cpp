@@ -4,10 +4,13 @@
 #include <ruvia/web/db/db_client.h>
 #include <ruvia/web/redis/redis_client.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <exception>
 #include <iostream>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -34,6 +37,7 @@ void require(bool condition, const char* message) {
 struct delivery_context final {
     ruvia::db_client& database_;
     ruvia::redis_client& redis_;
+    std::vector<std::string> own_claims_{};
     ruvia::db_handle db() const {
         return database_.handle();
     }
@@ -42,6 +46,10 @@ struct delivery_context final {
     }
     ruvia::stop_token get_stop_token() const {
         return {};
+    }
+    // The claim loops this worker woke for work it committed itself.
+    void record_own_claims(std::span<const std::string_view> types) {
+        own_claims_.insert(own_claims_.end(), types.begin(), types.end());
     }
 };
 
@@ -120,7 +128,7 @@ ruvia::task<queue::entry> retry(delivery_context& context, const queue::entry& e
 
 ruvia::task<void> deliver_notifications(delivery_context& context) {
     const auto events = co_await context.db().query("SELECT id FROM sys_notification_outbox");
-    require(co_await live::outbox::deliver_batch(context), "committed outbox events are claimed and delivered");
+    require(co_await live::outbox::deliver_batch<ingest::log_relay>(context), "committed outbox events are claimed and delivered");
     for (const auto& event : events) {
         const auto key = "flexedge:notification-published:v1:" + std::string(event[0].value().value_or(""));
         (void)co_await context.redis().command("DEL", key);
@@ -149,12 +157,14 @@ ruvia::task<void> verify(delivery_context& context) {
     (void)co_await db.execute("DROP TRIGGER reject_outbox ON sys_notification_outbox");
     require(co_await persist(context, entry) == 1, "the retained delivery succeeds when PostgreSQL recovers");
     co_await check_counts(context, 1, 1, 2);
+    require(std::find(context.own_claims_.begin(), context.own_claims_.end(), "outbox") != context.own_claims_.end(),
+        "the ingesting worker wakes only its own outbox loop for the notifications it committed");
     const auto duplicate = co_await append(context, payload);
     require(co_await persist(context, duplicate) == 1, "repeated node payloads complete idempotently");
     co_await check_counts(context, 1, 1, 2);
 
     (void)co_await context.redis().command("SET", ingest::notifications::stream_key, "wrong-type-fixture");
-    require(co_await live::outbox::deliver_batch(context), "failed Redis publication leaves durable outbox work");
+    require(co_await live::outbox::deliver_batch<ingest::log_relay>(context), "failed Redis publication leaves durable outbox work");
     co_await check_counts(context, 1, 1, 2);
     const auto deferred = co_await db.query("SELECT min(attempts),bool_and(available_at > now()) FROM sys_notification_outbox");
     require(deferred[0][0].as<int>() == 1 && deferred[0][1].as<bool>() == true, "outbox failure persists bounded retry scheduling");
@@ -195,19 +205,36 @@ int main() {
         if (!postgres_config || !redis_config) {
             return 77;
         }
+        const test_support::postgres_test_database temporary_database(*postgres_config);
         ruvia::event_loop_pool loops({.loop_count_ = 1});
         const auto loop = loops.loop(0);
-        ruvia::db_client database(loop, *postgres_config);
+        ruvia::db_client database(loop, temporary_database.config());
         ruvia::redis_client redis(loop, *redis_config);
         delivery_context context{database, redis};
         loops.start();
-        loop.start(database.connect()).get();
-        loop.start(redis.connect()).get();
-        loop.start(verify(context)).get();
-        loop.start(database.shutdown()).get();
-        loop.start(redis.shutdown()).get();
+        std::exception_ptr failure;
+        try {
+            loop.start(database.connect()).get();
+            loop.start(redis.connect()).get();
+            loop.start(verify(context)).get();
+        } catch (...) {
+            failure = std::current_exception();
+        }
+        try {
+            loop.start(database.shutdown()).get();
+            loop.start(redis.shutdown()).get();
+        } catch (...) {
+            if (!failure) {
+                failure = std::current_exception();
+            }
+        }
+        database.close();
+        redis.close();
         loops.stop();
         loops.join();
+        if (failure) {
+            std::rethrow_exception(failure);
+        }
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

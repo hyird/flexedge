@@ -1,13 +1,15 @@
+import type { InternalAxiosRequestConfig } from 'axios'
 import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { afterEach, expect, test } from 'vitest'
+import { api } from '@/lib/api'
 import { ApiProtocolError } from '@/lib/api-response'
 import { setLiveQueryQueryClient } from '@/lib/live-query'
 import {
-  operationDetailQuery,
-  operationsQuery,
-  recentOperationsQuery,
-  subtaskHistoryQuery,
+  recentTasksQuery,
   taskAttemptTraceQuery,
+  taskDetailQuery,
+  taskHistoryQuery,
+  tasksQuery,
 } from './data'
 import { historyRecordLimit } from './task-history'
 
@@ -37,10 +39,30 @@ class Source extends EventTarget {
 let sources: Source[] = []
 let log: string[] = []
 const clients: QueryClient[] = []
+const adapter = api.defaults.adapter
 afterEach(() => {
+  api.defaults.adapter = adapter
   setLiveQueryQueryClient(new QueryClient())
   clients.splice(0).forEach((client) => client.clear())
 })
+
+/** Answers GET reads with `respond(config)` as the envelope data; returns
+ * the requests in order. */
+function serve(respond: (config: InternalAxiosRequestConfig) => unknown) {
+  const requests: InternalAxiosRequestConfig[] = []
+  api.defaults.adapter = async (config) => {
+    requests.push(config)
+    return {
+      config,
+      status: 200,
+      statusText: '',
+      headers: {},
+      data: { code: 0, message: 'ok', data: respond(config) },
+    }
+  }
+  return requests
+}
+
 function setup() {
   sources = []
   log = []
@@ -62,69 +84,42 @@ async function settle() {
   for (let turn = 0; turn < 20; turn += 1) await Promise.resolve()
 }
 
-const operation = {
-  id: 'op-1',
-  action: 'website.update',
-  target_type: 'website',
-  target_id: 'website-1',
-  target_name: '品牌官网',
-  target_deleted: false,
-  actor_type: 'user',
-  actor_name: 'QA 管理员',
-  created_at: '2026-10-15T08:00:00.000000+00',
-  updated_at: '2026-10-15T08:00:05.000000+00',
-  finished_at: '',
+const ref = { resourceType: 'certificate', resourceId: 'cert-1' }
+const task = {
+  resource_type: 'certificate',
+  resource_id: 'cert-1',
+  resource_kind: '',
+  name: 'www.a-z.xin',
+  operation: 'issue',
   status: 'running',
-  subtask_count: 2,
-  settled_count: 1,
-  failed_count: 0,
-  next_attempt_at: '',
-  error: '',
-  summary: { sections: ['domains', 'https'] },
-}
-const subtask = {
-  id: 'sub-1',
-  parent_id: '',
-  kind: 'dns_sync',
-  resource_type: 'dns_zone',
-  resource_id: 'zone-1',
-  resource_name: 'a-z.xin',
-  resource_deleted: false,
-  status: 'completed',
   warning: '',
-  node_offline: false,
-  created_at: '2026-10-15T08:00:00.000000+00',
-  running_since: '',
-  finished_at: '2026-10-15T08:00:03.000000+00',
-  duration_ms: 3000,
+  error: '',
+  next_attempt_at: '',
+  updated_at: '2026-10-15T08:00:05.000000+00',
+  last_success_at: '',
   attempt_count: 1,
   failure_count: 0,
-  recovered: false,
-  next_attempt_at: '',
-  error: '',
-}
-const detail = {
-  ...operation,
-  subtasks: [subtask, { ...subtask, id: 'sub-2', status: 'running' }],
+  node_offline: false,
 }
 const page = {
-  list: [operation],
+  list: [task],
   total: 1,
   page: 1,
   page_size: 20,
   total_pages: 1,
   active: 1,
-  attention: 0,
+  failed: 0,
 }
 const summary = {
   attempt_count: 1,
   failure_count: 0,
   first_failure_at: '',
   last_success_at: '2026-10-15T08:00:03.000000+00',
-  next_attempt_at: '',
 }
-const attempt = (number: number, attemptId: string, outcome = 'completed') => ({
+const attempt = (number: number, id: string, outcome = 'completed') => ({
+  id,
   attempt: number,
+  operation: 'issue',
   outcome,
   error: outcome === 'failed' ? 'timeout' : '',
   started_at: '2026-10-15T08:00:00.000000+00',
@@ -134,7 +129,7 @@ const attempt = (number: number, attemptId: string, outcome = 'completed') => ({
   detail: { kind: 'none', truncated: false },
   trace: {
     state: 'available',
-    attempt_id: attemptId,
+    attempt_id: id,
     step_count: 1,
     call_count: 0,
     log_count: 0,
@@ -143,111 +138,123 @@ const attempt = (number: number, attemptId: string, outcome = 'completed') => ({
     steps: [],
   },
 })
-const history = (subtaskId: string, list: unknown[]) => ({
-  subtask_id: subtaskId,
-  truncated: false,
-  summary,
-  list,
-})
+const history = (list: unknown[]) => ({ truncated: false, summary, list })
 
-test('the list parses operations, keeps unknown enums raw and rejects malformed pages', async () => {
+test('the list reads the filtered task stream, keeps unknown enums raw and rejects malformed pages', async () => {
   let client = setup()
-  const filters = { page: 1, page_size: 20, status: 'attention', actor: 'me' }
-  const read = client.fetchQuery(operationsQuery(filters))
+  const filters = {
+    page: 1,
+    page_size: 20,
+    status: 'attention',
+    type: 'certificate',
+    keyword: 'a-z',
+  }
+  const read = client.fetchQuery(tasksQuery(filters))
   await settle()
   expect(sources[0].url).toBe(
-    '/api/operations/stream?actor=me&page=1&page_size=20&status=attention'
+    '/api/tasks/stream?keyword=a-z&page=1&page_size=20&status=attention&type=certificate'
   )
   sources[0].frame('snapshot', {
     ...page,
     list: [
+      { ...task, status: 'future_status', resource_type: 'gateway' },
       {
-        ...operation,
-        status: 'future_status',
-        action: 'website.future',
-        target_type: 'gateway',
-        // One malformed summary key never hides the others.
-        summary: { sections: ['domains'], record_counts: 'many', extra: 1 },
-      },
-      {
-        ...operation,
-        id: 'op-2',
-        target_type: 'provider',
-        target_kind: 'certificate',
+        ...task,
+        resource_type: 'provider',
+        resource_id: 'p-1',
+        resource_kind: 'certificate',
+        operation: 'verify',
       },
     ],
   })
   const data = await read
   expect(data.list[0]).toMatchObject({
     status: 'future_status',
-    action: 'website.future',
-    target_type: 'gateway',
-    summary: { sections: ['domains'] },
+    resource_type: 'gateway',
   })
-  expect(data.list[0].summary.record_counts).toBeUndefined()
-  expect(data.list[0].target_kind).toBeUndefined()
-  expect(data.list[1].target_kind).toBe('certificate')
+  expect(data.list[1].resource_kind).toBe('certificate')
   for (const value of [
-    { ...page, list: [{ ...operation, subtask_count: -1 }] },
-    { ...page, attention: '0' },
+    { ...page, list: [{ ...task, failure_count: -1 }] },
+    { ...page, failed: '0' },
     { ...page, list: null },
     { ...page, page: 2 },
   ]) {
     client = setup()
-    const failed = client.fetchQuery(operationsQuery())
+    const failed = client.fetchQuery(tasksQuery())
     await settle()
     sources[0].frame('snapshot', value)
     await expect(failed).rejects.toBeInstanceOf(ApiProtocolError)
   }
 })
 
-test('header and overview reads take one snapshot and close the stream', async () => {
+test('header and overview read the recent tasks over GET, never a stream', async () => {
   const client = setup()
-  const query = recentOperationsQuery(6)
-  expect(query.queryKey).toContain('once')
-  const observer = new QueryObserver(client, query)
-  const stop = observer.subscribe(() => undefined)
-  await settle()
-  expect(sources.map((source) => source.url)).toEqual([
-    '/api/operations/stream?page=1&page_size=6',
+  const requests = serve(() => ({ ...page, page_size: 6 }))
+  const data = await client.fetchQuery(recentTasksQuery(6))
+  expect(requests.map((config) => [config.url, config.params])).toEqual([
+    ['/tasks', { page: 1, page_size: 6 }],
   ])
-  sources[0].frame('snapshot', { ...page, page_size: 6 })
-  await settle()
-  expect(observer.getCurrentResult().data?.list).toHaveLength(1)
-  // Closed while still observed: no live subscription.
-  expect(sources[0].closed).toBe(true)
-  stop()
+  expect(data.list).toHaveLength(1)
+  expect(sources).toEqual([])
+  serve(() => ({ ...page, list: null }))
+  await expect(client.fetchQuery(recentTasksQuery(20))).rejects.toBeInstanceOf(
+    ApiProtocolError
+  )
 })
 
-test('one detail stream carries the task, the expanded records and new attempts', async () => {
+test('the detail sheet over the list switches the page stream and back', async () => {
   const client = setup()
-  const header = new QueryObserver(
-    client,
-    operationDetailQuery('op-1', 'sub-1')
+  const list = new QueryObserver(client, tasksQuery())
+  const stopList = list.subscribe(() => undefined)
+  await settle()
+  sources[0].frame('snapshot', page)
+  await settle()
+  const header = new QueryObserver(client, taskDetailQuery(ref))
+  const records = new QueryObserver(client, taskHistoryQuery(ref))
+  const stopSheet = [header, records].map((observer) =>
+    observer.subscribe(() => undefined)
   )
-  const records = new QueryObserver(
-    client,
-    subtaskHistoryQuery('op-1', 'sub-1')
-  )
+  await settle()
+  expect(sources.filter((source) => !source.closed)).toHaveLength(1)
+  expect(log).toEqual([
+    'open /api/tasks/stream',
+    'close /api/tasks/stream',
+    'open /api/tasks/certificate/cert-1/stream',
+  ])
+  // The list keeps its snapshot underneath.
+  expect(list.getCurrentResult().data?.total).toBe(1)
+  stopSheet.forEach((stop) => stop())
+  await settle()
+  expect(log.slice(3)).toEqual([
+    'close /api/tasks/certificate/cert-1/stream',
+    'open /api/tasks/stream',
+  ])
+  expect(sources.filter((source) => !source.closed)).toHaveLength(1)
+  stopList()
+})
+
+test('one detail stream carries the task, its records and new attempts', async () => {
+  const client = setup()
+  const header = new QueryObserver(client, taskDetailQuery(ref))
+  const records = new QueryObserver(client, taskHistoryQuery(ref))
   const stops = [header, records].map((observer) =>
     observer.subscribe(() => undefined)
   )
   await settle()
   expect(sources.map((source) => source.url)).toEqual([
-    '/api/operations/op-1/stream?subtask_id=sub-1',
+    '/api/tasks/certificate/cert-1/stream',
   ])
   const source = sources[0]
-  source.frame('snapshot', detail)
-  source.frame('history', history('sub-1', [attempt(1, '10')]))
+  source.frame('snapshot', task)
+  source.frame('history', history([attempt(1, '10')]))
   await settle()
-  expect(header.getCurrentResult().data?.subtasks).toHaveLength(2)
+  expect(header.getCurrentResult().data?.name).toBe('www.a-z.xin')
   expect(
     records.getCurrentResult().data?.list.map((item) => item.attempt)
   ).toEqual([1])
 
   // A new attempt goes on top and replaces the summary.
   source.raw('attempt', {
-    subtask_id: 'sub-1',
     item: attempt(2, '11', 'failed'),
     summary: { ...summary, attempt_count: 2, failure_count: 1 },
   })
@@ -256,31 +263,27 @@ test('one detail stream carries the task, the expanded records and new attempts'
   expect(data?.list.map((item) => item.attempt)).toEqual([2, 1])
   expect(data?.summary).toMatchObject({ attempt_count: 2, failure_count: 1 })
 
-  // The same attempt again (e.g. replayed after a reconnect) is not duplicated.
+  // The same attempt again (e.g. replayed after a reconnect) is not
+  // duplicated; malformed events change nothing.
   source.raw('attempt', {
-    subtask_id: 'sub-1',
     item: attempt(2, '11', 'failed'),
     summary: { ...summary, attempt_count: 2, failure_count: 1 },
   })
-  // Records of another subtask and malformed events change nothing.
-  source.raw('attempt', {
-    subtask_id: 'sub-2',
-    item: attempt(9, '19'),
-    summary,
-  })
-  source.raw('attempt', { subtask_id: 'sub-1', item: 'broken' })
+  source.raw('attempt', { item: 'broken', summary })
+  source.raw('attempt', { item: attempt(3, '12') })
   await settle()
   data = records.getCurrentResult().data
-  expect(data?.list.map((item) => item.attempt)).toEqual([2, 1])
+  expect(data?.list.map((item) => item.id)).toEqual(['11', '10'])
   expect(records.getCurrentResult().isError).toBe(false)
   expect(header.getCurrentResult().isError).toBe(false)
 
-  // A `history` frame replaces the records as a whole.
-  source.frame('history', history('sub-1', [attempt(3, '12')]))
+  // A recovery `history` frame replaces the records as a whole.
+  source.frame('history', history([attempt(3, '12'), attempt(2, '11', 'failed')]))
   await settle()
-  expect(
-    records.getCurrentResult().data?.list.map((item) => item.attempt)
-  ).toEqual([3])
+  expect(records.getCurrentResult().data?.list.map((item) => item.id)).toEqual([
+    '12',
+    '11',
+  ])
   expect(sources).toHaveLength(1)
   stops.forEach((stop) => stop())
   await settle()
@@ -289,16 +292,12 @@ test('one detail stream carries the task, the expanded records and new attempts'
 
 test('the records keep the newest 100 attempts', async () => {
   const client = setup()
-  const records = new QueryObserver(
-    client,
-    subtaskHistoryQuery('op-1', 'sub-1')
-  )
+  const records = new QueryObserver(client, taskHistoryQuery(ref))
   const stop = records.subscribe(() => undefined)
   await settle()
   sources[0].frame(
     'history',
     history(
-      'sub-1',
       Array.from({ length: historyRecordLimit }, (_, index) =>
         attempt(historyRecordLimit - index, String(1000 - index))
       )
@@ -307,7 +306,6 @@ test('the records keep the newest 100 attempts', async () => {
   // Each SSE event is its own browser task; the first frame settles first.
   await settle()
   sources[0].raw('attempt', {
-    subtask_id: 'sub-1',
     item: attempt(101, '2000'),
     summary: { ...summary, attempt_count: 101 },
   })
@@ -319,68 +317,13 @@ test('the records keep the newest 100 attempts', async () => {
   stop()
 })
 
-test('expanding another subtask releases the old connection first and keeps the task on screen', async () => {
-  const client = setup()
-  const header = new QueryObserver(client, operationDetailQuery('op-1', null))
-  const stopHeader = header.subscribe(() => undefined)
-  await settle()
-  sources[0].frame('snapshot', detail)
-  await settle()
-  expect(header.getCurrentResult().data?.id).toBe('op-1')
-
-  // Expand sub-1: the URL changes in one commit.
-  log = []
-  header.setOptions(operationDetailQuery('op-1', 'sub-1'))
-  const records = new QueryObserver(
-    client,
-    subtaskHistoryQuery('op-1', 'sub-1')
-  )
-  const stopRecords = records.subscribe(() => undefined)
-  await settle()
-  expect(log).toEqual([
-    'close /api/operations/op-1/stream',
-    'open /api/operations/op-1/stream?subtask_id=sub-1',
-  ])
-  // No skeleton: the task stays while the new connection opens.
-  let result = header.getCurrentResult()
-  expect(result.isPending).toBe(false)
-  expect(result.isPlaceholderData).toBe(true)
-  expect(result.data?.id).toBe('op-1')
-
-  // Expand sub-2 instead.
-  log = []
-  stopRecords()
-  header.setOptions(operationDetailQuery('op-1', 'sub-2'))
-  const next = new QueryObserver(client, subtaskHistoryQuery('op-1', 'sub-2'))
-  const stopNext = next.subscribe(() => undefined)
-  await settle()
-  expect(log).toEqual([
-    'close /api/operations/op-1/stream?subtask_id=sub-1',
-    'open /api/operations/op-1/stream?subtask_id=sub-2',
-  ])
-  expect(sources.filter((source) => !source.closed)).toHaveLength(1)
-  result = header.getCurrentResult()
-  expect(result.data?.id).toBe('op-1')
-  sources.at(-1)?.frame('snapshot', { ...detail, status: 'completed' })
-  await settle()
-  expect(header.getCurrentResult().data?.status).toBe('completed')
-  expect(header.getCurrentResult().isPlaceholderData).toBe(false)
-
-  // Another task never shows this task's data as a placeholder.
-  stopNext()
-  header.setOptions(operationDetailQuery('op-2', null))
-  await settle()
-  expect(header.getCurrentResult().data).toBeUndefined()
-  stopHeader()
-})
-
 test('unknown record values and malformed details degrade per attempt', async () => {
   const client = setup()
-  const read = client.fetchQuery(subtaskHistoryQuery('op-1', 'sub-1'))
+  const read = client.fetchQuery(taskHistoryQuery(ref))
   await settle()
   sources[0].frame(
     'history',
-    history('sub-1', [
+    history([
       { ...attempt(3, '3'), outcome: 'cancelled' },
       { ...attempt(2, '2'), detail: { kind: 'future_kind' } },
       { ...attempt(1, '1'), trace: 'broken' },
@@ -396,68 +339,33 @@ test('unknown record values and malformed details degrade per attempt', async ()
   expect(data.list[2].trace).toEqual({ invalid: true })
 })
 
-const traceUrl = (attemptId: string) =>
-  `/api/operations/op-1/attempts/${attemptId}/trace/stream`
+const tracePath = (attemptId: string) =>
+  `/tasks/certificate/cert-1/attempts/${attemptId}/trace`
 const traceSnapshot = { state: 'available', steps: [] }
 
-test('a trace is a cached one-shot read, opened only once its attempt is visible', async () => {
+test('a trace is a cached GET read, made only once its attempt is visible', async () => {
   const client = setup()
+  const requests = serve(() => traceSnapshot)
   const observer = new QueryObserver(
     client,
-    taskAttemptTraceQuery('op-1', '48213', false)
+    taskAttemptTraceQuery(ref, '48213', false)
   )
   const stop = observer.subscribe(() => undefined)
   await settle()
   expect(observer.getCurrentResult().fetchStatus).toBe('idle')
-  expect(sources).toEqual([])
-  observer.setOptions(taskAttemptTraceQuery('op-1', '48213', true))
-  await settle()
-  expect(sources.map((source) => source.url)).toEqual([traceUrl('48213')])
-  sources[0].frame('snapshot', traceSnapshot)
-  await settle()
-  expect(observer.getCurrentResult().data?.state).toBe('available')
-  expect(sources[0].closed).toBe(true)
+  expect(requests).toEqual([])
+  observer.setOptions(taskAttemptTraceQuery(ref, '48213', true))
+  // Joins the read the now-visible attempt started.
+  const trace = await client.fetchQuery(taskAttemptTraceQuery(ref, '48213'))
+  expect(requests.map((config) => config.url)).toEqual([tracePath('48213')])
+  expect(trace.state).toBe('available')
   // Traces never change: a cached trace is never read again.
-  await client.fetchQuery(taskAttemptTraceQuery('op-1', '48213'))
-  expect(sources).toHaveLength(1)
+  await client.fetchQuery(taskAttemptTraceQuery(ref, '48213'))
+  expect(requests).toHaveLength(1)
+  expect(sources).toEqual([])
   stop()
-  const broken = client.fetchQuery(taskAttemptTraceQuery('op-1', '48214'))
-  await settle()
-  sources[1].frame('snapshot', { ...traceSnapshot, steps: 'broken' })
-  await expect(broken).rejects.toBeInstanceOf(ApiProtocolError)
-})
-
-test('at most two trace reads are open at once; queued reads wait in order and cancel cleanly', async () => {
-  const client = setup()
-  const ids = ['1', '2', '3', '4', '5']
-  const observers = ids.map(
-    (id) => new QueryObserver(client, taskAttemptTraceQuery('op-1', id))
-  )
-  const stops = observers.map((observer) => observer.subscribe(() => undefined))
-  await settle()
-  expect(
-    observers.map((observer) => observer.getCurrentResult().fetchStatus)
-  ).toEqual(Array(5).fill('fetching'))
-  const urls = () => sources.map((source) => source.url)
-  expect(urls()).toEqual([traceUrl('1'), traceUrl('2')])
-
-  // Closing a queued attempt (the sheet unmounting it) never opens its read.
-  stops[2]()
-  sources[0].frame('snapshot', traceSnapshot)
-  await settle()
-  expect(urls()).toEqual([traceUrl('1'), traceUrl('2'), traceUrl('4')])
-  expect(observers[0].getCurrentResult().data?.state).toBe('available')
-
-  // Cancelling an open read frees its slot as well.
-  stops[1]()
-  await settle()
-  expect(urls().at(-1)).toBe(traceUrl('5'))
-  expect(urls()).toHaveLength(4)
-  for (const source of sources.slice(2)) source.frame('snapshot', traceSnapshot)
-  await settle()
-  expect(
-    [0, 3, 4].map((index) => observers[index].getCurrentResult().status)
-  ).toEqual(['success', 'success', 'success'])
-  expect(observers[2].getCurrentResult().data).toBeUndefined()
-  stops.forEach((stop) => stop())
+  serve(() => ({ ...traceSnapshot, steps: 'broken' }))
+  await expect(
+    client.fetchQuery(taskAttemptTraceQuery(ref, '48214'))
+  ).rejects.toBeInstanceOf(ApiProtocolError)
 })

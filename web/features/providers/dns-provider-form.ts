@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { dnsPlatformSchema } from './types'
 
 /** Credential shapes the backend accepts (`dns_provider_service.h`):
  * Cloudflare Account ID is 32 hex characters and its API Token 20–200
@@ -10,7 +11,7 @@ export const dnsProviderTokenLength = {
 
 const dnsProviderFormObject = z.object({
   name: z.string().trim().min(1, '请输入账号名称').max(100),
-  provider: z.enum(['cloudflare', 'aliyun']),
+  provider: dnsPlatformSchema,
   account_id: z
     .string()
     .trim()

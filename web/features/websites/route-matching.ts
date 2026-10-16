@@ -1,11 +1,5 @@
 import { RE2JS } from 're2js'
-
-export type RouteCondition = {
-  source: 'header' | 'query'
-  name: string
-  op: 'equals' | 'not_equals' | 'exists' | 'absent'
-  value: string
-}
+import type { WebsiteRouteCondition } from './types'
 
 const patterns = new Map<string, RE2JS>()
 const byteLength = (value: string) => new TextEncoder().encode(value).length
@@ -51,7 +45,7 @@ export function validCaptureTemplate(value: string, count: number) {
   return true
 }
 
-export function validRouteCondition(condition: RouteCondition) {
+export function validRouteCondition(condition: WebsiteRouteCondition) {
   return (
     ['header', 'query'].includes(condition.source) &&
     condition.name.length > 0 &&

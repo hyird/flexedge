@@ -41,6 +41,8 @@ inline bool matches_apply_result_ack(const v2::ServerEnvelope& reply, std::strin
            ack.manifest_digest() == result.manifest_digest() && ack.applied() == result.applied();
 }
 
+// With `state`, the revision, release and digest must describe that same state: one snapshot
+// supplies both frames, even if a newer release commits meanwhile.
 inline std::vector<v2::ServerEnvelope>
 release_probe_replies(std::string_view request_id, std::string_view binary_digest,
     std::int64_t revision, std::string_view release_id,
@@ -53,10 +55,6 @@ release_probe_replies(std::string_view request_id, std::string_view binary_diges
     ack->set_desired_release_id(release_id);
     ack->set_desired_manifest_digest(manifest_digest);
     if (state) {
-        // One snapshot supplies both frames, even if a newer release commits meanwhile.
-        ack->set_desired_node_spec_revision(state->node_spec().content().revision());
-        ack->set_desired_release_id(state->release().content().release_id());
-        ack->set_desired_manifest_digest(state->release().digest_sha256());
         auto& body = replies.emplace_back();
         body.set_request_id(request_id);
         *body.mutable_desired_state() = std::move(*state);

@@ -6,6 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory_resource>
+#include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "service/features/live_resource/notifications.h"
@@ -15,10 +18,12 @@ namespace test_support {
 // A worker context whose resource notifications are recorded instead of
 // sent to Redis. Each send also records whether the notified attempts are
 // already visible on the autocommit handle, i.e. committed before the send.
+// Own claim wakeups after a commit are recorded instead of signalled.
 struct recorded_notifications final {
     ruvia::db_handle handle_;
     std::vector<service::live_resource::notifications::resource_notification> sent_{};
     std::vector<bool> committed_{};
+    std::vector<std::string> own_claims_{};
     std::pmr::memory_resource* pool_{std::pmr::new_delete_resource()};
 
     ruvia::db_handle db() {
@@ -39,6 +44,9 @@ struct recorded_notifications final {
         }
         committed_.push_back(committed);
         sent_.push_back(value);
+    }
+    void record_own_claims(std::span<const std::string_view> work_types) {
+        own_claims_.insert(own_claims_.end(), work_types.begin(), work_types.end());
     }
 };
 

@@ -24,7 +24,16 @@ RUVIA_MODEL(
     RUVIA_OPTIONAL_FIELD_NAME("last_error", last_error, ruvia::string, RUVIA_OMIT_EMPTY),
     RUVIA_REQUIRED_FIELD_NAME("created_at", created_at, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("updated_at", updated_at, ruvia::string));
-RUVIA_MODEL(certificate_provider_list_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
+RUVIA_MODEL(certificate_provider_page_data_dto,
+    RUVIA_REQUIRED_FIELD(list, ruvia::array<certificate_provider_dto>),
+    RUVIA_REQUIRED_FIELD(total, ruvia::int64),
+    RUVIA_REQUIRED_FIELD(page, ruvia::int64),
+    RUVIA_REQUIRED_FIELD_NAME("page_size", page_size, ruvia::int64),
+    RUVIA_REQUIRED_FIELD_NAME("total_pages", total_pages, ruvia::int64));
+RUVIA_MODEL(certificate_provider_page_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
+    RUVIA_REQUIRED_FIELD(message, ruvia::string),
+    RUVIA_REQUIRED_FIELD(data, certificate_provider_page_data_dto));
+RUVIA_MODEL(certificate_provider_options_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
     RUVIA_REQUIRED_FIELD(message, ruvia::string),
     RUVIA_REQUIRED_FIELD(data, ruvia::array<certificate_provider_dto>));
 

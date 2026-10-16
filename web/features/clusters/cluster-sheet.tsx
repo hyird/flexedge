@@ -1,7 +1,7 @@
 import { useEffect, useEffectEvent } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiErrorMessage } from '@/lib/api'
 import { FormSheet } from '@/components/form-sheet'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
@@ -11,7 +11,7 @@ import {
   clusterFormValues,
   type ClusterFormValues,
 } from './cluster-form'
-import { saveCluster } from './data'
+import { afterClusterWrite, saveCluster } from './data'
 
 /** Create a cluster in a right sheet. The access domain preview is
  * `<prefix>.<zone>`. */
@@ -31,11 +31,13 @@ export function ClusterSheet({
   useEffect(() => {
     if (isOpen) resetForm()
   }, [isOpen])
+  const client = useQueryClient()
   const mutation = useMutation({
     meta: { inlineError: true },
     mutationFn: (values: ClusterFormValues) => saveCluster(values),
     onSuccess: (response) => {
-      toastWriteSuccess(response.message, response.data)
+      toastWriteSuccess(response.message)
+      void afterClusterWrite(client)
       onClose()
     },
   })

@@ -1,10 +1,10 @@
 import { QueryObserver } from '@tanstack/react-query'
 import { afterEach, expect, test } from 'vitest'
 import { api } from '@/lib/api'
-import { reconnectingEventSource } from '@/lib/event-stream'
+import { readLiveQuery, setLiveQueryQueryClient } from '@/lib/live-query'
 import { createAppQueryClient } from '@/lib/query-client'
 import { ensureAuthenticatedSession, login, logout } from './data'
-import { registerSessionCleanup, replaceSession } from './session-lifecycle'
+import { replaceSession } from './session-lifecycle'
 
 const cleanups: Array<() => void> = []
 const originalAdapter = api.defaults.adapter
@@ -17,43 +17,11 @@ afterEach(() => {
 })
 const user = { id: 'admin', username: 'same-admin', status: 'enabled' }
 
-test('authenticated route re-entry activates streams after an external login', async () => {
+test('an obsolete session check cannot authenticate after logout', async () => {
   const client = setup()
+  const check = ensureAuthenticatedSession(client)
   await replaceSession(client)
-  let retired = false
-  registerSessionCleanup(client, () => {
-    retired = true
-  })
-  expect(retired).toBe(true)
-  api.defaults.adapter = async (config) => ({
-    config,
-    status: 200,
-    statusText: 'OK',
-    headers: {},
-    data: { code: 0, message: '', data: user },
-  })
-  await ensureAuthenticatedSession(client)
-  let stopped = false
-  cleanups.push(
-    registerSessionCleanup(client, () => {
-      stopped = true
-    })
-  )
-  expect(stopped).toBe(false)
-  await replaceSession(client)
-  expect(stopped).toBe(true)
-})
-
-test('an obsolete session check cannot reactivate streams after logout', async () => {
-  const client = setup()
-  const check = ensureAuthenticatedSession(client).catch(() => undefined)
-  await replaceSession(client)
-  await check
-  let stopped = false
-  registerSessionCleanup(client, () => {
-    stopped = true
-  })
-  expect(stopped).toBe(true)
+  await expect(check).rejects.toThrow('登录会话已变更，请重试')
 })
 
 function setup() {
@@ -114,47 +82,46 @@ test('session replacement aborts cancellable reads', async () => {
   expect(signal.aborted).toBe(true)
 })
 
-test('both resource streams close before cache removal and late events do nothing', async () => {
+test('live views close before cache removal and late frames do nothing', async () => {
   const client = setup()
   class Source extends EventTarget {
-    readyState = 1
+    closed = false
     close() {
-      this.readyState = 2
+      this.closed = true
     }
   }
-  const sources = [new Source(), new Source()]
-  const streams = sources.map((source) =>
-    reconnectingEventSource('/stream', {
-      createSource: () => source as unknown as EventSource,
-      idleTimeoutMs: null,
+  const source = new Source()
+  // The ES2022 lib has no Promise.withResolvers.
+  let open!: () => void
+  const opened = new Promise<void>((resolve) => {
+    open = resolve
+  })
+  setLiveQueryQueryClient(client, undefined, () => {
+    open()
+    return source
+  })
+  cleanups.push(() => setLiveQueryQueryClient(client))
+  const observer = new QueryObserver(client, {
+    queryKey: ['nodes'],
+    queryFn: ({ queryKey, signal }) =>
+      readLiveQuery('/api/nodes/stream', queryKey, signal),
+  })
+  cleanups.push(observer.subscribe(() => undefined))
+  await opened
+  await replaceSession(client)
+  expect(source.closed).toBe(true)
+  await replaceSession(client, user)
+  source.dispatchEvent(
+    new MessageEvent('snapshot', {
+      data: JSON.stringify({ code: 0, message: 'ok', data: ['late'] }),
     })
   )
-  let events = 0
-  for (const stream of streams)
-    stream.addEventListener('ready', () => {
-      events++
-    })
-  const dispose = registerSessionCleanup(client, () => {
-    streams.forEach((stream) => stream.close())
-  })
-  cleanups.push(dispose)
-  await replaceSession(client)
-  expect(sources.every((source) => source.readyState === 2)).toBe(true)
-  await replaceSession(client, user)
-  sources.forEach((source) => source.dispatchEvent(new Event('ready')))
-  expect(events).toBe(0)
   expect(client.getQueryData(['nodes'])).toBeUndefined()
 })
 
-test('rejected auth operations preserve the existing session and streams', async () => {
+test('rejected auth operations preserve the existing session', async () => {
   const client = setup()
   client.setQueryData(['websites'], ['existing'])
-  let stopped = false
-  cleanups.push(
-    registerSessionCleanup(client, () => {
-      stopped = true
-    })
-  )
   api.defaults.adapter = async () => {
     throw new Error('rejected')
   }
@@ -162,7 +129,6 @@ test('rejected auth operations preserve the existing session and streams', async
   await expect(logout(client)).rejects.toThrow('rejected')
   expect(client.getQueryData(['websites'])).toEqual(['existing'])
   expect(client.getQueryData(['session'])).toEqual(user)
-  expect(stopped).toBe(false)
 })
 
 test('accepted login and logout clear resource caches through the actual auth functions', async () => {
@@ -190,12 +156,6 @@ test('accepted login and logout clear resource caches through the actual auth fu
 test('malformed successful login responses cannot replace the current session', async () => {
   const client = setup()
   client.setQueryData(['websites'], ['existing'])
-  let stopped = false
-  cleanups.push(
-    registerSessionCleanup(client, () => {
-      stopped = true
-    })
-  )
   for (const data of [
     null,
     {},
@@ -217,7 +177,6 @@ test('malformed successful login responses cannot replace the current session', 
     )
     expect(client.getQueryData(['session'])).toEqual(user)
     expect(client.getQueryData(['websites'])).toEqual(['existing'])
-    expect(stopped).toBe(false)
   }
 })
 
@@ -235,9 +194,4 @@ test('malformed current-user data never authenticates or enters the session cach
     '服务响应格式不正确'
   )
   expect(client.getQueryData(['session'])).toBeUndefined()
-  let stopped = false
-  registerSessionCleanup(client, () => {
-    stopped = true
-  })
-  expect(stopped).toBe(true)
 })

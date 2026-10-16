@@ -25,46 +25,44 @@ afterEach(() => {
   client.clear()
 })
 
-test('zone snapshots isolate provider selections and transform available data', async () => {
-  const sources = new Map<string, Source>()
-  setLiveQueryQueryClient(client, undefined, (url) => {
-    const source = new Source()
-    sources.set(url, source)
-    return source as never
-  })
-  const read = async <T>(
-    query: { queryKey: readonly unknown[]; queryFn?: unknown },
-    data: unknown
-  ) => {
-    const observer = new QueryObserver<T>(client, query as never)
-    const stop = observer.subscribe(() => undefined)
-    const pending = observer.refetch()
-    await new Promise<void>((resolve) => queueMicrotask(resolve))
-    const source = [...sources.values()].at(-1)!
-    source.dispatchEvent(
-      new MessageEvent('snapshot', {
-        data: JSON.stringify({ code: 0, message: 'ok', data }),
-      })
-    )
-    const result = await pending
-    stop()
-    observer.destroy()
-    return result.data
+/** Answers every GET with `data(url, params)` and records the request. */
+function serve(
+  data: (url: string, params: Record<string, unknown> | undefined) => unknown
+) {
+  const requests: unknown[] = []
+  api.defaults.adapter = async (config) => {
+    requests.push([config.url, config.params])
+    return {
+      config,
+      status: 200,
+      statusText: '',
+      headers: {},
+      data: {
+        code: 0,
+        message: 'ok',
+        data: data(config.url ?? '', config.params),
+      },
+    }
   }
-  expect(
-    await read(availableDnsZonesQuery('provider-a'), {
-      list: [{ domain: 'a.example', status: 'active' }],
-    })
-  ).toEqual([{ domain: 'a.example', status: 'active' }])
-  expect(
-    await read(availableDnsZonesQuery('provider-b'), { list: [] })
-  ).toEqual([])
-  expect(
-    await read(
-      dnsZonesQuery({ page: 2, page_size: 10, dns_provider_id: 'provider-a' }),
-      { list: [], total: 0, page: 2, page_size: 10, total_pages: 0 }
-    )
-  ).toMatchObject({ page: 2 })
+  return requests
+}
+
+test('available zones are read per provider and unwrap their list', async () => {
+  const requests = serve((_, params) =>
+    params?.dns_provider_id === 'provider-a'
+      ? { list: [{ domain: 'a.example', status: 'active' }] }
+      : { list: [] }
+  )
+  expect(await client.fetchQuery(availableDnsZonesQuery('provider-a'))).toEqual(
+    [{ domain: 'a.example', status: 'active' }]
+  )
+  expect(await client.fetchQuery(availableDnsZonesQuery('provider-b'))).toEqual(
+    []
+  )
+  expect(requests).toEqual([
+    ['/dns-zones/available', { dns_provider_id: 'provider-a' }],
+    ['/dns-zones/available', { dns_provider_id: 'provider-b' }],
+  ])
   expect(availableDnsZonesQuery('').enabled).toBe(false)
 })
 
@@ -113,35 +111,37 @@ test('record saves enforce provider capabilities without mutating editor values 
   ])
 })
 
-test('line queries share a zone read and change cache identity when a cluster changes zones', async () => {
-  const sources = new Map<string, Source>()
-  setLiveQueryQueryClient(client, undefined, (url) => {
-    const source = new Source()
-    sources.set(url, source)
-    return source as never
-  })
-  const readLines = async (zone: string) => {
-    const observer = new QueryObserver(client, dnsZoneLinesQuery(zone))
-    const stop = observer.subscribe(() => undefined)
-    const pending = observer.refetch()
-    await new Promise<void>((resolve) => queueMicrotask(resolve))
-    sources.get(`/api/dns-zones/${zone}/stream`)?.dispatchEvent(
-      new MessageEvent('snapshot', {
-        data: JSON.stringify({
-          code: 0,
-          message: 'ok',
-          data: { runtime: { lines: [{ code: zone }] } },
-        }),
-      })
-    )
-    const result = await pending
-    stop()
-    observer.destroy()
-    return result.data
-  }
-  expect(await readLines('zone-a')).toEqual([{ code: 'zone-a' }])
-  expect(await readLines('zone-b')).toEqual([{ code: 'zone-b' }])
+const line = (code: string) => ({
+  code,
+  name: code,
+  display_name: code,
+  status: 'enabled',
+})
+
+test('line queries read their zone and change cache identity when a cluster changes zones', async () => {
+  const requests = serve((url) => ({
+    runtime: { lines: [line(url.split('/').at(-1) ?? '')] },
+  }))
+  expect(await client.fetchQuery(dnsZoneLinesQuery('zone-a'))).toEqual([
+    line('zone-a'),
+  ])
+  expect(await client.fetchQuery(dnsZoneLinesQuery('zone-b'))).toEqual([
+    line('zone-b'),
+  ])
+  expect(requests).toEqual([
+    ['/dns-zones/zone-a', undefined],
+    ['/dns-zones/zone-b', undefined],
+  ])
   expect(dnsZoneLinesQuery(undefined).enabled).toBe(false)
+})
+
+test('reads that break the DTO contract are rejected', async () => {
+  serve(() => ({ runtime: { lines: [{ code: 'default' }] } }))
+  await expect(client.fetchQuery(dnsZoneLinesQuery('zone'))).rejects.toThrow()
+  serve(() => ({ list: [{ domain: 'a.example' }] }))
+  await expect(
+    client.fetchQuery(availableDnsZonesQuery('provider'))
+  ).rejects.toThrow()
 })
 
 test('the sync filter is a server parameter: it reaches the stream URL and the cache key', async () => {

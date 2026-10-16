@@ -1,13 +1,14 @@
 import type { DataGridColumn } from '@heroui-pro/react'
 import { formatDate } from '@/lib/format'
 import { pageLocally, useListState } from '@/lib/list-search'
+import { describeStatus } from '@/lib/status'
 import { DataTable } from '@/components/data-table'
 import { Mono } from '@/components/mono'
 import { Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { type DnsLineTreeOption, dnsLineIndex } from './dns-lines'
-import { lineStatusLabels } from './dns-zone-display'
+import { lineStatuses, lineStatusReserve } from './dns-zone-display'
 import { useZoneDetail } from './use-zone-detail'
 
 const columns: DataGridColumn<DnsLineTreeOption>[] = [
@@ -38,7 +39,10 @@ const columns: DataGridColumn<DnsLineTreeOption>[] = [
     header: '状态',
     minWidth: 110,
     cell: ({ line }) => (
-      <StatusChip status={line.status} reserve={lineStatusLabels} />
+      <StatusChip
+        {...describeStatus(lineStatuses, line.status)}
+        reserve={lineStatusReserve}
+      />
     ),
   },
 ]

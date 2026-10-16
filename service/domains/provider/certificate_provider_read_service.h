@@ -5,8 +5,10 @@
 #include <ruvia/web/db/db.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
+#include "service/common/database.h"
 #include "service/domains/provider/certificate_provider_types.h"
 #include "service/features/certificate/provider_config_mapper.h"
 
@@ -14,23 +16,61 @@ namespace service::provider {
 
 class certificate_provider_read_service final {
 public:
-    ruvia::task<ruvia::array<certificate_provider_dto>> list(auto& c,
-        const std::string& tenant_id) const {
-        const auto rows = co_await c.db().query(
-            "SELECT id, revision, provider, config::text, status, TO_CHAR(last_verified_at, "
-            "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), last_error, TO_CHAR(created_at, "
-            "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), TO_CHAR(updated_at, "
-            "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') FROM sys_provider WHERE tenant_id = $1 AND "
-            "kind = 'certificate' AND deleted_at IS NULL ORDER BY sort DESC",
-            tenant_id);
-        ruvia::array<certificate_provider_dto> result({.resource_ = c.pool()});
-        for (const auto& row : rows) {
-            fill(c, result.emplace_back(ruvia::model_options{.resource_ = c.pool()}), row);
+    ruvia::task<certificate_provider_page_data_dto> list(auto& c, const std::string& tenant_id,
+        std::int64_t page, std::int64_t page_size, std::int64_t skip,
+        const std::optional<std::string>& keyword) const {
+        std::optional<std::string> pattern;
+        if (keyword) {
+            pattern = "%" + service::common::escape_like_pattern(*keyword) + "%";
+        }
+        const auto filter = [&](ruvia::db_query& query) {
+            source(query, tenant_id);
+            if (pattern) {
+                const auto value = query.value(*pattern);
+                query.and_where(query.sql(
+                    {"provider.provider ILIKE ",
+                        " OR (CASE provider.provider WHEN 'letsencrypt' THEN 'Let''s Encrypt' "
+                        "WHEN 'zerossl' THEN 'ZeroSSL' ELSE provider.provider END) ILIKE ",
+                        " OR provider.config->>'account_email' ILIKE ",
+                        " OR provider.config->'access_key'->>'hint' ILIKE ", ""},
+                    {value, value, value, value}));
+            }
+        };
+        const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
+        const auto total = page_rows.total_;
+
+        certificate_provider_page_data_dto result({.resource_ = c.pool()});
+        result.template set<"total">(total);
+        result.template set<"page">(page);
+        result.template set<"page_size">(page_size);
+        result.template set<"total_pages">(page_size > 0 ? (total + page_size - 1) / page_size : 0);
+        auto& items = result.template ensure<"list">();
+        for (const auto& row : page_rows.rows_) {
+            fill(c, items.emplace_back(ruvia::model_options{.resource_ = c.pool()}), row);
         }
         co_return result;
     }
 
 private:
+    static void source(ruvia::db_query& query, const std::string& tenant_id) {
+        query.from("sys_provider", "provider")
+            .where(query.sql({"provider.tenant_id = ", ""}, {query.value(tenant_id)}))
+            .and_where(query.sql("provider.kind = 'certificate'"))
+            .and_where(query.sql("provider.deleted_at IS NULL"));
+    }
+
+    static void project(ruvia::db_query& query) {
+        query
+            .select(service::common::sql_columns(query,
+                {"provider.id", "provider.revision", "provider.provider", "provider.config::text",
+                    "provider.status",
+                    "TO_CHAR(provider.last_verified_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')",
+                    "provider.last_error",
+                    "TO_CHAR(provider.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')",
+                    "TO_CHAR(provider.updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')"}))
+            .order_by(query.sql("provider.sort"), ruvia::db_order_direction::desc);
+    }
+
     template <typename row_type>
     static void fill(auto& c, certificate_provider_dto& item, const row_type& row) {
         const auto config = service::certificate_issuance::parse_certificate_provider_config(

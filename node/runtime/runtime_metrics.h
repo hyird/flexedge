@@ -1,13 +1,12 @@
 #pragma once
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
-#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -29,39 +28,28 @@ struct runtime_metrics_snapshot final {
     double cpu_usage_{};
     double memory_usage_{};
     std::int64_t traffic_out_bps_{};
-    std::int64_t connection_count_{};
     double load1m_{};
 };
 
-class runtime_metrics final {
+// Whole-host CPU, memory and load, plus the node's outbound traffic rate. The control loop owns
+// the node's only sampler; each sample covers the interval since the previous one.
+class runtime_metrics_sampler final {
 public:
-    void connection_opened() noexcept {
-        active_connections_.fetch_add(1);
-    }
-    void connection_closed() noexcept {
-        active_connections_.fetch_sub(1);
-    }
-    void traffic_out(std::size_t bytes) noexcept {
-        traffic_out_bytes_.fetch_add(bytes);
-    }
-
-    [[nodiscard]] std::int64_t connection_count() const noexcept {
-        return active_connections_.load();
-    }
-
-    [[nodiscard]] runtime_metrics_snapshot sample() {
-        const std::lock_guard lock(sample_mutex_);
+    // `traffic_out_bytes` is the cumulative outbound byte count of all data workers, empty when
+    // it could not be collected; the rate is then 0 and the next collected sample covers the
+    // whole interval.
+    [[nodiscard]] runtime_metrics_snapshot sample(std::optional<std::uint64_t> traffic_out_bytes) {
         runtime_metrics_snapshot result;
-        result.connection_count_ = active_connections_.load();
-        const auto now = std::chrono::steady_clock::now();
-        const auto bytes = traffic_out_bytes_.load();
-        const auto elapsed = std::chrono::duration<double>(now - last_traffic_sample_).count();
-        if (elapsed > 0) {
-            result.traffic_out_bps_ = static_cast<std::int64_t>(
-                std::llround(static_cast<double>(bytes - last_traffic_bytes_) * 8.0 / elapsed));
+        if (traffic_out_bytes) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed = std::chrono::duration<double>(now - last_traffic_sample_).count();
+            if (elapsed > 0 && *traffic_out_bytes >= last_traffic_bytes_) {
+                result.traffic_out_bps_ = static_cast<std::int64_t>(std::llround(
+                    static_cast<double>(*traffic_out_bytes - last_traffic_bytes_) * 8.0 / elapsed));
+            }
+            last_traffic_bytes_ = *traffic_out_bytes;
+            last_traffic_sample_ = now;
         }
-        last_traffic_bytes_ = bytes;
-        last_traffic_sample_ = now;
         sample_system(result);
         return result;
     }
@@ -186,9 +174,6 @@ private:
     }
 #endif
 
-    std::atomic<std::int64_t> active_connections_{};
-    std::atomic<std::uint64_t> traffic_out_bytes_{};
-    std::mutex sample_mutex_;
     std::chrono::steady_clock::time_point last_traffic_sample_{std::chrono::steady_clock::now()};
     std::uint64_t last_traffic_bytes_{};
     std::uint64_t last_cpu_idle_{};

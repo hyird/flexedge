@@ -1,10 +1,9 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { queryKeys } from '@/lib/query-keys'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Mono } from '@/components/mono'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
-import { removeDnsZone, syncDnsZone } from './data'
+import { afterDnsZoneWrite, removeDnsZone, syncDnsZone } from './data'
 import type { DnsZone } from './types'
 
 type ConflictPolicy = 'local' | 'remote'
@@ -35,14 +34,15 @@ export function useZoneCommands({
     policy: ConflictPolicy
   }>()
   const [removing, setRemoving] = useState<DnsZone>()
-  const markStale = () =>
-    client.invalidateQueries({
-      queryKey: queryKeys.dnsZones,
-      refetchType: 'none',
+  const onSynced = (
+    response: { message: string },
+    { item }: { item: Pick<DnsZone, 'id'> }
+  ) => {
+    toastWriteSuccess(response.message || '同步任务已提交', {
+      resourceType: 'dns_zone',
+      resourceId: item.id,
     })
-  const onSynced = (response: { message: string; data?: unknown }) => {
-    toastWriteSuccess(response.message || '同步任务已提交', response.data)
-    void markStale()
+    void afterDnsZoneWrite(client)
   }
   // "立即同步" reports failures by toast; conflict resolution and removal run
   // inside ConfirmDialog, which shows the error inline.
@@ -55,9 +55,12 @@ export function useZoneCommands({
   const remove = useMutation({
     meta: { inlineError: true },
     mutationFn: removeDnsZone,
-    onSuccess: (response) => {
-      toastWriteSuccess(response.message || '域名已移除', response.data)
-      void markStale()
+    onSuccess: (response, zone) => {
+      toastWriteSuccess(response.message || '域名已移除', {
+        resourceType: 'dns_zone',
+        resourceId: zone.id,
+      })
+      void afterDnsZoneWrite(client)
       onRemoved?.()
     },
   })

@@ -16,8 +16,9 @@ using namespace service::dns_sync::detail;
 using namespace service::dns;
 
 int main() {
-    const record_name_policy cloudflare(dns_provider_kind::cloudflare);
-    const record_name_policy aliyun(dns_provider_kind::aliyun);
+    // Cloudflare names records fully qualified, Aliyun relative to the zone.
+    const record_name_policy cloudflare(true);
+    const record_name_policy aliyun(false);
     REQUIRE(cloudflare.remote_record_name("@", "example.com") == "example.com");
     REQUIRE(cloudflare.local_record_name("www.example.com.", "example.com") == "www");
     REQUIRE(aliyun.remote_record_name("www.example.com", "example.com") == "www");

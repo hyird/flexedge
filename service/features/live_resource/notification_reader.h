@@ -2,33 +2,46 @@
 
 #include <ruvia/core/operation_options.h>
 #include <ruvia/core/task.h>
-#include <ruvia/core/task_scope.h>
 #include <ruvia/core/timer.h>
+#include <ruvia/web/redis/redis.h>
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "service/features/background/work_available.h"
 #include "service/features/live_resource/fanout.h"
 #include "service/features/live_resource/notifications.h"
 #include "service/features/live_resource/redis_snapshot_cache.h"
-#include "service/features/log_ingest/fanout.h"
 #include "service/features/logging/logger.h"
-#include "service/features/node_channel/report_waits.h"
-#include "service/features/node_dispatch/fanout.h"
 
+// Every Web Worker follows the committed notification streams on its own
+// Redis connection and delivers them to its own subscriptions only. The
+// streams and what consumes them come from a compile-time list of handler
+// types; each handler names the stream it follows and provides
+//   using stream = ...;   // static constexpr std::string_view key; using value_type;
+//                         // static std::optional<value_type> parse(const ruvia::redis_value& entry);
+//   template <typename context_type>
+//   static void deliver(context_type&, const stream::value_type&, std::optional<std::int64_t> recovered_at);
+// and optionally
+//   static void ready(context_type&);  // the reader (re)captured the stream heads
+//   static ruvia::task<void> recover(context_type&, ruvia::redis_handle);
+//       // unread entries of its stream may have been lost
+// `recovered_at`: when this reader last recovered from losing the streams;
+// an owed recovery of a producer from before that instant is already covered.
+// Each entry is parsed once per stream and given to every handler of it.
 namespace service::live_resource {
 
 inline constexpr auto notification_retry_delay = std::chrono::seconds(1);
-
-inline constexpr std::array notification_streams{notifications::stream_key, service::log_ingest::notifications::stream_key,
-    service::background::work_available::stream_key, service::node_channel::completion_stream_key};
 
 struct notification_cursor final {
     std::string id_{"0-0"};
@@ -93,10 +106,10 @@ return result
 )lua";
 
 inline ruvia::task<ruvia::redis_value> read_notification_batch(ruvia::redis_handle redis,
-    const std::array<notification_cursor, notification_streams.size()>& cursors, bool head) {
-    std::vector<std::string_view> keys(notification_streams.begin(), notification_streams.end());
+    std::span<const std::string_view> streams, std::span<const notification_cursor> cursors, bool head) {
+    std::vector<std::string_view> keys(streams.begin(), streams.end());
     keys.push_back(service::background::work_available::generation_key);
-    std::array<std::string, notification_streams.size()> counts;
+    std::vector<std::string> counts(cursors.size());
     std::vector<std::string_view> arguments{head ? "head" : "read"};
     for (std::size_t index = 0; index < cursors.size(); ++index) {
         counts[index] = std::to_string(cursors[index].seen_entries_);
@@ -106,12 +119,13 @@ inline ruvia::task<ruvia::redis_value> read_notification_batch(ruvia::redis_hand
     co_return co_await redis.eval(notification_batch_script, keys, arguments);
 }
 
-inline bool matching_notification_generation(const ruvia::redis_value& batch, std::string_view generation) {
+inline bool matching_notification_generation(const ruvia::redis_value& batch, std::string_view generation,
+    std::size_t streams) {
     service::utils::require_redis_success(batch, "could not read notification batch");
     if (batch.kind() != ruvia::redis_value::kind_type::array || batch.array().size() != 2 ||
         batch.array()[0].kind() != ruvia::redis_value::kind_type::string ||
         batch.array()[1].kind() != ruvia::redis_value::kind_type::array ||
-        batch.array()[1].array().size() != notification_streams.size()) {
+        batch.array()[1].array().size() != streams) {
         throw std::runtime_error("invalid notification batch");
     }
     return batch.array()[0].string() == generation;
@@ -134,229 +148,269 @@ inline void accept_notification_cursor(notification_cursor& cursor, const ruvia:
         .count();
 }
 
-// Every subscription of the calling worker reads one recovery snapshot and
-// every node control connection it holds re-reads its desired state.
-template <typename context_type>
-void recover_subscriptions(context_type& context, std::optional<std::string_view> tenant = std::nullopt) {
-    get_hub(context).recover(tenant);
-    service::log_ingest::fanout::get_hub(context).recover(tenant);
-    auto& dispatch = service::node_dispatch::fanout::get_hub(context);
-    if (tenant) {
-        dispatch.publish(*tenant);
-    } else {
-        dispatch.publish_all();
-    }
-}
+// Delivers committed resource notifications to the calling worker's own
+// resource subscriptions.
+struct resource_subscriptions final {
+    using stream = notifications::stream;
 
-// Delivers one stream entry to the calling worker's own subscriptions.
-// `recovered_at`: when this reader last recovered from losing the stream; an
-// owed recovery of a producer from before that instant is already covered.
-template <typename context_type>
-void deliver_notification(context_type& context, const notifications::resource_notification& value,
-    std::optional<std::int64_t> recovered_at) {
-    if (value.missed_until_ && (!recovered_at || *recovered_at < *value.missed_until_)) {
+    template <typename context_type>
+    static void deliver(context_type& context, const notifications::resource_notification& value,
+        std::optional<std::int64_t> recovered_at) {
+        auto& hub_value = get_hub(context);
+        if (value.missed_until_ && (!recovered_at || *recovered_at < *value.missed_until_)) {
+            if (value.tenant_id_ == notifications::all_tenants) {
+                hub_value.recover();
+            } else {
+                hub_value.recover(std::string_view(value.tenant_id_));
+            }
+        }
         if (value.tenant_id_ == notifications::all_tenants) {
-            recover_subscriptions(context);
-        } else {
-            recover_subscriptions(context, std::string_view(value.tenant_id_));
+            return;
+        }
+        const auto& tenant = value.tenant_id_;
+        for (const auto& change : value.changes_) {
+            hub_value.publish(tenant, change.resource_, change.id_);
+        }
+        for (const auto& attempt : value.task_attempts_) {
+            hub_value.publish_task_attempt(tenant, attempt.task_id_, attempt.notice_);
+        }
+        for (const auto& task_id : value.task_history_resets_) {
+            hub_value.reset_task_history(tenant, task_id);
+        }
+        if (!value.node_runtime_.empty()) {
+            hub_value.publish_runtime(tenant, value.node_id_, value.node_runtime_);
+        }
+        for (const auto& origin : value.origin_runtime_) {
+            hub_value.publish_origins(tenant, origin.website_id_, value.node_id_, origin.payload_);
         }
     }
-    if (value.tenant_id_ == notifications::all_tenants) {
-        return;
-    }
-    auto& hub_value = get_hub(context);
-    const auto& tenant = value.tenant_id_;
-    for (const auto& change : value.changes_) {
-        hub_value.publish(tenant, change.resource_, change.id_);
-    }
-    for (const auto& attempt : value.task_attempts_) {
-        hub_value.publish_task_attempt(tenant, attempt.task_id_, attempt.notice_);
-    }
-    for (const auto& task_id : value.task_history_resets_) {
-        hub_value.reset_task_history(tenant, task_id);
-    }
-    if (!value.node_runtime_.empty()) {
-        hub_value.publish_runtime(tenant, value.node_id_, value.node_runtime_);
-    }
-    for (const auto& origin : value.origin_runtime_) {
-        hub_value.publish_origins(tenant, origin.website_id_, value.node_id_, origin.payload_);
-    }
-    if (value.node_config_) {
-        service::node_dispatch::fanout::get_hub(context).publish(tenant);
-    }
-}
 
-// The read loop of run_notification_reader. It starts at the newest entry
-// (fresh subscriptions read initial snapshots) and, after losing the stream
-// (Redis restart, timeout, network), recovers every subscription of this
-// worker once the stream is readable again: entries appended meanwhile may
-// have been lost or never sent.
-template <typename context_type>
-ruvia::task<void> read_notifications(context_type& context) {
-    namespace available = service::background::work_available;
-    const auto& streams = notification_streams;
-    std::array<notification_cursor, notification_streams.size()> cursors;
-    auto& signals = available::get_signals(context);
-    auto& report_waits = context.template worker_state<service::node_channel::report_waits>();
-    std::string generation;
-    bool initialized{};
-    bool interrupted{};
-    std::optional<std::int64_t> recovered_at;
-    while (!context.get_stop_token().stop_requested()) {
-        bool retry{};
-        try {
-            const auto redis = context.redis().with_options({.timeout_ = notifications::read_timeout,
-                .stop_token_ = context.get_stop_token()});
-            auto current_generation = co_await available::generation(redis);
-            if (!generation.empty() && current_generation != generation) {
-                initialized = false;
-                interrupted = true;
-            }
-            if (!initialized) {
-                // All local signal channels exist before the cursor snapshot.
-                // The following catchup hint covers work that raced startup,
-                // while later appends stay visible to the independent cursors.
-                const auto heads = co_await read_notification_batch(redis, cursors, true);
-                if (!matching_notification_generation(heads, current_generation)) {
+    // Unread resource changes may be lost: reusable snapshots are invalid and
+    // every subscription of this worker reads one recovery snapshot.
+    template <typename context_type>
+    static ruvia::task<void> recover(context_type& context, ruvia::redis_handle redis) {
+        const std::vector<std::string> scopes{"*"};
+        co_await redis_snapshot_cache::invalidate(redis, scopes);
+        get_hub(context).recover();
+    }
+};
+
+namespace notification_detail {
+
+template <typename... types>
+struct type_list final {};
+
+template <typename list, typename type>
+struct append_unique;
+template <typename... types, typename type>
+struct append_unique<type_list<types...>, type> {
+    using result = std::conditional_t<(std::is_same_v<types, type> || ...), type_list<types...>, type_list<types..., type>>;
+};
+
+template <typename list, typename... types>
+struct unique {
+    using result = list;
+};
+template <typename list, typename first, typename... rest>
+struct unique<list, first, rest...> {
+    using result = typename unique<typename append_unique<list, first>::result, rest...>::result;
+};
+
+// Recovery of every handler rather than of one stream's handlers.
+struct all_streams final {};
+
+template <typename stream_list, typename... handlers>
+class reader;
+
+template <typename... streams, typename... handlers>
+class reader<type_list<streams...>, handlers...> final {
+public:
+    static constexpr std::array<std::string_view, sizeof...(streams)> keys{streams::key...};
+
+    // It starts at the newest entries (fresh subscriptions read initial
+    // snapshots) and, after losing the streams (Redis restart, timeout,
+    // network), recovers every handler once the streams are readable again:
+    // entries appended meanwhile may have been lost or never sent.
+    template <typename context_type>
+    static ruvia::task<void> run(context_type& context) {
+        static_assert(distinct_keys(), "two notification stream types name the same Redis stream");
+        std::array<notification_cursor, sizeof...(streams)> cursors;
+        std::string generation;
+        bool initialized{};
+        bool interrupted{};
+        std::optional<std::int64_t> recovered_at;
+        while (!context.get_stop_token().stop_requested()) {
+            bool retry{};
+            try {
+                const auto redis = context.redis().with_options({.timeout_ = notifications::read_timeout,
+                    .stop_token_ = context.get_stop_token()});
+                auto current_generation = co_await service::background::work_available::generation(redis);
+                if (!generation.empty() && current_generation != generation) {
+                    initialized = false;
+                    interrupted = true;
+                }
+                if (!initialized) {
+                    const auto heads = co_await read_notification_batch(redis, keys, cursors, true);
+                    if (!matching_notification_generation(heads, current_generation, keys.size())) {
+                        continue;
+                    }
+                    for (std::size_t index = 0; index < keys.size(); ++index) {
+                        accept_notification_cursor(cursors[index], heads.array()[1].array()[index]);
+                    }
+                    generation = std::move(current_generation);
+                    (ready<handlers>(context), ...);
+                    initialized = true;
+                }
+                if (interrupted) {
+                    for (auto& recovery : recoveries<all_streams>(context, redis)) {
+                        co_await std::move(recovery);
+                    }
+                    recovered_at = unix_milliseconds();
+                    interrupted = false;
+                    service::logging::info("Resource notifications resumed; subscriptions read recovery snapshots");
+                }
+                const auto batch = co_await read_notification_batch(redis, keys, cursors, false);
+                if (!matching_notification_generation(batch, generation, keys.size())) {
+                    initialized = false;
+                    interrupted = true;
                     continue;
                 }
-                for (std::size_t index = 0; index < streams.size(); ++index) {
-                    accept_notification_cursor(cursors[index], heads.array()[1].array()[index]);
+                const auto results = batch.array()[1].array();
+                std::array<bool, sizeof...(streams)> gaps{};
+                bool active{};
+                for (std::size_t index = 0; index < keys.size(); ++index) {
+                    const auto& result = results[index];
+                    if (result.kind() != ruvia::redis_value::kind_type::array || result.array().size() != 5 ||
+                        result.array()[0].kind() != ruvia::redis_value::kind_type::string ||
+                        result.array()[0].string() != keys[index] ||
+                        result.array()[1].kind() != ruvia::redis_value::kind_type::array ||
+                        result.array()[4].kind() != ruvia::redis_value::kind_type::integer) {
+                        throw std::runtime_error("invalid combined notification stream");
+                    }
+                    // Only the stream that lost unread entries recovers: a gap
+                    // of one stream never manufactures unrelated updates.
+                    gaps[index] = result.array()[4].integer() == 1;
+                    active = active || gaps[index] || !result.array()[1].array().empty();
                 }
-                generation = std::move(current_generation);
-                service::log_ingest::fanout::get_hub(context).mark_ready();
-                signals.notify_all();
-                report_waits.recover();
-                initialized = true;
+                std::vector<ruvia::task<void>> gap_recoveries;
+                [&]<std::size_t... index>(std::index_sequence<index...>) {
+                    ((gaps[index] ? add_recoveries<streams>(gap_recoveries, context, redis) : void()), ...);
+                }(std::index_sequence_for<streams...>{});
+                for (auto& recovery : gap_recoveries) {
+                    co_await std::move(recovery);
+                }
+                [&]<std::size_t... index>(std::index_sequence<index...>) {
+                    (deliver_stream<streams>(context, results[index], recovered_at), ...);
+                }(std::index_sequence_for<streams...>{});
+                for (std::size_t index = 0; index < keys.size(); ++index) {
+                    accept_notification_cursor(cursors[index], results[index]);
+                }
+                if (active) {
+                    continue;
+                }
+                // The only blocking Redis operation on this Worker. Its reply is
+                // accepted by the following atomic batch, or covered by a recovery
+                // snapshot if Redis trimmed it while the Worker was suspended.
+                std::vector<std::string_view> wait{"XREAD", "BLOCK", "15000", "COUNT", "1", "STREAMS"};
+                wait.insert(wait.end(), keys.begin(), keys.end());
+                for (const auto& cursor : cursors) {
+                    wait.push_back(cursor.id_);
+                }
+                const auto reply = co_await redis.command(std::span<const std::string_view>(wait));
+                service::utils::require_redis_success(reply, "could not wait for worker notifications");
+                if (!reply.null() && reply.kind() != ruvia::redis_value::kind_type::array) {
+                    throw std::runtime_error("invalid combined notification wakeup");
+                }
+            } catch (const std::exception& error) {
+                if (!context.get_stop_token().stop_requested()) {
+                    service::logging::error("Resource notification reader failure: " + std::string(error.what()));
+                    retry = true;
+                }
             }
-            if (interrupted) {
-                const std::vector<std::string> scopes{"*"};
-                co_await redis_snapshot_cache::invalidate(redis, scopes);
-                recover_subscriptions(context);
-                recovered_at = unix_milliseconds();
-                interrupted = false;
-                service::logging::info("Resource notifications resumed; subscriptions read recovery snapshots");
-            }
-            const auto batch = co_await read_notification_batch(redis, cursors, false);
-            if (!matching_notification_generation(batch, generation)) {
+            if (retry) {
                 initialized = false;
                 interrupted = true;
-                continue;
-            }
-            bool active{};
-            for (const auto& stream_value : batch.array()[1].array()) {
-                if (stream_value.kind() != ruvia::redis_value::kind_type::array || stream_value.array().size() != 5) {
-                    throw std::runtime_error("invalid combined notification stream");
+                if (co_await ruvia::sleep_for(context.worker(), notification_retry_delay, context.get_stop_token()) ==
+                    ruvia::timer_sleep_result::stop_requested) {
+                    co_return;
                 }
-                const auto stream = stream_value.array();
-                if (stream[0].kind() != ruvia::redis_value::kind_type::string ||
-                    stream[1].kind() != ruvia::redis_value::kind_type::array) {
-                    throw std::runtime_error("invalid combined notification stream fields");
-                }
-                std::size_t stream_index{};
-                while (stream_index < streams.size() && streams[stream_index] != stream[0].string()) {
-                    ++stream_index;
-                }
-                if (stream_index == streams.size()) {
-                    throw std::runtime_error("unknown worker notification stream");
-                }
-                if (stream[4].kind() != ruvia::redis_value::kind_type::integer) {
-                    throw std::runtime_error("invalid notification gap flag");
-                }
-                if (stream[4].integer() == 1) {
-                    // Only the stream that lost unread entries recovers. A
-                    // resource gap also invalidates reusable snapshots and
-                    // wakes configuration watches; work/receipt gaps never
-                    // manufacture unrelated SSE updates.
-                    if (stream_index == 0) {
-                        const std::vector<std::string> scopes{"*"};
-                        co_await redis_snapshot_cache::invalidate(redis, scopes);
-                        get_hub(context).recover();
-                        service::node_dispatch::fanout::get_hub(context).publish_all();
-                    } else if (stream_index == 1) {
-                        service::log_ingest::fanout::get_hub(context).recover();
-                    } else if (stream_index == 2) {
-                        signals.notify_all();
-                    } else {
-                        report_waits.recover();
-                    }
-                    active = true;
-                }
-                for (const auto& entry : stream[1].array()) {
-                    active = true;
-                    const auto id = service::log_ingest::notifications::entry_id(entry);
-                    if (!id || entry.array()[1].kind() != ruvia::redis_value::kind_type::array) {
-                        throw std::runtime_error("invalid worker notification entry");
-                    }
-                    if (stream_index == 0) {
-                        if (const auto notification = notifications::parse_fields(entry.array()[1].array())) {
-                            deliver_notification(context, *notification, recovered_at);
-                        }
-                    } else if (stream_index == 1) {
-                        if (const auto notification = service::log_ingest::notifications::parse_entry(entry)) {
-                            service::log_ingest::fanout::deliver(context, *notification);
-                        }
-                    } else {
-                        const auto fields = entry.array()[1].array();
-                        if (fields.size() % 2 != 0) {
-                            throw std::runtime_error("invalid worker signal fields");
-                        }
-                        std::optional<std::string_view> value;
-                        const auto name = stream_index == 2 ? "type" : "report_id";
-                        for (std::size_t index = 0; index < fields.size(); index += 2) {
-                            if (fields[index].kind() != ruvia::redis_value::kind_type::string ||
-                                fields[index + 1].kind() != ruvia::redis_value::kind_type::string) {
-                                throw std::runtime_error("invalid worker signal field type");
-                            }
-                            if (fields[index].string() == name) {
-                                value = fields[index + 1].string();
-                            }
-                        }
-                        if (!value || value->empty()) {
-                            throw std::runtime_error("missing worker signal field");
-                        }
-                        if (stream_index == 2) {
-                            signals.for_type(*value).notify();
-                        } else {
-                            report_waits.publish(*value);
-                        }
-                    }
-                }
-                accept_notification_cursor(cursors[stream_index], stream_value);
-            }
-            if (active) {
-                continue;
-            }
-            // The only blocking Redis operation on this Worker. Its reply is
-            // accepted by the following atomic batch, or covered by a recovery
-            // snapshot if Redis trimmed it while the Worker was suspended.
-            const auto reply = co_await redis.command("XREAD", "BLOCK", "15000", "COUNT", "1", "STREAMS",
-                streams[0], streams[1], streams[2], streams[3], cursors[0].id_, cursors[1].id_, cursors[2].id_, cursors[3].id_);
-            service::utils::require_redis_success(reply, "could not wait for worker notifications");
-            if (!reply.null() && reply.kind() != ruvia::redis_value::kind_type::array) {
-                throw std::runtime_error("invalid combined notification wakeup");
-            }
-        } catch (const std::exception& error) {
-            if (!context.get_stop_token().stop_requested()) {
-                service::logging::error("Resource notification reader failure: " + std::string(error.what()));
-                retry = true;
-            }
-        }
-        if (retry) {
-            initialized = false;
-            interrupted = true;
-            if (co_await ruvia::sleep_for(context.worker(), notification_retry_delay, context.get_stop_token()) ==
-                ruvia::timer_sleep_result::stop_requested) {
-                co_return;
             }
         }
     }
-}
 
-// Each Web Worker follows committed notifications for its own subscriptions.
-template <typename context_type>
+private:
+    static constexpr bool distinct_keys() {
+        for (std::size_t first = 0; first < keys.size(); ++first) {
+            for (std::size_t second = first + 1; second < keys.size(); ++second) {
+                if (keys[first] == keys[second]) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    template <typename handler, typename context_type>
+    static void ready(context_type& context) {
+        if constexpr (requires { handler::ready(context); }) {
+            handler::ready(context);
+        }
+    }
+
+    // Recovery tasks are lazy: they run in list order when awaited.
+    template <typename stream, typename context_type>
+    static void add_recoveries(std::vector<ruvia::task<void>>& output, context_type& context, ruvia::redis_handle redis) {
+        const auto add = [&]<typename handler>() {
+            if constexpr (requires { handler::recover(context, redis); }) {
+                if constexpr (std::is_same_v<stream, all_streams> || std::is_same_v<typename handler::stream, stream>) {
+                    output.push_back(handler::recover(context, redis));
+                }
+            }
+        };
+        (add.template operator()<handlers>(), ...);
+    }
+
+    template <typename stream, typename context_type>
+    static std::vector<ruvia::task<void>> recoveries(context_type& context, ruvia::redis_handle redis) {
+        std::vector<ruvia::task<void>> output;
+        add_recoveries<stream>(output, context, redis);
+        return output;
+    }
+
+    template <typename stream, typename context_type>
+    static void deliver_stream(context_type& context, const ruvia::redis_value& result,
+        std::optional<std::int64_t> recovered_at) {
+        for (const auto& entry : result.array()[1].array()) {
+            if (entry.kind() != ruvia::redis_value::kind_type::array || entry.array().size() != 2 ||
+                entry.array()[0].kind() != ruvia::redis_value::kind_type::string ||
+                entry.array()[1].kind() != ruvia::redis_value::kind_type::array) {
+                throw std::runtime_error("invalid worker notification entry");
+            }
+            const auto value = stream::parse(entry);
+            if (!value) {
+                continue;
+            }
+            const auto deliver = [&]<typename handler>() {
+                if constexpr (std::is_same_v<typename handler::stream, stream>) {
+                    handler::deliver(context, *value, recovered_at);
+                }
+            };
+            (deliver.template operator()<handlers>(), ...);
+        }
+    }
+};
+
+}  // namespace notification_detail
+
+// The reader of the streams `handlers` follow, each stream read once.
+template <typename... handlers>
+using notification_reader = notification_detail::reader<
+    typename notification_detail::unique<notification_detail::type_list<>, typename handlers::stream...>::result,
+    handlers...>;
+
+template <typename... handlers, typename context_type>
 ruvia::task<void> run_notification_reader(context_type& context) {
-    co_await read_notifications(context);
+    co_await notification_reader<handlers...>::run(context);
 }
 
 }  // namespace service::live_resource

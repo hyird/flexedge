@@ -1,4 +1,4 @@
-import { getRouteApi, useNavigate } from '@tanstack/react-router'
+import { getRouteApi } from '@tanstack/react-router'
 import { useListSearch } from '@/lib/list-search'
 import { Page } from '@/components/page'
 import { NodesTable } from './nodes-table'
@@ -7,7 +7,6 @@ const route = getRouteApi('/_authenticated/nodes/')
 
 export function NodesPage() {
   const list = useListSearch(route)
-  const navigate = useNavigate()
   return (
     <Page
       title='节点'
@@ -15,16 +14,9 @@ export function NodesPage() {
     >
       <NodesTable
         list={list}
-        isCreating={list.search.create === 1}
+        isCreating={list.sheet.isCreating}
         onCreatingChange={(creating) =>
-          void navigate({
-            to: '.',
-            search: (previous: Record<string, unknown>) => ({
-              ...previous,
-              create: creating ? (1 as const) : undefined,
-            }),
-            replace: !creating,
-          })
+          creating ? list.sheet.openCreate() : list.sheet.close()
         }
       />
     </Page>

@@ -15,7 +15,7 @@ import {
 } from './task-trace'
 import {
   invalidItem,
-  subtaskHistorySchema,
+  taskHistorySchema,
   taskAttemptTraceSchema,
   type TaskAttemptTraceSummary,
 } from './types'
@@ -186,7 +186,6 @@ const stepSample = {
 // §2.1 envelope.
 const traceSample = {
   attempt_id: '48213',
-  task_id: '6f3c',
   resource_type: 'dns_zone',
   resource_id: '9a1e',
   kind: 'dns_sync',
@@ -251,8 +250,11 @@ const abridgedStep = {
     },
   ],
 }
+const ref = { resourceType: 'dns_zone', resourceId: '9a1e' }
 const attemptBase = {
+  id: '48213',
   attempt: 3,
+  operation: 'sync',
   outcome: 'failed',
   error: 'Cloudflare API 连接失败',
   started_at: '2026-10-14T14:16:44.123456+00',
@@ -262,14 +264,12 @@ const attemptBase = {
   detail: { kind: 'none', truncated: false },
 }
 const historyOf = (...list: unknown[]) => ({
-  subtask_id: 'sub-1',
   truncated: false,
   summary: {
     attempt_count: list.length,
     failure_count: list.length,
     first_failure_at: '',
     last_success_at: '',
-    next_attempt_at: '',
   },
   list,
 })
@@ -279,7 +279,7 @@ function parseTrace(value: unknown) {
 }
 
 test('trace schemas read the contract samples', () => {
-  const history = subtaskHistorySchema.parse(
+  const history = taskHistorySchema.parse(
     historyOf({ ...attemptBase, trace: summarySample })
   )
   // Only what the timeline shows; totals and the failed step stay on the wire.
@@ -462,7 +462,7 @@ test('unknown values and malformed items degrade locally', () => {
   // History: a malformed summary hides only that attempt's trace; an absent
   // one (backend without traces) is null; summary items that do not parse
   // drop out of the timeline.
-  const history = subtaskHistorySchema.parse(
+  const history = taskHistorySchema.parse(
     historyOf(
       { ...attemptBase, trace: { ...summarySample, step_count: 'six' } },
       { ...attemptBase, attempt: 2 },
@@ -556,7 +556,7 @@ function render(element: ReactElement, client = new QueryClient()) {
   return html
 }
 
-const summary = subtaskHistorySchema.parse(
+const summary = taskHistorySchema.parse(
   historyOf({ ...attemptBase, trace: summarySample })
 ).list[0].trace
 
@@ -565,11 +565,11 @@ function renderTimeline(steps?: unknown[]) {
   const client = new QueryClient()
   if (steps)
     client.setQueryData(
-      taskAttemptTraceQuery('op-1', '48213').queryKey,
+      taskAttemptTraceQuery(ref, '48213').queryKey,
       parseTrace({ ...traceSample, steps })
     )
   return render(
-    createElement(AttemptTimeline, { operationId: 'op-1', trace: summary }),
+    createElement(AttemptTimeline, { task: ref, trace: summary }),
     client
   )
 }
@@ -600,7 +600,7 @@ test('the timeline renders from the summary before the full trace arrives', () =
   expect(html).not.toContain('失败步骤')
 
   // Merged steps retain their actual repeat count, without omission hints.
-  const merged = subtaskHistorySchema.parse(
+  const merged = taskHistorySchema.parse(
     historyOf({
       ...attemptBase,
       trace: {
@@ -621,7 +621,7 @@ test('the timeline renders from the summary before the full trace arrives', () =
     })
   ).list[0].trace
   const mergedHtml = render(
-    createElement(AttemptTimeline, { operationId: 'op-1', trace: merged })
+    createElement(AttemptTimeline, { task: ref, trace: merged })
   )
   expect(mergedHtml).toContain('×4')
   expect(mergedHtml).toContain('5.10 s')
@@ -687,7 +687,7 @@ test('capture and omission metadata never add notes or hide saved excerpts', () 
   ]) {
     const client = new QueryClient()
     client.setQueryData(
-      taskAttemptTraceQuery('op-1', '48213').queryKey,
+      taskAttemptTraceQuery(ref, '48213').queryKey,
       parseTrace({
         ...traceSample,
         capture: { truncated: true, degraded: true, redactions: 99 },
@@ -726,7 +726,7 @@ test('capture and omission metadata never add notes or hide saved excerpts', () 
       })
     )
     const html = render(
-      createElement(AttemptTimeline, { operationId: 'op-1', trace: summary }),
+      createElement(AttemptTimeline, { task: ref, trace: summary }),
       client
     )
     expect(html).toContain('saved response')
@@ -822,13 +822,13 @@ test('attempts without a trace render nothing', () => {
     steps: [],
   }
   for (const trace of [none, null, { ...none, state: 'available' }])
-    expect(
-      render(createElement(AttemptTimeline, { operationId: 'op-1', trace }))
-    ).toBe('')
+    expect(render(createElement(AttemptTimeline, { task: ref, trace }))).toBe(
+      ''
+    )
   expect(
     render(
       createElement(AttemptTimeline, {
-        operationId: 'op-1',
+        task: ref,
         trace: invalidItem,
       })
     )

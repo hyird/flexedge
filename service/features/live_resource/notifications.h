@@ -63,8 +63,8 @@ inline constexpr std::string_view all_tenants{"*"};
             return "providers";
         case resource::certificates:
             return "certificates";
-        case resource::operations:
-            return "operations";
+        case resource::tasks:
+            return "tasks";
         case resource::overview:
             return "overview";
         case resource::access_history:
@@ -77,7 +77,7 @@ inline constexpr std::string_view all_tenants{"*"};
 
 [[nodiscard]] inline std::optional<resource> parse_resource(std::string_view value) {
     for (const auto candidate : {resource::nodes, resource::clusters, resource::websites, resource::dns_zones,
-             resource::providers, resource::certificates, resource::operations, resource::overview,
+             resource::providers, resource::certificates, resource::tasks, resource::overview,
              resource::access_history, resource::overview_traffic}) {
         if (resource_name(candidate) == value) {
             return candidate;
@@ -91,7 +91,7 @@ struct resource_change final {
     std::string id_;
     friend bool operator==(const resource_change&, const resource_change&) = default;
 };
-// An attempt recorded for a subtask of task (operation) `task_id_`.
+// An attempt recorded for task `task_id_` (the task's resource id).
 struct task_attempt_change final {
     std::string task_id_;
     task_attempt_notice notice_;
@@ -130,8 +130,8 @@ struct resource_notification final {
         }
         return *this;
     }
-    resource_notification& task_attempt(std::string_view task_id, task_attempt_notice notice) {
-        task_attempts_.push_back({std::string(task_id), std::move(notice)});
+    resource_notification& task_attempt(std::string_view task_id, std::int64_t event_id) {
+        task_attempts_.push_back({std::string(task_id), {.event_id_ = event_id}});
         return *this;
     }
     resource_notification& task_history_reset(std::string_view task_id) {
@@ -255,16 +255,13 @@ inline std::vector<std::string_view> split(std::string_view value, char separato
     if (!value.task_attempts_.empty()) {
         std::string attempts;
         for (const auto& attempt : value.task_attempts_) {
-            if (attempt.task_id_.empty() || attempt.notice_.subtask_id_.empty() ||
-                detail::contains_separator(attempt.task_id_) ||
-                detail::contains_separator(attempt.notice_.subtask_id_)) {
+            if (attempt.task_id_.empty() || detail::contains_separator(attempt.task_id_)) {
                 throw std::invalid_argument("task attempt notification is invalid");
             }
             if (!attempts.empty()) {
                 attempts += ';';
             }
-            attempts += attempt.task_id_ + ',' + attempt.notice_.subtask_id_ + ',' +
-                        std::to_string(attempt.notice_.event_id_);
+            attempts += attempt.task_id_ + ',' + std::to_string(attempt.notice_.event_id_);
         }
         fields.emplace_back("task_attempts", std::move(attempts));
     }
@@ -322,15 +319,14 @@ inline std::vector<std::string_view> split(std::string_view value, char separato
         } else if (name == "task_attempts") {
             for (const auto item : detail::split(field, ';')) {
                 const auto parts = detail::split(item, ',');
-                if (parts.size() != 3 || parts[0].empty() || parts[1].empty()) {
+                if (parts.size() != 2 || parts[0].empty()) {
                     return std::nullopt;
                 }
-                const auto event_id = detail::parse_integer<std::int64_t>(parts[2]);
+                const auto event_id = detail::parse_integer<std::int64_t>(parts[1]);
                 if (!event_id) {
                     return std::nullopt;
                 }
-                value.task_attempts_.push_back(
-                    {std::string(parts[0]), {.subtask_id_ = std::string(parts[1]), .event_id_ = *event_id}});
+                value.task_attempts_.push_back({std::string(parts[0]), {.event_id_ = *event_id}});
             }
         } else if (name == "task_history_resets") {
             for (const auto item : detail::split(field, ';')) {
@@ -379,6 +375,15 @@ inline std::vector<std::string_view> split(std::string_view value, char separato
     return decode(pairs);
 }
 
+// The resource notification stream as the Worker notification reader follows
+// it: each entry is parsed once, then given to every handler of this stream.
+struct stream final {
+    static constexpr std::string_view key{stream_key};
+    using value_type = resource_notification;
+    [[nodiscard]] static std::optional<resource_notification> parse(const ruvia::redis_value& entry) {
+        return parse_fields(entry.array()[1].array());
+    }
+};
 
 struct entry final {
     std::string id_;

@@ -39,16 +39,19 @@
 #include "service/common/http.h"
 #include "service/config/auth.h"
 #include "service/config/database.h"
+#include "service/config/geoip.h"
 #include "service/config/http_server.h"
 #include "service/config/outbound.h"
 #include "service/config/rate_limit.h"
 #include "service/config/redis.h"
 #include "service/config/runtime_env.h"
 #include "service/config/schema.h"
+#include "service/features/geoip/runtime_database.h"
 #include "service/features/live_resource/notification_outbox.h"
 #include "service/features/logging/access.h"
 #include "service/features/logging/connection.h"
 #include "service/features/logging/logger.h"
+#include "service/features/node_presence/notification_relay.h"
 #include "service/middleware/rate_limit.h"
 
 // 业务控制器（RUVIA_CONTROLLER_GROUP 在静态阶段把路由表注册到 ruvia::app()）。
@@ -73,9 +76,10 @@
 #include "service/features/node_channel/projection.h"
 #include "service/features/node_channel/report_persistence.h"
 #include "service/features/node_channel/report_waits.h"
+#include "service/features/node_dispatch/fanout.h"
 #include "service/features/node_release/catalog.h"
 #include "service/features/provider_verification/worker.h"
-#include "service/features/website_dispatch/worker.h"
+#include "service/features/website_dns/worker.h"
 #include "service/utils/secret.h"
 #include "service/utils/token.h"
 
@@ -155,12 +159,14 @@ ruvia::redis_config configure_redis(ruvia::application& app) {
 
 // Every Web Worker owns its live delivery state; nothing is shared between
 // workers. Changes arrive only through the worker's own Redis readers.
-void configure_worker_states(ruvia::application& app) {
+void configure_worker_states(ruvia::application& app, const service::node_release::snapshot& node_release) {
     app.use_worker_state<service::live_resource::hub>();
     app.use_worker_state<service::node_dispatch::fanout::hub>();
     app.use_worker_state<service::log_ingest::fanout::hub>();
     app.use_worker_state<service::node_channel::report_waits>();
-    app.use_worker_state<service::background::work_available::signals>();
+    app.use_worker_state<service::background::work_available::claim_signals>();
+    app.use_worker_state<service::node_release::catalog>(
+        [node_release] { return service::node_release::catalog(node_release); });
 }
 
 std::filesystem::path system_ca_bundle([[maybe_unused]] const std::filesystem::path& runtime_dir) {
@@ -359,23 +365,24 @@ int main(int argc, char* argv[]) {
 #else
         const auto node_binary_path = runtime_dir / "node";
 #endif
-        service::node_release::configure(node_binary_path, runtime_dir / "install-node.sh",
-            runtime_dir / "node-release.manifest");
+        const auto node_release = service::node_release::load(node_binary_path,
+            runtime_dir / "install-node.sh", runtime_dir / "node-release.manifest");
         const auto env_path = service::config::dotenv_path(runtime_dir);
         app.load_dotenv(env_path, {.missing_file_ = ruvia::dotenv_missing_file_policy::require});
         if (service::config::ensure_runtime_secrets(env_path, app.env())) {
             app.load_dotenv(env_path);
         }
         service::utils::configure_secret_key(app.env().get("SECRET_MASTER_KEY").value_or(""));
-        (void)service::config::get_auth_configuration(app.env());
+        service::config::configure_auth(service::config::get_auth_configuration(app.env()));
         auto initial_admin = service::initial_admin::get_initial_admin_config(app.env());
         configure_document_root(app, runtime_dir);
         auto database = configure_database(app);
         service::initial_admin::initialize(database, std::move(initial_admin));
         (void)configure_redis(app);
         service::config::configure_rate_limits(service::config::get_rate_limit_config(app.env()));
+        service::geoip::configure_xdb_database(service::config::get_geoip_configuration(app.env()));
         app.use<service::middleware::request_rate_limit_middleware>();
-        configure_worker_states(app);
+        configure_worker_states(app, node_release);
         configure_outbound_origins(app, runtime_dir);
         configure_http_server(app, env_path.parent_path());
 
@@ -408,7 +415,9 @@ int main(int argc, char* argv[]) {
                     }
                 };
                 post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
-                    co_await service::live_resource::run_notification_reader(context);
+                    co_await service::live_resource::run_notification_reader<service::live_resource::resource_subscriptions,
+                        service::node_dispatch::fanout::desired_state_waits, service::log_ingest::fanout::log_tails,
+                        service::log_ingest::fanout::log_tail_recovery, service::node_channel::report_receipts>(context);
                 });
                 post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
                     service::background::task_context task(context);
@@ -424,15 +433,16 @@ int main(int argc, char* argv[]) {
                 });
                 post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
                     service::background::task_context task(context);
-                    co_await service::website_dispatch::run_worker(task);
+                    co_await service::website_dns::run_worker(task);
                 });
                 post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
                     service::background::task_context task(context);
-                    co_await service::live_resource::node_presence::run_worker(task);
+                    co_await service::node_presence::run_worker(task);
                 });
                 post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
                     service::background::task_context task(context);
-                    co_await service::live_resource::outbox::run_worker(task);
+                    co_await service::live_resource::outbox::run_worker<service::node_presence::resource_relay,
+                        service::log_ingest::log_relay, service::node_channel::projection_refresh>(task);
                 });
                 post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
                     service::background::task_context task(context);

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string_view>
 
+#include "service/features/background/queued_work.h"
 #include "service/features/sync_runtime/state.h"
 
 namespace service::provider_verification {
@@ -14,7 +15,7 @@ namespace service::provider_verification {
 // configuration to verify; the marker only wakes the verifier for its latest
 // generation and coalesces repeated requests for the same provider.
 inline ruvia::task<void> mark_current(ruvia::db_transaction& transaction, std::string_view tenant_id,
-    std::string_view provider_id, service::operation::work_origin& origin) {
+    std::string_view provider_id, service::background::queued_work& work) {
     const auto rows = co_await transaction.query(
         "SELECT kind, verification_generation FROM sys_provider WHERE tenant_id = $1 AND id = $2 "
         "AND deleted_at IS NULL LIMIT 1",
@@ -25,14 +26,14 @@ inline ruvia::task<void> mark_current(ruvia::db_transaction& transaction, std::s
     co_await service::sync_runtime::upsert_marker(
         transaction, tenant_id, service::sync_runtime::marker_resource_type::provider, provider_id,
         service::sync_runtime::marker_operation::verify,
-        rows.front()[1].as<std::int64_t>().value_or(1), origin);
+        rows.front()[1].as<std::int64_t>().value_or(1), work);
     co_return;
 }
 
 inline ruvia::task<void> remove(ruvia::db_transaction& transaction, std::string_view tenant_id,
-    std::string_view provider_id, service::operation::work_origin& origin) {
+    std::string_view provider_id, service::background::queued_work& work) {
     co_await service::sync_runtime::remove_marker(
-        transaction, tenant_id, service::sync_runtime::marker_resource_type::provider, provider_id, origin);
+        transaction, tenant_id, service::sync_runtime::marker_resource_type::provider, provider_id, work);
     co_return;
 }
 
@@ -40,7 +41,7 @@ namespace detail {
 
 inline ruvia::task<bool> enqueue(ruvia::db_transaction& transaction, std::string_view tenant_id,
     std::string_view provider_id, std::string_view kind, std::int64_t expected_revision,
-    service::operation::work_origin& origin) {
+    service::background::queued_work& work) {
     const auto rows = co_await transaction.query(
         "UPDATE sys_provider SET verification_generation = verification_generation + 1, "
         "last_error = NULL, status = 'unverified', runtime = '{}'::jsonb, updated_at = NOW() "
@@ -53,22 +54,22 @@ inline ruvia::task<bool> enqueue(ruvia::db_transaction& transaction, std::string
     co_await service::sync_runtime::upsert_marker(
         transaction, tenant_id, service::sync_runtime::marker_resource_type::provider, provider_id,
         service::sync_runtime::marker_operation::verify,
-        rows.front()[0].as<std::int64_t>().value_or(1), origin);
+        rows.front()[0].as<std::int64_t>().value_or(1), work);
     co_return true;
 }
 
 }  // namespace detail
 
 inline ruvia::task<bool> enqueue_dns(ruvia::db_transaction& transaction, std::string_view tenant_id,
-    std::string_view provider_id, std::int64_t expected_revision, service::operation::work_origin& origin) {
-    co_return co_await detail::enqueue(transaction, tenant_id, provider_id, "dns", expected_revision, origin);
+    std::string_view provider_id, std::int64_t expected_revision, service::background::queued_work& work) {
+    co_return co_await detail::enqueue(transaction, tenant_id, provider_id, "dns", expected_revision, work);
 }
 
 inline ruvia::task<bool> enqueue_certificate(ruvia::db_transaction& transaction,
     std::string_view tenant_id, std::string_view provider_id,
-    std::int64_t expected_revision, service::operation::work_origin& origin) {
+    std::int64_t expected_revision, service::background::queued_work& work) {
     co_return co_await detail::enqueue(transaction, tenant_id, provider_id, "certificate", expected_revision,
-        origin);
+        work);
 }
 
 }  // namespace service::provider_verification

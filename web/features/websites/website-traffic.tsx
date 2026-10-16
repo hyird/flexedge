@@ -1,3 +1,4 @@
+import { useQuery } from '@tanstack/react-query'
 import { ArrowRotateLeft } from '@gravity-ui/icons'
 import { ChartTooltip, TrendChip, Widget } from '@heroui-pro/react'
 import { AreaChart } from '@heroui-pro/react/area-chart'
@@ -23,8 +24,8 @@ import type {
   WebsiteDashboardClientIpRanking,
   WebsiteDashboardRanking,
 } from './dashboard-schema'
+import { websiteDashboardQuery } from './data'
 import { todayTrafficStatistics } from './traffic-statistics'
-import { useWebsiteDashboard } from './use-website-dashboard'
 import { useOpenWebsiteTab, useWebsite } from './website-context'
 
 const statusClassColors: Record<string, string> = {
@@ -40,7 +41,7 @@ const statusClassColors: Record<string, string> = {
 export function WebsiteTraffic() {
   const website = useWebsite()
   const openTab = useOpenWebsiteTab()
-  const dashboard = useWebsiteDashboard(website.id)
+  const dashboard = useQuery(websiteDashboardQuery(website.id))
   const data = dashboard.data
   const logging = website.config.access_log_enabled
 
@@ -70,13 +71,13 @@ export function WebsiteTraffic() {
           <Alert.Indicator />
           <Alert.Content>
             <Alert.Title>统计连接异常</Alert.Title>
-            <Alert.Description>{dashboard.error}</Alert.Description>
+            <Alert.Description>{dashboard.error.message}</Alert.Description>
           </Alert.Content>
           <Button
             size='sm'
             variant='tertiary'
             className='shrink-0 self-center'
-            onPress={dashboard.reconnect}
+            onPress={() => void dashboard.refetch()}
           >
             <ArrowRotateLeft />
             重新连接

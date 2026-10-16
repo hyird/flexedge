@@ -136,6 +136,7 @@ public:
     channel_origin(flexedge::node::v2::ActiveState active, std::string binary_digest,
         std::vector<session_behavior> sessions)
         : active_(std::move(active)),
+          contents_(flexedge::node::open_state(active_).value()),
           binary_digest_(std::move(binary_digest)),
           sessions_(std::move(sessions)),
           acceptor_(io_, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0)),
@@ -281,8 +282,8 @@ private:
         }
         auto* value = welcome.mutable_welcome();
         value->set_node_id(node_id);
-        value->set_desired_node_spec_revision(active_.node_spec().content().revision());
-        value->set_desired_release_id(active_.release().content().release_id());
+        value->set_desired_node_spec_revision(contents_.node_spec_.revision());
+        value->set_desired_release_id(contents_.release_.release_id());
         value->set_desired_manifest_digest(active_.release().digest_sha256());
         value->set_node_binary_sha256(binary_digest_);
         value->set_heartbeat_interval_seconds(1);
@@ -335,8 +336,8 @@ private:
                     return;
                 }
                 const auto replies = flexedge::node::release_probe_replies(incoming.request_id(),
-                    binary_digest_, active_.node_spec().content().revision(),
-                    active_.release().content().release_id(), active_.release().digest_sha256(), {});
+                    binary_digest_, contents_.node_spec_.revision(),
+                    contents_.release_.release_id(), active_.release().digest_sha256(), {});
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 send(socket, replies.front());
             } else {
@@ -398,6 +399,7 @@ private:
     }
 
     flexedge::node::v2::ActiveState active_;
+    flexedge::node::state_contents contents_;
     std::string binary_digest_;
     std::vector<session_behavior> sessions_;
     asio::io_context io_;
@@ -472,7 +474,7 @@ node_start start_node(const std::filesystem::path& root, const std::filesystem::
 // A listener-free configuration the data plane activates without binding ports.
 flexedge::testing::TestConfig offline_config() {
     auto config = flexedge::testing::snapshot(false);
-    config.active.mutable_node_spec()->mutable_content()->set_enabled(false);
+    config.node_spec.set_enabled(false);
     config.mutableWebsite()->set_https_enabled(false);
     for (auto& domain : *config.mutableWebsite()->mutable_domains()) {
         domain.set_https_enabled(false);
@@ -564,7 +566,7 @@ void verify_control_reconnect(const std::filesystem::path& root,
     std::vector<session_behavior> sessions, std::size_t expected_heartbeats,
     std::size_t expected_warnings, std::size_t expected_errors, std::size_t expected_recoveries) {
     auto config = offline_config();
-    config.active.mutable_node_spec()->mutable_content()->set_node_id(node_id);
+    config.node_spec.set_node_id(node_id);
     config.finalize();
     const auto state = root / ("reconnect-state-" + std::to_string(static_cast<int>(sessions.front())));
     const flexedge::node::state_store store(state, node_secret);
@@ -628,7 +630,7 @@ void verify_control_reconnect(const std::filesystem::path& root,
 
 void verify_multiplexed_logs(const std::filesystem::path& root, bool retry, bool cancel = false) {
     auto config = offline_config();
-    config.active.mutable_node_spec()->mutable_content()->set_node_id(node_id);
+    config.node_spec.set_node_id(node_id);
     config.finalize();
     const flexedge::node::state_store store(root / (cancel ? "multiplex-cancel" : retry ? "multiplex-retry"
                                                                                         : "multiplex-normal"),
@@ -804,7 +806,7 @@ int main() {
         }
 
         // An object persisted by another code line carries a field this build does not know.
-        // Re-serialization moves the unknown field behind the website, so the digest differs.
+        // Its digest covers the stored bytes, so it still verifies and serves.
         {
             const auto state = root / "unknown-field";
             const flexedge::node::state_store store(state, node_secret);
@@ -814,24 +816,45 @@ int main() {
                 length_delimited(10, flexedge::node::serialize_artifact(config.website()));
             const auto digest = flexedge::node::artifact_digest(std::string_view(content));
             std::vector<flexedge::node::v2::DeliveryObject> certificates;
-            for (const auto& object : config.objects) {
-                if (object.content().has_certificate()) {
-                    certificates.push_back(object);
+            for (std::size_t index = 0; index < config.contents.size(); ++index) {
+                if (config.contents[index].has_certificate()) {
+                    certificates.push_back(config.objects[index]);
                 }
             }
-            auto* manifest = config.active.mutable_release()->mutable_content();
-            for (auto& reference : *manifest->mutable_objects()) {
+            for (auto& reference : *config.release.mutable_objects()) {
                 if (reference.kind() == flexedge::node::v2::OBJECT_KIND_WEBSITE) {
                     reference.set_digest_sha256(digest);
                 }
             }
-            config.active.mutable_release()->set_digest_sha256(
-                flexedge::node::artifact_digest(*manifest));
+            *config.active.mutable_release() =
+                flexedge::node::pack_artifact<flexedge::node::v2::ClusterReleaseManifest>(config.release);
             store.stage(config.active, certificates);
             store.activate_staged();
             flexedge::node::write_secure_file_atomic(state / "objects" / (digest + ".pb"),
                 flexedge::node::state_cipher(node_secret)
                     .seal(length_delimited(1, digest) + length_delimited(2, content)));
+            const auto loaded = store.load_object(digest);
+            REQUIRE(loaded && loaded->content() == content);
+            REQUIRE(store.load().objects_.size() == config.objects.size());
+
+            const auto start = start_node(root, state);
+            REQUIRE(start.connected_);
+            REQUIRE(start.applied_node_spec_revision_ == 3);
+            REQUIRE(start.state_logs_.empty());
+        }
+
+        // A stored object whose bytes no longer reproduce its digest is an unusable cache.
+        {
+            const auto state = root / "mismatched-object";
+            const flexedge::node::state_store store(state, node_secret);
+            const auto config = offline_config();
+            store.stage(config.active, config.objects);
+            store.activate_staged();
+            const auto& digest = config.objects.back().digest_sha256();
+            flexedge::node::write_secure_file_atomic(state / "objects" / (digest + ".pb"),
+                flexedge::node::state_cipher(node_secret)
+                    .seal(length_delimited(1, digest) +
+                          length_delimited(2, config.objects.back().content() + "x")));
             REQUIRE(rejects_as_unusable([&] { (void)store.load_object(digest); }));
             REQUIRE(rejects_as_unusable([&] { (void)store.load(); }));
 

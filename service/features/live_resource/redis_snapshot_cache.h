@@ -92,7 +92,7 @@ inline constexpr std::array<std::string_view, 3> generation_keys{keys[3], keys[4
     const auto add = [&](resource value, std::string_view resource_id = {}) {
         result.push_back(resource_scope(tenant, value, resource_id));
     };
-    if (resource_value != resource::operations && resource_value != resource::access_history &&
+    if (resource_value != resource::tasks && resource_value != resource::access_history &&
         resource_value != resource::overview_traffic) {
         add(resource::overview);
     }

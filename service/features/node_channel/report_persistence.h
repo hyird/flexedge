@@ -11,12 +11,14 @@
 #include <string>
 #include <string_view>
 
-#include "service/domains/agent/agent_command_service.h"
-#include "service/domains/agent/agent_report_mapper.h"
-#include "service/domains/agent/report_receipt_entity.h"
 #include "service/features/background/work_available.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/logging/logger.h"
+#include "service/features/node_channel/projection.h"
+#include "service/features/node_channel/report_mapper.h"
 #include "service/features/node_channel/report_queue.h"
+#include "service/features/node_channel/report_receipt_entity.h"
+#include "service/features/node_channel/report_service.h"
 #include "service/utils/token.h"
 
 namespace service::node_channel {
@@ -42,9 +44,9 @@ inline std::string received_timestamp(std::int64_t milliseconds) {
     return {text.data(), static_cast<std::size_t>(length)};
 }
 
-inline ruvia::task<std::optional<service::agent::report_node_entity>> lock_report_node(
+inline ruvia::task<std::optional<report_node_entity>> lock_report_node(
     ruvia::db_transaction& transaction, std::string_view tenant, std::string_view node) {
-    using entity = service::agent::report_node_entity;
+    using entity = report_node_entity;
     co_return co_await transaction.get_repository<entity>().find_one({.where_ = entity::column<"tenant_id">() == tenant && entity::column<"id">() == node,
         .lock_ = ruvia::db_lock_options{.mode_ = ruvia::db_row_lock::update}});
 }
@@ -60,7 +62,7 @@ ruvia::task<bool> persist_report(context_type& context, std::string_view consume
     if (!(co_await report_queue::owns(context.redis(), consumer, entry))) {
         co_return false;
     }
-    using receipt_entity = service::agent::report_receipt_entity;
+    using receipt_entity = report_receipt_entity;
     const auto previous = co_await transaction.template get_repository<receipt_entity>().find_one(
         {.where_ = receipt_entity::column<"id">() == std::string_view(entry.report_id_)});
     if (previous) {
@@ -87,22 +89,22 @@ ruvia::task<bool> persist_report(context_type& context, std::string_view consume
     receipt.template set<"agent_id">(value.principal_.agent_id_);
     receipt.template set<"received_at">(received_timestamp(value.received_unix_ms_));
     (void)co_await transaction.template get_repository<receipt_entity>().insert(receipt);
-    auto& commands = service::agent::get_agent_command_service();
     if (value.envelope_.has_authenticate()) {
-        const auto principal = co_await commands.authenticate_hashed(context, transaction,
-            value.principal_.agent_id_, value.verified_hash_, value.received_unix_ms_);
+        const auto principal = co_await record_authentication(transaction, value.principal_.agent_id_,
+            value.verified_hash_, value.received_unix_ms_);
         if (principal.node_id_ != value.principal_.node_id_ || principal.cluster_id_ != value.principal_.cluster_id_ ||
             principal.tenant_id_ != value.principal_.tenant_id_) {
             throw invalid_report("report_authenticated_identity_changed");
         }
     } else if (value.envelope_.has_heartbeat()) {
-        co_await commands.heartbeat(context, transaction, value.principal_,
-            service::agent::to_heartbeat_report(value.envelope_.heartbeat()), value.received_unix_ms_);
+        co_await record_heartbeat(context, transaction, value.principal_,
+            to_heartbeat_report(value.envelope_.heartbeat()), value.received_unix_ms_);
     } else {
-        co_await commands.record_apply_result(context, transaction, value.principal_, value.envelope_.apply_result(),
+        co_await record_apply_result(context, transaction, value.principal_, value.envelope_.apply_result(),
             value.elapsed_milliseconds_, value.trace_);
     }
     co_await transaction.commit();
+    service::live_resource::wake_own_outbox(context);
     co_return true;
 }
 
@@ -218,7 +220,7 @@ ruvia::task<std::size_t> clean_report_receipts(context_type& context) {
         if (original_exists) {
             continue;
         }
-        using entity = service::agent::report_receipt_entity;
+        using entity = report_receipt_entity;
         (void)co_await transaction.template get_repository<entity>().delete_by(entity::column<"id">() == std::string_view(metadata).substr(second_separator + 1));
         co_await transaction.commit();
         const std::array keys{report_queue::stream_key, report_queue::cleanup_key, report_queue::cleanup_identity_key, report_queue::bytes_key};
@@ -237,7 +239,7 @@ ruvia::task<std::size_t> clean_report_receipts(context_type& context) {
 // reports that remain queued for an arbitrarily long database outage.
 template <typename context_type>
 ruvia::task<std::size_t> clean_orphan_receipts(context_type& context, std::string& cursor) {
-    using entity = service::agent::report_receipt_entity;
+    using entity = report_receipt_entity;
     const auto candidates = co_await context.db().template get_repository<entity>().find({.where_ = entity::column<"id">() > std::string_view(cursor), .order_ = {{.column_ = "id"}}, .take_ = 16});
     std::size_t removed{};
     if (candidates.empty()) {
@@ -275,7 +277,7 @@ ruvia::task<std::size_t> clean_orphan_receipts(context_type& context, std::strin
 
 template <typename context_type>
 ruvia::task<void> run_reports(context_type& context) {
-    (void)service::background::work_available::get_signals(context).for_type("node-reports");
+    const auto own = service::background::work_available::subscribe(context, report_work_type);
     const auto consumer = service::utils::random_token();
     std::string receipt_cursor;
     auto next_orphan_cleanup = std::chrono::steady_clock::now();
@@ -298,7 +300,7 @@ ruvia::task<void> run_reports(context_type& context) {
             }
             co_await clean_report_consumers(context.redis());
             const auto duration = co_await report_queue::idle_wait(context.redis());
-            co_await service::background::work_available::wait(context, "node-reports", duration);
+            (void)co_await own.receive_for(duration, context.get_stop_token());
         } catch (const std::exception&) {
             if (context.get_stop_token().stop_requested()) {
                 co_return;

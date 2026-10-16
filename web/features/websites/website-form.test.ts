@@ -10,6 +10,7 @@ import {
   websiteHostnames,
 } from './website-form'
 import { websiteFormToConfig } from './website-form-mapping'
+import { collectWebsiteFormErrors } from './website-sections'
 
 function values() {
   return {
@@ -327,12 +328,48 @@ describe('website settings validation', () => {
       }).success
     ).toBe(false)
   })
-  it('maps existing rules to the original path and query behavior', () => {
-    expect(routeRuleToForm({ rewrite_path: '/old' }).rewrite_mode).toBe(
-      'replace_path'
-    )
-    expect(routeRuleToForm({}).rewrite_mode).toBe('none')
-    expect(routeRuleToForm({}).query_mode).toBe('preserve')
+  it('maps stored empty modes to the original path and query behavior', () => {
+    expect(
+      routeRuleToForm({ rewrite_mode: '', rewrite_path: '/old' }).rewrite_mode
+    ).toBe('replace_path')
+    expect(routeRuleToForm({ rewrite_mode: '' }).rewrite_mode).toBe('none')
+    expect(routeRuleToForm({ query_mode: '' }).query_mode).toBe('preserve')
+  })
+  it('limits each route rule to 20 request and 20 response headers', () => {
+    const headers = (count: number) =>
+      Array.from({ length: count }, (_, index) => `X-H${index}: v`).join('\n')
+    const rule = routeRuleToForm({
+      id: '12345678-1234-4234-8234-123456789015',
+      origin_group: 'default',
+    })
+    expect(
+      validateWebsiteForm({
+        ...values(),
+        route_rules: [
+          {
+            ...rule,
+            request_headers_text: `${headers(20)}\n\n`,
+            response_headers_text: headers(20),
+          },
+        ],
+      }).success
+    ).toBe(true)
+    const result = validateWebsiteForm({
+      ...values(),
+      route_rules: [
+        {
+          ...rule,
+          request_headers_text: headers(21),
+          response_headers_text: headers(21),
+        },
+      ],
+    })
+    expect(result.success).toBe(false)
+    if (!result.success)
+      expect(collectWebsiteFormErrors(result.error.issues)).toMatchObject({
+        'route_rules.0.request_headers_text': '最多20个请求头',
+        'route_rules.0.response_headers_text': '最多20个响应头',
+      })
   })
   it('keeps editable origin timeout values', () => {
     const result = websiteFormSchema.parse({

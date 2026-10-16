@@ -12,8 +12,8 @@
 #include <type_traits>
 #include <vector>
 
-#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/live_resource/notification_reader.h"
+#include "service/features/node_presence/notification_relay.h"
 #include "support/redis_test.h"
 
 namespace {
@@ -30,18 +30,11 @@ void require(bool condition, const char* message) {
 
 struct worker_states final {
     live::hub live_;
-    service::log_ingest::fanout::hub logs_;
-    service::node_dispatch::fanout::hub dispatch_;
 
     template <typename state_type>
     state_type& worker_state() {
-        if constexpr (std::is_same_v<state_type, live::hub>) {
-            return live_;
-        } else if constexpr (std::is_same_v<state_type, service::log_ingest::fanout::hub>) {
-            return logs_;
-        } else {
-            return dispatch_;
-        }
+        static_assert(std::is_same_v<state_type, live::hub>);
+        return live_;
     }
 };
 
@@ -70,18 +63,27 @@ ruvia::task<std::vector<notifications::entry>> exchange(ruvia::redis_client& red
     require(co_await cache::store(handle, tenant_b, before_b.generation_, {"cached-b", false}), "other tenant cache primed");
 
     notifications::resource_notification attempt("tenant-a");
-    attempt.task_attempt("task-a", {.subtask_id_ = "zone-a", .event_id_ = 42})
-        .changed(live::resource::dns_zones, "zone-a");
+    attempt.task_attempt("task-a", 42).changed(live::resource::tasks, "task-a").changed(live::resource::dns_zones, "zone-a");
     const auto fields = notifications::encode(attempt);
+    const auto encoded = [&](std::string_view name) {
+        for (const auto& [field, value] : fields) {
+            if (field == name) {
+                return value;
+            }
+        }
+        return std::string{};
+    };
+    require(encoded("task_attempts") == "task-a,42" && encoded("changes") == "tasks:task-a;dns_zones:zone-a",
+        "a task attempt travels as its task id and event id; the task list resource is named tasks");
     const auto payload = live::outbox::pack(fields);
-    co_await live::outbox::publish(handle, first_id, "resource", payload);
+    co_await service::node_presence::resource_relay::publish(handle, first_id, payload);
     const auto after_a = co_await cache::read(handle, tenant_a);
     const auto after_b = co_await cache::read(handle, tenant_b);
     require(!after_a.snapshot_ && after_a.generation_ != before_a.generation_,
         "the commit notification atomically invalidates the affected tenant projection");
     require(after_b.snapshot_ && after_b.snapshot_->data_ == "cached-b", "another tenant's projection remains cached");
     require(co_await cache::store(handle, tenant_a, after_a.generation_, {"refreshed-a", false}), "updated projection cached");
-    co_await live::outbox::publish(handle, first_id, "resource", payload);
+    co_await service::node_presence::resource_relay::publish(handle, first_id, payload);
     require((co_await cache::read(handle, tenant_a)).snapshot_.has_value(),
         "replaying an already published event does not invalidate a newer projection");
     require(!co_await cache::store(handle, tenant_a, before_a.generation_, {"stale-a", false}),
@@ -89,7 +91,7 @@ ruvia::task<std::vector<notifications::entry>> exchange(ruvia::redis_client& red
 
     const auto other = notifications::encode(
         std::move(notifications::resource_notification("tenant-b").changed(live::resource::nodes, "node-b")));
-    co_await live::outbox::publish(handle, second_id, "resource", live::outbox::pack(other));
+    co_await service::node_presence::resource_relay::publish(handle, second_id, live::outbox::pack(other));
     const auto first_reader = co_await notifications::read(handle, cursor);
     const auto second_reader = co_await notifications::read(handle, cursor);
     require(first_reader.entries_.size() == 2 && second_reader.entries_.size() == 2 &&
@@ -101,14 +103,14 @@ ruvia::task<std::vector<notifications::entry>> exchange(ruvia::redis_client& red
     (void)co_await handle.command("SET", notifications::stream_key, "wrong-type-fixture");
     bool rejected{};
     try {
-        co_await live::outbox::publish(handle, failed_id, "resource", payload);
+        co_await service::node_presence::resource_relay::publish(handle, failed_id, payload);
     } catch (const std::exception&) {
         rejected = true;
     }
     require(rejected && (co_await handle.command("GET", failed_key)).null(),
         "failed publication does not falsely record successful deduplication");
     (void)co_await handle.command("DEL", notifications::stream_key);
-    co_await live::outbox::publish(handle, failed_id, "resource", payload);
+    co_await service::node_presence::resource_relay::publish(handle, failed_id, payload);
     require((co_await notifications::read(handle, "0-0")).entries_.size() == 1,
         "the persisted event can be published after repairing Redis");
     (void)co_await handle.command("DEL", notifications::stream_key, first_key, second_key, failed_key);
@@ -135,18 +137,18 @@ int main() {
         require(entries.size() == 2 && entries.front().notification_ && entries.back().notification_, "all event fields decode");
         const auto& attempt = *entries.front().notification_;
         require(attempt.task_attempts_.size() == 1 && attempt.task_attempts_[0].task_id_ == "task-a" &&
-                    attempt.task_attempts_[0].notice_.event_id_ == 42 &&
-                    attempt.task_attempts_[0].notice_.subtask_id_ == "zone-a" &&
+                    attempt.task_attempts_[0].notice_.event_id_ == 42 && attempt.changes_.size() == 2 &&
+                    attempt.changes_[0].resource_ == live::resource::tasks && attempt.changes_[0].id_ == "task-a" &&
                     entries.back().notification_->tenant_id_ == "tenant-b",
             "task attempt and tenant scope round trip");
 
         worker_states worker_a, worker_b;
         std::vector<live::subscription_part> parts;
-        parts.push_back({live::resource::operations, "task-a", live::query_key("history", "zone-a"), true});
+        parts.push_back({live::resource::tasks, "task-a", live::query_key("history"), true});
         auto history_a = worker_a.live_.subscribe(first.handle(), "tenant-a", std::move(parts));
-        auto history_b = worker_b.live_.subscribe(second.handle(), "tenant-a", live::resource::operations, "task-a");
-        auto other_tenant = worker_a.live_.subscribe(first.handle(), "tenant-b", live::resource::operations, "task-a");
-        live::deliver_notification(worker_a, attempt, std::nullopt);
+        auto history_b = worker_b.live_.subscribe(second.handle(), "tenant-a", live::resource::tasks, "task-a");
+        auto other_tenant = worker_a.live_.subscribe(first.handle(), "tenant-b", live::resource::tasks, "task-a");
+        live::resource_subscriptions::deliver(worker_a, attempt, std::nullopt);
         require(first.start(signalled(history_a, std::chrono::seconds(1))).get(), "own subscription is woken");
         const auto pending = history_a.drain();
         require(pending.task_attempts_.size() == 1 && pending.task_attempts_[0].event_id_ == 42 && !pending.history_reset_,
@@ -154,7 +156,7 @@ int main() {
         require(!second.start(signalled(history_b, std::chrono::milliseconds(50))).get(),
             "another worker's subscription is untouched until its own reader delivers");
         require(!first.start(signalled(other_tenant, std::chrono::milliseconds(50))).get(), "tenant isolation");
-        live::deliver_notification(worker_b, attempt, std::nullopt);
+        live::resource_subscriptions::deliver(worker_b, attempt, std::nullopt);
         require(second.start(signalled(history_b, std::chrono::seconds(1))).get(),
             "the second reader delivers to its own subscription");
         first.start(redis.shutdown()).get();

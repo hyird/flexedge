@@ -10,7 +10,7 @@
 #include <variant>
 
 #include "service/domains/auth/auth_user.h"
-#include "service/domains/auth/session_credential.h"
+#include "service/features/auth_session/session_credential.h"
 #include "service/utils/token.h"
 
 namespace service::auth {

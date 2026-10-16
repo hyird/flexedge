@@ -8,7 +8,6 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
-#include <initializer_list>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -31,8 +30,10 @@ class node_controller final {
 public:
     RUVIA_CONTROLLER_GROUP("/api/nodes", service::middleware::auth_middleware)
     RUVIA_ROUTES_BEGIN(node_controller)
-    RUVIA_GET_SSE("/stream", list);
-    RUVIA_GET_SSE("/:id/stream", detail);
+    RUVIA_GET("/", list);
+    RUVIA_GET_SSE("/stream", list_stream);
+    RUVIA_GET("/:id", detail);
+    RUVIA_GET_SSE("/:id/stream", detail_stream);
     RUVIA_POST("/", create, ruvia::json_body<node_save_input>);
     RUVIA_PUT("/:id", update, ruvia::json_body<node_save_input>);
     RUVIA_GET_SSE("/:id/logs/stream", log_stream);
@@ -42,36 +43,19 @@ public:
     RUVIA_ROUTES_END
 
 private:
-    static std::string require_id(ruvia::context& c) {
-        return service::common::require_uuid_param(c, "id");
-    }
+    struct list_query final {
+        std::int64_t page_{};
+        std::int64_t page_size_{};
+        std::int64_t skip_{};
+        std::string keyword_;
+        std::optional<std::string> cluster_id_;
+        std::optional<std::string> status_;
+        std::optional<std::string> registration_status_;
+        std::optional<std::string> connection_status_;
+    };
 
-    static const std::string& tenant_id(ruvia::context& c) {
-        return service::middleware::current_tenant_id(c);
-    }
-
-    static std::int64_t expected_revision(ruvia::context& c) {
-        return service::common::require_expected_revision(c);
-    }
-
-    static std::optional<std::string> enum_query(ruvia::context& c, std::string_view name,
-        std::initializer_list<std::string_view> allowed) {
-        const auto value = c.req().query(name);
-        if (!value) {
-            return std::nullopt;
-        }
-        for (const auto item : allowed) {
-            if (*value == item) {
-                return std::string(*value);
-            }
-        }
-        service::common::throw_app_error(service::common::validation_error_code,
-            std::string(name) + " 不正确", 400);
-    }
-
-    ruvia::task<void> list(ruvia::context& c) {
+    static list_query parse_list(ruvia::context& c) {
         const auto [page, page_size, skip] = service::common::require_pagination(c);
-        const auto keyword = service::common::require_keyword(c.req().query("keyword"));
         std::optional<std::string> cluster_id;
         if (const auto value = c.req().query("cluster_id")) {
             cluster_id = service::common::parse_uuid(value);
@@ -80,39 +64,65 @@ private:
                     "cluster_id 必须是 UUID", 400);
             }
         }
-        const auto status = enum_query(c, "status", {"enabled", "disabled"});
-        const auto registration_status =
-            enum_query(c, "registration_status", {"pending", "registered"});
-        const auto connection_status =
-            enum_query(c, "connection_status", {"unregistered", "online", "offline"});
-        const auto tenant = tenant_id(c);
+        return {.page_ = page,
+            .page_size_ = page_size,
+            .skip_ = skip,
+            .keyword_ = service::common::require_keyword(c.req().query("keyword")).value_or(""),
+            .cluster_id_ = std::move(cluster_id),
+            .status_ = service::common::require_enum_query(c, "status", {"enabled", "disabled"},
+                "status 不正确"),
+            .registration_status_ = service::common::require_enum_query(c, "registration_status",
+                {"pending", "registered"}, "registration_status 不正确"),
+            .connection_status_ = service::common::require_enum_query(c, "connection_status",
+                {"unregistered", "online", "offline"}, "connection_status 不正确")};
+    }
+
+    static ruvia::task<node_page_response> read_list(auto& read, const std::string& tenant,
+        const list_query& q) {
+        auto data = co_await get_node_read_service().list(read, tenant, q.page_, q.page_size_, q.skip_,
+            q.keyword_, q.cluster_id_, q.status_, q.registration_status_, q.connection_status_);
+        co_return service::common::ok<node_page_response>(read, std::move(data));
+    }
+
+    static ruvia::task<node_detail_response> read_detail(auto& read, const std::string& tenant,
+        const std::string& id) {
+        auto data = co_await get_node_read_service().get(read, tenant, id);
+        co_return service::common::ok<node_detail_response>(read, std::move(data));
+    }
+
+    ruvia::task<ruvia::http_response> list(ruvia::context& c) {
+        co_return c.json(co_await read_list(c, service::middleware::current_tenant_id(c), parse_list(c)));
+    }
+
+    ruvia::task<void> list_stream(ruvia::context& c) {
+        const auto q = parse_list(c);
+        const auto tenant = service::middleware::current_tenant_id(c);
         auto sub = service::live_resource::get_hub(c).subscribe(c.worker(), tenant,
             service::live_resource::resource::nodes, {},
-            node_list_query_key(page, page_size, keyword.value_or(""), cluster_id, status,
-                registration_status, connection_status));
+            node_list_query_key(q.page_, q.page_size_, q.keyword_, q.cluster_id_, q.status_,
+                q.registration_status_, q.connection_status_));
         co_await service::live_resource::stream_snapshot(c, std::move(sub),
-            [tenant, page, page_size, skip, keyword = keyword.value_or(""), cluster_id, status,
-                registration_status, connection_status](auto& read) -> ruvia::task<std::string> {
-                auto data = co_await get_node_read_service().list(read, tenant, page, page_size, skip,
-                    keyword, cluster_id, status, registration_status, connection_status);
-                co_return std::string(ruvia::to_json(service::common::ok<node_page_response>(read,
-                                                         std::move(data)),
-                    {.resource_ = read.pool()}));
+            [tenant, q](auto& read) -> ruvia::task<std::string> {
+                co_return std::string(
+                    ruvia::to_json(co_await read_list(read, tenant, q), {.resource_ = read.pool()}));
             });
     }
 
-    ruvia::task<void> detail(ruvia::context& c) {
-        const auto id = require_id(c);
-        const auto tenant = tenant_id(c);
+    ruvia::task<ruvia::http_response> detail(ruvia::context& c) {
+        co_return c.json(co_await read_detail(c, service::middleware::current_tenant_id(c),
+            service::common::require_uuid_param(c, "id")));
+    }
+
+    ruvia::task<void> detail_stream(ruvia::context& c) {
+        const auto id = service::common::require_uuid_param(c, "id");
+        const auto tenant = service::middleware::current_tenant_id(c);
         auto sub = service::live_resource::get_hub(c).subscribe(c.worker(), tenant,
             service::live_resource::resource::nodes, id,
             service::live_resource::query_key("detail"));
         co_await service::live_resource::stream_snapshot(c, std::move(sub),
             [tenant, id](auto& read) -> ruvia::task<std::string> {
-                auto data = co_await get_node_read_service().get(read, tenant, id);
-                co_return std::string(ruvia::to_json(service::common::ok<node_detail_response>(read,
-                                                         std::move(data)),
-                    {.resource_ = read.pool()}));
+                co_return std::string(
+                    ruvia::to_json(co_await read_detail(read, tenant, id), {.resource_ = read.pool()}));
             });
     }
 
@@ -122,50 +132,52 @@ private:
         ruvia::validator validator({.resource_ = c.arena()});
         validate_node_save_input(body.value(), validator);
         validator.throw_if_invalid();
-        auto data = co_await get_node_command_service().create(c, tenant_id(c), body);
+        auto data = co_await get_node_command_service().create(c, service::middleware::current_tenant_id(c), body);
         service::common::set_revision_etag(c, data.get<"revision">().value_);
         co_return c.json(service::common::ok<node_credentials_response>(c, std::move(data)));
     }
 
     ruvia::task<ruvia::http_response> update(ruvia::context& c) {
-        const auto revision = expected_revision(c);
+        const auto expected_revision = service::common::require_expected_revision(c);
         const auto body = c.req().validated_json<node_save_input>();
         ruvia::validator validator({.resource_ = c.arena()});
         validate_node_save_input(body.value(), validator);
         validator.throw_if_invalid();
-        const auto operation_id =
-            co_await get_node_command_service().update(c, tenant_id(c), require_id(c), revision, body);
-        service::common::set_revision_etag(c, revision + 1);
-        co_return c.json(service::common::operation(c, "节点配置已更新", operation_id));
+        const auto revision = co_await get_node_command_service().update(c, service::middleware::current_tenant_id(c),
+            service::common::require_uuid_param(c, "id"), expected_revision, body);
+        service::common::set_revision_etag(c, revision);
+        co_return c.json(service::common::operation(c, "节点配置已更新"));
     }
 
     ruvia::task<ruvia::http_response> remove(ruvia::context& c) {
-        const auto revision = expected_revision(c);
-        const auto operation_id =
-            co_await get_node_command_service().remove(c, tenant_id(c), require_id(c), revision);
-        service::common::set_revision_etag(c, revision + 1);
-        co_return c.json(service::common::operation(c, "节点已删除", operation_id));
+        const auto expected_revision = service::common::require_expected_revision(c);
+        const auto revision = co_await get_node_command_service().remove(c,
+            service::middleware::current_tenant_id(c), service::common::require_uuid_param(c, "id"),
+            expected_revision);
+        service::common::set_revision_etag(c, revision);
+        co_return c.json(service::common::operation(c, "节点已删除"));
     }
 
     ruvia::task<ruvia::http_response> credentials(ruvia::context& c) {
         c.header("cache-control", "no-store");
-        auto data = co_await get_node_read_service().credentials(c, tenant_id(c), require_id(c));
+        auto data = co_await get_node_read_service().credentials(c, service::middleware::current_tenant_id(c),
+            service::common::require_uuid_param(c, "id"));
         service::common::set_revision_etag(c, data.get<"revision">().value_);
         co_return c.json(service::common::ok<node_credentials_response>(c, std::move(data)));
     }
 
     ruvia::task<ruvia::http_response> reset_credentials(ruvia::context& c) {
         c.header("cache-control", "no-store");
-        const auto revision = expected_revision(c);
-        auto data =
-            co_await get_node_command_service().reset_credentials(c, tenant_id(c), require_id(c), revision);
+        const auto revision = service::common::require_expected_revision(c);
+        auto data = co_await get_node_command_service().reset_credentials(c,
+            service::middleware::current_tenant_id(c), service::common::require_uuid_param(c, "id"), revision);
         service::common::set_revision_etag(c, data.get<"revision">().value_);
         co_return c.json(service::common::ok<node_credentials_response>(c, std::move(data)));
     }
 
     ruvia::task<void> log_stream(ruvia::context& c) {
-        const auto tenant = tenant_id(c);
-        const auto id = require_id(c);
+        const auto tenant = service::middleware::current_tenant_id(c);
+        const auto id = service::common::require_uuid_param(c, "id");
         const auto limit = service::log_ingest::require_tail_limit(c);
         co_await service::log_ingest::stream_sse_tail(
             c,

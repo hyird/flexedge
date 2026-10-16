@@ -88,7 +88,7 @@ public:
         const std::string& tenant_id) {
         ruvia::db_query minutes(resource);
         const auto status_code = minutes.column("status_code", "access");
-        auto status_count = [&](std::int64_t lower) {
+        auto status_count = [&](std::int64_t lower, std::string_view alias) {
             return minutes.alias(
                 minutes.filter(minutes.aggregate("count", {minutes.star()}),
                     minutes.binary(
@@ -97,7 +97,7 @@ public:
                         ruvia::db_binary_operator::and_value,
                         minutes.binary(status_code, ruvia::db_binary_operator::less,
                             minutes.value(lower + 100)))),
-                "status_" + std::to_string(lower / 100) + "xx");
+                alias);
         };
         const auto minute = minutes.call(
             "date_trunc", {minutes.value("minute"), minutes.column("occurred_at", "access")});
@@ -106,8 +106,9 @@ public:
                 minutes.alias(minutes.aggregate("count", {minutes.star()}), "requests"),
                 minutes.alias(minutes.aggregate("sum", {minutes.column("response_bytes", "access")}),
                     "bytes"),
-                status_count(100), status_count(200), status_count(300), status_count(400),
-                status_count(500)})
+                status_count(100, "status_1xx"), status_count(200, "status_2xx"),
+                status_count(300, "status_3xx"), status_count(400, "status_4xx"),
+                status_count(500, "status_5xx")})
             .from("sys_website_access_log", "access");
         restrict_to_window(minutes, tenant_id);
         minutes.group_by({minute});

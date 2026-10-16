@@ -11,6 +11,7 @@ import {
 } from '@gravity-ui/icons'
 import { Skeleton } from '@heroui/react'
 import { useArrivalState } from '@/lib/history-state'
+import { describeStatus, enablementStatuses } from '@/lib/status'
 import { useTabSwitchGuard } from '@/lib/unsaved-changes'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
 import { DetailHeader, DetailHeaderSkeleton } from '@/components/detail-header'
@@ -31,6 +32,7 @@ import {
   type WebsiteDetailTab,
 } from './website-context'
 import {
+  deployStatuses,
   deployStatusReserve,
   websiteName,
   websiteStatusReserve,
@@ -77,8 +79,7 @@ export function WebsiteDetailLayout() {
   const live = useQuery({ ...websiteDetailQuery(websiteId), enabled: liveTab })
   const snapshot = useQuery({
     ...websiteSnapshotQuery(websiteId),
-    // A frame from the live tab is just as fresh; reading again would open a
-    // second stream next to the tab's own.
+    // A frame from the live tab is just as fresh; no need to read it again.
     enabled: !liveTab && !live.data,
   })
   const showLive =
@@ -146,7 +147,7 @@ export function WebsiteDetailLayout() {
           title={name}
           status={
             <StatusChip
-              status={website.status}
+              {...describeStatus(enablementStatuses, website.status)}
               reserve={websiteStatusReserve}
             />
           }
@@ -155,7 +156,10 @@ export function WebsiteDetailLayout() {
             <Mono key='access'>{website.access_domain}</Mono>,
             <span key='deploy' className='inline-flex items-center gap-1.5'>
               <StatusChip
-                status={website.runtime.deploy_status}
+                {...describeStatus(
+                  deployStatuses,
+                  website.runtime.deploy_status
+                )}
                 reserve={deployStatusReserve}
               />
               <span className='tabular-nums'>

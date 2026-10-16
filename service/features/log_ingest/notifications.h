@@ -131,6 +131,15 @@ inline std::optional<notification> parse_entry(const ruvia::redis_value& value) 
     };
 }
 
+// The log notification stream as the Worker notification reader follows it.
+struct stream final {
+    static constexpr std::string_view key{stream_key};
+    using value_type = notification;
+    [[nodiscard]] static std::optional<notification> parse(const ruvia::redis_value& entry) {
+        return parse_entry(entry);
+    }
+};
+
 inline std::optional<std::string> entry_id(const ruvia::redis_value& value) {
     if (value.kind() != ruvia::redis_value::kind_type::array) {
         return std::nullopt;

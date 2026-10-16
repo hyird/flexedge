@@ -17,10 +17,11 @@
 
 #include "node/proto/artifact.h"
 #include "node/proto/edge_control.pb.h"
-#include "service/domains/agent/release_manifest.h"
+#include "service/features/live_resource/notification_outbox.h"
 #include "service/features/live_resource/notifications.h"
 #include "service/features/logging/logger.h"
 #include "service/features/node_channel/projection_entity.h"
+#include "service/features/node_channel/release_manifest.h"
 #include "service/features/node_channel/store.h"
 #include "service/features/node_dispatch/protocol.h"
 #include "service/utils/secret.h"
@@ -271,8 +272,11 @@ inline ruvia::task<void> refresh_node(ruvia::db_transaction& transaction,
         }
         const auto manifest_digest = std::string(release->template get<"manifest_digest">());
         service::utils::sensitive_string manifest_plaintext(service::utils::open_secret(release->template get<"manifest_envelope">()));
-        const auto manifest = service::agent::parse_release_manifest(manifest_plaintext.view(), manifest_digest, release_id, cluster_id);
-        if (!manifest) {
+        const auto manifest = parse_release_manifest(manifest_plaintext.view(), manifest_digest, release_id, cluster_id);
+        const auto release_content = manifest ? flexedge::node::open_artifact<flexedge::node::v2::ClusterReleaseContent>(
+                                                    manifest->digest_sha256(), manifest->content())
+                                              : std::nullopt;
+        if (!release_content) {
             throw std::runtime_error("node release manifest is invalid");
         }
         flexedge::node::v2::DesiredState state;
@@ -285,7 +289,7 @@ inline ruvia::task<void> refresh_node(ruvia::db_transaction& transaction,
             digest_to_record = spec_digest;
         }
         std::unordered_map<std::string, flexedge::node::v2::ObjectKind> expected;
-        for (const auto& object : manifest->content().objects()) {
+        for (const auto& object : release_content->objects()) {
             if (!expected.emplace(object.digest_sha256(), object.kind()).second) {
                 throw std::runtime_error("duplicate release object");
             }
@@ -307,10 +311,10 @@ inline ruvia::task<void> refresh_node(ruvia::db_transaction& transaction,
                 throw std::runtime_error("release object is absent from manifest");
             }
             service::utils::sensitive_string plaintext(service::utils::open_secret(object.template get<"payload_envelope">()));
-            flexedge::node::v2::DeliveryObjectContent content;
-            if (!flexedge::node::parse_artifact(plaintext.view(), content) || flexedge::node::artifact_digest(content) != digest ||
-                (found->second == flexedge::node::v2::OBJECT_KIND_WEBSITE && (!content.has_website() || object.template get<"kind">() != "website")) ||
-                (found->second == flexedge::node::v2::OBJECT_KIND_CERTIFICATE && (!content.has_certificate() || object.template get<"kind">() != "certificate")) ||
+            const auto content = flexedge::node::open_artifact<flexedge::node::v2::DeliveryObjectContent>(digest, plaintext.view());
+            if (!content ||
+                (found->second == flexedge::node::v2::OBJECT_KIND_WEBSITE && (!content->has_website() || object.template get<"kind">() != "website")) ||
+                (found->second == flexedge::node::v2::OBJECT_KIND_CERTIFICATE && (!content->has_certificate() || object.template get<"kind">() != "certificate")) ||
                 (found->second != flexedge::node::v2::OBJECT_KIND_WEBSITE && found->second != flexedge::node::v2::OBJECT_KIND_CERTIFICATE)) {
                 throw std::runtime_error("node release object is invalid");
             }
@@ -419,6 +423,43 @@ ruvia::task<void> refresh(context_type& context, std::optional<std::string_view>
         co_await projection_detail::prune_orphan_agents(context);
     }
 }
+
+// Committed resource notifications that change node desired state. The
+// outbox runs this in its claim transaction before publishing them, so the
+// connections they wake read the refreshed projection. Rows of a tenant whose
+// projection could not be refreshed stay durable for the outbox retry.
+struct projection_refresh final {
+    template <typename context_type, typename rows_type>
+    static ruvia::task<std::set<std::string>> prepare(ruvia::db_transaction& transaction, context_type& context, const rows_type& rows) {
+        namespace live = service::live_resource;
+        // Ordered by tenant: every claimant acquires node locks in the same order.
+        std::map<std::string, std::vector<std::string>> tenants;
+        for (const auto& row : rows) {
+            if (std::string_view(row.template get<"kind">()) != live::outbox::resource_kind) {
+                continue;
+            }
+            try {
+                const auto notification = live::notifications::decode(live::outbox::unpack(row.template get<"payload">()));
+                if (notification && notification->node_config_) {
+                    tenants[notification->tenant_id_].emplace_back(row.template get<"id">());
+                }
+            } catch (const std::runtime_error&) {
+                // The relay rejects the malformed row; it is not a projection input.
+            }
+        }
+        std::set<std::string> deferred;
+        for (const auto& [tenant, ids] : tenants) {
+            try {
+                co_await refresh(transaction, context.redis(), tenant);
+            } catch (const ruvia::db_error&) {
+                throw;
+            } catch (const std::exception&) {
+                deferred.insert(ids.begin(), ids.end());
+            }
+        }
+        co_return deferred;
+    }
+};
 
 inline ruvia::task<std::string> repair_generation(ruvia::redis_handle redis) {
     const auto token = service::utils::random_token();

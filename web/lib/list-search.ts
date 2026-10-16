@@ -42,7 +42,21 @@ export const listSearchSchema = z.object({
       .refine((value) => (pageSizeOptions as readonly number[]).includes(value))
   ),
 })
-type ListSearch = { q?: string; page?: number; page_size?: number }
+
+/** Sheet params of list routes, spread into their schema: `create=1` opens
+ * the create sheet, `edit=<id>` the edit sheet of one listed item. */
+export const listSheetSearch = {
+  create: optionalSearchValue(z.literal(1)),
+  edit: optionalSearchValue(z.string().uuid()),
+}
+
+type ListSearch = {
+  q?: string
+  page?: number
+  page_size?: number
+  create?: 1
+  edit?: string
+}
 type SearchRecord = Record<string, unknown>
 
 const searchDefaults: SearchRecord = { page: 1, page_size: defaultPageSize }
@@ -90,12 +104,24 @@ export type ListSearchState<TSearch extends ListSearch> = {
   ) => Promise<void>
 }
 
+/** Create/edit sheet state of a list route (`listSheetSearch`). Opening a
+ * sheet adds a history entry, so Back closes it; closing replaces it. */
+export type ListSheetState = {
+  isCreating: boolean
+  /** Id of the item whose edit sheet is open. */
+  editing: string | undefined
+  openCreate: () => Promise<void>
+  openEdit: (id: string) => Promise<void>
+  close: () => Promise<void>
+}
+
 /** Reads and writes a list route's search params. Pass the file route (`Route`)
- * whose `validateSearch` extends `listSearchSchema`. Writes replace the history
- * entry, keep unrelated params and reset `page` unless only `page` changes. */
+ * whose `validateSearch` extends `listSearchSchema` (and `listSheetSearch`
+ * for `sheet`). Writes replace the history entry, keep unrelated params and
+ * reset `page` unless only `page` or a sheet param changes. */
 export function useListSearch<TSearch extends ListSearch>(route: {
   useSearch: () => TSearch
-}): ListSearchState<TSearch> {
+}): ListSearchState<TSearch> & { sheet: ListSheetState } {
   const search = route.useSearch()
   const navigate = useNavigate()
   const setSearch = (patch: Partial<TSearch>, options?: { push?: boolean }) =>
@@ -104,6 +130,12 @@ export function useListSearch<TSearch extends ListSearch>(route: {
       search: (previous: SearchRecord) =>
         applyListSearchPatch(previous, patch as SearchRecord),
       replace: !options?.push,
+    })
+  const setSheet = (sheet: Pick<ListSearch, 'create' | 'edit'>) =>
+    navigate({
+      to: '.',
+      search: (previous: SearchRecord) => ({ ...previous, ...sheet }),
+      replace: !sheet.create && !sheet.edit,
     })
   return {
     search,
@@ -121,13 +153,20 @@ export function useListSearch<TSearch extends ListSearch>(route: {
           ['q', ...filterKeys].map((key) => [key, undefined])
         ) as Partial<TSearch>
       ),
+    sheet: {
+      isCreating: search.create === 1,
+      editing: search.edit,
+      openCreate: () => setSheet({ create: 1, edit: undefined }),
+      openEdit: (id: string) => setSheet({ create: undefined, edit: id }),
+      close: () => setSheet({ create: undefined, edit: undefined }),
+    },
   }
 }
 
 /** List state kept in the component instead of the URL, for lists inside an
- * in-page tab (cluster detail tabs, `/providers`, DNS records, access logs):
- * switching tabs must not change the URL. Same shape and patch rules as
- * `useListSearch`; `initial` seeds it on mount (e.g. from an arrival `q`). */
+ * in-page tab (cluster detail tabs, DNS records, access logs): switching tabs
+ * must not change the URL. Same shape and patch rules as `useListSearch`;
+ * `initial` seeds it on mount. */
 export function useListState<TSearch extends ListSearch>(
   initial: TSearch = {} as TSearch
 ): ListSearchState<TSearch> {

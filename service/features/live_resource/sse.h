@@ -21,12 +21,87 @@
 
 #include "service/common/connection_error.h"
 #include "service/common/http.h"
+#include "service/features/auth_session/session_cookie.h"
+#include "service/features/auth_session/session_credential.h"
+#include "service/features/auth_session/session_read_service.h"
 #include "service/features/live_resource/fanout.h"
 #include "service/features/live_resource/read_scope.h"
 #include "service/features/live_resource/read_snapshot.h"
-#include "service/middleware/auth.h"
+#include "service/middleware/request_identity.h"
 
 namespace service::live_resource {
+
+// One authenticated SSE connection: every live view and log tail writes
+// through it. It re-validates the session once per heartbeat interval and
+// keeps an idle connection alive.
+class sse_connection final {
+public:
+    using clock = std::chrono::steady_clock;
+    static constexpr auto heartbeat_interval = std::chrono::seconds(15);
+
+    explicit sse_connection(ruvia::context& c)
+        : context_(c),
+          events_(c.stream_sse()),
+          credential_(std::make_shared<std::optional<service::auth::session_credential>>(
+              service::auth::read_session_cookie(c))),
+          checked_at_(clock::now()),
+          heartbeat_at_(checked_at_ + heartbeat_interval) {}
+
+    [[nodiscard]] bool aborted() const noexcept {
+        return events_.aborted();
+    }
+
+    // Activity delays keep-alive writes, never the next session revalidation.
+    [[nodiscard]] clock::time_point next_wake_at() const noexcept {
+        return std::min(heartbeat_at_, checked_at_ + heartbeat_interval);
+    }
+
+    ruvia::task<void> write(const ruvia::sse_message& message) {
+        co_await events_.write(message);
+        heartbeat_at_ = clock::now() + heartbeat_interval;
+    }
+
+    // Re-checks the session once per heartbeat interval. This bounded check is
+    // security validation, never a resource reload: a revoked session receives
+    // `session-expired` and the caller ends the stream (returns false).
+    ruvia::task<bool> session_valid() {
+        const auto now = clock::now();
+        if (now - checked_at_ < heartbeat_interval) {
+            co_return true;
+        }
+        const auto principal =
+            co_await read_once<std::optional<service::auth::authenticated_principal>>(context_,
+                [credential = credential_](
+                    auto& read) -> ruvia::task<std::optional<service::auth::authenticated_principal>> {
+                    if (!*credential) {
+                        co_return std::nullopt;
+                    }
+                    co_return co_await service::auth::resolve_session_principal(read.db(), **credential);
+                });
+        if (!principal || principal->system_tenant_id_ != service::middleware::current_tenant_id(context_)) {
+            co_await write({.data_ = "{}", .event_ = "session-expired"});
+            co_return false;
+        }
+        checked_at_ = clock::now();
+        co_return true;
+    }
+
+    // Writes the keep-alive frame once the connection has been idle for the
+    // heartbeat interval. Ruvia 7572cdb cannot format SSE comment lines, so the
+    // frame is an empty message: a lone blank line, which dispatches no event.
+    ruvia::task<void> keep_alive() {
+        if (clock::now() >= heartbeat_at_) {
+            co_await write({});
+        }
+    }
+
+private:
+    ruvia::context& context_;
+    ruvia::sse_writer events_;
+    std::shared_ptr<std::optional<service::auth::session_credential>> credential_;
+    clock::time_point checked_at_;
+    clock::time_point heartbeat_at_;
+};
 
 // One projection carried by a snapshot stream. Parts are paired by index with
 // the parts of the stream's hub subscription: each has its own event source,
@@ -54,16 +129,13 @@ struct snapshot_part final {
 // re-read when their deferral elapses.
 inline ruvia::task<void> stream_snapshots(ruvia::context& c, hub::subscription subscription,
     std::vector<snapshot_part> parts) {
-    using clock = std::chrono::steady_clock;
+    using clock = sse_connection::clock;
     if (parts.empty() || parts.size() != subscription.parts()) {
         throw std::logic_error("snapshot parts must pair with subscription parts");
     }
     // Business errors are SSE frames as well, including errors in the initial
-    // snapshot. EventSource cannot inspect HTTP error bodies.
-    auto events = c.stream_sse();
-    const auto credential = std::make_shared<std::optional<service::auth::session_credential>>(
-        service::auth::read_session_cookie(c));
-    auto checked_at = clock::now();
+    // snapshot. A reconnecting client cannot inspect HTTP error bodies.
+    sse_connection events(c);
     struct part_state final {
         // What this connection last wrote for the part; the cache may drop
         // and re-read the snapshot any number of times in between.
@@ -82,29 +154,9 @@ inline ruvia::task<void> stream_snapshots(ruvia::context& c, hub::subscription s
     try {
         co_await events.write(
             {.data_ = "{}", .event_ = "ready", .retry_ = std::chrono::milliseconds(3000)});
-        auto heartbeat_at = clock::now() + heartbeat_interval;
         while (!events.aborted()) {
-            const auto now = clock::now();
-            if (now - checked_at >= heartbeat_interval) {
-                // This bounded session check is security validation, never a
-                // resource reload. Revoked sessions cannot retain live access.
-                const auto principal =
-                    co_await read_once<std::optional<service::auth::authenticated_principal>>(
-                        c,
-                        [credential](auto& read)
-                            -> ruvia::task<std::optional<service::auth::authenticated_principal>> {
-                            if (!*credential) {
-                                co_return std::nullopt;
-                            }
-                            co_return co_await service::auth::resolve_session_principal(read.db(),
-                                **credential);
-                        });
-                if (!principal ||
-                    principal->system_tenant_id_ != service::middleware::current_tenant_id(c)) {
-                    co_await events.write({.data_ = "{}", .event_ = "session-expired"});
-                    co_return;
-                }
-                checked_at = now;
+            if (!co_await events.session_valid()) {
+                co_return;
             }
             for (std::size_t index = 0; index < parts.size(); ++index) {
                 auto& part = parts[index];
@@ -170,8 +222,8 @@ inline ruvia::task<void> stream_snapshots(ruvia::context& c, hub::subscription s
                     co_await events.write({.data_ = origins, .event_ = "origin-runtime"});
                 }
             }
-            // Wait for a change, a coalescing deadline, or the heartbeat.
-            auto wake_at = heartbeat_at;
+            // Wait for a change, a coalescing deadline, or connection maintenance.
+            auto wake_at = events.next_wake_at();
             for (const auto& state : states) {
                 if (state.refresh_at_) {
                     wake_at = std::min(wake_at, *state.refresh_at_);
@@ -182,13 +234,11 @@ inline ruvia::task<void> stream_snapshots(ruvia::context& c, hub::subscription s
             if (events.aborted()) {
                 co_return;
             }
-            const auto woken_at = clock::now();
-            if (signal.has_value()) {
-                heartbeat_at = woken_at + heartbeat_interval;
-            } else {
+            if (!signal.has_value()) {
                 if (signal.status() != ruvia::worker_wait_status::timed_out) {
                     co_return;
                 }
+                const auto woken_at = clock::now();
                 for (std::size_t index = 0; index < states.size(); ++index) {
                     auto& state = states[index];
                     if (state.refresh_at_ && woken_at >= *state.refresh_at_) {
@@ -197,10 +247,7 @@ inline ruvia::task<void> stream_snapshots(ruvia::context& c, hub::subscription s
                         (void)subscription.release_coalesced(index, woken_at);
                     }
                 }
-                if (woken_at >= heartbeat_at) {
-                    co_await events.write({.data_ = "{}", .event_ = "heartbeat"});
-                    heartbeat_at = woken_at + heartbeat_interval;
-                }
+                co_await events.keep_alive();
             }
             for (std::size_t index = 0; index < states.size(); ++index) {
                 auto& state = states[index];

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <memory_resource>
 #include <optional>
@@ -16,6 +17,7 @@
 #include <string_view>
 #include <utility>
 
+#include "service/config/geoip.h"
 #include "service/config/schema.h"
 #include "service/domains/certificate/certificate_filter.h"
 #include "service/domains/certificate/certificate_read_service.h"
@@ -25,9 +27,11 @@
 #include "service/domains/node/node_read_service.h"
 #include "service/domains/overview/overview_service.h"
 #include "service/domains/overview/overview_traffic_service.h"
+#include "service/domains/provider/certificate_provider_read_service.h"
 #include "service/domains/website/website_dashboard_service.h"
 #include "service/domains/website/website_filter.h"
 #include "service/domains/website/website_read_service.h"
+#include "service/features/geoip/runtime_database.h"
 #include "support/postgres_test.h"
 
 #define REQUIRE(condition)                                                             \
@@ -318,6 +322,60 @@ void require_not_found(const ruvia::http_error& error, std::string_view code) {
     REQUIRE(error.info().code() == code);
 }
 
+ruvia::task<void> verify_provider_pages(read_context& c, ruvia::db_transaction& tx) {
+    // Respect the production uniqueness constraint: two supported CAs, one each.
+    (void)co_await tx.execute(
+        R"(UPDATE sys_provider SET config = '{"credential_mode":"email","account_email":"ops+100%_@example.com"}'
+           WHERE kind = 'certificate')");
+    (void)co_await tx.execute(
+        R"(INSERT INTO sys_provider (id, tenant_id, kind, provider, status, config, deleted_at) VALUES
+           ('00000000-0000-4000-8000-0000000000f2', '00000000-0000-4000-8000-00000000000a',
+            'certificate', 'zerossl', 'unverified',
+            '{"credential_mode":"access_key","access_key":{"envelope":"opaque-secret","hint":"****ZX_9"}}', NULL),
+           ('00000000-0000-4000-8000-0000000000f3', '00000000-0000-4000-8000-00000000000a',
+            'certificate', 'letsencrypt', 'invalid',
+            '{"credential_mode":"email","account_email":"deleted@example.com"}', NOW()))");
+    const std::string tenant(tenant_a);
+    const auto& providers = service::provider::get_certificate_provider_read_service();
+    const auto first = co_await providers.list(c, tenant, 1, 1, 0, std::nullopt);
+    const auto second = co_await providers.list(c, tenant, 2, 1, 1, std::nullopt);
+    REQUIRE(integer(first.get<"total">()) == 2);
+    REQUIRE(integer(first.get<"page">()) == 1);
+    REQUIRE(integer(first.get<"page_size">()) == 1);
+    REQUIRE(integer(first.get<"total_pages">()) == 2);
+    REQUIRE(first.get<"list">().size() == 1 && second.get<"list">().size() == 1);
+    REQUIRE(first.get<"list">()[0].get<"provider">().view() == "zerossl");
+    REQUIRE(second.get<"list">()[0].get<"provider">().view() == "letsencrypt");
+    REQUIRE(integer(second.get<"page">()) == 2);
+    REQUIRE(integer(second.get<"total">()) == 2);
+    const auto past_end = co_await providers.list(c, tenant, 3, 1, 2, std::nullopt);
+    REQUIRE(past_end.get<"list">().empty());
+    REQUIRE(integer(past_end.get<"total">()) == 2);
+    REQUIRE(integer(past_end.get<"total_pages">()) == 2);
+    const auto search = [&](std::string keyword)
+        -> ruvia::task<service::provider::certificate_provider_page_data_dto> {
+        co_return co_await providers.list(c, tenant, 1, 1, 0, keyword);
+    };
+    for (const auto keyword : {"letsencrypt", "LET'S ENCRYPT", "ops+100", "%", "ZeroSSL", "ZX_9"}) {
+        const auto found = co_await search(keyword);
+        REQUIRE(integer(found.get<"total">()) == 1);
+        REQUIRE(integer(found.get<"total_pages">()) == 1);
+        REQUIRE(found.get<"list">().size() == 1);
+    }
+    for (const auto keyword : {"ZX%9", "deleted@example.com", "opaque-secret", "missing"}) {
+        const auto empty = co_await search(keyword);
+        REQUIRE(empty.get<"list">().empty());
+        REQUIRE(integer(empty.get<"total">()) == 0);
+        REQUIRE(integer(empty.get<"total_pages">()) == 0);
+    }
+    const auto other = co_await providers.list(c, std::string(tenant_b), 1, 1, 0, std::nullopt);
+    REQUIRE(integer(other.get<"total">()) == 1);
+    REQUIRE(other.get<"list">()[0].get<"id">().view() == "00000000-0000-4000-8000-0000000000fb");
+    const auto empty = co_await providers.list(c, std::string(tenant_c), 1, 1, 0, std::nullopt);
+    REQUIRE(empty.get<"list">().empty());
+    REQUIRE(integer(empty.get<"total">()) == 0);
+}
+
 ruvia::task<void> verify_traffic(read_context& c, ruvia::db_transaction& tx) {
     const auto hour_rows = co_await tx.query(
         "SELECT to_char(date_trunc('hour', NOW()), 'YYYY-MM-DD\"T\"HH24:MI:SSOF'), "
@@ -553,13 +611,6 @@ void require_bad_request(parse_type parse) {
 }
 
 void verify_filter_parsing() {
-    using service::dns_zone::parse_sync_status_filter;
-    REQUIRE(!parse_sync_status_filter(std::nullopt));
-    REQUIRE(parse_sync_status_filter("issue") == "issue");
-    REQUIRE(parse_sync_status_filter("conflict") == "conflict");
-    require_bad_request([] { (void)parse_sync_status_filter("syncing"); });
-    require_bad_request([] { (void)parse_sync_status_filter(""); });
-
     using service::certificate::parse_attention_filter;
     REQUIRE(!parse_attention_filter(std::nullopt, "expiring"));
     REQUIRE(parse_attention_filter("1", "expiring"));
@@ -741,6 +792,7 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     read_context c{&tx, &resource};
     co_await apply_schema(tx);
     co_await insert_fixture(tx);
+    co_await verify_provider_pages(c, tx);
     co_await verify_traffic(c, tx);
     co_await verify_overview_and_filters(c);
     co_await verify_details(c);
@@ -757,16 +809,17 @@ ruvia::task<void> verify(ruvia::db_client& client) {
 
 int main(int argc, char** argv) {
     const bool with_geoip = argc == 2 && std::string_view{argv[1]} == "with-xdb";
-    // The driver runs separate processes because the runtime database is loaded once.
-    if (!with_geoip) {
-#ifdef _WIN32
-        _putenv_s("FLEXEDGE_XDB_V4_PATH", "");
-        _putenv_s("FLEXEDGE_XDB_V6_PATH", "");
-#else
-        ::unsetenv("FLEXEDGE_XDB_V4_PATH");
-        ::unsetenv("FLEXEDGE_XDB_V6_PATH");
-#endif
+    // The driver runs separate processes because the runtime database is configured once.
+    service::config::geoip_configuration geoip;
+    if (with_geoip) {
+        const auto path = [](const char* name) {
+            const auto* value = std::getenv(name);
+            return std::filesystem::path(value ? value : "");
+        };
+        geoip.ipv4_path_ = path("FLEXEDGE_XDB_V4_PATH");
+        geoip.ipv6_path_ = path("FLEXEDGE_XDB_V6_PATH");
     }
+    service::geoip::configure_xdb_database(geoip);
     REQUIRE(service::geoip::get_xdb_database().available() == with_geoip);
     return test_support::run_postgres_test(verify);
 }

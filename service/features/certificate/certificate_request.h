@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <openssl/asn1.h>
@@ -13,25 +12,19 @@
 
 #include "service/features/certificate/acme_jws.h"
 #include "service/features/certificate/acme_types.h"
-#include "service/utils/sensitive_string.h"
 
 namespace service::certificate_issuance::detail {
 
 using certificate_request_ptr = std::unique_ptr<X509_REQ, decltype(&X509_REQ_free)>;
 
-struct certificate_request final {
-    service::utils::sensitive_string private_key_pem_;
-    std::string csr_;
-};
-
-inline certificate_request create_certificate_request(const std::vector<std::string>& domains) {
+// The base64url DER CSR for `domains`, signed with the certificate key.
+inline std::string create_certificate_request(EVP_PKEY* key, const std::vector<std::string>& domains) {
     if (domains.empty()) {
         throw acme_error("证书标识不能为空", true);
     }
-    auto key = generate_rsa_key();
     certificate_request_ptr request(X509_REQ_new(), X509_REQ_free);
     if (!request || X509_REQ_set_version(request.get(), 0L) != 1 ||
-        X509_REQ_set_pubkey(request.get(), key.get()) != 1) {
+        X509_REQ_set_pubkey(request.get(), key) != 1) {
         throw acme_error("证书 CSR 初始化失败", true);
     }
 
@@ -66,7 +59,7 @@ inline certificate_request create_certificate_request(const std::vector<std::str
     }
     const auto extensions_added = X509_REQ_add_extensions(request.get(), extensions);
     sk_X509_EXTENSION_pop_free(extensions, X509_EXTENSION_free);
-    if (extensions_added != 1 || X509_REQ_sign(request.get(), key.get(), EVP_sha256()) <= 0) {
+    if (extensions_added != 1 || X509_REQ_sign(request.get(), key, EVP_sha256()) <= 0) {
         throw acme_error("证书 CSR 签名失败", true);
     }
 
@@ -79,8 +72,7 @@ inline certificate_request create_certificate_request(const std::vector<std::str
     if (i2d_X509_REQ(request.get(), &output) != der_size) {
         throw acme_error("证书 CSR 编码失败", true);
     }
-    return certificate_request{service::utils::sensitive_string(private_key_pem(key.get())),
-        base64_url(der)};
+    return base64_url(der);
 }
 
 }  // namespace service::certificate_issuance::detail

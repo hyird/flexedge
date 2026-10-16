@@ -5,14 +5,15 @@
 #include <cstdint>
 #include <string>
 
+#include "service/features/background/queued_work.h"
 #include "service/features/background/task_context.h"
 #include "service/features/dns_sync/queue.h"
+#include "service/features/sync_runtime/work_commit.h"
 
 namespace service::dns_sync::detail {
 
-// Prunes obsolete cluster-managed records (a changed zone becomes the system
-// task 「清理过期 DNS 记录」) and re-queues zones whose current revision lost
-// its marker; the subtask of that revision keeps the work.
+// Prunes obsolete cluster-managed records and re-queues zones whose current
+// revision lost its marker.
 inline ruvia::task<void> reconcile_tasks(service::background::task_context& context) {
     const auto zones = co_await context.db().query(
         "SELECT tenant_id, id FROM sys_dns_zone WHERE deleted_at IS NULL ORDER BY sort ASC LIMIT "
@@ -20,11 +21,10 @@ inline ruvia::task<void> reconcile_tasks(service::background::task_context& cont
     for (const auto& zone : zones) {
         const auto tenant_id = std::string(zone[0].value().value_or(""));
         const auto zone_id = std::string(zone[1].value().value_or(""));
-        auto origin =
-            service::operation::work_origin::system(service::operation::action::system_dns_cleanup, "dns_zone", zone_id);
+        service::background::queued_work work;
         auto transaction = co_await context.db().begin_transaction();
-        (void)co_await service::dns_sync::prune_cluster_managed_records(transaction, tenant_id, zone_id, origin);
-        co_await service::sync_runtime::commit_origin(transaction, context, tenant_id, origin);
+        (void)co_await service::dns_sync::prune_cluster_managed_records(transaction, tenant_id, zone_id, work);
+        co_await service::sync_runtime::commit_work(transaction, context, tenant_id, work);
     }
     const auto missing = co_await context.db().query(
         "SELECT zone.tenant_id, zone.id, zone.desired_revision FROM sys_dns_zone zone WHERE "
@@ -35,7 +35,7 @@ inline ruvia::task<void> reconcile_tasks(service::background::task_context& cont
         "32");
     for (const auto& row : missing) {
         const auto tenant_id = std::string(row[0].value().value_or(""));
-        auto origin = service::operation::work_origin::repair();
+        service::background::queued_work work;
         auto transaction = co_await context.db().begin_transaction();
         const auto revision = row[2].as<std::int64_t>().value_or(1);
         const auto locked = co_await transaction.query(
@@ -44,9 +44,9 @@ inline ruvia::task<void> reconcile_tasks(service::background::task_context& cont
             row[0].value().value_or(""), row[1].value().value_or(""), revision);
         if (!locked.empty()) {
             co_await service::dns_sync::enqueue_zone_revision(
-                transaction, tenant_id, std::string(row[1].value().value_or("")), revision, origin);
+                transaction, tenant_id, std::string(row[1].value().value_or("")), revision, work);
         }
-        co_await service::sync_runtime::commit_origin(transaction, context, tenant_id, origin);
+        co_await service::sync_runtime::commit_work(transaction, context, tenant_id, work);
     }
     co_return;
 }

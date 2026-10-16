@@ -5,12 +5,14 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
 
 #include "common/route_match.h"
+#include "node/proto/website_validation.h"
 #include "service/common/domain_name.h"
 #include "service/common/ip_address.h"
 #include "service/common/uuid.h"
@@ -38,126 +40,12 @@ inline bool is_origin_group(std::string_view value) {
 }
 
 inline bool valid_compression_algorithms(const ruvia::array<ruvia::string>& values) {
-    if (values.empty() || values.size() > 3) {
-        return false;
-    }
-    std::unordered_set<std::string> seen;
-    for (const auto& value : values) {
-        if ((value.view() != "br" && value.view() != "zstd" && value.view() != "gzip") ||
-            !seen.emplace(value.view()).second) {
-            return false;
-        }
-    }
-    return true;
-}
-
-inline bool valid_compression_values(const ruvia::array<ruvia::string>& values) {
-    if (values.size() > 32) {
-        return false;
-    }
-    std::unordered_set<std::string> seen;
-    for (const auto& value : values) {
-        if (value.empty() || value.view().size() > 127 ||
-            std::ranges::any_of(value.view(),
-                [](unsigned char ch) { return std::isspace(ch) != 0; }) ||
-            !seen.emplace(value.view()).second) {
-            return false;
-        }
-    }
-    return true;
-}
-
-inline bool is_compression_mime_type(std::string_view value) {
-    const auto token = [](std::string_view segment) {
-        return !segment.empty() && std::ranges::all_of(segment, [](unsigned char ch) {
-            return std::isalnum(ch) || ch == '!' || ch == '#' || ch == '$' || ch == '&' ||
-                   ch == '^' || ch == '_' || ch == '.' || ch == '+' || ch == '-';
-        });
-    };
-    const auto slash = value.find('/');
-    if (slash == std::string_view::npos || value.find('/', slash + 1) != std::string_view::npos) {
-        return false;
-    }
-    const auto type = value.substr(0, slash);
-    const auto subtype = value.substr(slash + 1);
-    return token(type) && (subtype == "*" || token(subtype));
-}
-
-inline bool valid_compression_mime_types(const ruvia::array<ruvia::string>& values) {
-    return valid_compression_values(values) && std::ranges::all_of(values, [](const auto& value) {
-        return is_compression_mime_type(value.view());
-    });
-}
-
-inline bool valid_compression_extensions(const ruvia::array<ruvia::string>& values) {
-    return valid_compression_values(values) && std::ranges::all_of(values, [](const auto& value) {
-        return !value.empty() && value.view().front() == '.';
-    });
-}
-
-inline bool valid_access_log_status_code_ranges(const ruvia::array<ruvia::string>& values) {
-    if (values.empty() || values.size() > 5) {
-        return false;
-    }
-    std::unordered_set<std::string> seen;
-    for (const auto& value : values) {
-        if ((value.view() != "1xx" && value.view() != "2xx" && value.view() != "3xx" &&
-                value.view() != "4xx" && value.view() != "5xx") ||
-            !seen.emplace(value.view()).second) {
-            return false;
-        }
-    }
-    return true;
-}
-
-inline bool is_http_token(std::string_view value) {
-    return !value.empty() && std::ranges::all_of(value, [](unsigned char ch) {
-        return std::isalnum(ch) || ch == '!' || ch == '#' || ch == '$' || ch == '%' || ch == '&' ||
-               ch == '\'' || ch == '*' || ch == '+' || ch == '-' || ch == '.' || ch == '^' ||
-               ch == '_' || ch == '`' || ch == '|' || ch == '~';
-    });
-}
-
-inline bool is_route_header_name(std::string_view value) {
-    if (!is_http_token(value)) {
-        return false;
-    }
-    std::string normalized(value);
-    std::ranges::transform(normalized, normalized.begin(),
-        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return normalized != "connection" && normalized != "content-length" && normalized != "host" &&
-           normalized != "keep-alive" && normalized != "proxy-connection" &&
-           normalized != "strict-transport-security" && normalized != "te" &&
-           normalized != "trailer" && normalized != "transfer-encoding" && normalized != "upgrade";
-}
-
-inline bool is_route_header_value(std::string_view value) {
-    return value.size() <= 4096 && value.find('\r') == std::string_view::npos &&
-           value.find('\n') == std::string_view::npos;
-}
-
-inline bool is_route_path(std::string_view value) {
-    return value.size() <= 2048 && !value.empty() && value.front() == '/' &&
-           value.find('\r') == std::string_view::npos && value.find('\n') == std::string_view::npos;
-}
-
-inline bool is_redirect_url(std::string_view value) {
-    return value.size() <= 2048 && !value.empty() &&
-           (value.front() == '/' || value.starts_with("http://") ||
-               value.starts_with("https://")) &&
-           std::ranges::none_of(value, [](unsigned char ch) { return std::isspace(ch) != 0; }) &&
-           value.find('\r') == std::string_view::npos && value.find('\n') == std::string_view::npos;
-}
-
-inline bool valid_route_methods(const ruvia::array<ruvia::string>& values) {
-    if (values.size() > 8) {
+    if (values.empty()) {
         return false;
     }
     std::unordered_set<std::string_view> seen;
     for (const auto& value : values) {
-        if ((value.view() != "GET" && value.view() != "HEAD" && value.view() != "POST" &&
-                value.view() != "PUT" && value.view() != "PATCH" && value.view() != "DELETE" &&
-                value.view() != "OPTIONS") ||
+        if (!flexedge::node::compression_algorithm(value.view()) ||
             !seen.emplace(value.view()).second) {
             return false;
         }
@@ -165,13 +53,56 @@ inline bool valid_route_methods(const ruvia::array<ruvia::string>& values) {
     return true;
 }
 
+inline bool valid_compression_values(const ruvia::array<ruvia::string>& values,
+    flexedge::node::compression_match_kind kind) {
+    if (values.size() > flexedge::node::max_response_compression_match_values) {
+        return false;
+    }
+    std::unordered_set<std::string_view> seen;
+    for (const auto& value : values) {
+        if (!flexedge::node::compression_match_value(value.view(), kind) ||
+            !seen.emplace(value.view()).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool valid_access_log_status_code_ranges(const ruvia::array<ruvia::string>& values) {
+    if (values.empty()) {
+        return false;
+    }
+    std::unordered_set<std::string_view> seen;
+    for (const auto& value : values) {
+        if (!flexedge::node::access_log_status_code_range(value.view()) ||
+            !seen.emplace(value.view()).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool valid_route_methods(const ruvia::array<ruvia::string>& values) {
+    if (values.size() > flexedge::node::max_route_methods) {
+        return false;
+    }
+    std::unordered_set<std::string_view> seen;
+    for (const auto& value : values) {
+        if (!flexedge::node::route_method(value.view()) || !seen.emplace(value.view()).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The count limit is reported per list by the rule validator.
 inline bool valid_route_header_set(const ruvia::array<website_route_header_input>& headers) {
     std::unordered_set<std::string> names;
     for (const auto& header : headers) {
         const auto& name = header.get<"name">();
         const auto& value = header.get<"value">();
-        if (!name || !value || !is_route_header_name(name->view()) ||
-            !is_route_header_value(value->view())) {
+        if (!name || !value || !flexedge::node::route_header_name(name->view()) ||
+            !flexedge::node::route_header_value(value->view())) {
             return false;
         }
         std::string normalized(name->view());
@@ -249,38 +180,28 @@ struct website_origin_validator final {
     }
 };
 
-struct website_route_header_validator final {
-    template <typename validator_t_type>
-    void validate_nested(const website_route_header_input& value, std::string_view path,
-        validator_t_type& validator) const {
-        const auto& name = value.get<"name">();
-        if (!name || !is_route_header_name(name->view())) {
-            validator.add(std::string(path) + ".name", "format", "请求头名称不正确或不允许修改");
-        }
-        const auto& header_value = value.get<"value">();
-        if (!header_value || !is_route_header_value(header_value->view())) {
-            validator.add(std::string(path) + ".value", "format", "请求头值不正确");
-        }
-    }
-};
-
 struct website_route_rule_validator final {
     template <typename validator_t_type>
     void validate_nested(const website_route_rule_input& value, std::string_view path,
         validator_t_type& validator) const {
         namespace policy = flexedge::route_policy;
-        if (const auto& name = value.get<"name">(); name && !policy::clean_text(name->view(), 100)) {
+        namespace protocol = flexedge::node;
+        if (const auto& name = value.get<"name">();
+            name && !policy::clean_text(name->view(), protocol::max_route_name_bytes)) {
             validator.add(std::string(path) + ".name", "format",
-                "规则名称最多100字节且不能包含控制字符");
+                "规则名称最多" + std::to_string(protocol::max_route_name_bytes) +
+                    "字节且不能包含控制字符");
         }
         if (const auto& description = value.get<"description">();
-            description && description->view().size() > 1000) {
-            validator.add(std::string(path) + ".description", "format", "规则备注最多1000字节");
+            description && description->view().size() > protocol::max_route_description_bytes) {
+            validator.add(std::string(path) + ".description", "format",
+                "规则备注最多" + std::to_string(protocol::max_route_description_bytes) + "字节");
         }
         if (const auto& hostnames = value.get<"hostnames">()) {
             std::unordered_set<std::string> seen;
-            if (hostnames->size() > 100) {
-                validator.add(std::string(path) + ".hostnames", "format", "最多100个匹配域名");
+            if (hostnames->size() > protocol::max_route_hostnames) {
+                validator.add(std::string(path) + ".hostnames", "format",
+                    "最多" + std::to_string(protocol::max_route_hostnames) + "个匹配域名");
             }
             for (const auto& host : *hostnames) {
                 if (!policy::exact_hostname(host.view()) ||
@@ -316,17 +237,17 @@ struct website_route_rule_validator final {
                     "正则需符合 RE2 语法，最多512字节、9个捕获组，不支持回溯引用、前后查找或 \\C");
             }
         } else if (match_type && match_type->view() == "suffix") {
-            if (!route_path || route_path->empty() || !policy::clean_text(route_path->view(), 2048) ||
-                route_path->view().find_first_of(" ?#") != std::string_view::npos) {
+            if (!route_path || !protocol::route_suffix(route_path->view())) {
                 validator.add(std::string(path) + ".path", "format",
                     "请填写路径后缀，不含空白、查询参数或片段");
             }
-        } else if (!route_path || !is_route_path(route_path->view())) {
+        } else if (!route_path || !protocol::route_path(route_path->view())) {
             validator.add(std::string(path) + ".path", "format", "匹配路径必须以 / 开头");
         }
         if (const auto& conditions = value.get<"conditions">()) {
-            if (conditions->size() > 20) {
-                validator.add(std::string(path) + ".conditions", "format", "最多20个匹配条件");
+            if (conditions->size() > protocol::max_route_conditions) {
+                validator.add(std::string(path) + ".conditions", "format",
+                    "最多" + std::to_string(protocol::max_route_conditions) + "个匹配条件");
             }
             std::size_t index = 0;
             for (const auto& condition : *conditions) {
@@ -347,6 +268,17 @@ struct website_route_rule_validator final {
         const auto& methods = value.get<"methods">();
         if (!methods || !valid_route_methods(*methods)) {
             validator.add(std::string(path) + ".methods", "format", "请求方法不正确或重复");
+        }
+        const auto header_limit = std::to_string(protocol::max_route_headers);
+        if (const auto& headers = value.get<"request_headers">();
+            headers && headers->size() > protocol::max_route_headers) {
+            validator.add(std::string(path) + ".request_headers", "too_big",
+                "最多" + header_limit + "个请求头");
+        }
+        if (const auto& headers = value.get<"response_headers">();
+            headers && headers->size() > protocol::max_route_headers) {
+            validator.add(std::string(path) + ".response_headers", "too_big",
+                "最多" + header_limit + "个响应头");
         }
         const auto& action = value.get<"action">();
         if (!action || (action->view() != "proxy" && action->view() != "redirect" &&
@@ -418,7 +350,7 @@ struct website_route_rule_validator final {
                 !is_origin_group(origin_group->view())) {
                 validator.add(std::string(path), "format", "代理规则配置不正确");
             }
-        } else if (!is_redirect_url(redirect_url->view()) ||
+        } else if (!flexedge::node::route_redirect_url(redirect_url->view()) ||
                    !policy::redirect_status(redirect_status->value_) || !rewrite_path->empty() ||
                    !origin_group->empty()) {
             validator.add(std::string(path), "format", "重定向规则配置不正确");
@@ -602,7 +534,7 @@ struct website_config_rules final {
         required(health_check_path, "health_check_path", "健康检查路径不能为空");
         custom(
             health_check_path, "health_check_path",
-            [](const auto& v) { return is_route_path(v.view()); }, "custom",
+            [](const auto& v) { return flexedge::node::route_path(v.view()); }, "custom",
             "健康检查路径必须以 / 开头");
         const auto& health_check_interval_seconds = body.get<"health_check_interval_seconds">();
         required(health_check_interval_seconds, "health_check_interval_seconds",
@@ -671,7 +603,9 @@ struct website_config_rules final {
         const auto& response_compression_min_bytes = body.get<"response_compression_min_bytes">();
         required(response_compression_min_bytes, "response_compression_min_bytes",
             "响应压缩阈值不能为空");
-        bounded(response_compression_min_bytes, "response_compression_min_bytes", 256, 1048576,
+        bounded(response_compression_min_bytes, "response_compression_min_bytes",
+            static_cast<std::int64_t>(flexedge::node::min_response_compression_bytes),
+            static_cast<std::int64_t>(flexedge::node::max_response_compression_min_bytes),
             "响应压缩阈值必须在256字节到1 MiB之间");
         const auto& response_compression_max_bytes = body.get<"response_compression_max_bytes">();
         required(response_compression_max_bytes, "response_compression_max_bytes",
@@ -680,7 +614,9 @@ struct website_config_rules final {
             validator.add(field("response_compression_max_bytes"), "too_small",
                 "响应压缩最大长度不能小于0");
         }
-        if (response_compression_max_bytes && response_compression_max_bytes->value_ > 67108864) {
+        if (response_compression_max_bytes &&
+            response_compression_max_bytes->value_ >
+                static_cast<std::int64_t>(flexedge::node::max_response_compression_bytes)) {
             validator.add(field("response_compression_max_bytes"), "too_big",
                 "响应压缩最大长度不能超过64 MiB");
         }
@@ -696,14 +632,20 @@ struct website_config_rules final {
             "压缩 MIME 类型不能为空");
         custom(
             response_compression_mime_types, "response_compression_mime_types",
-            [](const auto& v) { return valid_compression_mime_types(v); }, "custom",
+            [](const auto& v) {
+                return valid_compression_values(v, flexedge::node::compression_match_kind::mime_type);
+            },
+            "custom",
             "压缩 MIME 类型不正确");
         const auto& response_compression_extensions = body.get<"response_compression_extensions">();
         required(response_compression_extensions, "response_compression_extensions",
             "压缩扩展名不能为空");
         custom(
             response_compression_extensions, "response_compression_extensions",
-            [](const auto& v) { return valid_compression_extensions(v); }, "custom",
+            [](const auto& v) {
+                return valid_compression_values(v, flexedge::node::compression_match_kind::extension);
+            },
+            "custom",
             "压缩扩展名不正确");
         const auto& response_compression_excluded_extensions =
             body.get<"response_compression_excluded_extensions">();
@@ -711,13 +653,17 @@ struct website_config_rules final {
             "例外扩展名不能为空");
         custom(
             response_compression_excluded_extensions, "response_compression_excluded_extensions",
-            [](const auto& v) { return valid_compression_extensions(v); }, "custom",
+            [](const auto& v) {
+                return valid_compression_values(v, flexedge::node::compression_match_kind::extension);
+            },
+            "custom",
             "例外扩展名不正确");
         const auto& rules = body.get<"route_rules">();
         required(rules, "route_rules", "路由规则不能为空");
         if (rules) {
-            if (rules->size() > 100) {
-                validator.add(field("route_rules"), "too_big", "最多配置100条路由规则");
+            if (rules->size() > flexedge::node::max_route_rules) {
+                validator.add(field("route_rules"), "too_big",
+                    "最多配置" + std::to_string(flexedge::node::max_route_rules) + "条路由规则");
             }
             custom(
                 rules, "route_rules", [](const auto& v) { return valid_route_rule_set(v); }, "custom",

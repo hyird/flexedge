@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-#include "service/domains/auth/session_credential.h"
+#include "service/features/auth_session/session_credential.h"
 #include "service/utils/password.h"
 #include "service/utils/token.h"
 

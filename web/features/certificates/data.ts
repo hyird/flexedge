@@ -1,17 +1,23 @@
-import { queryOptions } from '@tanstack/react-query'
-import { api, sendData, streamPath, type PageData } from '@/lib/api'
+import { z } from 'zod'
+import { queryOptions, type QueryClient } from '@tanstack/react-query'
+import { api, getData, pageDataSchema, sendData, streamPath } from '@/lib/api'
+import { parseResponseData } from '@/lib/api-response'
 import { readLiveQuery } from '@/lib/live-query'
 import { queryKeys } from '@/lib/query-keys'
-import type { Certificate } from './types'
+import { resourceListSearchQuery } from '@/lib/resource'
+import { websitesSnapshotKey } from '@/features/websites/data'
+import { certificateSchema, type Certificate } from './types'
+
+const certificateOptionsSchema = z.array(certificateSchema)
+const certificatePageSchema = pageDataSchema(certificateSchema)
 
 export const usableCertificateOptionsQuery = queryOptions({
   retry: false,
   queryKey: [...queryKeys.certificates, 'usable-options'],
-  queryFn: ({ queryKey, signal }) =>
-    readLiveQuery<Certificate[]>(
-      streamPath('/certificates/options', { usable: true }),
-      queryKey,
-      signal
+  queryFn: async ({ signal }) =>
+    parseResponseData(
+      certificateOptionsSchema,
+      await getData<unknown>('/certificates/options', { usable: true }, signal)
     ),
 })
 
@@ -19,7 +25,7 @@ export function certificatesQuery(params: {
   page: number
   page_size: number
   keyword?: string
-  status?: string
+  status?: Certificate['status']
   /** Valid and expiring within 30 days (overview `certificate_expiring_count`). */
   expiring?: 1
   /** Failed/expired, or valid with an error (overview `certificate_failed_count`). */
@@ -29,12 +35,27 @@ export function certificatesQuery(params: {
     retry: false,
     queryKey: [...queryKeys.certificates, 'list', params],
     queryFn: ({ queryKey, signal }) =>
-      readLiveQuery<PageData<Certificate>>(
+      readLiveQuery(
         streamPath('/certificates', params),
         queryKey,
-        signal
+        signal,
+        (value) => parseResponseData(certificatePageSchema, value)
       ),
   })
+}
+
+/** Command palette search of certificates. */
+export function certificateSearchQuery(keyword: string) {
+  return resourceListSearchQuery(
+    '/certificates',
+    queryKeys.certificates,
+    keyword,
+    certificateSchema.pick({ id: true, domains: true }),
+    (certificate) => ({
+      id: certificate.id,
+      label: certificate.domains[0] ?? certificate.id,
+    })
+  )
 }
 
 /** Live certificate detail (`/certificates/:id/stream`). */
@@ -45,12 +66,27 @@ export function certificateDetailQuery(certificateId: string) {
     meta: { inlineError: true },
     queryKey: [...queryKeys.certificates, 'detail', certificateId],
     queryFn: ({ queryKey, signal }) =>
-      readLiveQuery<Certificate>(
+      readLiveQuery(
         streamPath('/certificates/' + certificateId),
         queryKey,
-        signal
+        signal,
+        (value) => parseResponseData(certificateSchema, value)
       ),
   })
+}
+
+/** After any certificate write: live list and detail streams push the change,
+ * so certificate snapshots (e.g. the website editor's usable certificates)
+ * are only marked stale; the snapshot lists of websites referencing
+ * certificates re-read. */
+export function afterCertificateWrite(client: QueryClient) {
+  return Promise.all([
+    client.invalidateQueries({
+      queryKey: queryKeys.certificates,
+      refetchType: 'none',
+    }),
+    client.invalidateQueries({ queryKey: websitesSnapshotKey }),
+  ])
 }
 
 type CertificateTarget = Pick<Certificate, 'id' | 'revision'>

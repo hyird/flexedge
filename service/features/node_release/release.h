@@ -9,12 +9,6 @@
 
 namespace service::node_release {
 
-class incomplete_release final : public std::runtime_error {
-public:
-    incomplete_release()
-        : std::runtime_error("node release files are not yet consistent") {}
-};
-
 class release final {
 public:
     release(const std::filesystem::path& binary_path, const std::filesystem::path& installer_path,
@@ -27,7 +21,7 @@ public:
             throw std::runtime_error("node release manifest is invalid");
         }
         if (metadata->digest_ != binary_.digest()) {
-            throw incomplete_release{};
+            throw std::runtime_error("node release manifest does not match the node binary");
         }
         version_ = metadata->version_;
     }
@@ -40,13 +34,6 @@ public:
     }
     [[nodiscard]] const std::string& version() const noexcept {
         return version_;
-    }
-
-    [[nodiscard]] bool matches_sources(const std::filesystem::path& binary_path,
-        const std::filesystem::path& installer_path,
-        const std::filesystem::path& manifest_path) const noexcept {
-        return binary_.matches_source(binary_path) && installer_.matches_source(installer_path) &&
-               manifest_.matches_source(manifest_path);
     }
 
 private:

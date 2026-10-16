@@ -11,12 +11,13 @@
 #include <unordered_set>
 #include <vector>
 
+#include "service/common/database.h"
 #include "service/common/domain_name.h"
 #include "service/common/http.h"
 #include "service/domains/dns_zone/dns_zone_error.h"
 #include "service/domains/dns_zone/dns_zone_filter.h"
 #include "service/domains/dns_zone/dns_zone_types.h"
-#include "service/features/dns/provider_runtime.h"
+#include "service/domains/provider/provider_reference.h"
 #include "service/features/dns_sync/mapper.h"
 #include "service/features/dns_sync/queue.h"
 
@@ -29,18 +30,9 @@ public:
         const std::optional<std::string>& owner_of,
         const std::optional<bool>& available,
         bool all = false) const {
-        std::string where =
-            " FROM sys_dns_zone zone INNER JOIN sys_provider provider ON provider.tenant_id = "
-            "zone.tenant_id AND provider.id = zone.provider_id AND provider.kind = 'dns' "
-            "WHERE zone.tenant_id = $1 AND zone.deleted_at IS NULL AND provider.deleted_at IS "
-            "NULL";
-        std::vector<ruvia::db_value> params{ruvia::db_value{tenant_id}};
         std::optional<std::string> pattern;
         if (keyword) {
             pattern = "%" + service::common::escape_like_pattern(*keyword) + "%";
-            where += " AND (zone.domain ILIKE $" + std::to_string(params.size() + 1) +
-                     " OR provider.name ILIKE $" + std::to_string(params.size() + 1) + ")";
-            params.emplace_back(std::string_view(*pattern));
         }
         std::optional<std::string> owner;
         if (owner_of) {
@@ -48,23 +40,37 @@ public:
             if (owner->starts_with("*.")) {
                 owner->erase(0, 2);
             }
-            where += " AND ($" + std::to_string(params.size() + 1) + " = zone.domain OR $" +
-                     std::to_string(params.size() + 1) + " LIKE '%.' || zone.domain)";
-            params.emplace_back(std::string_view(*owner));
+        }
+        ruvia::db_query query(c.pool());
+        source(query, tenant_id);
+        query.select(service::common::sql_columns(query,
+            {"zone.id", "zone.domain", "provider.provider", "provider.name", "zone.sync_status",
+                "zone.sync_status = 'synced' AND provider.status = 'verified'"}));
+        if (pattern) {
+            const auto value = query.value(*pattern);
+            query.and_where(
+                query.sql({"zone.domain ILIKE ", " OR provider.name ILIKE ", ""}, {value, value}));
+        }
+        if (owner) {
+            const auto value = query.value(*owner);
+            query.and_where(
+                query.sql({"", " = zone.domain OR ", " LIKE '%.' || zone.domain"}, {value, value}));
         }
         if (available) {
-            where += " AND (zone.sync_status = 'synced' AND provider.status = 'verified') = $" +
-                     std::to_string(params.size() + 1);
-            params.emplace_back(*available);
+            query.and_where(
+                query.sql({"(zone.sync_status = 'synced' AND provider.status = 'verified') = ", ""},
+                    {query.value(*available)}));
         }
-        const auto rows = co_await c.db().query(
-            "SELECT zone.id, zone.domain, provider.provider, provider.name, zone.sync_status, "
-            "zone.sync_status = 'synced' AND provider.status = 'verified'" +
-                where +
-                (owner_of ? (all ? " ORDER BY length(zone.domain) DESC, zone.sort DESC"
-                                 : " ORDER BY length(zone.domain) DESC, zone.sort DESC LIMIT 20")
-                          : (all ? " ORDER BY zone.sort DESC" : " ORDER BY zone.sort DESC LIMIT 20")),
-            params);
+        if (owner_of) {
+            query.order_by(query.sql("length(zone.domain)"), ruvia::db_order_direction::desc);
+            query.add_order_by(query.sql("zone.sort"), ruvia::db_order_direction::desc);
+        } else {
+            query.order_by(query.sql("zone.sort"), ruvia::db_order_direction::desc);
+        }
+        if (!all) {
+            query.limit(20);
+        }
+        const auto rows = co_await c.db().query(query);
         dns_zone_option_list_data_dto result({.resource_ = c.pool()});
         auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
@@ -81,16 +87,12 @@ public:
 
     ruvia::task<available_dns_zone_list_data_dto>
     available(auto& c, const std::string& tenant_id, const std::string& provider_id) const {
-        const auto provider_rows = co_await c.db().query(
-            "SELECT runtime::text FROM sys_provider WHERE id = $1 AND tenant_id = $2 AND kind "
-            "= 'dns' AND status = 'verified' AND deleted_at IS NULL LIMIT 1",
-            provider_id, tenant_id);
-        if (provider_rows.empty()) {
+        auto db = c.db();
+        const auto zones = co_await service::provider::verified_dns_provider_zones(db, tenant_id,
+            provider_id, c.pool());
+        if (!zones) {
             service::common::throw_app_error(dns_zone_error::provider_unavailable);
         }
-
-        const auto zones = service::dns::parse_dns_provider_runtime(
-            provider_rows.front()[0].value().value_or("{}"), c.pool());
         const auto local_rows = co_await c.db().query(
             "SELECT domain FROM sys_dns_zone WHERE tenant_id = $1 AND deleted_at IS NULL",
             tenant_id);
@@ -102,7 +104,7 @@ public:
 
         available_dns_zone_list_data_dto result({.resource_ = c.pool()});
         auto& items = result.template ensure<"list">();
-        for (const auto& zone : zones) {
+        for (const auto& zone : *zones) {
             if (managed.contains(zone.domain_)) {
                 continue;
             }
@@ -119,38 +121,27 @@ public:
         const std::optional<std::string>& keyword,
         const std::optional<std::string>& provider_id,
         const std::optional<std::string>& sync_status) const {
-        std::string where =
-            " FROM sys_dns_zone zone INNER JOIN sys_provider provider ON provider.tenant_id = "
-            "zone.tenant_id AND provider.id = zone.provider_id WHERE zone.tenant_id = $1 "
-            "AND provider.kind = 'dns' AND "
-            "zone.deleted_at IS NULL AND provider.deleted_at IS NULL";
-        std::vector<ruvia::db_value> params{ruvia::db_value{tenant_id}};
         std::optional<std::string> pattern;
-        if (provider_id) {
-            where += " AND provider.id = $" + std::to_string(params.size() + 1);
-            params.emplace_back(*provider_id);
-        }
         if (keyword) {
-            where += " AND zone.domain ILIKE $" + std::to_string(params.size() + 1);
             pattern = "%" + service::common::escape_like_pattern(*keyword) + "%";
-            params.emplace_back(std::string_view(*pattern));
         }
-        if (sync_status) {
-            if (*sync_status == dns_zone_issue_filter) {
-                where += " AND " + dns_zone_issue_sql();
-            } else {
-                where += " AND zone.sync_status = $" + std::to_string(params.size() + 1);
-                params.emplace_back(std::string_view(*sync_status));
+        const auto filter = [&](ruvia::db_query& query) {
+            source(query, tenant_id);
+            if (provider_id) {
+                query.and_where(query.sql({"provider.id = ", ""}, {query.value(*provider_id)}));
             }
-        }
-
-        const auto count_rows = co_await c.db().query("SELECT COUNT(*)" + where, params);
-        const auto total = count_rows.empty() ? std::int64_t{0}
-                                              : count_rows.front()[0].template as<std::int64_t>().value_or(0);
-        const auto rows =
-            co_await c.db().query(select_columns() + where + " ORDER BY zone.sort DESC LIMIT " +
-                                      std::to_string(page_size) + " OFFSET " + std::to_string(skip),
-                params);
+            if (pattern) {
+                query.and_where(query.sql({"zone.domain ILIKE ", ""}, {query.value(*pattern)}));
+            }
+            if (sync_status) {
+                query.and_where(*sync_status == dns_zone_issue_filter
+                                    ? dns_zone_issue_predicate(query, "zone")
+                                    : query.sql({"zone.sync_status = ", ""}, {query.value(*sync_status)}));
+            }
+        };
+        const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
+        const auto total = page_rows.total_;
+        const auto& rows = page_rows.rows_;
         dns_zone_page_data_dto result({.resource_ = c.pool()});
         result.template set<"total">(total);
         result.template set<"page">(page);
@@ -174,14 +165,12 @@ public:
 
     ruvia::task<dns_zone_dto> get(auto& c, const std::string& tenant_id,
         const std::string& id) const {
-        const auto rows = co_await c.db().query(
-            select_columns() +
-                " FROM sys_dns_zone zone INNER JOIN sys_provider provider ON "
-                "provider.tenant_id = zone.tenant_id AND provider.id = zone.provider_id "
-                "WHERE zone.id = $1 AND zone.tenant_id = $2 AND "
-                "provider.kind = 'dns' AND zone.deleted_at IS NULL AND provider.deleted_at IS "
-                "NULL LIMIT 1",
-            id, tenant_id);
+        ruvia::db_query query(c.pool());
+        source(query, tenant_id);
+        query.and_where(query.sql({"zone.id = ", ""}, {query.value(id)}));
+        project(query);
+        query.limit(1);
+        const auto rows = co_await c.db().query(query);
         if (rows.empty()) {
             service::common::throw_app_error(dns_zone_error::not_found);
         }
@@ -193,19 +182,31 @@ public:
     }
 
 private:
-    static std::string select_columns() {
-        return "SELECT zone.id, provider.id, provider.provider, provider.name, zone.domain, "
-               "zone.sync_status, zone.revision, zone.desired_revision, zone.synced_revision, "
-               "zone.config::text, zone.runtime::text, "
-               "TO_CHAR(zone.last_synced_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-               "zone.last_error, TO_CHAR(zone.created_at, "
-               "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), TO_CHAR(zone.updated_at, "
-               "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-               "(SELECT COUNT(DISTINCT claim.website_id) FROM sys_website_domain_claim claim "
-               "INNER JOIN sys_website website ON website.tenant_id = claim.tenant_id AND "
-               "website.id = claim.website_id WHERE claim.tenant_id = zone.tenant_id AND "
-               "claim.dns_zone_id = zone.id AND website.status = 'enabled' AND "
-               "website.deleted_at IS NULL)";
+    static void source(ruvia::db_query& query, const std::string& tenant_id) {
+        query.from("sys_dns_zone", "zone")
+            .join(ruvia::db_join_type::inner, "sys_provider",
+                query.sql("provider.tenant_id = zone.tenant_id AND provider.id = zone.provider_id"),
+                "provider")
+            .where(query.sql({"zone.tenant_id = ", ""}, {query.value(tenant_id)}))
+            .and_where(query.sql("zone.deleted_at IS NULL"))
+            .and_where(service::provider::live_dns_provider_predicate(query, "provider"));
+    }
+
+    static void project(ruvia::db_query& query) {
+        query
+            .select(service::common::sql_columns(query,
+                {"zone.id", "provider.id", "provider.provider", "provider.name", "zone.domain",
+                    "zone.sync_status", "zone.revision", "zone.desired_revision", "zone.synced_revision",
+                    "zone.config::text", "zone.runtime::text",
+                    "TO_CHAR(zone.last_synced_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')", "zone.last_error",
+                    "TO_CHAR(zone.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')",
+                    "TO_CHAR(zone.updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')",
+                    "SELECT COUNT(DISTINCT claim.website_id) FROM sys_website_domain_claim claim "
+                    "INNER JOIN sys_website website ON website.tenant_id = claim.tenant_id AND "
+                    "website.id = claim.website_id WHERE claim.tenant_id = zone.tenant_id AND "
+                    "claim.dns_zone_id = zone.id AND website.status = 'enabled' AND "
+                    "website.deleted_at IS NULL"}))
+            .order_by(query.sql("zone.sort"), ruvia::db_order_direction::desc);
     }
 
     template <typename dto_type, typename row_type>

@@ -6,7 +6,9 @@
 #include <string>
 #include <vector>
 
-#include "service/domains/website/reference_store.h"
+#include "service/domains/certificate/certificate_reference.h"
+#include "service/domains/cluster/cluster_reference.h"
+#include "service/domains/dns_zone/dns_zone_reference.h"
 #include "service/domains/website/relation_store.h"
 #include "support/postgres_test.h"
 
@@ -21,7 +23,7 @@ ruvia::task<void> verify_references(ruvia::db_handle& db) {
     auto transaction = co_await db.begin_transaction();
     (void)co_await transaction.execute(
         "CREATE TEMP TABLE sys_cluster (id uuid, tenant_id uuid, status text, "
-        "deleted_at timestamptz) ON COMMIT DROP");
+        "deleted_at timestamptz, dns_zone_id uuid) ON COMMIT DROP");
     (void)co_await transaction.execute(
         "CREATE TEMP TABLE sys_certificate (id uuid, tenant_id uuid, issued_revision bigint, "
         "expires_at timestamptz, deleted_at timestamptz, subject_alt_names varchar(253)[]) ON "
@@ -32,7 +34,7 @@ ruvia::task<void> verify_references(ruvia::db_handle& db) {
     (void)co_await transaction.execute(
         "CREATE TEMP TABLE sys_dns_zone (id uuid, tenant_id uuid, domain text, sort int, "
         "deleted_at timestamptz) ON COMMIT DROP");
-    require((co_await service::website::lock_dns_zone_references(transaction, tenant)).empty());
+    require((co_await service::dns_zone::lock_live_dns_zones(transaction, tenant)).empty());
     (void)co_await transaction.execute(
         "INSERT INTO sys_dns_zone VALUES "
         "($1, $2, 'example.com', 0, NULL), "
@@ -41,7 +43,7 @@ ruvia::task<void> verify_references(ruvia::db_handle& db) {
         "($1, $2, 'deleted.sub.example.com', 0, NOW()), "
         "($1, $3, 'foreign.sub.example.com', 0, NULL)",
         cluster, tenant, other_tenant);
-    const auto zones = co_await service::website::lock_dns_zone_references(transaction, tenant);
+    const auto zones = co_await service::dns_zone::lock_live_dns_zones(transaction, tenant);
     require(zones.size() == 3);
     require(zones[0].domain_ == "alt.example.com");
     require(zones[1].domain_ == "sub.example.com");
@@ -56,7 +58,7 @@ ruvia::task<void> verify_references(ruvia::db_handle& db) {
             std::string("UPDATE sys_dns_zone SET ") + field + " = NULL WHERE tenant_id=$1", tenant);
         bool rejected = false;
         try {
-            (void)co_await service::website::lock_dns_zone_references(transaction, tenant);
+            (void)co_await service::dns_zone::lock_live_dns_zones(transaction, tenant);
         } catch (const std::bad_optional_access&) {
             rejected = true;
         }
@@ -68,17 +70,17 @@ ruvia::task<void> verify_references(ruvia::db_handle& db) {
         "00000000-0000-0000-0000-000000000040",
         "00000000-0000-0000-0000-000000000041",
     }};
-    require(!(co_await service::website::lock_available_cluster(transaction, tenant, cluster)));
+    require(!(co_await service::cluster::lock_enabled_cluster(transaction, tenant, cluster)));
     (void)co_await transaction.execute(
         "INSERT INTO sys_cluster VALUES ($1, $2, 'enabled', NULL)", cluster, tenant);
-    require(co_await service::website::lock_available_cluster(transaction, tenant, cluster));
-    require(!(co_await service::website::lock_available_cluster(transaction, other_tenant, cluster)));
+    require((co_await service::cluster::lock_enabled_cluster(transaction, tenant, cluster)).has_value());
+    require(!(co_await service::cluster::lock_enabled_cluster(transaction, other_tenant, cluster)));
     (void)co_await transaction.execute("UPDATE sys_cluster SET status='disabled'");
-    require(!(co_await service::website::lock_available_cluster(transaction, tenant, cluster)));
+    require(!(co_await service::cluster::lock_enabled_cluster(transaction, tenant, cluster)));
     (void)co_await transaction.execute("UPDATE sys_cluster SET status='enabled', deleted_at=NOW()");
-    require(!(co_await service::website::lock_available_cluster(transaction, tenant, cluster)));
-    require((co_await service::website::lock_available_certificates(transaction, tenant, {})).has_value());
-    require(!(co_await service::website::lock_available_certificates(transaction, tenant, certificates)));
+    require(!(co_await service::cluster::lock_enabled_cluster(transaction, tenant, cluster)));
+    require((co_await service::certificate::lock_usable_certificates(transaction, tenant, {})).has_value());
+    require(!(co_await service::certificate::lock_usable_certificates(transaction, tenant, certificates)));
     (void)co_await transaction.execute(
         "INSERT INTO sys_certificate VALUES ($1, $2, 1, NOW() + INTERVAL '1 day', NULL, "
         "ARRAY['example.com', 'www.example.com']), ($3, $2, 1, NOW() + INTERVAL '1 day', NULL, "
@@ -87,7 +89,7 @@ ruvia::task<void> verify_references(ruvia::db_handle& db) {
     {
         // Configured names come back with each locked certificate for domain matching.
         const auto locked =
-            co_await service::website::lock_available_certificates(transaction, tenant, certificates);
+            co_await service::certificate::lock_usable_certificates(transaction, tenant, certificates);
         require(locked && locked->size() == 2);
         for (const auto& certificate : *locked) {
             require(certificate.id_ == certificates[0]
@@ -96,18 +98,18 @@ ruvia::task<void> verify_references(ruvia::db_handle& db) {
                               certificate.names_ == std::vector<std::string>{"*.example.com"});
         }
     }
-    require(!(co_await service::website::lock_available_certificates(transaction, other_tenant, certificates)));
+    require(!(co_await service::certificate::lock_usable_certificates(transaction, other_tenant, certificates)));
     // One unavailable member must reject the entire selection.
     for (const auto* mutation : {
              "issued_revision=0", "expires_at=NOW()", "expires_at=NULL", "deleted_at=NOW()"}) {
         (void)co_await transaction.execute(
             std::string("UPDATE sys_certificate SET ") + mutation + " WHERE id=$1", certificates[1]);
-        require(!(co_await service::website::lock_available_certificates(transaction, tenant, certificates)));
+        require(!(co_await service::certificate::lock_usable_certificates(transaction, tenant, certificates)));
         (void)co_await transaction.execute(
             "UPDATE sys_certificate SET issued_revision=1, expires_at=NOW()+INTERVAL '1 day', "
             "deleted_at=NULL WHERE id=$1",
             certificates[1]);
-        require((co_await service::website::lock_available_certificates(transaction, tenant, certificates))
+        require((co_await service::certificate::lock_usable_certificates(transaction, tenant, certificates))
                 .has_value());
     }
     co_await transaction.rollback();

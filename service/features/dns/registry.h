@@ -6,25 +6,17 @@
 
 namespace service::dns {
 
-enum class dns_provider_kind { cloudflare,
-    aliyun };
-
+// What the management API offers per DNS provider. The wire protocol and the
+// provider's record rules live in its client (cloudflare.h, aliyun.h).
 struct dns_provider_descriptor final {
-    dns_provider_kind kind_;
     std::string_view code_;
     bool supports_routing_lines_;
     bool supports_proxy_;
 };
 
 inline constexpr std::array<dns_provider_descriptor, 2> dns_providers{{
-    {.kind_ = dns_provider_kind::cloudflare,
-        .code_ = "cloudflare",
-        .supports_routing_lines_ = false,
-        .supports_proxy_ = true},
-    {.kind_ = dns_provider_kind::aliyun,
-        .code_ = "aliyun",
-        .supports_routing_lines_ = true,
-        .supports_proxy_ = false},
+    {.code_ = "cloudflare", .supports_routing_lines_ = false, .supports_proxy_ = true},
+    {.code_ = "aliyun", .supports_routing_lines_ = true, .supports_proxy_ = false},
 }};
 
 [[nodiscard]] inline constexpr const dns_provider_descriptor*

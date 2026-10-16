@@ -8,7 +8,6 @@ import {
   renewCertificate,
   removeCertificate,
   downloadCertificate,
-  usableCertificateOptionsQuery,
   certificatesQuery,
 } from './data'
 
@@ -16,6 +15,25 @@ class Source extends EventTarget {
   closed = false
   close() {
     this.closed = true
+  }
+}
+
+function certificate(id: string) {
+  return {
+    id,
+    revision: 1,
+    created_at: '2026-10-01T00:00:00.000000+00',
+    updated_at: '2026-10-01T00:00:00.000000+00',
+    domains: ['example.com'],
+    issuer: "Let's Encrypt",
+    certificate_provider_id: 'provider',
+    certificate_provider: 'letsencrypt',
+    status: 'pending',
+    usable: false,
+    config: { auto_renew: true },
+    dns_zone_id: 'zone',
+    dns_zone_domain: 'example.com',
+    website_count: 0,
   }
 }
 
@@ -30,35 +48,7 @@ afterEach(() => {
   client.clear()
 })
 
-test('certificate options release after the first snapshot while lists stay live', async () => {
-  const source = new Source()
-  setLiveQueryQueryClient(client, undefined, () => source as never)
-  const options = new QueryObserver(client, usableCertificateOptionsQuery)
-  const stop = options.subscribe(() => undefined)
-  const pending = options.refetch()
-  source.dispatchEvent(
-    new MessageEvent('snapshot', {
-      data: JSON.stringify({ code: 0, message: 'ok', data: [{ id: 'first' }] }),
-    })
-  )
-  await expect(pending).resolves.toMatchObject({ data: [{ id: 'first' }] })
-  expect(source.closed).toBe(true)
-  source.dispatchEvent(
-    new MessageEvent('snapshot', {
-      data: JSON.stringify({
-        code: 0,
-        message: 'ok',
-        data: [{ id: 'replacement' }],
-      }),
-    })
-  )
-  await new Promise<void>((resolve) => queueMicrotask(resolve))
-  expect(client.getQueryData(usableCertificateOptionsQuery.queryKey)).toEqual([
-    { id: 'first' },
-  ])
-  stop()
-  options.destroy()
-
+test('certificate lists stay live after the first snapshot', async () => {
   const listSource = new Source()
   setLiveQueryQueryClient(client, undefined, () => listSource as never)
   const query = new QueryObserver(
@@ -73,7 +63,7 @@ test('certificate options release after the first snapshot while lists stay live
         code: 0,
         message: 'ok',
         data: {
-          list: [{ id: 'certificate' }],
+          list: [certificate('certificate')],
           total: 1,
           page: 2,
           page_size: 10,
@@ -92,7 +82,7 @@ test('certificate options release after the first snapshot while lists stay live
         code: 0,
         message: 'ok',
         data: {
-          list: [{ id: 'replacement' }],
+          list: [certificate('replacement')],
           total: 1,
           page: 2,
           page_size: 10,

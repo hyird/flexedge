@@ -1,14 +1,43 @@
-import { statusLabels } from '@/lib/status'
+import {
+  enablementStatuses,
+  statusReserve,
+  type StatusDictionary,
+} from '@/lib/status'
 import type { Website, WebsiteOrigin } from './types'
 
-/** `StatusChip` reserves: every label the website/deploy status can show. */
-export const websiteStatusReserve = statusLabels(['enabled', 'disabled'])
-export const deployStatusReserve = statusLabels([
-  'applied',
-  'pending',
-  'partial',
-  'no_nodes',
-])
+/** Labels of the website `status` (`enablementStatuses`). */
+export const websiteStatusReserve = statusReserve(enablementStatuses)
+
+/** `runtime.deploy_status`, derived from the node counts
+ * (service/domains/website/website_runtime_mapper.h). */
+export const deployStatuses = {
+  applied: { label: '已生效', tone: 'success' },
+  pending: { label: '等待中', tone: 'warning' },
+  partial: { label: '部分完成', tone: 'warning' },
+  no_nodes: { label: '无节点', tone: 'default' },
+} as const satisfies StatusDictionary<
+  'applied' | 'pending' | 'partial' | 'no_nodes'
+>
+export const deployStatusReserve = statusReserve(deployStatuses)
+
+/** `runtime.origin_states[].status`, one node's health check of one origin
+ * (node/data/origin_health.h, accepted by service/features/node_channel). */
+export const originHealthStatuses = {
+  healthy: { label: '健康', tone: 'success' },
+  unhealthy: { label: '不健康', tone: 'danger' },
+  unknown: { label: '未知', tone: 'default' },
+} as const satisfies StatusDictionary<'healthy' | 'unhealthy' | 'unknown'>
+export const originHealthReserve = statusReserve(originHealthStatuses)
+
+/** `runtime.domain_states[].resolution_status`: the DNS probe's CNAME check
+ * (service/features/website_dns/runtime.h); a domain without a probe result
+ * is `unverified` (website_runtime_mapper.h). */
+export const domainResolutionStatuses = {
+  verified: { label: '已验证', tone: 'success' },
+  unverified: { label: '未验证', tone: 'warning' },
+  invalid: { label: '无效', tone: 'danger' },
+} as const satisfies StatusDictionary<'verified' | 'unverified' | 'invalid'>
+export const domainResolutionReserve = statusReserve(domainResolutionStatuses)
 
 /** Display name used in titles, menus and confirmations. */
 export function websiteName(

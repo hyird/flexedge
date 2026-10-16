@@ -15,8 +15,8 @@
 #include "service/features/dns/driver.h"
 #include "service/features/dns/provider_config_mapper.h"
 #include "service/features/dns/provider_runtime.h"
+#include "service/features/outbound_http/error.h"
 #include "service/features/provider_verification/attempt_detail.h"
-#include "service/features/provider_verification/failure.h"
 #include "service/features/provider_verification/task.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
@@ -33,7 +33,7 @@ parse_runtime_eab(std::string_view current_runtime_json, std::pmr::memory_resour
     const auto runtime = service::certificate_issuance::parse_certificate_provider_runtime(
         current_runtime_json, {.resource_ = resource});
     if (!runtime) {
-        throw verification_error("证书供应商 runtime 损坏", true);
+        throw service::outbound_http::attempt_error("证书供应商 runtime 损坏", true);
     }
     const auto& runtime_eab = runtime->eab_;
     if (!runtime_eab) {
@@ -50,7 +50,7 @@ parse_runtime_eab(std::string_view current_runtime_json, std::pmr::memory_resour
             service::utils::sensitive_string(service::utils::open_secret(*hmac_key_envelope)),
         };
     } catch (...) {
-        throw verification_error("证书供应商 EAB runtime 损坏", true);
+        throw service::outbound_http::attempt_error("证书供应商 EAB runtime 损坏", true);
     }
 }
 
@@ -61,26 +61,26 @@ fetch_zero_ssl_eab(runtime_type& context, service::attempt_trace::recorder& trac
     std::string_view credential_mode, const service::outbound_http::quota_scope& scope) {
     if (credential_mode == "email") {
         if (!config.account_email_) {
-            throw verification_error("ZeroSSL 供应商配置不完整", true);
+            throw service::outbound_http::attempt_error("ZeroSSL 供应商配置不完整", true);
         }
         co_return co_await service::certificate_issuance::fetch_zero_ssl_eab_by_email(
             context, trace, *config.account_email_, scope);
     }
     if (credential_mode == "access_key") {
         if (!config.envelope_) {
-            throw verification_error("ZeroSSL 供应商配置不完整", true);
+            throw service::outbound_http::attempt_error("ZeroSSL 供应商配置不完整", true);
         }
         service::utils::sensitive_string access_key([&] {
             try {
                 return service::utils::open_secret(*config.envelope_);
             } catch (...) {
-                throw verification_error("证书供应商 Access Key 损坏", true);
+                throw service::outbound_http::attempt_error("证书供应商 Access Key 损坏", true);
             }
         }());
         co_return co_await service::certificate_issuance::fetch_zero_ssl_eab_by_access_key(
             context, trace, access_key.view(), scope);
     }
-    throw verification_error("ZeroSSL 供应商配置不完整", true);
+    throw service::outbound_http::attempt_error("ZeroSSL 供应商配置不完整", true);
 }
 
 inline ruvia::task<verification_result> verify_dns(service::background::task_context& context,
@@ -92,7 +92,7 @@ inline ruvia::task<verification_result> verify_dns(service::background::task_con
         try {
             return service::utils::open_secret(config.credential_envelope_);
         } catch (...) {
-            throw verification_error("DNS 服务商凭据损坏", true);
+            throw service::outbound_http::attempt_error("DNS 服务商凭据损坏", true);
         }
     }());
     trace.register_secret(secret.view());
@@ -125,7 +125,7 @@ verify_certificate(service::background::task_context& context, service::attempt_
         task.config_json_, context.pool());
     const auto settings = service::certificate_issuance::settings_for_provider(task.provider_);
     if (!settings) {
-        throw verification_error("不支持的证书供应商", true);
+        throw service::outbound_http::attempt_error("不支持的证书供应商", true);
     }
     settings_step.complete();
     auto eab_step = trace.begin_step(step_code::load_eab);

@@ -1,5 +1,3 @@
-#include "service/features/live_resource/node_presence.h"
-
 #include <ruvia/core/event_loop_pool.h>
 #include <ruvia/core/task.h>
 #include <ruvia/core/timer.h>
@@ -10,18 +8,20 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <exception>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
 #include <string>
 
+#include "service/features/node_presence/notification_relay.h"
 #include "support/postgres_test.h"
 #include "support/redis_test.h"
 
 namespace {
 
 using namespace std::chrono_literals;
-namespace presence = service::live_resource::node_presence;
+namespace presence = service::node_presence;
 namespace notifications = service::live_resource::notifications;
 namespace cache = service::live_resource::redis_snapshot_cache;
 
@@ -91,6 +91,54 @@ ruvia::task<void> verify_renewal_and_faults(ruvia::redis_client& client) {
         "publication failure leaves the expiry claimable in Redis");
     (void)co_await redis.del(notifications::stream_key);
     require(co_await presence::expire(redis, candidate), "expiry resumes after publication recovers");
+}
+
+ruvia::task<void> verify_publication_replay(ruvia::redis_client& client) {
+    co_await reset(client);
+    const auto redis = client.handle();
+    const auto id = service::utils::random_token();
+    const auto dedup_key = "flexedge:notification-published:v1:" + id;
+    notifications::resource_notification value("tenant-a");
+    value.node_seen("node-a").changed(service::live_resource::resource::nodes, "node-a");
+    value.node_seen_unix_ms_ = co_await redis_now(redis);
+    const auto payload = service::live_resource::outbox::pack(notifications::encode(value));
+    // Node changes invalidate the cached overview; node lists are not cached.
+    const auto scope = cache::resource_scope("tenant-a", service::live_resource::resource::overview);
+    (void)co_await redis.set(presence::deadlines_key, "wrong-type");
+    bool rejected{};
+    try {
+        co_await presence::resource_relay::publish(redis, id, payload);
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    require(rejected && !(co_await redis.exists(notifications::stream_key)) &&
+                !(co_await redis.exists(dedup_key)) && !(co_await redis.hget(cache::generation_keys[0], scope)),
+        "bad presence storage cannot partially append, invalidate or acknowledge an event");
+    (void)co_await redis.del(presence::deadlines_key);
+    co_await presence::resource_relay::publish(redis, id, payload);
+    const auto deadline = co_await redis.command("ZSCORE", presence::deadlines_key, "tenant-a|node-a");
+    const auto generation = co_await redis.hget(cache::generation_keys[0], scope);
+    require(!deadline.null() && generation && (co_await redis.command("XLEN", notifications::stream_key)).integer() == 1 &&
+                (co_await redis.exists(dedup_key)),
+        "a repaired publication commits its heartbeat, event, cache invalidation and replay fence together");
+    co_await presence::record(redis, "tenant-a", "node-a", value.node_seen_unix_ms_ + 1000);
+    const auto renewed = co_await redis.command("ZSCORE", presence::deadlines_key, "tenant-a|node-a");
+    co_await presence::resource_relay::publish(redis, id, payload);
+    const auto repeated = co_await redis.command("ZSCORE", presence::deadlines_key, "tenant-a|node-a");
+    require(renewed.string() == repeated.string() &&
+                (co_await redis.hget(cache::generation_keys[0], scope)) == generation &&
+                (co_await redis.command("XLEN", notifications::stream_key)).integer() == 1,
+        "replaying a committed event preserves the newer deadline without duplicate invalidation or append");
+    (void)co_await redis.del(presence::deadlines_key);
+    value.node_seen_unix_ms_ = (co_await redis_now(redis)) - 16000;
+    const auto delayed_id = service::utils::random_token();
+    co_await presence::resource_relay::publish(redis, delayed_id,
+        service::live_resource::outbox::pack(notifications::encode(value)));
+    require(!(co_await redis.exists(presence::deadlines_key)),
+        "a delayed committed heartbeat cannot resurrect presence after expiry or Redis reset");
+    (void)co_await redis.del(dedup_key);
+    (void)co_await redis.del("flexedge:notification-published:v1:" + delayed_id);
+    co_await reset(client);
 }
 
 ruvia::task<void> verify_generation(ruvia::redis_client& client) {
@@ -181,31 +229,50 @@ int main() {
         if (!redis_config || !postgres_config) {
             return 77;
         }
+        const test_support::postgres_test_database temporary_database(*postgres_config);
         ruvia::event_loop_pool loops({.loop_count_ = 2});
         const auto first = loops.loop(0);
         const auto second = loops.loop(1);
         ruvia::redis_client left(first, *redis_config);
         ruvia::redis_client right(second, *redis_config);
-        ruvia::db_client database(first, *postgres_config);
+        ruvia::db_client database(first, temporary_database.config());
         loops.start();
-        first.start(left.connect()).get();
-        second.start(right.connect()).get();
-        first.start(database.connect()).get();
-        first.start(reset(left)).get();
-        const auto candidate = first.start(prepare_expiry(left)).get();
-        auto a = first.start(expire(left, candidate));
-        auto b = second.start(expire(right, candidate));
-        require(static_cast<int>(a.get()) + static_cast<int>(b.get()) == 1, "expiry is atomically claimed across workers");
-        first.start(verify_expired(left, candidate)).get();
-        first.start(verify_renewal_and_faults(left)).get();
-        first.start(verify_generation(left)).get();
-        first.start(verify_database_seed(database, left)).get();
-        first.start(reset(left)).get();
-        first.start(left.shutdown()).get();
-        second.start(right.shutdown()).get();
-        first.start(database.shutdown()).get();
+        std::exception_ptr failure;
+        try {
+            first.start(left.connect()).get();
+            second.start(right.connect()).get();
+            first.start(database.connect()).get();
+            first.start(reset(left)).get();
+            const auto candidate = first.start(prepare_expiry(left)).get();
+            auto a = first.start(expire(left, candidate));
+            auto b = second.start(expire(right, candidate));
+            require(static_cast<int>(a.get()) + static_cast<int>(b.get()) == 1, "expiry is atomically claimed across workers");
+            first.start(verify_expired(left, candidate)).get();
+            first.start(verify_renewal_and_faults(left)).get();
+            first.start(verify_publication_replay(left)).get();
+            first.start(verify_generation(left)).get();
+            first.start(verify_database_seed(database, left)).get();
+            first.start(reset(left)).get();
+        } catch (...) {
+            failure = std::current_exception();
+        }
+        try {
+            first.start(left.shutdown()).get();
+            second.start(right.shutdown()).get();
+            first.start(database.shutdown()).get();
+        } catch (...) {
+            if (!failure) {
+                failure = std::current_exception();
+            }
+        }
+        left.close();
+        right.close();
+        database.close();
         loops.stop();
         loops.join();
+        if (failure) {
+            std::rethrow_exception(failure);
+        }
         std::cout << "Node presence: Redis atomic expiry, renewal, durable failure recovery, generations and PostgreSQL ORM seed passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

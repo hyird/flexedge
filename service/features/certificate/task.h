@@ -4,8 +4,6 @@
 #include <cstdint>
 #include <string>
 
-#include "service/features/operation/work_origin.h"
-
 namespace service::certificate_issuance::worker_detail {
 
 struct certificate_task final {
@@ -18,8 +16,6 @@ struct certificate_task final {
     std::string operation_;
     // Monotonic instant the claim acquired the lease: the attempt start.
     std::chrono::steady_clock::time_point claimed_at_{};
-    // The issuance subtask, empty for work of no task.
-    service::operation::work_owner owner_{};
 };
 
 }  // namespace service::certificate_issuance::worker_detail

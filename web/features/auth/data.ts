@@ -3,11 +3,7 @@ import { getData, sendData } from '@/lib/api'
 import { ApiProtocolError } from '@/lib/api-response'
 import { queryKeys } from '@/lib/query-keys'
 import { authUserSchema } from '@/features/auth/types'
-import {
-  activateSession,
-  replaceSession,
-  sessionVersion,
-} from './session-lifecycle'
+import { replaceSession, sessionVersion } from './session-lifecycle'
 
 function parseUser(value: unknown) {
   const result = authUserSchema.safeParse(value)
@@ -28,7 +24,7 @@ export const sessionQueryOptions = queryOptions({
 export async function ensureAuthenticatedSession(client: QueryClient) {
   const version = sessionVersion(client)
   const user = await client.ensureQueryData(sessionQueryOptions)
-  if (!activateSession(client, version))
+  if (sessionVersion(client) !== version)
     throw new Error('登录会话已变更，请重试')
   return user
 }

@@ -1,10 +1,15 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { getRouteApi, Link, useNavigate } from '@tanstack/react-router'
+import { getRouteApi, Link } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button } from '@heroui/react'
 import { hasListFilters, useListSearch } from '@/lib/list-search'
-import { statusLabels } from '@/lib/status'
+import {
+  describeStatus,
+  enablementStatuses,
+  statusOptions,
+  statusReserve,
+} from '@/lib/status'
 import { DataTable } from '@/components/data-table'
 import { LinkButton } from '@/components/link-button'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
@@ -19,11 +24,10 @@ import { clustersQuery } from './data'
 import type { Cluster } from './types'
 
 const route = getRouteApi('/_authenticated/clusters/')
-const clusterStatusLabels = statusLabels(['enabled', 'disabled'])
+const clusterStatusReserve = statusReserve(enablementStatuses)
 
 export function ClustersPage() {
   const list = useListSearch(route)
-  const navigate = useNavigate()
   const { search } = list
   const zones = useQuery(dnsZoneOptionsQuery)
   const query = useQuery({
@@ -36,15 +40,6 @@ export function ClustersPage() {
     }),
     placeholderData: keepPreviousData,
   })
-  const setSheet = (patch: Pick<ClustersSearch, 'create'>) =>
-    navigate({
-      to: '.',
-      search: (previous: Record<string, unknown>) => ({
-        ...previous,
-        ...patch,
-      }),
-      replace: patch.create === undefined,
-    })
   const filtered = hasListFilters(search, clusterFilterKeys)
   const columns: DataGridColumn<Cluster>[] = [
     {
@@ -91,7 +86,10 @@ export function ClustersPage() {
       header: '状态',
       minWidth: 100,
       cell: (cluster) => (
-        <StatusChip status={cluster.status} reserve={clusterStatusLabels} />
+        <StatusChip
+          {...describeStatus(enablementStatuses, cluster.status)}
+          reserve={clusterStatusReserve}
+        />
       ),
     },
     {
@@ -110,7 +108,7 @@ export function ClustersPage() {
     },
   ]
   const createButton = (
-    <Button size='sm' onPress={() => void setSheet({ create: 1 })}>
+    <Button size='sm' onPress={() => void list.sheet.openCreate()}>
       <Plus className='size-4' />
       创建集群
     </Button>
@@ -136,10 +134,7 @@ export function ClustersPage() {
                   status: (value || undefined) as ClustersSearch['status'],
                 })
               }
-              options={[
-                { id: 'enabled', label: '已启用' },
-                { id: 'disabled', label: '已停用' },
-              ]}
+              options={statusOptions(enablementStatuses)}
             />
             <FilterSelect
               label='托管域名'
@@ -190,8 +185,8 @@ export function ClustersPage() {
         }
       />
       <ClusterSheet
-        isOpen={search.create === 1}
-        onClose={() => void setSheet({ create: undefined })}
+        isOpen={list.sheet.isCreating}
+        onClose={() => void list.sheet.close()}
       />
     </Page>
   )

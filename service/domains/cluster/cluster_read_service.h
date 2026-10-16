@@ -3,17 +3,18 @@
 #include <ruvia/core/task.h>
 #include <ruvia/web/context.h>
 #include <ruvia/web/db/db.h>
+#include <ruvia/web/db/db_query.h>
 
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <string_view>
-#include <vector>
 
+#include "service/common/database.h"
 #include "service/common/http.h"
 #include "service/domains/cluster/cluster_error.h"
 #include "service/domains/cluster/cluster_types.h"
-#include "service/domains/node/node_connection.h"
+#include "service/domains/provider/provider_reference.h"
+#include "service/features/node_presence/node_connection.h"
 
 namespace service::cluster {
 
@@ -25,33 +26,28 @@ public:
         const std::optional<std::string>& keyword,
         const std::optional<std::string>& dns_zone_id,
         const std::optional<std::string>& status) const {
-        std::string where = cluster_source();
-        std::vector<ruvia::db_value> params{ruvia::db_value{tenant_id}};
         std::optional<std::string> keyword_pattern;
         if (keyword) {
             keyword_pattern = "%" + service::common::escape_like_pattern(*keyword) + "%";
-            const auto placeholder = "$" + std::to_string(params.size() + 1);
-            where += " AND (cluster.name ILIKE " + placeholder +
-                     " OR (cluster.hostname_prefix || '.' || zone.domain) ILIKE " + placeholder +
-                     ")";
-            params.emplace_back(std::string_view(*keyword_pattern));
         }
-        if (dns_zone_id) {
-            where += " AND cluster.dns_zone_id = $" + std::to_string(params.size() + 1);
-            params.emplace_back(*dns_zone_id);
-        }
-        if (status) {
-            where += " AND cluster.status = $" + std::to_string(params.size() + 1);
-            params.emplace_back(std::string_view(*status));
-        }
-
-        const auto count_rows = co_await c.db().query("SELECT COUNT(*)" + where, params);
-        const auto total = count_rows.empty() ? std::int64_t{0}
-                                              : count_rows.front()[0].template as<std::int64_t>().value_or(0);
-        const auto rows = co_await c.db().query(
-            cluster_columns() + where + " ORDER BY cluster.sort DESC LIMIT " +
-                std::to_string(page_size) + " OFFSET " + std::to_string(skip),
-            params);
+        const auto filter = [&](ruvia::db_query& query) {
+            source(query, tenant_id);
+            if (keyword_pattern) {
+                const auto pattern = query.value(*keyword_pattern);
+                query.and_where(query.sql({"cluster.name ILIKE ",
+                                              " OR (cluster.hostname_prefix || '.' || zone.domain) ILIKE ",
+                                              ""},
+                    {pattern, pattern}));
+            }
+            if (dns_zone_id) {
+                query.and_where(query.sql({"cluster.dns_zone_id = ", ""}, {query.value(*dns_zone_id)}));
+            }
+            if (status) {
+                query.and_where(query.sql({"cluster.status = ", ""}, {query.value(*status)}));
+            }
+        };
+        const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
+        const auto total = page_rows.total_;
 
         cluster_page_data_dto result({.resource_ = c.pool()});
         result.template set<"total">(total);
@@ -59,7 +55,7 @@ public:
         result.template set<"page_size">(page_size);
         result.template set<"total_pages">(page_size > 0 ? (total + page_size - 1) / page_size : 0);
         auto& items = result.template ensure<"list">();
-        for (const auto& row : rows) {
+        for (const auto& row : page_rows.rows_) {
             fill_cluster(items.emplace_back(), row);
         }
         co_return result;
@@ -68,8 +64,12 @@ public:
     // One cluster with exactly the list item's projection.
     ruvia::task<cluster_dto> get(auto& c, const std::string& tenant_id,
         const std::string& id) const {
-        const auto rows = co_await c.db().query(
-            cluster_columns() + cluster_source() + " AND cluster.id = $2 LIMIT 1", tenant_id, id);
+        ruvia::db_query query(c.pool());
+        source(query, tenant_id);
+        query.and_where(query.sql({"cluster.id = ", ""}, {query.value(id)}));
+        project(query);
+        query.limit(1);
+        const auto rows = co_await c.db().query(query);
         if (rows.empty()) {
             service::common::throw_app_error(cluster_error::not_found);
         }
@@ -79,28 +79,35 @@ public:
     }
 
 private:
-    // The list query and its projection predate structured queries and are
-    // not rewritten in this change; the detail read reuses them verbatim.
-    static std::string cluster_source() {
-        return " FROM sys_cluster cluster INNER JOIN sys_dns_zone zone ON zone.tenant_id = "
-               "cluster.tenant_id AND zone.id = cluster.dns_zone_id INNER JOIN sys_provider "
-               "provider ON provider.tenant_id = zone.tenant_id AND provider.id = "
-               "zone.provider_id AND provider.kind = 'dns' WHERE cluster.tenant_id = $1 AND "
-               "cluster.deleted_at IS NULL AND zone.deleted_at IS NULL AND provider.deleted_at IS "
-               "NULL";
+    static void source(ruvia::db_query& query, const std::string& tenant_id) {
+        query.from("sys_cluster", "cluster")
+            .join(ruvia::db_join_type::inner, "sys_dns_zone",
+                query.sql("zone.tenant_id = cluster.tenant_id AND zone.id = cluster.dns_zone_id"), "zone")
+            .join(ruvia::db_join_type::inner, "sys_provider",
+                query.sql("provider.tenant_id = zone.tenant_id AND provider.id = zone.provider_id"),
+                "provider")
+            .where(query.sql({"cluster.tenant_id = ", ""}, {query.value(tenant_id)}))
+            .and_where(query.sql("cluster.deleted_at IS NULL AND zone.deleted_at IS NULL"))
+            .and_where(service::provider::live_dns_provider_predicate(query, "provider"));
     }
 
-    static std::string cluster_columns() {
-        return "SELECT cluster.id, cluster.name, cluster.dns_zone_id, zone.domain, provider.provider, "
-               "cluster.hostname_prefix, cluster.hostname_prefix || '.' || zone.domain, "
-               "(SELECT COUNT(*) FROM sys_node node WHERE node.tenant_id = cluster.tenant_id "
-               "AND node.cluster_id = cluster.id AND node.deleted_at IS NULL), (SELECT COUNT(*) FROM "
-               "sys_node node WHERE node.tenant_id = cluster.tenant_id AND node.cluster_id = "
-               "cluster.id AND node.deleted_at IS NULL AND " +
-               service::node::node_online_sql() +
-               "), cluster.status, cluster.revision, "
-               "TO_CHAR(cluster.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-               "TO_CHAR(cluster.updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')";
+    static void project(ruvia::db_query& query) {
+        auto columns = service::common::sql_columns(query,
+            {"cluster.id", "cluster.name", "cluster.dns_zone_id", "zone.domain", "provider.provider",
+                "cluster.hostname_prefix", "cluster.hostname_prefix || '.' || zone.domain",
+                "SELECT COUNT(*) FROM sys_node node WHERE node.tenant_id = cluster.tenant_id AND "
+                "node.cluster_id = cluster.id AND node.deleted_at IS NULL"});
+        columns.push_back(query.sql({"SELECT COUNT(*) FROM sys_node node WHERE node.tenant_id = "
+                                     "cluster.tenant_id AND node.cluster_id = cluster.id AND "
+                                     "node.deleted_at IS NULL AND ",
+                                        ""},
+            {service::node::node_online_predicate(query, "node")}));
+        for (const auto column : {"cluster.status", "cluster.revision",
+                 "TO_CHAR(cluster.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')",
+                 "TO_CHAR(cluster.updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')"}) {
+            columns.push_back(query.sql(column));
+        }
+        query.select(columns).order_by(query.sql("cluster.sort"), ruvia::db_order_direction::desc);
     }
 
     template <typename row_type>

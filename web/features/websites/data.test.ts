@@ -56,35 +56,42 @@ it('applies current origin runtime per node and ignores stale updates', () => {
         origin_id: 'origin-new',
         status: 'unhealthy',
         checked_at_unix_millis: 300,
+        latency_millis: 12,
       },
     ],
   }
-  const changed = patchWebsiteOriginRuntime(website, update)!
+  const event = 'origin-runtime'
+  const changed = patchWebsiteOriginRuntime(website, update, event)!
   expect(changed.runtime.origin_states.map((state) => state.origin_id)).toEqual(
     ['origin-other', 'origin-new']
   )
   expect(
-    patchWebsiteOriginRuntime(changed, {
-      ...update,
-      reported_at: '2026-09-08T00:00:30Z',
-      origin_states: [
-        { ...update.origin_states[0], checked_at_unix_millis: 100 },
-      ],
-    })
+    patchWebsiteOriginRuntime(
+      changed,
+      {
+        ...update,
+        reported_at: '2026-09-08T00:00:30Z',
+        origin_states: [
+          { ...update.origin_states[0], checked_at_unix_millis: 100 },
+        ],
+      },
+      event
+    )
   ).toBe(changed)
-  const removed = patchWebsiteOriginRuntime(changed, {
-    ...update,
-    reported_at: '2026-09-08T00:02:00Z',
-    origin_states: [],
-  })!
+  const removed = patchWebsiteOriginRuntime(
+    changed,
+    { ...update, reported_at: '2026-09-08T00:02:00Z', origin_states: [] },
+    event
+  )!
   expect(removed.runtime.origin_states).toEqual([
     changed.runtime.origin_states[0],
   ])
   expect(
-    patchWebsiteOriginRuntime(removed, {
-      ...update,
-      reported_at: '2026-09-08T00:01:30Z',
-    })
+    patchWebsiteOriginRuntime(
+      removed,
+      { ...update, reported_at: '2026-09-08T00:01:30Z' },
+      event
+    )
   ).toBe(removed)
 })
 

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <ruvia/core/task.h>
-#include <ruvia/web/app.h>
 #include <ruvia/web/context.h>
 
 #include "service/common/http.h"
@@ -10,15 +9,15 @@
 #include "service/domains/auth/auth_session_store.h"
 #include "service/domains/auth/auth_types.h"
 #include "service/domains/auth/auth_user_mapper.h"
-#include "service/domains/auth/session_cookie.h"
+#include "service/features/auth_session/session_cookie.h"
 
 namespace service::auth {
 
 class auth_session_service final {
 public:
     ruvia::task<void> start(ruvia::context& c, const std::string& admin_id) const {
-        const auto configuration = service::config::get_auth_configuration(ruvia::app().env());
-        const auto session = co_await create_session_credential(c.db(), admin_id, configuration.session_expires_in_);
+        const auto session =
+            co_await create_session_credential(c.db(), admin_id, service::config::auth_config().session_expires_in_);
         set_session_cookie(c, session);
     }
 
@@ -27,8 +26,8 @@ public:
         if (!presented) {
             service::common::throw_app_error(auth_error::unauthorized);
         }
-        const auto configuration = service::config::get_auth_configuration(ruvia::app().env());
-        const auto rotation = co_await rotate_session(c.db(), *presented, configuration.session_expires_in_);
+        const auto rotation =
+            co_await rotate_session(c.db(), *presented, service::config::auth_config().session_expires_in_);
         if (const auto* error = std::get_if<session_rotation_error>(&rotation)) {
             if (*error != session_rotation_error::unknown_session) {
                 delete_session_cookie(c);

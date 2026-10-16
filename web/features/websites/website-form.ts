@@ -10,9 +10,13 @@ import {
   compileRoutePattern,
   validCaptureTemplate,
   validRouteCondition,
-  type RouteCondition,
 } from './route-matching'
-import type { Website, WebsiteConfig } from './types'
+import {
+  routeMethods,
+  type Website,
+  type WebsiteConfig,
+  type WebsiteRouteRule,
+} from './types'
 
 const routeConditionSchema = z
   .object({
@@ -54,29 +58,10 @@ const originSchema = z.object({
   status: z.enum(['enabled', 'disabled']),
 })
 
-export const routeMethods = [
-  'GET',
-  'HEAD',
-  'POST',
-  'PUT',
-  'PATCH',
-  'DELETE',
-  'OPTIONS',
-] as const
-
-function routeHeadersToText(value: unknown) {
-  if (!Array.isArray(value)) return ''
-  return value
-    .flatMap((header) => {
-      if (!header || typeof header !== 'object') return []
-      const record = header as Record<string, unknown>
-      if (typeof record.name !== 'string' || typeof record.value !== 'string') {
-        return []
-      }
-      return [`${record.name}: ${record.value}`]
-    })
-    .join('\n')
-}
+/** Headers each route rule may set per direction (`max_route_headers`,
+ * node/proto/website_validation.h); the messages match the save check in
+ * service/features/website_config/validation.h. */
+const maxRouteHeaders = 20
 
 export function parseRouteHeaders(value: string) {
   return value
@@ -194,10 +179,18 @@ const routeRuleSchema = z
     origin_group: z.string().trim().max(100),
     request_headers_text: z
       .string()
-      .refine(hasValidRouteHeaderText, '每行请填写为 Header: value'),
+      .refine(hasValidRouteHeaderText, '每行请填写为 Header: value')
+      .refine(
+        (value) => parseRouteHeaders(value).length <= maxRouteHeaders,
+        `最多${maxRouteHeaders}个请求头`
+      ),
     response_headers_text: z
       .string()
-      .refine(hasValidRouteHeaderText, '每行请填写为 Header: value'),
+      .refine(hasValidRouteHeaderText, '每行请填写为 Header: value')
+      .refine(
+        (value) => parseRouteHeaders(value).length <= maxRouteHeaders,
+        `最多${maxRouteHeaders}个响应头`
+      ),
   })
   .superRefine((rule, context) => {
     if (
@@ -591,80 +584,39 @@ export function websiteCertificateOptions(
   return options
 }
 
+/** Editor row of a stored rule; a new row passes only what it presets and
+ * takes the defaults. An empty stored rewrite or query mode keeps its
+ * backend meaning (`replace_path` with a rewrite path, else `none`;
+ * `preserve`). */
 export function routeRuleToForm(
-  rule: Record<string, unknown>
+  rule: Partial<WebsiteRouteRule>
 ): WebsiteRouteRuleForm {
-  const methods = Array.isArray(rule.methods)
-    ? rule.methods.filter((method): method is (typeof routeMethods)[number] =>
-        routeMethods.includes(method as (typeof routeMethods)[number])
-      )
-    : []
-  const action =
-    rule.action === 'redirect'
-      ? 'redirect'
-      : rule.action === 'rewrite'
-        ? 'rewrite'
-        : 'proxy'
-
+  const action = rule.action ?? 'proxy'
   return {
-    id: typeof rule.id === 'string' ? rule.id : crypto.randomUUID(),
-    name: typeof rule.name === 'string' ? rule.name : '',
-    description: typeof rule.description === 'string' ? rule.description : '',
-    hostnames: Array.isArray(rule.hostnames)
-      ? rule.hostnames.filter(
-          (host): host is string => typeof host === 'string'
-        )
-      : [],
-    rewrite_mode: [
-      'none',
-      'replace_path',
-      'strip_prefix',
-      'replace_prefix',
-    ].includes(String(rule.rewrite_mode))
-      ? (rule.rewrite_mode as WebsiteRouteRuleForm['rewrite_mode'])
-      : rule.rewrite_path
-        ? 'replace_path'
-        : 'none',
-    query_mode: ['preserve', 'drop', 'replace'].includes(
-      String(rule.query_mode)
-    )
-      ? (rule.query_mode as WebsiteRouteRuleForm['query_mode'])
-      : 'preserve',
-    query_string:
-      typeof rule.query_string === 'string' ? rule.query_string : '',
-    status: rule.status === 'disabled' ? 'disabled' : 'enabled',
-    conditions: Array.isArray(rule.conditions)
-      ? rule.conditions.map((condition: Record<string, unknown>) => ({
-          source: String(
-            condition.source ?? 'header'
-          ) as RouteCondition['source'],
-          name: String(condition.name ?? ''),
-          op: String(condition.op ?? 'equals') as RouteCondition['op'],
-          value: String(condition.value ?? ''),
-        }))
-      : [],
-    match_type: ['exact', 'prefix', 'suffix', 'regex'].includes(
-      String(rule.match_type)
-    )
-      ? (rule.match_type as WebsiteRouteRuleForm['match_type'])
-      : 'prefix',
-    path: typeof rule.path === 'string' ? rule.path : '/',
-    methods,
+    id: rule.id ?? crypto.randomUUID(),
+    name: rule.name ?? '',
+    description: rule.description ?? '',
+    hostnames: rule.hostnames ?? [],
+    rewrite_mode:
+      rule.rewrite_mode || (rule.rewrite_path ? 'replace_path' : 'none'),
+    query_mode: rule.query_mode || 'preserve',
+    query_string: rule.query_string ?? '',
+    status: rule.status ?? 'enabled',
+    conditions: rule.conditions ?? [],
+    match_type: rule.match_type ?? 'prefix',
+    path: rule.path ?? '/',
+    methods: rule.methods ?? [],
     action,
-    rewrite_path:
-      typeof rule.rewrite_path === 'string' ? rule.rewrite_path : '',
-    redirect_url:
-      typeof rule.redirect_url === 'string' ? rule.redirect_url : '',
-    redirect_status:
-      typeof rule.redirect_status === 'number'
-        ? rule.redirect_status
-        : action === 'redirect'
-          ? 302
-          : 0,
-    origin_group:
-      typeof rule.origin_group === 'string' ? rule.origin_group : '',
-    request_headers_text: routeHeadersToText(rule.request_headers),
-    response_headers_text: routeHeadersToText(rule.response_headers),
+    rewrite_path: rule.rewrite_path ?? '',
+    redirect_url: rule.redirect_url ?? '',
+    redirect_status: rule.redirect_status ?? (action === 'redirect' ? 302 : 0),
+    origin_group: rule.origin_group ?? '',
+    request_headers_text: (rule.request_headers ?? [])
+      .map((header) => `${header.name}: ${header.value}`)
+      .join('\n'),
+    response_headers_text: (rule.response_headers ?? [])
+      .map((header) => `${header.name}: ${header.value}`)
+      .join('\n'),
   }
 }
 export function defaultWebsiteConfig(): WebsiteConfig {

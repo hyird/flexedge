@@ -11,7 +11,7 @@
 
 #include "service/common/http.h"
 #include "service/config/rate_limit.h"
-#include "service/domains/auth/auth_session_read_service.h"
+#include "service/features/auth_session/principal.h"
 #include "service/features/rate_limit/store.h"
 #include "service/utils/token.h"
 

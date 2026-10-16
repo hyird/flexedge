@@ -80,6 +80,8 @@ class SseClient {
         for (const line of lines) {
           if (line === "") {
             if (event.event) this.push({ ...event });
+            // A field-less frame is the server keep-alive; it is not an event.
+            else if (Object.keys(event).length === 0) this.push({ keepAlive: true });
             event = {};
           } else if (line.startsWith("event: ")) {
             event.event = line.slice(7);
@@ -103,7 +105,7 @@ class SseClient {
       try {
         event.json = JSON.parse(event.data);
       } catch {
-        // Heartbeats and readiness frames do not need JSON decoding.
+        // Readiness frames do not need JSON decoding.
       }
     }
     let delivered = false;
@@ -165,6 +167,96 @@ function providerData(event) {
   return event.json.data;
 }
 
+async function verifyCertificatePagination() {
+  const marker = `sse-pages-${Date.now()}`;
+  const streams = [];
+  try {
+    for (const provider of ["letsencrypt", "zerossl"]) {
+      const created = await request("/api/providers/certificate", {
+        method: "POST",
+        body: JSON.stringify({
+          provider,
+          credential_mode: "email",
+          account_email: `${marker}-${provider}@example.com`,
+        }),
+      });
+      assert.equal(created.response.status, 200);
+    }
+    const first = await request("/api/providers/certificate?page=1&page_size=1");
+    const second = await request("/api/providers/certificate?page=2&page_size=1");
+    for (const [index, result] of [first, second].entries()) {
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.data.list.length, 1);
+      assert.equal(result.body.data.total, 2);
+      assert.equal(result.body.data.page, index + 1);
+      assert.equal(result.body.data.page_size, 1);
+      assert.equal(result.body.data.total_pages, 2);
+    }
+    assert.notEqual(first.body.data.list[0].id, second.body.data.list[0].id);
+    const options = await request("/api/providers/certificate/options?page=99&page_size=1");
+    assert.equal(options.response.status, 200);
+    assert.equal(options.body.data.length, 2, "options must ignore list pagination");
+    for (const keyword of ["Let's Encrypt", "LET'S ENCRYPT", "ZeroSSL", `${marker}-letsencrypt`]) {
+      const filtered = await request(`/api/providers/certificate?page_size=1&keyword=${encodeURIComponent(keyword)}`);
+      assert.equal(filtered.body.data.list.length, 1);
+      assert.equal(filtered.body.data.total, 1);
+      const picker = await request(`/api/providers/certificate/options?page_size=1&keyword=${encodeURIComponent(keyword)}`);
+      assert.deepEqual(picker.body.data, filtered.body.data.list);
+    }
+    const target = first.body.data.list[0];
+    const label = target.provider === "letsencrypt" ? "Let's Encrypt" : "ZeroSSL";
+    const paths = [
+      "/api/providers/certificate/stream?page=1&page_size=1",
+      "/api/providers/certificate/stream?page=2&page_size=1",
+      `/api/providers/certificate/stream?page=1&page_size=1&keyword=${encodeURIComponent(label)}`,
+      "/api/providers/certificate/stream?page=1&page_size=1&keyword=missing-provider",
+    ];
+    for (const path of paths) streams.push(await open(path));
+    const snapshots = await Promise.all(streams.map((stream) => stream.snapshot()));
+    for (const [index, path] of paths.entries()) {
+      const get = await request(path.replace("/stream", ""));
+      assert.deepEqual(listData(snapshots[index]), get.body.data, "GET/SSE page contract differs");
+    }
+    assert.equal(listData(snapshots[0]).list[0].id, target.id);
+    assert.equal(listData(snapshots[1]).list[0].id, second.body.data.list[0].id);
+    assert.equal(listData(snapshots[2]).list[0].id, target.id);
+    assert.equal(listData(snapshots[3]).total_pages, 0);
+    const invalidPaths = [
+      "/api/providers/certificate?page=0",
+      "/api/providers/certificate/stream?page_size=1001",
+      `/api/providers/certificate/stream?keyword=${"x".repeat(201)}`,
+    ];
+    for (const path of invalidPaths) {
+      const invalid = await request(path, { headers: { accept: "text/event-stream" } });
+      assert.equal(invalid.response.status, 400, "GET/SSE must share query validation");
+    }
+    const removed = await request(`/api/providers/certificate/${target.id}`, {
+      method: "DELETE",
+      headers: { "if-match": `"${target.revision}"` },
+    });
+    assert.equal(removed.response.status, 200);
+    const changed = await Promise.all(streams.slice(0, 3).map((stream) => stream.snapshot()));
+    assert.equal(listData(changed[0]).list[0].id, second.body.data.list[0].id);
+    assert.equal(listData(changed[0]).total, 1);
+    assert.deepEqual(listData(changed[1]).list, []);
+    assert.equal(listData(changed[1]).total, 1);
+    assert.deepEqual(listData(changed[2]).list, []);
+    assert.equal(listData(changed[2]).total, 0);
+  } finally {
+    for (const stream of streams) stream.close();
+    const remaining = await request("/api/providers/certificate/options");
+    assert.equal(remaining.response.status, 200);
+    for (const item of remaining.body.data) {
+      if (!item.account_email?.startsWith(marker)) continue;
+      const removed = await request(`/api/providers/certificate/${item.id}`, {
+        method: "DELETE",
+        headers: { "if-match": `"${item.revision}"` },
+      });
+      assert.equal(removed.response.status, 200);
+    }
+  }
+}
+
 async function main() {
   await login();
   const oldName = fixtureName;
@@ -182,12 +274,11 @@ async function main() {
       `/api/providers/dns/stream?page_size=10&page=99`,
     ];
     const listClients = await Promise.all(listPaths.map(open));
-    const options = await open("/api/providers/dns/options/stream");
     const detail = await open(`/api/providers/dns/${providerId}/stream`);
-    const certificateList = await open("/api/providers/certificate/stream");
-    const all = [...listClients, options, detail, certificateList];
+    const certificateList = await open("/api/providers/certificate/stream?page=1&page_size=10");
+    const all = [...listClients, detail, certificateList];
     const initial = await Promise.all(all.map((client) => client.snapshot()));
-    original = providerData(initial[9]);
+    original = providerData(initial[8]);
     assert.equal(original.id, providerId);
     assert.equal(original.name, oldName);
     assert.equal(listData(initial[0]).page, 1);
@@ -198,9 +289,14 @@ async function main() {
     assert.equal(listData(initial[4]).list.length, 1);
     assert.equal(listData(initial[6]).list.length, 0);
     assert.equal(listData(initial[7]).list.length, 0);
-    assert.ok(Array.isArray(initial[8].json.data));
-    assert.ok(initial[8].json.data.some((item) => item.id === providerId));
-    assert.deepEqual(initial[10].json.data, []);
+    const options = await request("/api/providers/dns/options");
+    assert.equal(options.response.status, 200);
+    assert.ok(Array.isArray(options.body.data));
+    assert.ok(options.body.data.some((item) => item.id === providerId));
+    assert.deepEqual(listData(initial[9]).list, []);
+    assert.equal(listData(initial[9]).total, 0);
+    assert.equal(listData(initial[9]).page_size, 10);
+    await verifyCertificatePagination();
 
     const revision = original.revision;
     const newName = `SSE live resource ${Date.now()}`;
@@ -218,7 +314,6 @@ async function main() {
 
     const updated = await Promise.all([
       ...listClients.slice(0, 6).map((client) => client.snapshot()),
-      options.snapshot(),
       detail.snapshot(),
     ]);
     for (const event of updated) {
@@ -227,12 +322,13 @@ async function main() {
     assert.equal(listData(updated[0]).list[0].name, newName);
     assert.equal(listData(updated[4]).list.length, 0);
     assert.equal(listData(updated[5]).list.length, 0);
-    assert.equal(updated[6].json.data[0].name, newName);
-    assert.equal(providerData(updated[7]).name, newName);
-    assert.equal(providerData(updated[7]).revision, revision + 1);
+    const updatedOptions = await request("/api/providers/dns/options");
+    assert.equal(updatedOptions.body.data.find((item) => item.id === providerId).name, newName);
+    assert.equal(providerData(updated[6]).name, newName);
+    assert.equal(providerData(updated[6]).revision, revision + 1);
 
     const heartbeatBaseline = listClients[0].snapshotCount;
-    await listClients[0].next((event) => event.event === "heartbeat", 17000);
+    await listClients[0].next((event) => event.keepAlive === true, 17000);
     assert.equal(listClients[0].snapshotCount, heartbeatBaseline);
 
     const logout = await request("/api/auth/logout", { method: "POST" });
@@ -257,7 +353,7 @@ async function main() {
     });
     assert.equal(restore.response.status, 200);
     restored = true;
-    console.log("Live resource HTTP integration passed: keyed projections, fanout updates, cancellation, heartbeat, logout, and re-login.");
+    console.log("Live resource HTTP integration passed: provider pagination/search/options, keyed projections, fanout updates, cancellation, heartbeat, logout, and re-login.");
   } finally {
     if (!restored && original) {
       try {

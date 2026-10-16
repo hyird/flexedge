@@ -15,13 +15,13 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     auto db = client.handle();
     auto tx = co_await db.begin_transaction();
     (void)co_await tx.execute("CREATE TEMP TABLE sys_delivery_object (tenant_id text, digest_sha256 text, kind text, payload_envelope text, created_at timestamptz, PRIMARY KEY(tenant_id,digest_sha256)) ON COMMIT DROP");
-    flexedge::node::v2::DeliveryObject object;
-    object.mutable_content()->mutable_website()->set_id("qa-website");
-    object.set_digest_sha256(flexedge::node::artifact_digest(object.content()));
+    flexedge::node::v2::DeliveryObjectContent content;
+    content.mutable_website()->set_id("qa-website");
+    const auto object = flexedge::node::pack_artifact<flexedge::node::v2::DeliveryObject>(content);
     co_await service::node_dispatch::persist_object(tx, "t1", object);
     const auto initial = co_await tx.query("SELECT payload_envelope FROM sys_delivery_object WHERE tenant_id='t1'");
     const std::string envelope(initial.front()[0].value().value());
-    const auto serialized = flexedge::node::serialize_artifact(object.content());
+    const auto serialized = flexedge::node::serialize_artifact(content);
     require(envelope != serialized && service::utils::open_secret(envelope) == serialized);
     co_await service::node_dispatch::persist_object(tx, "t1", object);
     co_await service::node_dispatch::persist_object(tx, "t2", object);

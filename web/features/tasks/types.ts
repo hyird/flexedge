@@ -1,14 +1,13 @@
 import { z } from 'zod'
 import { collectionPageSchema } from '@/lib/pagination'
 
-// build/operation-tasks/contract.md defines the task center wire contract: a
-// task is one user operation (or one system action), its subtasks are the
-// background work it caused. Times are `YYYY-MM-DDTHH:MM:SS.ffffff+00` or ''
-// when unknown or not applicable.
+// Task center wire contract (GoEdge model): one task per (resource_type,
+// resource_id); re-initiating work resets the same task and its history is
+// that task's attempts. Times are `YYYY-MM-DDTHH:MM:SS.ffffff+00` or '' when
+// unknown or not applicable.
 //
 // Everything must survive a newer backend: enums are open (unknown values are
-// kept as the raw string, shown raw and muted, see `known`), and a summary key
-// that does not parse is dropped on its own.
+// kept as the raw string, shown raw and muted, see `known`).
 const count = z.number().int().nonnegative()
 
 /** Value outside the known set, kept as the raw wire string. */
@@ -27,129 +26,65 @@ export function known<K extends string, V>(
   return Object.hasOwn(map, value) ? map[value as K] : undefined
 }
 
-export const operationStatusValues = [
+export const taskStatusValues = [
   'queued',
   'running',
   'retrying',
   'failed',
-  'partial_failed',
   'attention_required',
   'completed',
-  'merged',
-  'cancelled',
 ] as const
-export const operationTargetTypes = [
+export const taskResourceTypes = [
   'website',
-  'cluster',
-  'node',
   'dns_zone',
   'certificate',
   'provider',
+  'node',
 ] as const
-const operationStatus = open(operationStatusValues)
+export type TaskResourceType = (typeof taskResourceTypes)[number]
 
-// Contract §5.4: every key optional, unknown keys ignored, one malformed key
-// never hides the others.
-const operationSummarySchema = z
-  .object({
-    sections: z.array(z.string()).optional().catch(undefined),
-    record_counts: z
-      .object({ created: count, updated: count, deleted: count })
-      .optional()
-      .catch(undefined),
-    credentials_changed: z.boolean().optional().catch(undefined),
-  })
-  .catch({})
-
-/** `operation_dto` (contract §2.3): one row of the task list. */
-export const operationSchema = z.object({
-  id: z.string(),
-  // Open codes (contract §5.1); `operationActions` names the known ones.
-  action: z.string(),
-  target_type: open(operationTargetTypes),
-  target_id: z.string(),
-  target_name: z.string(),
-  target_deleted: z.boolean(),
-  // Only for `target_type = provider` (contract §2.3); open like the enums.
-  target_kind: open(['dns', 'certificate']).optional(),
-  actor_type: open(['user', 'system']),
-  actor_name: z.string(),
-  created_at: z.string(),
-  updated_at: z.string(),
-  finished_at: z.string(),
-  status: operationStatus,
-  subtask_count: count,
-  settled_count: count,
-  failed_count: count,
-  next_attempt_at: z.string(),
-  error: z.string(),
-  summary: operationSummarySchema,
-})
-export const operationPageSchema = collectionPageSchema.extend({
-  list: z.array(operationSchema),
-  active: count,
-  attention: count,
-})
-
-/** `subtask_dto` (contract §3.4). */
-export const subtaskSchema = z.object({
-  id: z.string(),
-  parent_id: z.string(),
-  // Open codes (contract §5.3); `subtaskKinds` names the known ones.
-  kind: z.string(),
-  resource_type: open([
-    'dns_zone',
-    'certificate',
-    'website',
-    'provider',
-    'node',
-  ]),
+/** One task (`/api/tasks` list row, `GET /api/tasks/:type/:id` and the
+ * detail stream's `snapshot`). */
+export const taskSchema = z.object({
+  resource_type: open(taskResourceTypes),
   resource_id: z.string(),
-  resource_name: z.string(),
-  resource_deleted: z.boolean(),
-  status: operationStatus,
+  // Provider tasks: the provider's kind (selects the /providers/{dns|
+  // certificate} list); '' for every other type.
+  resource_kind: open(['', 'dns', 'certificate']),
+  name: z.string(),
+  // Open codes; `taskOperations` names the known ones.
+  operation: z.string(),
+  status: open(taskStatusValues),
   warning: open(['', 'dns_conflict', 'dns_unpushed', 'domain_unverified']),
-  node_offline: z.boolean(),
-  created_at: z.string(),
-  running_since: z.string(),
-  finished_at: z.string(),
-  duration_ms: count,
+  error: z.string(),
+  next_attempt_at: z.string(),
+  updated_at: z.string(),
+  last_success_at: z.string(),
   attempt_count: count,
   failure_count: count,
-  recovered: z.boolean(),
-  next_attempt_at: z.string(),
-  error: z.string(),
-  merged_into: z
-    .object({
-      operation_id: z.string(),
-      subtask_id: z.string(),
-      action: z.string(),
-      target_name: z.string(),
-      status: operationStatus,
-    })
-    .optional(),
-  closed_by: z
-    .object({
-      operation_id: z.string(),
-      action: z.string(),
-      target_name: z.string(),
-    })
-    .optional(),
+  node_offline: z.boolean(),
 })
-/** `operation_detail_dto` (contract §3.3): the detail stream's `snapshot`. */
-export const operationDetailSchema = operationSchema.extend({
-  subtasks: z.array(subtaskSchema),
+export const taskPageSchema = collectionPageSchema.extend({
+  list: z.array(taskSchema),
+  active: count,
+  failed: count,
 })
 
-export type Operation = z.infer<typeof operationSchema>
-export type OperationPage = z.infer<typeof operationPageSchema>
-export type OperationDetail = z.infer<typeof operationDetailSchema>
-export type OperationStatus = Operation['status']
-export type OperationSummary = Operation['summary']
-export type Subtask = z.infer<typeof subtaskSchema>
+export type Task = z.infer<typeof taskSchema>
+export type TaskPage = z.infer<typeof taskPageSchema>
+export type TaskStatus = Task['status']
 
-// Execution records (`attempt_dto`, contract §3.5): the shape of the former
-// task history, `attempt` numbered within the subtask. Records without a
+/** Identity of a task: the resource it belongs to. */
+export type TaskRef = { resourceType: string; resourceId: string }
+
+export function taskRefOf(
+  task: Pick<Task, 'resource_type' | 'resource_id'>
+): TaskRef {
+  return { resourceType: task.resource_type, resourceId: task.resource_id }
+}
+
+// Execution records (`attempt_dto`): every retained attempt of the task,
+// newest first, `attempt` numbered within the task. Records without a
 // start time have a zero duration and `detail.kind: 'none'`. A detail that
 // does not parse becomes `{ kind: 'invalid' }` so only that attempt loses it.
 const dnsRecordSchema = z.object({
@@ -282,7 +217,7 @@ const traceStepSummarySchema = z.object({
 // summary also carries totals and the first failed step.
 const traceSummarySchema = z.object({
   state: open(['available', 'none']),
-  // Path parameter of the trace stream only; never shown.
+  // Path parameter of the trace GET read only; never shown.
   attempt_id: text,
   step_count: amount,
   // A summary item that does not parse is left out of the timeline; the
@@ -355,11 +290,12 @@ const traceStepSchema = z.object({
   duration_ms: amount,
   outcome: traceStepOutcome,
   error: text,
-  // `subtask_id` (contract §3.7) links a step to another subtask of the same
-  // task; steps without one show no link.
+  // Links a step to another task (a certificate waiting for its DNS zone's
+  // sync); steps without one show no link.
   related_task: z
     .object({
-      subtask_id: text,
+      resource_type: text,
+      resource_id: text,
       label: text,
     })
     .nullable()
@@ -368,15 +304,21 @@ const traceStepSchema = z.object({
   logs: lenientList(traceLogSchema),
 })
 /** Full trace of one attempt
- * (`/operations/:id/attempts/:attempt_id/trace/stream`). */
+ * (`GET /api/tasks/:type/:id/attempts/:attempt_id/trace`). */
 export const taskAttemptTraceSchema = z.object({
   state: open(['available', 'none']),
   steps: lenientList(traceStepSchema),
 })
 
 const taskAttemptSchema = z.object({
+  // `sys_sync_event` id as a decimal string (= `trace.attempt_id`).
+  id: z.string(),
   attempt: z.number().int().positive(),
-  outcome: open(['completed', 'failed']),
+  // Node tasks mix `publish` and `configure` attempts.
+  operation: z.string(),
+  // `progressed`: a staged attempt advanced (certificate DNS-01 records
+  // written) and the task waits for the DNS sync before continuing.
+  outcome: open(['completed', 'failed', 'progressed']),
   error: z.string(),
   started_at: z.string(),
   emitted_at: z.string(),
@@ -398,22 +340,18 @@ const historySummarySchema = z.object({
   failure_count: count,
   first_failure_at: z.string(),
   last_success_at: z.string(),
-  next_attempt_at: z.string(),
 })
-/** `subtask_history_dto` (contract §3.5): the `history` event, newest first.
- * `truncated` is kept on the wire only; the UI never mentions it. */
-export const subtaskHistorySchema = z.object({
-  subtask_id: z.string(),
+/** The detail stream's `history` event, newest first. */
+export const taskHistorySchema = z.object({
   summary: historySummarySchema,
   list: z.array(taskAttemptSchema),
 })
-/** `subtask_attempt_event` (contract §3.6): the `attempt` event, plain JSON. */
-export const subtaskAttemptEventSchema = z.object({
-  subtask_id: z.string(),
-  item: z.object({ trace: z.unknown().optional() }).loose(),
+/** The detail stream's `attempt` event (plain JSON). */
+export const taskAttemptEventSchema = z.object({
+  item: z.object({ id: z.string() }).loose(),
   summary: historySummarySchema,
 })
-export type SubtaskHistory = z.infer<typeof subtaskHistorySchema>
+export type TaskHistory = z.infer<typeof taskHistorySchema>
 export type TaskAttempt = z.infer<typeof taskAttemptSchema>
 export type TaskAttemptDetail = TaskAttempt['detail']
 export type TaskAttemptTraceSummary = TaskAttempt['trace']

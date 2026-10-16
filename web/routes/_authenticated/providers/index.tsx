@@ -1,7 +1,8 @@
-import { createFileRoute } from '@tanstack/react-router'
-import { ProvidersLayout } from '@/features/providers/providers-layout'
+import { createFileRoute, redirect } from '@tanstack/react-router'
 
+/** `/providers` opens its DNS account list. */
 export const Route = createFileRoute('/_authenticated/providers/')({
-  staticData: { breadcrumb: '供应商账号' },
-  component: ProvidersLayout,
+  beforeLoad: () => {
+    throw redirect({ to: '/providers/dns', search: {}, replace: true })
+  },
 })

@@ -3,10 +3,9 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { TrashBin } from '@gravity-ui/icons'
 import { Button } from '@heroui/react'
-import { queryKeys } from '@/lib/query-keys'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
-import { removeWebsite } from './data'
+import { afterWebsiteRemove, removeWebsite } from './data'
 import { useMarkWebsiteDeleted, useWebsite } from './website-context'
 import { websiteName } from './website-display'
 
@@ -39,19 +38,16 @@ export function WebsiteLifecycleActions() {
         description='网站配置会从所有边缘节点撤下，域名将不再由边缘处理。此操作无法撤销。'
         confirmLabel='删除网站'
         onConfirm={async () => {
-          const response = await removeWebsite(website)
+          await removeWebsite(website)
           markDeleted()
-          toastWriteSuccess(`网站 ${name} 已删除`, response.data)
+          toastWriteSuccess(`网站 ${name} 已删除`)
           // The website is gone, so an unsaved settings draft is moot.
           await navigate({
             to: '/websites',
             replace: true,
             ignoreBlocker: true,
           })
-          client.removeQueries({
-            queryKey: [...queryKeys.websites, website.id],
-          })
-          void client.invalidateQueries({ queryKey: queryKeys.websites })
+          void afterWebsiteRemove(client, website.id)
         }}
       />
     </>

@@ -14,17 +14,18 @@ namespace service::node_dispatch {
 
 inline ruvia::task<void> persist_object(ruvia::db_transaction& transaction, std::string_view tenant_id,
     const flexedge::node::v2::DeliveryObject& object) {
-    if (!object.has_content() ||
-        flexedge::node::artifact_digest(object.content()) != object.digest_sha256()) {
+    const auto content = flexedge::node::open_artifact<flexedge::node::v2::DeliveryObjectContent>(
+        object.digest_sha256(), object.content());
+    if (!content) {
         throw std::runtime_error("delivery object digest does not match payload");
     }
-    if (!object.content().has_website() && !object.content().has_certificate()) {
+    if (!content->has_website() && !content->has_certificate()) {
         throw std::runtime_error("delivery object has no supported payload");
     }
-    const auto kind = object.content().has_website() ? std::string_view{"website"}
-                                                     : std::string_view{"certificate"};
-    const service::utils::sensitive_string plaintext(flexedge::node::serialize_artifact(object.content()));
-    const auto envelope = service::utils::seal_secret(plaintext.view());
+    const auto kind = content->has_website() ? std::string_view{"website"}
+                                             : std::string_view{"certificate"};
+    const std::string_view plaintext = object.content();
+    const auto envelope = service::utils::seal_secret(plaintext);
     const auto inserted = co_await transaction.execute(
         "INSERT INTO sys_delivery_object (tenant_id, digest_sha256, kind, payload_envelope, "
         "created_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (tenant_id, digest_sha256) DO "
@@ -40,7 +41,7 @@ inline ruvia::task<void> persist_object(ruvia::db_transaction& transaction, std:
         }
         service::utils::sensitive_string stored(
             service::utils::open_secret(rows.front()[1].value().value_or("")));
-        if (stored.view() != plaintext.view()) {
+        if (stored.view() != plaintext) {
             throw std::runtime_error(
                 "content-addressed delivery object failed storage verification");
         }

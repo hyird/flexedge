@@ -1,10 +1,10 @@
 #pragma once
 
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 
+#include "service/features/outbound_http/error.h"
 #include "service/utils/sensitive_string.h"
 
 namespace service::certificate_issuance {
@@ -33,18 +33,20 @@ inline std::optional<acme_settings> settings_for_provider(std::string_view provi
     return std::nullopt;
 }
 
-class acme_error final : public std::runtime_error {
+// A failure the ACME server reported or the issuance flow detected.
+class acme_error : public service::outbound_http::attempt_error {
 public:
     acme_error(std::string_view message, bool permanent)
-        : std::runtime_error(std::string(message)),
-          permanent_(permanent) {}
+        : attempt_error(message, permanent) {}
+};
 
-    [[nodiscard]] bool permanent() const noexcept {
-        return permanent_;
-    }
-
-private:
-    bool permanent_;
+// The ACME server has not finished an authorization or order within the
+// attempt's polling window (or the worker stops): the order stays usable and
+// the next attempt resumes it.
+class acme_pending final : public acme_error {
+public:
+    explicit acme_pending(std::string_view message)
+        : acme_error(message, false) {}
 };
 
 struct eab_credentials final {

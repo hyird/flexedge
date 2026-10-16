@@ -15,18 +15,23 @@
 #include "service/common/http.h"
 #include "service/domains/certificate/certificate_error.h"
 #include "service/domains/certificate/certificate_types.h"
+#include "service/domains/dns_zone/dns_zone_reference.h"
+#include "service/domains/provider/provider_reference.h"
+#include "service/domains/website/website_reference.h"
+#include "service/features/background/queued_work.h"
 #include "service/features/certificate/config_mapper.h"
-#include "service/features/certificate/dns_challenge.h"
 #include "service/features/certificate/queue.h"
 #include "service/features/dns/registry.h"
+#include "service/features/dns_sync/queue.h"
 #include "service/features/live_resource/notification_outbox.h"
 #include "service/features/sync_runtime/state.h"
+#include "service/features/sync_runtime/work_commit.h"
 
 namespace service::certificate {
 
 class certificate_command_service final {
 public:
-    ruvia::task<std::optional<std::string>> create(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<std::int64_t> create(ruvia::context& c, const std::string& tenant_id,
         const create_certificate_body& body) {
         const auto& domain_input = body.get<"domain">();
         const auto& provider_id_input = body.get<"certificate_provider_id">();
@@ -52,28 +57,21 @@ public:
         if (!exists.empty()) {
             service::common::throw_app_error(certificate_error::domain_exists);
         }
-        const auto provider_rows = co_await transaction.query(
-            "SELECT id FROM sys_provider WHERE id = $1 AND tenant_id = $2 AND kind = "
-            "'certificate' AND status = 'verified' AND deleted_at IS NULL LIMIT 1 FOR SHARE",
-            provider_id, tenant_id);
-        if (provider_rows.empty()) {
+        if (!co_await service::provider::lock_verified_certificate_provider(transaction, tenant_id, provider_id)) {
             service::common::throw_app_error(certificate_error::provider_unavailable);
         }
-        const auto zone_rows = co_await transaction.query(
-            "SELECT zone.domain, dns_provider.provider FROM sys_dns_zone zone INNER JOIN "
-            "sys_provider dns_provider ON dns_provider.tenant_id = zone.tenant_id AND "
-            "dns_provider.id = zone.provider_id AND dns_provider.kind = 'dns' WHERE zone.id = $1 "
-            "AND zone.tenant_id = $2 AND zone.sync_status = 'synced' AND "
-            "dns_provider.status = 'verified' AND zone.deleted_at IS NULL AND "
-            "dns_provider.deleted_at IS NULL LIMIT 1 FOR SHARE OF zone, dns_provider",
-            zone_id, tenant_id);
-        if (zone_rows.empty()) {
+        const auto zone = co_await service::dns_zone::lock_dns_zone(transaction, tenant_id, zone_id);
+        if (!zone || !zone->synced_) {
             service::common::throw_app_error(certificate_error::domain_unavailable);
         }
-        if (!service::dns::find_dns_provider(zone_rows.front()[1].value().value_or(""))) {
+        const auto dns_provider = co_await service::provider::lock_dns_provider(transaction, tenant_id, zone->provider_id_);
+        if (!dns_provider || !dns_provider->verified_) {
+            service::common::throw_app_error(certificate_error::domain_unavailable);
+        }
+        if (!service::dns::find_dns_provider(dns_provider->provider_)) {
             service::common::throw_app_error(certificate_error::dns_provider_unsupported);
         }
-        const auto zone_domain = std::string(zone_rows.front()[0].value().value_or(""));
+        const auto& zone_domain = zone->domain_;
         const auto plain_domain = domain.starts_with("*.") ? domain.substr(2) : domain;
         if (plain_domain != zone_domain &&
             (plain_domain.size() <= zone_domain.size() || !plain_domain.ends_with("." + zone_domain))) {
@@ -81,30 +79,31 @@ public:
         }
         const auto config_json = serialize_certificate_config(c, *config);
         std::string certificate_id;
+        std::int64_t revision{};
         try {
             const auto saved = co_await transaction.query(
                 "INSERT INTO sys_certificate (tenant_id, provider_id, domain, dns_zone_id, "
                 "status, config, material, revision, issuance_revision, issued_revision, "
                 "created_at, updated_at) VALUES ($1, $2, $3, $4, 'pending', $5::jsonb, "
-                "'{}'::jsonb, 1, 1, 0, NOW(), NOW()) RETURNING id",
+                "'{}'::jsonb, 1, 1, 0, NOW(), NOW()) RETURNING id, revision",
                 tenant_id, provider_id, std::string_view(domain), zone_id,
                 std::string_view(config_json));
             certificate_id = std::string(saved.front()[0].value().value_or(""));
+            revision = saved.front()[1].as<std::int64_t>().value_or(1);
         } catch (const ruvia::db_error& error) {
             if (service::common::is_unique_constraint_violation(error, "uk_certificate_domain")) {
                 service::common::throw_app_error(certificate_error::domain_exists);
             }
             throw;
         }
-        auto origin = start(c, service::operation::action::certificate_create, certificate_id);
-        (void)co_await origin.require_operation(transaction, tenant_id);
+        service::background::queued_work work;
         (void)co_await service::certificate_issuance::enqueue_certificate_revision(
-            transaction, tenant_id, certificate_id, 1, service::sync_runtime::marker_operation::issue, origin);
-        co_await commit_changes(transaction, c, tenant_id, certificate_id, origin);
-        co_return origin.operation_id();
+            transaction, tenant_id, certificate_id, 1, service::sync_runtime::marker_operation::issue, work);
+        co_await commit_changes(transaction, c, tenant_id, certificate_id, work);
+        co_return revision;
     }
 
-    ruvia::task<std::optional<std::string>> update(
+    ruvia::task<std::int64_t> update(
         ruvia::context& c, const std::string& tenant_id, const std::string& id,
         std::int64_t expected_revision,
         const ruvia::validated_json<service::certificate_issuance::certificate_config_input>& config) {
@@ -113,67 +112,47 @@ public:
             "SELECT revision FROM sys_certificate WHERE id = $1 AND tenant_id = $2 AND "
             "deleted_at IS NULL LIMIT 1 FOR UPDATE",
             id, tenant_id);
-        if (certificates.empty()) {
-            service::common::throw_app_error(certificate_error::not_found);
-        }
-        if (certificates.front()[0].as<std::int64_t>().value_or(0) != expected_revision) {
-            service::common::throw_app_error(certificate_error::revision_conflict);
-        }
+        service::common::require_current_revision(certificates, expected_revision, revision_errors_);
         const auto normalized_config = service::certificate_issuance::normalize(config.value());
         if (!normalized_config) {
             service::common::throw_app_error(service::common::validation_error_code, "证书配置不正确",
                 400);
         }
         const auto config_json = serialize_certificate_config(c, *normalized_config);
-        const auto result = co_await transaction.execute(
+        const auto updated = co_await transaction.query(
             "UPDATE sys_certificate SET revision = revision + 1, config = $1::jsonb, updated_at = "
-            "NOW() WHERE id = $2 AND tenant_id = $3 AND revision = $4 AND deleted_at IS NULL",
-            std::string_view(config_json), id, tenant_id, expected_revision);
-        if (result.affected_rows() == 0) {
-            service::common::throw_app_error(certificate_error::revision_conflict);
-        }
-        auto origin = start(c, service::operation::action::certificate_update, id);
-        (void)co_await origin.require_operation(transaction, tenant_id);
-        co_await commit_changes(transaction, c, tenant_id, id, origin);
-        co_return origin.operation_id();
+            "NOW() WHERE id = $2 AND tenant_id = $3 RETURNING revision",
+            std::string_view(config_json), id, tenant_id);
+        co_await commit_changes(transaction, c, tenant_id, id, service::background::queued_work{});
+        co_return updated.front()[0].as<std::int64_t>().value_or(0);
     }
 
-    ruvia::task<std::optional<std::string>> renew(ruvia::context& c, const std::string& tenant_id,
+    // Renewal leaves the revision unchanged; returns it.
+    ruvia::task<std::int64_t> renew(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, std::int64_t expected_revision) {
-        auto origin = start(c, service::operation::action::certificate_renew, id);
         auto transaction = co_await c.db().begin_transaction();
         const auto rows = co_await transaction.query(
             "SELECT revision, issuance_revision, issued_revision FROM sys_certificate WHERE id = "
             "$1 AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
             id, tenant_id);
-        if (rows.empty()) {
-            service::common::throw_app_error(certificate_error::not_found);
-        }
-        if (rows.front()[0].as<std::int64_t>().value_or(0) != expected_revision) {
-            service::common::throw_app_error(certificate_error::revision_conflict);
-        }
+        service::common::require_current_revision(rows, expected_revision, revision_errors_);
         const auto issuance_revision = rows.front()[1].as<std::int64_t>().value_or(0) + 1;
         const auto has_certificate = rows.front()[2].as<std::int64_t>().value_or(0) > 0;
-        const auto result = co_await transaction.execute(
+        (void)co_await transaction.execute(
             "UPDATE sys_certificate SET issuance_revision = $1, status = $2, last_error = NULL, "
-            "updated_at = NOW() WHERE id = $3 AND tenant_id = $4 AND revision = $5 AND "
-            "deleted_at IS NULL",
+            "updated_at = NOW() WHERE id = $3 AND tenant_id = $4",
             issuance_revision,
             has_certificate ? std::string_view{"renewing"} : std::string_view{"pending"}, id,
-            tenant_id, expected_revision);
-        if (result.affected_rows() == 0) {
-            service::common::throw_app_error(certificate_error::revision_conflict);
-        }
-        (void)co_await origin.require_operation(transaction, tenant_id);
+            tenant_id);
+        service::background::queued_work work;
         (void)co_await service::certificate_issuance::enqueue_certificate_revision(
-            transaction, tenant_id, id, issuance_revision, service::sync_runtime::marker_operation::renew, origin);
-        co_await commit_changes(transaction, c, tenant_id, id, origin);
-        co_return origin.operation_id();
+            transaction, tenant_id, id, issuance_revision, service::sync_runtime::marker_operation::renew, work);
+        co_await commit_changes(transaction, c, tenant_id, id, work);
+        co_return expected_revision;
     }
 
-    ruvia::task<std::optional<std::string>> remove(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<std::int64_t> remove(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, std::int64_t expected_revision) {
-        auto origin = start(c, service::operation::action::certificate_delete, id);
         auto transaction = co_await c.db().begin_transaction();
         const auto certificates =
             co_await transaction.query(
@@ -181,53 +160,33 @@ public:
                 "= $1 AND tenant_id = $2 AND "
                 "deleted_at IS NULL LIMIT 1 FOR UPDATE",
                 id, tenant_id);
-        if (certificates.empty()) {
-            service::common::throw_app_error(certificate_error::not_found);
-        }
-        if (certificates.front()[0].as<std::int64_t>().value_or(0) != expected_revision) {
-            service::common::throw_app_error(certificate_error::revision_conflict);
-        }
+        service::common::require_current_revision(certificates, expected_revision, revision_errors_);
         const auto dns_zone_id = certificates.front()[1].value().value_or("");
-        const auto consumers = co_await transaction.query(
-            "SELECT website_id FROM sys_website_certificate_binding WHERE tenant_id = $1 AND "
-            "certificate_id = $2 LIMIT 1",
-            tenant_id, id);
-        if (!consumers.empty()) {
+        if (co_await service::website::websites_bind_certificate(transaction, tenant_id, id)) {
             service::common::throw_app_error(certificate_error::in_use);
         }
-        const auto result = co_await transaction.execute(
+        const auto removed = co_await transaction.query(
             "UPDATE sys_certificate SET material = '{}'::jsonb, revision = revision + 1, "
-            "deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND tenant_id = $2 AND "
-            "revision = $3 AND deleted_at IS NULL",
-            id, tenant_id, expected_revision);
-        if (result.affected_rows() == 0) {
-            service::common::throw_app_error(certificate_error::not_found);
-        }
-        (void)co_await origin.require_operation(transaction, tenant_id);
-        co_await service::certificate_issuance::retire_dns_challenges_for_deleted_certificate(
-            transaction, tenant_id, dns_zone_id, id, origin);
+            "deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND tenant_id = $2 RETURNING revision",
+            id, tenant_id);
+        service::background::queued_work work;
+        (void)co_await service::dns_sync::replace_challenge_records(transaction, tenant_id, dns_zone_id, id, {}, 0,
+            work);
         co_await service::sync_runtime::remove_marker(
-            transaction, tenant_id, service::sync_runtime::marker_resource_type::certificate, id, origin);
-        co_await commit_changes(transaction, c, tenant_id, id, origin);
-        co_return origin.operation_id();
+            transaction, tenant_id, service::sync_runtime::marker_resource_type::certificate, id, work);
+        co_await commit_changes(transaction, c, tenant_id, id, work);
+        co_return removed.front()[0].as<std::int64_t>().value_or(0);
     }
 
 private:
-    static service::operation::work_origin start(ruvia::context& c, service::operation::action action,
-        const std::string& id) {
-        return service::operation::work_origin::start({.action_ = action,
-            .actor_id_ = service::middleware::current_principal(c).admin_id_,
-            .target_type_ = "certificate",
-            .target_id_ = id,
-            .summary_ = "{}"});
-    }
+    static constexpr service::common::revision_errors revision_errors_{certificate_error::not_found,
+        certificate_error::revision_conflict};
 
     static ruvia::task<void> commit_changes(ruvia::db_transaction& transaction, ruvia::context& c, const std::string& tenant_id, const std::string& id,
-        const service::operation::work_origin& origin) {
+        const service::background::queued_work& work) {
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.changed(service::live_resource::resource::certificates, id);
-        origin.add_changes(notification);
-        co_await service::live_resource::commit_and_notify(transaction, c, notification);
+        co_await service::sync_runtime::commit_work(transaction, c, std::move(notification), work);
     }
 
     static std::string

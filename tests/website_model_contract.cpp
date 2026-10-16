@@ -138,6 +138,33 @@ int main() {
     require(mismatch.status() == ruvia::http_status::bad_request,
         "compression max/min cross-field mismatch was accepted");
 
+    // Nodes reject a release whose route rule sets more headers than the protocol limit.
+    const auto with_route_headers = [](std::size_t count) {
+        std::string headers;
+        for (std::size_t index = 0; index < count; ++index) {
+            headers += (index == 0 ? "" : ",");
+            headers += "{\"name\":\"X-Route-" + std::to_string(index) + "\",\"value\":\"v\"}";
+        }
+        std::string body(valid_body);
+        const auto rules = body.find("\"route_rules\":[]");
+        require(rules != std::string::npos, "fixture route rules missing");
+        body.replace(rules, std::string_view("\"route_rules\":[]").size(),
+            "\"route_rules\":[{\"id\":\"33333333-3333-4333-8333-333333333333\",\"status\":\"enabled\","
+            "\"match_type\":\"prefix\",\"path\":\"/\",\"methods\":[],\"action\":\"proxy\","
+            "\"rewrite_path\":\"\",\"redirect_url\":\"\",\"redirect_status\":0,\"origin_group\":\"main\","
+            "\"request_headers\":[" +
+                headers + "],\"response_headers\":[]}]");
+        return body;
+    };
+    const auto at_limit = app.request(ruvia::test_request::post("/website-validation-probe")
+            .json(with_route_headers(flexedge::node::max_route_headers)));
+    require(at_limit.status() == ruvia::http_status::ok, "route headers at the protocol limit were rejected");
+    const auto over_limit = app.request(ruvia::test_request::post("/website-validation-probe")
+            .json(with_route_headers(flexedge::node::max_route_headers + 1)));
+    require(over_limit.status() == ruvia::http_status::bad_request &&
+                over_limit.body().find("config.route_rules[0].request_headers") != std::string_view::npos,
+        "route headers over the protocol limit were accepted");
+
     std::string negative_maximum(valid_body);
     const auto zero_maximum = negative_maximum.find("\"response_compression_max_bytes\":0");
     require(zero_maximum != std::string::npos, "fixture max bytes value missing");

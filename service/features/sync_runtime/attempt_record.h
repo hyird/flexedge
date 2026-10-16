@@ -21,6 +21,8 @@ namespace service::sync_runtime {
 
 inline constexpr std::string_view event_outcome_completed{"completed"};
 inline constexpr std::string_view event_outcome_failed{"failed"};
+// The attempt advanced its task, which now waits on another task.
+inline constexpr std::string_view event_outcome_progressed{"progressed"};
 
 // Bounds of one attempt detail document stored in sys_sync_event.detail and
 // returned verbatim by the task history stream.
@@ -216,12 +218,11 @@ inline ruvia::db_expression next_attempt_number(ruvia::db_query& source,
 }
 
 // Columns written by every attempt record, in the order the source selects
-// them; `subtask_id` is the subtask (of a task) the attempt belongs to.
+// them.
 inline constexpr std::array attempt_event_columns{std::string_view{"tenant_id"}, std::string_view{"task_id"},
     std::string_view{"resource_type"}, std::string_view{"resource_id"}, std::string_view{"operation"},
     std::string_view{"version"}, std::string_view{"outcome"}, std::string_view{"error"},
     std::string_view{"attempt"}, std::string_view{"started_at"}, std::string_view{"duration_ms"},
-    std::string_view{"next_attempt_at"}, std::string_view{"detail"}, std::string_view{"emitted_at"},
-    std::string_view{"subtask_id"}};
+    std::string_view{"next_attempt_at"}, std::string_view{"detail"}, std::string_view{"emitted_at"}};
 
 }  // namespace service::sync_runtime

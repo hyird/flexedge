@@ -4,6 +4,7 @@ import { ListView } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Alert, Skeleton } from '@heroui/react'
 import { formatNumber } from '@/lib/format'
+import { describeStatus } from '@/lib/status'
 import { TruncatedText } from '@/components/data-table'
 import { KpiQuantity } from '@/components/kpi-quantity'
 import { Mono } from '@/components/mono'
@@ -16,15 +17,14 @@ import { nodeQuery } from './data'
 import { NodeConnectionChip } from './node-connection-chip'
 import {
   liveMetrics,
-  nodeHealthLabels,
+  nodeHealthReserve,
   nodeHealthStatuses,
-} from './node-status'
+  nodeSpecStateReserve,
+  nodeSpecStates,
+} from './node-display'
 import type { Node } from './types'
 
 const route = getRouteApi('/_authenticated/nodes/$nodeId')
-// The configuration row shows whether the node runs its target spec, never
-// the revision numbers themselves.
-const specStateLabels = ['已生效', '待生效']
 
 /** Load ratio KPI. The progress bar is always rendered (hidden without a
  * value) so the card keeps its height when a node goes offline. */
@@ -197,9 +197,8 @@ export function NodeOverview() {
                 label: '配置',
                 value: (
                   <StatusChip
-                    status={pending ? 'pending' : 'applied'}
-                    label={pending ? '待生效' : '已生效'}
-                    reserve={specStateLabels}
+                    {...nodeSpecStates[pending ? 'pending' : 'applied']}
+                    reserve={nodeSpecStateReserve}
                   />
                 ),
               },
@@ -207,10 +206,10 @@ export function NodeOverview() {
                 label: '健康',
                 value:
                   metrics.health &&
-                  nodeHealthStatuses.includes(metrics.health) ? (
+                  Object.hasOwn(nodeHealthStatuses, metrics.health) ? (
                     <StatusChip
-                      status={metrics.health}
-                      reserve={nodeHealthLabels}
+                      {...describeStatus(nodeHealthStatuses, metrics.health)}
+                      reserve={nodeHealthReserve}
                     />
                   ) : (
                     <TruncatedText

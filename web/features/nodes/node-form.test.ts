@@ -64,7 +64,7 @@ test('form values round-trip a saved node and default new nodes', () => {
   const node = {
     cluster_id: id,
     name: 'node',
-    status: 'disabled',
+    status: 'disabled' as const,
     config: { endpoints: [endpoint] },
   }
   const form = nodeFormValues(node)

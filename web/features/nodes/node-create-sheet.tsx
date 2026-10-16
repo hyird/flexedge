@@ -5,9 +5,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { apiErrorMessage } from '@/lib/api'
 import { FormSheet } from '@/components/form-sheet'
-import { clusterSnapshotKey } from '@/features/clusters/data'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
-import { createNode, type CreatedNode } from './data'
+import { afterNodeCreate, createNode, type CreatedNode } from './data'
 import { NodeConfigFields } from './node-config-fields'
 import { NodeCredentialsSheet } from './node-credentials-sheet'
 import {
@@ -44,9 +43,9 @@ export function NodeCreateSheet({
       createNode(nodeInputFromForm(values)),
     onSuccess: (response, values) => {
       // The credentials response carries the generic envelope message "ok".
-      toastWriteSuccess(`节点 ${values.name} 已创建`, response.data)
-      // The cluster detail header counts nodes; it re-reads its snapshot.
-      void client.invalidateQueries({ queryKey: clusterSnapshotKey })
+      // The node has no task until it registers.
+      toastWriteSuccess(`节点 ${values.name} 已创建`)
+      afterNodeCreate(client)
       setCreated({ node: response.data, name: values.name })
       form.reset(nodeFormValues(undefined, clusterId))
       onClose()

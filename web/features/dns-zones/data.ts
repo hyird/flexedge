@@ -1,18 +1,33 @@
-import { queryOptions } from '@tanstack/react-query'
-import { sendData, streamPath, type PageData } from '@/lib/api'
+import { z } from 'zod'
+import { queryOptions, type QueryClient } from '@tanstack/react-query'
+import { getData, pageDataSchema, sendData, streamPath } from '@/lib/api'
+import { parseResponseData } from '@/lib/api-response'
 import { readLiveQuery } from '@/lib/live-query'
 import { queryKeys } from '@/lib/query-keys'
+import { resourceListSearchQuery } from '@/lib/resource'
 import type { ZoneSyncFilter } from './dns-zone-display'
-import type { DnsZoneOption, DnsZone, DnsRecord } from './types'
+import {
+  availableDnsZonesSchema,
+  dnsLineSchema,
+  dnsZoneOptionsSchema,
+  dnsZoneSchema,
+  type DnsRecord,
+  type DnsZone,
+} from './types'
+
+const dnsZonePageSchema = pageDataSchema(dnsZoneSchema)
+/** The part of `/dns-zones/:id` a line picker reads. */
+const dnsZoneLinesSchema = z.object({
+  runtime: z.object({ lines: z.array(dnsLineSchema) }),
+})
 
 export const dnsZoneOptionsQuery = queryOptions({
   retry: false,
   queryKey: [...queryKeys.dnsZones, 'options'],
-  queryFn: ({ queryKey, signal }) =>
-    readLiveQuery<DnsZoneOption[]>(
-      streamPath('/dns-zones/collection'),
-      queryKey,
-      signal
+  queryFn: async ({ signal }) =>
+    parseResponseData(
+      dnsZoneOptionsSchema,
+      await getData<unknown>('/dns-zones/collection', undefined, signal)
     ),
 })
 
@@ -28,12 +43,24 @@ export function dnsZonesQuery(params: {
     retry: false,
     queryKey: [...queryKeys.dnsZones, 'list', params],
     queryFn: ({ queryKey, signal }) =>
-      readLiveQuery<PageData<DnsZone>>(
+      readLiveQuery(
         streamPath('/dns-zones', params),
         queryKey,
-        signal
+        signal,
+        (value) => parseResponseData(dnsZonePageSchema, value)
       ),
   })
+}
+
+/** Command palette search of DNS zones. */
+export function dnsZoneSearchQuery(keyword: string) {
+  return resourceListSearchQuery(
+    '/dns-zones',
+    queryKeys.dnsZones,
+    keyword,
+    dnsZoneSchema.pick({ id: true, domain: true }),
+    (zone) => ({ id: zone.id, label: zone.domain })
+  )
 }
 
 /** Live zone detail (`/dns-zones/:id/stream`): one stream shared by the
@@ -45,10 +72,11 @@ export function dnsZoneDetailQuery(zoneId: string) {
     meta: { inlineError: true },
     queryKey: [...queryKeys.dnsZones, 'detail', zoneId],
     queryFn: ({ queryKey, signal }) =>
-      readLiveQuery<DnsZone>(
+      readLiveQuery(
         streamPath('/dns-zones/' + zoneId),
         queryKey,
-        signal
+        signal,
+        (value) => parseResponseData(dnsZoneSchema, value)
       ),
   })
 }
@@ -57,15 +85,26 @@ export function availableDnsZonesQuery(providerId: string) {
   return queryOptions({
     retry: false,
     queryKey: [...queryKeys.dnsZones, 'available', providerId],
-    queryFn: ({ queryKey, signal }) =>
-      readLiveQuery(
-        streamPath('/dns-zones/available', { dns_provider_id: providerId }),
-        queryKey,
-        signal,
-        (data) =>
-          (data as { list: Array<{ domain: string; status: string }> }).list
-      ),
+    queryFn: async ({ signal }) =>
+      parseResponseData(
+        availableDnsZonesSchema,
+        await getData<unknown>(
+          '/dns-zones/available',
+          { dns_provider_id: providerId },
+          signal
+        )
+      ).list,
     enabled: !!providerId,
+  })
+}
+
+/** After any zone write (create, record save, sync, removal): live streams
+ * push the new state, so one-shot snapshots (options, lines, available
+ * zones) are only marked stale. */
+export function afterDnsZoneWrite(client: QueryClient) {
+  return client.invalidateQueries({
+    queryKey: queryKeys.dnsZones,
+    refetchType: 'none',
   })
 }
 
@@ -115,13 +154,11 @@ export function dnsZoneLinesQuery(zoneId: string | undefined) {
   return queryOptions({
     retry: false,
     queryKey: [...queryKeys.dnsZones, 'lines', zoneId],
-    queryFn: ({ queryKey, signal }) =>
-      readLiveQuery(
-        streamPath('/dns-zones/' + zoneId),
-        queryKey,
-        signal,
-        (zone) => (zone as DnsZone).runtime.lines
-      ),
+    queryFn: async ({ signal }) =>
+      parseResponseData(
+        dnsZoneLinesSchema,
+        await getData<unknown>('/dns-zones/' + zoneId, undefined, signal)
+      ).runtime.lines,
     enabled: !!zoneId,
   })
 }

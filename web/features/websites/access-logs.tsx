@@ -6,6 +6,7 @@ import { Segment, type DataGridColumn } from '@heroui-pro/react'
 import { Button, Tooltip } from '@heroui/react'
 import { formatBytes, formatDate } from '@/lib/format'
 import { pageLocally, useListState } from '@/lib/list-search'
+import { statusReserve, type StatusDictionary } from '@/lib/status'
 import { CopyButton } from '@/components/copy-button'
 import { DataTable } from '@/components/data-table'
 import { FormSheet } from '@/components/form-sheet'
@@ -16,8 +17,8 @@ import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { useLiveLogs } from '@/features/logs/use-live-logs'
-import { accessLogStatusTone, filterAccessLogs } from './access-log-filter'
-import { parseAccessLogs, type AccessLog } from './access-log-schema'
+import { accessLogStatus, filterAccessLogs } from './access-log-filter'
+import type { AccessLog } from './access-log-schema'
 import {
   accessLogMethods,
   accessLogStatusClasses,
@@ -25,17 +26,22 @@ import {
 } from './access-log-search'
 import { ClientIpTooltip } from './client-ip-tooltip'
 import { formatClientLocation } from './client-location'
-import { websiteAccessLogHistoryQuery } from './data'
+import { websiteAccessLogHistoryQuery, websiteAccessLogsQuery } from './data'
 import { useWebsite } from './website-context'
 
 const filterKeys = ['method', 'status_class'] as const
-const liveStateReserve = ['已暂停', '实时连接', '正在连接']
+/** State of the live tail shown next to the mode switch. */
+const liveStates = {
+  paused: { label: '已暂停', tone: 'default' },
+  connected: { label: '实时连接', tone: 'success' },
+  connecting: { label: '正在连接', tone: 'accent' },
+} as const satisfies StatusDictionary<'paused' | 'connected' | 'connecting'>
+const liveStateReserve = statusReserve(liveStates)
 
 /** Website detail “访问日志” tab. Mode, filters, page and the open request
  * are component state, so leaving the tab resets them and the URL never
- * changes. Live mode tails `access-logs/stream` only while this tab is
- * mounted and not paused; history mode takes one snapshot per query (the
- * `/history/stream` connection closes after the first frame). */
+ * changes. Live mode tails the website's access logs only while this tab
+ * is mounted and not paused; history mode reads one page per query. */
 export function AccessLogs() {
   const website = useWebsite()
   const list = useListState<AccessLogsSearch>()
@@ -49,8 +55,7 @@ export function AccessLogs() {
     status_class: search.status_class,
   }
   const live = useLiveLogs(
-    `/api/websites/${website.id}/access-logs/stream`,
-    parseAccessLogs,
+    websiteAccessLogsQuery(website.id),
     !history && !paused
   )
   const historyQuery = useQuery({
@@ -132,12 +137,7 @@ export function AccessLogs() {
       id: 'status',
       header: '状态',
       minWidth: 70,
-      cell: (log) => (
-        <StatusChip
-          label={String(log.status_code)}
-          tone={accessLogStatusTone(log.status_code)}
-        />
-      ),
+      cell: (log) => <StatusChip {...accessLogStatus(log.status_code)} />,
     },
     {
       id: 'client',
@@ -178,10 +178,10 @@ export function AccessLogs() {
   ]
 
   const liveState = paused
-    ? { label: '已暂停', tone: 'default' as const }
+    ? liveStates.paused
     : live.connected
-      ? { label: '实时连接', tone: 'success' as const }
-      : { label: '正在连接', tone: 'accent' as const }
+      ? liveStates.connected
+      : liveStates.connecting
 
   return (
     <Section
@@ -260,11 +260,7 @@ export function AccessLogs() {
           actions={
             history ? undefined : (
               <>
-                <StatusChip
-                  label={liveState.label}
-                  tone={liveState.tone}
-                  reserve={liveStateReserve}
-                />
+                <StatusChip {...liveState} reserve={liveStateReserve} />
                 <Tooltip delay={300}>
                   <Button
                     size='sm'
@@ -388,12 +384,7 @@ function AccessLogDetail({ log }: { log: AccessLog }) {
           { label: '时间', value: formatDate(log.occurred_at) },
           {
             label: '状态码',
-            value: (
-              <StatusChip
-                label={String(log.status_code)}
-                tone={accessLogStatusTone(log.status_code)}
-              />
-            ),
+            value: <StatusChip {...accessLogStatus(log.status_code)} />,
           },
           { label: '协议', value: log.protocol },
           {

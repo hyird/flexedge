@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { pageDataSchema } from '@/lib/api'
 import { createLogEventParser } from '@/features/logs/log-event'
 
 // service/domains/website/website_types.h: WebsiteAccessLogDto
@@ -31,10 +32,4 @@ const accessLogSchema = z.object({
 })
 export type AccessLog = z.infer<typeof accessLogSchema>
 export const parseAccessLogs = createLogEventParser(accessLogSchema)
-export const accessLogPageSchema = z.object({
-  list: z.array(accessLogSchema),
-  total: z.number().int(),
-  page: z.number().int(),
-  page_size: z.number().int(),
-  total_pages: z.number().int(),
-})
+export const accessLogPageSchema = pageDataSchema(accessLogSchema)

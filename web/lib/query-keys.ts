@@ -6,5 +6,5 @@ export const queryKeys = {
   clusters: ['clusters'],
   nodes: ['nodes'],
   websites: ['websites'],
-  operations: ['operations'],
+  tasks: ['tasks'],
 } as const

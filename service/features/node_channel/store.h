@@ -11,7 +11,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "service/domains/agent/agent_types.h"
+#include "service/features/node_channel/types.h"
 #include "service/utils/redis_reply.h"
 #include "service/utils/token.h"
 
@@ -23,7 +23,7 @@ inline constexpr std::string_view repair_key{"flexedge:node-channel:v1:repair"};
 inline constexpr std::string_view identities_key{"flexedge:node-channel:v1:identities"};
 inline constexpr std::string_view repair_cooldown_key{"flexedge:node-channel:v1:repair-cooldown"};
 
-inline std::string identity_binding(const service::agent::agent_principal& principal) {
+inline std::string identity_binding(const agent_principal& principal) {
     return principal.tenant_id_ + ":" + principal.node_id_ + ":" + principal.cluster_id_;
 }
 
@@ -55,7 +55,7 @@ return 1
 }
 
 inline ruvia::task<bool> request_repair(ruvia::redis_handle redis,
-    const service::agent::agent_principal& principal, std::string_view release_id = {}) {
+    const agent_principal& principal, std::string_view release_id = {}) {
     const auto binding = identity_binding(principal);
     co_return co_await request_repair(redis, principal.agent_id_, binding, release_id);
 }
@@ -113,7 +113,7 @@ return result
 )lua";
 
 inline ruvia::task<std::optional<std::string>> desired(ruvia::redis_handle redis,
-    const service::agent::agent_principal& principal) {
+    const agent_principal& principal) {
     const auto key = agent_key(principal.agent_id_);
     const std::array<std::string_view, 1> keys{key};
     const std::array<std::string_view, 6> arguments{principal.tenant_id_, principal.node_id_,
@@ -147,7 +147,7 @@ public:
 };
 
 inline ruvia::task<std::vector<std::string>> objects(ruvia::redis_handle redis,
-    const service::agent::agent_principal& principal, std::string_view release_id,
+    const agent_principal& principal, std::string_view release_id,
     const std::vector<std::string>& requested) {
     if (release_id.empty()) {
         throw std::invalid_argument("node release identity is required");

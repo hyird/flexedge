@@ -6,7 +6,7 @@
 #include <ruvia/http/http_status.h>
 #include <ruvia/web/http_client_types.h>
 
-#include <cctype>
+#include <chrono>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -16,8 +16,10 @@
 
 #include "service/features/attempt_trace/outbound_policy.h"
 #include "service/features/attempt_trace/recorder.h"
+#include "service/features/outbound_http/error.h"
 #include "service/features/outbound_http/quota.h"
 #include "service/utils/sensitive_string.h"
+#include "service/utils/text.h"
 
 namespace service::outbound_http {
 
@@ -42,7 +44,7 @@ public:
 
     [[nodiscard]] std::optional<std::string_view> header(std::string_view name) const noexcept {
         for (const auto& header : headers_) {
-            if (equal_ignore_case(header.name_, name)) {
+            if (service::utils::equals_ignore_case(header.name_, name)) {
                 return header.value_;
             }
         }
@@ -54,21 +56,6 @@ public:
     }
 
 private:
-    [[nodiscard]] static bool equal_ignore_case(std::string_view left,
-        std::string_view right) noexcept {
-        if (left.size() != right.size()) {
-            return false;
-        }
-        for (std::size_t index = 0; index < left.size(); ++index) {
-            const auto left_char = static_cast<unsigned char>(left[index]);
-            const auto right_char = static_cast<unsigned char>(right[index]);
-            if (std::tolower(left_char) != std::tolower(right_char)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     ruvia::http_status_code status_;
     std::vector<service::outbound_http::header> headers_;
     service::utils::sensitive_string body_;
@@ -76,18 +63,23 @@ private:
 
 // The single outbound HTTP path of background attempts. Every request and its
 // response or transport failure is captured by the attempt's recorder (after
-// redaction) before the result is returned or the error rethrown unchanged.
+// redaction) before the result is returned; a transport failure is rethrown
+// as a transport_error naming `remote`. The request is bounded by the remote
+// service's timeout and the context's stop token.
 template <typename runtime_type>
 ruvia::task<buffered_response> send_buffered(runtime_type& context, const quota_scope& scope,
-    const service::attempt_trace::outbound_call& call,
-    service::attempt_trace::recorder& trace, const ruvia::http_client_request_view& request,
-    ruvia::operation_options options = {}) {
+    const service::attempt_trace::outbound_call& call, const remote_service& remote,
+    service::attempt_trace::recorder& trace, const ruvia::http_client_request_view& request) {
     co_await acquire_quota(context, call.origin_alias_, scope);
     auto&& client = context.get_http_client(call.origin_alias_);
     const auto token = trace.begin_http(call, request);
     std::optional<buffered_response> result;
     try {
-        auto response = co_await client.with_options(std::move(options)).send(request);
+        auto response = co_await client
+                            .with_options({.timeout_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               remote.timeout_),
+                                .stop_token_ = context.get_stop_token()})
+                            .send(request);
         std::vector<header> headers;
         headers.reserve(response.headers().size());
         for (const auto& header : response.headers()) {
@@ -102,7 +94,7 @@ ruvia::task<buffered_response> send_buffered(runtime_type& context, const quota_
         result.emplace(response.status(), std::move(headers), std::move(body));
     } catch (const ruvia::http_client_error& error) {
         trace.fail_http(token, error.code());
-        throw;
+        throw transport_error(transport_error_message(remote, error.code()));
     }
     std::vector<service::attempt_trace::header_entry> captured;
     try {

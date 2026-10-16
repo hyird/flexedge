@@ -7,8 +7,11 @@ import { apiErrorMessage } from '@/lib/api'
 import { setLiveQueryQueryClient } from '@/lib/live-query'
 import { loadingEpoch, minimumLoadingMs } from '@/lib/minimum-loading'
 import { createAppQueryClient } from '@/lib/query-client'
-import { ThemeProvider } from '@/context/theme-provider'
-import { createSessionExpiryHandler } from '@/features/auth/session-expiry'
+import { ThemeProvider } from '@/components/theme-provider'
+import {
+  createSessionExpiryHandler,
+  recoverStreamSession,
+} from '@/features/auth/session-expiry'
 import { routeTree } from '../build/generated/web/routeTree.gen'
 import './styles/index.css'
 
@@ -16,11 +19,12 @@ const queryClient = createAppQueryClient(
   (message) => toast.danger(message),
   (error) => handleSessionExpiry(error)
 )
+// A stream reports an ended session without an HTTP response for the API
+// client: live views recover through the session query, whose final 401
+// reaches `handleSessionExpiry` like any other query.
 setLiveQueryQueryClient(
   queryClient,
-  (error) => {
-    handleSessionExpiry(error)
-  },
+  () => recoverStreamSession(queryClient),
   undefined,
   minimumLoadingMs,
   loadingEpoch

@@ -54,4 +54,51 @@ inline bool truncate_utf8(std::string& value, std::size_t limit) noexcept {
     return true;
 }
 
+// Valid UTF-8 without control characters other than line feeds, carriage
+// returns and tabs.
+[[nodiscard]] inline bool valid_utf8_text(std::string_view value) noexcept {
+    for (std::size_t index = 0; index < value.size();) {
+        const auto length = utf8_sequence_length(value, index);
+        if (length == 0) {
+            return false;
+        }
+        const auto lead = static_cast<unsigned char>(value[index]);
+        if (length == 1 && lead < 0x20 && lead != '\n' && lead != '\r' && lead != '\t') {
+            return false;
+        }
+        index += length;
+    }
+    return true;
+}
+
+// Valid UTF-8 only; NUL and control characters become spaces except line
+// feeds and tabs in multi-line text (PostgreSQL rejects NUL in jsonb).
+[[nodiscard]] inline std::string sanitized_utf8(std::string_view value, bool multiline) {
+    std::string result;
+    result.reserve(value.size());
+    for (std::size_t index = 0; index < value.size();) {
+        const auto length = utf8_sequence_length(value, index);
+        if (length == 0) {
+            ++index;
+            continue;
+        }
+        const auto lead = static_cast<unsigned char>(value[index]);
+        if (length == 1 && (lead < 0x20 || lead == 0x7F)) {
+            if (lead == '\r') {
+                if (!multiline) {
+                    result.push_back(' ');
+                }
+            } else if (multiline && (lead == '\n' || lead == '\t')) {
+                result.push_back(static_cast<char>(lead));
+            } else {
+                result.push_back(' ');
+            }
+        } else {
+            result.append(value.substr(index, length));
+        }
+        index += length;
+    }
+    return result;
+}
+
 }  // namespace service::utils

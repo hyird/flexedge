@@ -14,17 +14,22 @@
 #include <variant>
 #include <vector>
 
+#include "service/common/database.h"
 #include "service/common/http.h"
+#include "service/domains/certificate/certificate_reference.h"
+#include "service/domains/cluster/cluster_reference.h"
+#include "service/domains/dns_zone/dns_zone_reference.h"
 #include "service/domains/website/aggregate_store.h"
 #include "service/domains/website/certificate_coverage.h"
 #include "service/domains/website/domain_claim.h"
-#include "service/domains/website/reference_store.h"
 #include "service/domains/website/relation_store.h"
 #include "service/domains/website/website_error.h"
 #include "service/domains/website/website_types.h"
+#include "service/features/background/queued_work.h"
 #include "service/features/live_resource/notification_outbox.h"
 #include "service/features/node_dispatch/queue.h"
 #include "service/features/sync_runtime/state.h"
+#include "service/features/sync_runtime/work_commit.h"
 #include "service/features/website_config/mapper.h"
 #include "service/features/website_dns/projection.h"
 
@@ -33,23 +38,20 @@ namespace service::website {
 class website_command_service final {
 public:
     // 「检查网站域名」: re-checks the domains at the current revision.
-    ruvia::task<std::optional<std::string>> request_dns_probe(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<void> request_dns_probe(ruvia::context& c, const std::string& tenant_id,
         const std::string& id) {
-        auto origin = start(c, service::operation::action::website_check_domains, id);
         auto transaction = co_await c.db().begin_transaction();
         const auto revision = co_await lock_website_revision(transaction, tenant_id, id);
         if (!revision) {
             service::common::throw_app_error(website_error::not_found);
         }
-        (void)co_await origin.require_operation(transaction, tenant_id);
+        service::background::queued_work work;
         (void)co_await service::sync_runtime::upsert_marker(transaction, tenant_id,
             service::sync_runtime::marker_resource_type::website, id, service::sync_runtime::marker_operation::apply,
-            *revision, origin);
+            *revision, work);
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.node_config().changed(service::live_resource::resource::websites, id);
-        origin.add_changes(notification);
-        co_await service::live_resource::commit_and_notify(transaction, c, notification);
-        co_return origin.operation_id();
+        co_await service::sync_runtime::commit_work(transaction, c, std::move(notification), work);
     }
 
     ruvia::task<website_created_dto> create(ruvia::context& c, const std::string& tenant_id,
@@ -70,25 +72,19 @@ public:
                 co_await build_domain_claims(transaction, tenant_id, std::nullopt, config);
             co_await validate_certificates(transaction, tenant_id, config);
             const auto website_id = co_await insert_website(transaction, tenant_id, cluster_id, status, config_json);
-            auto origin = start(c, service::operation::action::website_create, website_id);
-            (void)co_await origin.require_operation(transaction, tenant_id);
+            service::background::queued_work work;
             co_await replace_relation_projections(transaction, tenant_id, website_id, domain_claims,
                 config.certificate_ids_);
-            co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id, cluster_id, origin);
+            co_await service::website_dns::reconcile_claim_change(transaction, tenant_id, website_id, {}, work);
+            co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id, cluster_id, work);
             (void)co_await service::sync_runtime::upsert_marker(transaction, tenant_id,
                 service::sync_runtime::marker_resource_type::website, website_id,
-                service::sync_runtime::marker_operation::apply, 1, origin);
-            co_await service::website_dns::reconcile_config_change(transaction, tenant_id, std::nullopt, config_json,
-                origin);
+                service::sync_runtime::marker_operation::apply, 1, work);
             service::live_resource::notifications::resource_notification notification(tenant_id);
             notification.node_config().changed(service::live_resource::resource::websites, website_id);
-            origin.add_changes(notification);
-            co_await service::live_resource::commit_and_notify(transaction, c, notification);
+            co_await service::sync_runtime::commit_work(transaction, c, std::move(notification), work);
             result.set<"id">(website_id);
             result.set<"revision">(1);
-            if (const auto operation_id = origin.operation_id()) {
-                result.set<"operation_id">(*operation_id);
-            }
         } catch (const ruvia::db_error& error) {
             if (is_domain_claim_conflict(error)) {
                 service::common::throw_app_error(website_error::domain_exists);
@@ -98,7 +94,7 @@ public:
         co_return result;
     }
 
-    ruvia::task<std::optional<std::string>> update(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<std::int64_t> update(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, const std::string& cluster_id, std::int64_t expected_revision,
         const ruvia::validated_json<website_save_input>& body) {
         const auto normalized = normalize(body.value());
@@ -111,53 +107,31 @@ public:
         try {
             auto transaction = co_await c.db().begin_transaction();
             const auto previous = co_await lock_website_snapshot(transaction, tenant_id, id);
-            if (!previous) {
-                service::common::throw_app_error(website_error::not_found);
-            }
-            if (previous->revision_ != expected_revision) {
-                service::common::throw_app_error(website_error::revision_conflict);
-            }
+            service::common::require_current_revision(
+                previous ? std::optional<std::int64_t>{previous->revision_} : std::nullopt, expected_revision,
+                revision_errors_);
             co_await require_cluster(transaction, tenant_id, cluster_id);
             const auto domain_claims = co_await build_domain_claims(transaction, tenant_id, id, config);
             co_await validate_certificates(transaction, tenant_id, config);
-            const auto& previous_config = previous->config_json_;
             const auto& previous_cluster_id = previous->cluster_id_;
-            const auto previous_status = co_await find_website_status(transaction, tenant_id, id);
-            auto sections = config_sections(
-                co_await service::operation::changed_keys(transaction, previous_config, config_json));
-            if (previous_cluster_id != cluster_id) {
-                service::operation::add_section(sections, "cluster");
-            }
-            if (previous_status != status) {
-                service::operation::add_section(sections, "status");
-            }
-            const auto action = sections.size() == 1 && sections.front() == "status"
-                                    ? (status == "enabled" ? service::operation::action::website_enable
-                                                           : service::operation::action::website_disable)
-                                    : service::operation::action::website_update;
-            auto origin = start(c, action, id, service::operation::sections_summary(sections));
             const auto revision = co_await update_website(transaction, tenant_id, id, expected_revision,
                 cluster_id, status, config_json);
-            if (!revision) {
-                service::common::throw_app_error(website_error::revision_conflict);
-            }
-            (void)co_await origin.require_operation(transaction, tenant_id);
+            service::background::queued_work work;
+            const auto previous_zone_ids = co_await service::website_dns::managed_zone_ids(transaction, tenant_id, id);
             co_await replace_relation_projections(transaction, tenant_id, id, domain_claims, config.certificate_ids_);
+            co_await service::website_dns::reconcile_claim_change(transaction, tenant_id, id, previous_zone_ids, work);
             if (previous_cluster_id != cluster_id) {
                 co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id, previous_cluster_id,
-                    origin);
+                    work);
             }
-            co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id, cluster_id, origin);
+            co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id, cluster_id, work);
             (void)co_await service::sync_runtime::upsert_marker(transaction, tenant_id,
                 service::sync_runtime::marker_resource_type::website, id,
-                service::sync_runtime::marker_operation::apply, *revision, origin);
-            co_await service::website_dns::reconcile_config_change(transaction, tenant_id, previous_config,
-                config_json, origin);
+                service::sync_runtime::marker_operation::apply, *revision, work);
             service::live_resource::notifications::resource_notification notification(tenant_id);
             notification.node_config().changed(service::live_resource::resource::websites, id);
-            origin.add_changes(notification);
-            co_await service::live_resource::commit_and_notify(transaction, c, notification);
-            co_return origin.operation_id();
+            co_await service::sync_runtime::commit_work(transaction, c, std::move(notification), work);
+            co_return *revision;
         } catch (const ruvia::db_error& error) {
             if (is_domain_claim_conflict(error)) {
                 service::common::throw_app_error(website_error::domain_exists);
@@ -166,77 +140,31 @@ public:
         }
     }
 
-    ruvia::task<std::optional<std::string>> remove(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<std::int64_t> remove(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, std::int64_t expected_revision) {
-        auto origin = start(c, service::operation::action::website_delete, id);
         auto transaction = co_await c.db().begin_transaction();
         const auto previous = co_await soft_delete_website(transaction, tenant_id, id, expected_revision);
-        if (!previous) {
-            if (!(co_await find_website_revision(transaction, tenant_id, id))) {
-                service::common::throw_app_error(website_error::not_found);
-            }
-            service::common::throw_app_error(website_error::revision_conflict);
-        }
-        const auto& previous_config = previous->config_json_;
+        co_await service::common::require_revision_written(transaction, previous.has_value(), "sys_website",
+            tenant_id, id, revision_errors_);
         const auto& cluster_id = previous->cluster_id_;
-        (void)co_await origin.require_operation(transaction, tenant_id);
+        service::background::queued_work work;
+        const auto previous_zone_ids = co_await service::website_dns::managed_zone_ids(transaction, tenant_id, id);
         co_await clear_relation_projections(transaction, tenant_id, id);
-        co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id, cluster_id, origin);
-        co_await service::website_dns::reconcile_config_change(transaction, tenant_id, previous_config,
-            std::nullopt, origin);
+        co_await service::website_dns::reconcile_claim_change(transaction, tenant_id, id, previous_zone_ids, work);
+        co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id, cluster_id, work);
         co_await service::sync_runtime::remove_marker(transaction, tenant_id,
-            service::sync_runtime::marker_resource_type::website, id, origin);
+            service::sync_runtime::marker_resource_type::website, id, work);
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.node_config()
             .changed(service::live_resource::resource::websites, id)
             .changed(service::live_resource::resource::access_history, id);
-        origin.add_changes(notification);
-        co_await service::live_resource::commit_and_notify(transaction, c, notification);
-        co_return origin.operation_id();
+        co_await service::sync_runtime::commit_work(transaction, c, std::move(notification), work);
+        co_return previous->revision_;
     }
 
 private:
-    static service::operation::work_origin start(ruvia::context& c, service::operation::action action,
-        const std::string& id, std::string summary = "{}") {
-        return service::operation::work_origin::start({.action_ = action,
-            .actor_id_ = service::middleware::current_principal(c).admin_id_,
-            .target_type_ = "website",
-            .target_id_ = id,
-            .summary_ = std::move(summary)});
-    }
-
-    // Section names of changed top-level config keys.
-    static std::vector<std::string_view> config_sections(const std::vector<std::string>& keys) {
-        std::vector<std::string_view> sections;
-        for (const std::string_view key : keys) {
-            if (key == "name") {
-                service::operation::add_section(sections, "basic");
-            } else if (key == "domains") {
-                service::operation::add_section(sections, "domains");
-            } else if (key.starts_with("origin") || key.starts_with("default_origin") || key == "pass_client_ip") {
-                service::operation::add_section(sections, "origins");
-            } else if (key.starts_with("health_check") || key.ends_with("healthy_threshold")) {
-                service::operation::add_section(sections, "health_check");
-            } else if (key.starts_with("access_log")) {
-                service::operation::add_section(sections, "access_log");
-            } else if (key == "https_enabled" || key == "certificate_ids" || key == "minimum_tls_version" ||
-                       key == "force_https" || key == "hsts_enabled") {
-                service::operation::add_section(sections, "https");
-            } else if (key.starts_with("response_compression")) {
-                service::operation::add_section(sections, "compression");
-            } else {
-                service::operation::add_section(sections, "rules");
-            }
-        }
-        return sections;
-    }
-
-    static ruvia::task<std::string> find_website_status(ruvia::db_transaction& db, const std::string& tenant_id,
-        const std::string& id) {
-        const auto rows = co_await db.query(
-            "SELECT status FROM sys_website WHERE tenant_id = $1 AND id = $2 LIMIT 1", tenant_id, id);
-        co_return rows.empty() ? std::string{} : std::string(rows.front()[0].value().value_or(""));
-    }
+    static constexpr service::common::revision_errors revision_errors_{website_error::not_found,
+        website_error::revision_conflict};
 
     static std::string serialize_config(ruvia::context& c,
         const service::website_config::website_config_data& input) {
@@ -247,7 +175,7 @@ private:
 
     static ruvia::task<void> require_cluster(ruvia::db_transaction& db, const std::string& tenant_id,
         const std::string& cluster_id) {
-        if (!(co_await lock_available_cluster(db, tenant_id, cluster_id))) {
+        if (!(co_await service::cluster::lock_enabled_cluster(db, tenant_id, cluster_id))) {
             service::common::throw_app_error(website_error::cluster_unavailable);
         }
         co_return;
@@ -257,7 +185,7 @@ private:
     build_domain_claims(ruvia::db_transaction& db, const std::string& tenant_id,
         const std::optional<std::string>& excluded_website_id,
         const service::website_config::website_config_data& config) {
-        const auto zones = co_await lock_dns_zone_references(db, tenant_id);
+        const auto zones = co_await service::dns_zone::lock_live_dns_zones(db, tenant_id);
         auto planned = plan_domain_claims(config.domains_, zones);
         if (const auto* error = std::get_if<domain_claim_error>(&planned)) {
             switch (*error) {
@@ -285,7 +213,7 @@ private:
             co_return;
         }
 
-        const auto certificates = co_await lock_available_certificates(db, tenant_id, certificate_ids);
+        const auto certificates = co_await service::certificate::lock_usable_certificates(db, tenant_id, certificate_ids);
         if (!certificates) {
             service::common::throw_app_error(website_error::certificate_unavailable);
         }

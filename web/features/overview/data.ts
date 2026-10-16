@@ -1,10 +1,11 @@
 import { z } from 'zod'
 import { queryOptions } from '@tanstack/react-query'
-import { streamPath, type PageData } from '@/lib/api'
+import { pageDataSchema, streamPath } from '@/lib/api'
+import { parseResponseData } from '@/lib/api-response'
 import { formatDate, ratioOf } from '@/lib/format'
 import { readLiveEvent } from '@/lib/live-query'
 import { applyNodeRuntimePagePatch } from '@/features/nodes/data'
-import type { Node } from '@/features/nodes/types'
+import { nodeSchema, type Node } from '@/features/nodes/types'
 
 const count = z.number().int().nonnegative()
 const amount = z.number().nonnegative()
@@ -30,8 +31,8 @@ export type Overview = z.infer<typeof overviewSchema>
 // redesign-spec §8.3: one combined SSE connection, `/api/overview/stream`,
 // pushes `snapshot` (counts and issues), `traffic`, `nodes` and
 // `node-runtime` patches. Each event feeds its own query; all three share the
-// page's single EventSource, released when the last of them unmounts. Tasks
-// are a separate one-shot read (`recentOperationsQuery`).
+// page's single live connection, released when the last of them unmounts.
+// Recent tasks are read over GET (`recentTasksQuery`).
 const overviewStream = streamPath('/overview')
 
 export const overviewQuery = queryOptions({
@@ -41,7 +42,7 @@ export const overviewQuery = queryOptions({
   meta: { inlineError: true },
   queryFn: ({ queryKey, signal }) =>
     readLiveEvent(overviewStream, 'snapshot', queryKey, signal, (value) =>
-      overviewSchema.parse(value)
+      parseResponseData(overviewSchema, value)
     ),
 })
 
@@ -88,9 +89,11 @@ export const overviewTrafficQuery = queryOptions({
   meta: { inlineError: true },
   queryFn: ({ queryKey, signal }) =>
     readLiveEvent(overviewStream, 'traffic', queryKey, signal, (value) =>
-      overviewTrafficSchema.parse(value)
+      parseResponseData(overviewTrafficSchema, value)
     ),
 })
+
+const overviewNodePageSchema = pageDataSchema(nodeSchema)
 
 /** Page size of the `nodes` event (same page shape as `/api/nodes/stream`). */
 export const overviewNodePageSize = 100
@@ -101,12 +104,12 @@ export const overviewNodesQuery = queryOptions({
   retry: false,
   meta: { inlineError: true },
   queryFn: ({ queryKey, signal }) =>
-    readLiveEvent<PageData<Node>>(
+    readLiveEvent(
       overviewStream,
       'nodes',
       queryKey,
       signal,
-      undefined,
+      (value) => parseResponseData(overviewNodePageSchema, value),
       applyNodeRuntimePagePatch
     ),
 })
@@ -251,11 +254,11 @@ type AttentionItem = {
 }
 
 /** "需要关注" rows, each linking to the filtered list that shows them. Rows
- * with nothing to report are dropped. `attentionTasks` is the task list's
- * `attention` count (retrying, failed, partially failed or needing action). */
+ * with nothing to report are dropped. `failedTasks` is the task list's
+ * `failed` count. */
 export function attentionItems(
   overview: Overview,
-  attentionTasks: number
+  failedTasks: number
 ): AttentionItem[] {
   const items: AttentionItem[] = [
     {
@@ -283,12 +286,12 @@ export function attentionItems(
       tone: 'warning',
     },
     {
-      id: 'task-attention',
-      label: '需关注任务',
-      description: '重试中、失败或需处理的任务',
-      count: attentionTasks,
-      href: '/tasks?status=attention',
-      tone: 'warning',
+      id: 'task-failed',
+      label: '失败任务',
+      description: '执行失败、需要处理的任务',
+      count: failedTasks,
+      href: '/tasks?status=failed',
+      tone: 'danger',
     },
     {
       id: 'node-not-online',

@@ -16,10 +16,9 @@ namespace flexedge::node {
 // activation failures keep their original errors.
 inline void activate_persisted_config(data_plane& data_plane, const v2::ActiveState& active,
     const std::vector<v2::DeliveryObject>& objects) {
-    auto state = std::make_shared<v2::ActiveState>(active);
     std::shared_ptr<const compiled_config> compiled;
     try {
-        compiled = std::make_shared<const compiled_config>(state, objects);
+        compiled = std::make_shared<const compiled_config>(active, objects);
     } catch (const std::exception& error) {
         throw stored_state_unusable(std::string("stored active state does not compile: ") +
                                     error.what());
@@ -40,9 +39,8 @@ inline void activate_desired_config(state_store& store, data_plane& data_plane, 
     trace.run_step("stage", [&] { store.stage(active, objects); });
     trace.log(apply_log_level::info, "staged the release state");
     phase = v2::APPLY_PHASE_VALIDATE;
-    auto state = std::make_shared<v2::ActiveState>(active);
     auto compiled = trace.run_step("validate",
-        [&] { return std::make_shared<const compiled_config>(state, objects); });
+        [&] { return std::make_shared<const compiled_config>(active, objects); });
     trace.log(apply_log_level::info,
         "compiled the configuration: " + std::to_string(compiled->websites().size()) +
             " websites, " + std::to_string(compiled->endpoints().size()) + " endpoints" +

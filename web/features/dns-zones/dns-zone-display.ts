@@ -1,5 +1,11 @@
 import { ApiBusinessError } from '@/lib/api-response'
-import { statusLabels } from '@/lib/status'
+import {
+  enablementStatuses,
+  statusIds,
+  statusOptions,
+  statusReserve,
+  type StatusDictionary,
+} from '@/lib/status'
 import type { DnsRecord, DnsZone } from '@/features/dns-zones/types'
 
 export function hasMeaningfulConflicts(zone: DnsZone) {
@@ -14,44 +20,48 @@ export function displaySyncStatus(zone: DnsZone) {
   return zone.sync_status
 }
 
-/** Every label `displaySyncStatus` can show (wire: pending/synced/failed/
- * conflict; mock and transient states: queued/syncing), for `reserve`. */
-export const zoneSyncStatusLabels = statusLabels([
-  'synced',
-  'pending',
-  'queued',
-  'syncing',
-  'failed',
-  'out_of_sync',
-  'consistent',
-])
+/** Zone `sync_status` (wire: pending/synced/failed/conflict; mock and
+ * transient states: queued/syncing) and the `out_of_sync`/`consistent`
+ * states `displaySyncStatus` derives from a conflict. */
+export const zoneSyncStatuses = {
+  synced: { label: '已同步', tone: 'success' },
+  pending: { label: '等待同步', tone: 'warning' },
+  queued: { label: '排队中', tone: 'accent' },
+  syncing: { label: '同步中', tone: 'accent' },
+  failed: { label: '同步失败', tone: 'danger' },
+  conflict: { label: '存在冲突', tone: 'danger' },
+  out_of_sync: { label: '未同步', tone: 'warning' },
+  consistent: { label: '一致', tone: 'success' },
+} as const satisfies StatusDictionary
+export const zoneSyncStatusReserve = statusReserve(zoneSyncStatuses)
 
-/** Labels of a custom record's `record_states[].sync_status`. */
-export const recordSyncStatusLabels = statusLabels([
-  'synced',
-  'pending',
-  'syncing',
-  'failed',
-  'conflict',
-])
+/** A record's `record_states[].sync_status`; same wording as the zone. */
+export const recordSyncStatuses = {
+  synced: zoneSyncStatuses.synced,
+  pending: zoneSyncStatuses.pending,
+  syncing: zoneSyncStatuses.syncing,
+  failed: zoneSyncStatuses.failed,
+  conflict: zoneSyncStatuses.conflict,
+} as const satisfies StatusDictionary
+export const recordSyncStatusReserve = statusReserve(recordSyncStatuses)
 
-/** Labels of a provider line's `status`. */
-export const lineStatusLabels = statusLabels(['enabled', 'disabled'])
+/** A provider line's `status`. */
+export const lineStatuses = enablementStatuses
+export const lineStatusReserve = statusReserve(lineStatuses)
 
 /** `sync_status` list filter values, sent to `/api/dns-zones/stream`.
- * `issue` (failed or conflict) matches the overview's "DNS 同步异常" count. */
-export const zoneSyncFilters = [
-  { id: 'issue', label: '同步异常' },
-  { id: 'synced', label: '已同步' },
-  { id: 'pending', label: '等待同步' },
-  { id: 'failed', label: '同步失败' },
-  { id: 'conflict', label: '存在冲突' },
-] as const
-export type ZoneSyncFilter = (typeof zoneSyncFilters)[number]['id']
-export const zoneSyncFilterIds = zoneSyncFilters.map(({ id }) => id) as [
-  ZoneSyncFilter,
-  ...ZoneSyncFilter[],
-]
+ * `issue` (failed or conflict) matches the overview's "DNS 同步异常" count;
+ * the others reuse the chip wording. */
+const zoneSyncFilterStatuses = {
+  issue: { label: '同步异常', tone: 'danger' },
+  synced: zoneSyncStatuses.synced,
+  pending: zoneSyncStatuses.pending,
+  failed: zoneSyncStatuses.failed,
+  conflict: zoneSyncStatuses.conflict,
+} as const satisfies StatusDictionary
+export type ZoneSyncFilter = keyof typeof zoneSyncFilterStatuses
+export const zoneSyncFilters = statusOptions(zoneSyncFilterStatuses)
+export const zoneSyncFilterIds = statusIds(zoneSyncFilterStatuses)
 
 /** A DataGrid row carrying the cached record and its current sync state. */
 export type ZoneRecordRow = {

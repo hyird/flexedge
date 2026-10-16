@@ -15,17 +15,21 @@
 
 #include "service/common/database.h"
 #include "service/common/http.h"
+#include "service/domains/cluster/cluster_reference.h"
+#include "service/domains/dns_zone/dns_zone_reference.h"
 #include "service/domains/node/endpoint_claim_store.h"
 #include "service/domains/node/node_error.h"
 #include "service/domains/node/node_mapper.h"
 #include "service/domains/node/node_types.h"
-#include "service/features/cluster_dns/projection.h"
+#include "service/features/background/queued_work.h"
 #include "service/features/dns_sync/line.h"
 #include "service/features/dns_sync/mapper.h"
+#include "service/features/dns_sync/queue.h"
 #include "service/features/live_resource/notification_outbox.h"
 #include "service/features/node_config/model.h"
 #include "service/features/node_dispatch/queue.h"
 #include "service/features/node_dispatch/target_store.h"
+#include "service/features/sync_runtime/work_commit.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
 #include "service/utils/token.h"
@@ -61,30 +65,25 @@ public:
                 "updated_at) "
                 "VALUES ($1, $2, $3, $4, 'pending', 1, 1, 0, $5, $6, $7, $8::jsonb, "
                 "'{}'::jsonb, "
-                "NOW(), NOW()) RETURNING id",
+                "NOW(), NOW()) RETURNING id, revision",
                 service::common::db_params(
                     ruvia::db_value{tenant_id}, ruvia::db_value{cluster_id}, ruvia::db_value{name},
                     ruvia::db_value{status}, ruvia::db_value{agent_id}, ruvia::db_value{secret_hash},
                     ruvia::db_value{secret_envelope}, ruvia::db_value{std::string_view(config_json)}));
             const auto node_id = std::string(rows.front()[0].value().value_or(""));
-            auto origin = start(c, service::operation::action::node_create, node_id);
-            (void)co_await origin.require_operation(transaction, tenant_id);
-            co_await service::node_dispatch::ensure_cluster_release(transaction, tenant_id, cluster_id, origin);
+            service::background::queued_work work;
+            co_await service::node_dispatch::ensure_cluster_release(transaction, tenant_id, cluster_id, work);
             co_await replace_endpoint_claims(transaction, tenant_id, node_id, stored_config.endpoints_);
-            co_await service::cluster_dns::reconcile_cluster(transaction, tenant_id, cluster_id, origin);
+            co_await service::dns_sync::mark_cluster_zone_dirty(transaction, tenant_id, cluster_id, work);
             service::live_resource::notifications::resource_notification notification(tenant_id);
             notification.node_config()
                 .changed(service::live_resource::resource::nodes, node_id)
                 .changed(service::live_resource::resource::clusters, cluster_id);
-            origin.add_changes(notification);
-            co_await service::live_resource::commit_and_notify(transaction, c, notification);
+            co_await service::sync_runtime::commit_work(transaction, c, std::move(notification), work);
             result.set<"id">(node_id);
             result.set<"node_id">(agent_id);
             result.set<"secret">(secret.view());
-            result.set<"revision">(1);
-            if (const auto operation_id = origin.operation_id()) {
-                result.set<"operation_id">(*operation_id);
-            }
+            result.set<"revision">(rows.front()[1].as<std::int64_t>().value_or(1));
         } catch (const ruvia::db_error& error) {
             if (service::common::is_unique_constraint_violation(error, "uk_node_name") ||
                 service::common::is_unique_constraint_violation(error, "uq_node_endpoint_claim")) {
@@ -95,7 +94,7 @@ public:
         co_return result;
     }
 
-    ruvia::task<std::optional<std::string>> update(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<std::int64_t> update(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, std::int64_t expected_revision,
         const ruvia::validated_json<node_save_input>& config) {
         const auto normalized = normalize(config.value());
@@ -112,69 +111,34 @@ public:
             auto transaction = co_await c.db().begin_transaction();
             co_await require_cluster(transaction, tenant_id, cluster_id, stored_config);
             const auto current_rows = co_await transaction.query(
-                "SELECT cluster_id, name, status, config::text FROM sys_node WHERE id = $1 AND tenant_id = $2 AND "
+                "SELECT revision, cluster_id FROM sys_node WHERE id = $1 AND tenant_id = $2 AND "
                 "deleted_at IS NULL LIMIT 1 FOR UPDATE",
                 id, tenant_id);
-            if (current_rows.empty()) {
-                service::common::throw_app_error(node_error::not_found);
-            }
-            const auto previous_cluster_id = std::string(current_rows.front()[0].value().value_or(""));
-            std::vector<std::string_view> sections;
-            if (current_rows.front()[1].value().value_or("") != name) {
-                service::operation::add_section(sections, "basic");
-            }
-            if (previous_cluster_id != cluster_id) {
-                service::operation::add_section(sections, "cluster");
-            }
-            if (!(co_await service::operation::changed_keys(transaction, current_rows.front()[3].value().value_or("{}"),
-                      config_json))
-                    .empty()) {
-                service::operation::add_section(sections, "endpoints");
-            }
-            if (current_rows.front()[2].value().value_or("") != status) {
-                service::operation::add_section(sections, "status");
-            }
-            auto origin = service::operation::work_origin::start({.action_ = service::operation::action::node_update,
-                .actor_id_ = service::middleware::current_principal(c).admin_id_,
-                .target_type_ = "node",
-                .target_id_ = id,
-                .summary_ = service::operation::sections_summary(sections)});
-            (void)co_await origin.require_operation(transaction, tenant_id);
-            co_await service::node_dispatch::ensure_cluster_release(transaction, tenant_id, cluster_id, origin);
+            service::common::require_current_revision(current_rows, expected_revision, revision_errors_);
+            const auto previous_cluster_id = std::string(current_rows.front()[1].value().value_or(""));
+            service::background::queued_work work;
+            const auto release_id =
+                co_await service::node_dispatch::ensure_cluster_release(transaction, tenant_id, cluster_id, work);
             const auto rows = co_await transaction.query(
                 "UPDATE sys_node SET cluster_id = $1, name = $2, status = $3, config = "
                 "$4::jsonb, revision = revision + 1, node_spec_revision = node_spec_revision + 1, "
-                "node_spec_digest = NULL, desired_release_id = (SELECT current_release_id FROM "
-                "sys_cluster WHERE tenant_id = $6 AND id = $1), "
-                "updated_at = NOW() WHERE id = $5 AND tenant_id = $6 AND revision = $7 AND "
-                "deleted_at IS "
-                "NULL RETURNING revision, node_spec_revision",
+                "node_spec_digest = NULL, desired_release_id = $7, "
+                "updated_at = NOW() WHERE id = $5 AND tenant_id = $6 RETURNING revision",
                 service::common::db_params(
                     ruvia::db_value{cluster_id}, ruvia::db_value{name}, ruvia::db_value{status},
                     ruvia::db_value{std::string_view(config_json)}, ruvia::db_value{id},
-                    ruvia::db_value{tenant_id}, ruvia::db_value{expected_revision}));
-            if (rows.empty()) {
-                const auto current = co_await transaction.query(
-                    "SELECT revision FROM sys_node WHERE id = $1 AND tenant_id = $2 AND "
-                    "deleted_at IS NULL",
-                    id, tenant_id);
-                if (current.empty()) {
-                    service::common::throw_app_error(node_error::not_found);
-                }
-                service::common::throw_app_error(node_error::revision_conflict);
-            }
+                    ruvia::db_value{tenant_id}, ruvia::db_value{std::string_view(release_id)}));
             // The node applies its new configuration: 「节点配置下发」.
-            co_await service::node_dispatch::track_node_config(transaction, tenant_id, id,
-                rows.front()[1].as<std::int64_t>().value_or(1), origin);
+            work.changed(id);
             co_await replace_endpoint_claims(transaction, tenant_id, id, stored_config.endpoints_);
-            co_await service::cluster_dns::reconcile_cluster(transaction, tenant_id, cluster_id, origin);
+            co_await service::dns_sync::mark_cluster_zone_dirty(transaction, tenant_id, cluster_id, work);
             if (previous_cluster_id != cluster_id) {
                 co_await service::node_dispatch::exclude_pending_node_cluster_targets(transaction, tenant_id, id,
-                    previous_cluster_id, origin);
-                co_await service::cluster_dns::reconcile_cluster(transaction, tenant_id, previous_cluster_id, origin);
+                    previous_cluster_id, work);
+                co_await service::dns_sync::mark_cluster_zone_dirty(transaction, tenant_id, previous_cluster_id, work);
             }
             if (status == "disabled") {
-                co_await service::node_dispatch::exclude_pending_node_targets(transaction, tenant_id, id, origin);
+                co_await service::node_dispatch::exclude_pending_node_targets(transaction, tenant_id, id, work);
             }
             service::live_resource::notifications::resource_notification notification(tenant_id);
             notification.node_config()
@@ -183,9 +147,8 @@ public:
             if (previous_cluster_id != cluster_id) {
                 notification.changed(service::live_resource::resource::clusters, previous_cluster_id);
             }
-            origin.add_changes(notification);
-            co_await service::live_resource::commit_and_notify(transaction, c, notification);
-            co_return origin.operation_id();
+            co_await service::sync_runtime::commit_work(transaction, c, std::move(notification), work);
+            co_return rows.front()[0].as<std::int64_t>().value_or(0);
         } catch (const ruvia::db_error& error) {
             if (service::common::is_unique_constraint_violation(error, "uk_node_name") ||
                 service::common::is_unique_constraint_violation(error, "uq_node_endpoint_claim")) {
@@ -195,60 +158,45 @@ public:
         }
     }
 
-    ruvia::task<std::optional<std::string>> remove(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<std::int64_t> remove(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, std::int64_t expected_revision) {
-        auto origin = start(c, service::operation::action::node_delete, id);
         auto transaction = co_await c.db().begin_transaction();
         const auto rows = co_await transaction.query(
             "UPDATE sys_node SET deleted_at = NOW(), revision = revision + 1, "
             "registration_status = 'pending', node_secret_hash = NULL, "
             "node_secret_envelope = NULL, agent_id = NULL, "
             "registered_at = NULL, last_heartbeat_at = NULL, updated_at = NOW() WHERE id = $1 "
-            "AND tenant_id = $2 AND revision = $3 AND deleted_at IS NULL RETURNING cluster_id",
+            "AND tenant_id = $2 AND revision = $3 AND deleted_at IS NULL RETURNING cluster_id, revision",
             id, tenant_id, expected_revision);
-        if (rows.empty()) {
-            const auto current = co_await transaction.query(
-                "SELECT revision FROM sys_node WHERE id = $1 AND tenant_id = $2 AND deleted_at "
-                "IS NULL",
-                id, tenant_id);
-            if (current.empty()) {
-                service::common::throw_app_error(node_error::not_found);
-            }
-            service::common::throw_app_error(node_error::revision_conflict);
-        }
+        co_await service::common::require_revision_written(transaction, !rows.empty(), "sys_node", tenant_id, id,
+            revision_errors_);
         const auto cluster_id = std::string(rows.front()[0].value().value_or(""));
-        (void)co_await origin.require_operation(transaction, tenant_id);
+        service::background::queued_work work;
         co_await clear_endpoint_claims(transaction, tenant_id, id);
-        co_await service::cluster_dns::reconcile_cluster(transaction, tenant_id, cluster_id, origin);
-        co_await service::node_dispatch::exclude_pending_node_targets(transaction, tenant_id, id, origin);
-        co_await service::node_dispatch::cancel_node_config(transaction, tenant_id, id, origin);
+        co_await service::dns_sync::mark_cluster_zone_dirty(transaction, tenant_id, cluster_id, work);
+        co_await service::node_dispatch::exclude_pending_node_targets(transaction, tenant_id, id, work);
+        work.changed(id);
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.node_config()
             .changed(service::live_resource::resource::nodes, id)
             .changed(service::live_resource::resource::clusters, cluster_id);
-        origin.add_changes(notification);
-        co_await service::live_resource::commit_and_notify(transaction, c, notification);
-        co_return origin.operation_id();
+        co_await service::sync_runtime::commit_work(transaction, c, std::move(notification), work);
+        co_return rows.front()[1].as<std::int64_t>().value_or(0);
     }
 
     ruvia::task<node_credentials_dto> reset_credentials(ruvia::context& c, const std::string& tenant_id,
         const std::string& id,
         std::int64_t expected_revision) {
-        auto origin = start(c, service::operation::action::node_reset_credentials, id);
+        service::background::queued_work work;
         auto transaction = co_await c.db().begin_transaction();
         const auto current_rows = co_await transaction.query(
             "SELECT revision, cluster_id FROM sys_node WHERE id = $1 AND tenant_id = $2 AND "
-            "deleted_at IS NULL LIMIT 1",
+            "deleted_at IS NULL LIMIT 1 FOR UPDATE",
             id, tenant_id);
-        if (current_rows.empty()) {
-            service::common::throw_app_error(node_error::not_found);
-        }
-        if (current_rows.front()[0].as<std::int64_t>().value_or(0) != expected_revision) {
-            service::common::throw_app_error(node_error::revision_conflict);
-        }
+        service::common::require_current_revision(current_rows, expected_revision, revision_errors_);
         const auto current_cluster_id = current_rows.front()[1].value().value_or("");
-        (void)co_await origin.require_operation(transaction, tenant_id);
-        co_await service::node_dispatch::ensure_cluster_release(transaction, tenant_id, current_cluster_id, origin);
+        const auto release_id =
+            co_await service::node_dispatch::ensure_cluster_release(transaction, tenant_id, current_cluster_id, work);
         const auto agent_id = service::utils::random_token().substr(0, 32);
         service::utils::sensitive_string secret(service::utils::random_token());
         const auto hash = service::utils::token_hash(secret.view());
@@ -256,75 +204,50 @@ public:
         const auto rows = co_await transaction.query(
             "UPDATE sys_node SET agent_id = $3, node_secret_hash = $4, node_secret_envelope = $5, "
             "registration_status = 'pending', registered_at = NULL, last_heartbeat_at = NULL, "
-            "applied_node_spec_revision = 0, node_spec_digest = NULL, desired_release_id = "
-            "(SELECT current_release_id FROM sys_cluster WHERE tenant_id = $2 AND id = "
-            "sys_node.cluster_id), active_release_id = NULL, active_manifest_digest = NULL, "
+            "applied_node_spec_revision = 0, node_spec_digest = NULL, desired_release_id = $6, "
+            "active_release_id = NULL, active_manifest_digest = NULL, "
             "last_apply_phase = NULL, last_apply_error_code = NULL, last_apply_error = NULL, "
             "last_apply_retryable = NULL, "
             "runtime = '{}'::jsonb, revision = "
             "revision + 1, updated_at = "
             "NOW() WHERE id = $1 AND "
-            "tenant_id = $2 AND revision = $6 AND deleted_at IS NULL RETURNING revision, "
-            "cluster_id",
+            "tenant_id = $2 RETURNING revision",
             id, tenant_id, agent_id, std::string_view(hash), std::string_view(envelope),
-            expected_revision);
-        if (rows.empty()) {
-            const auto current = co_await transaction.query(
-                "SELECT revision FROM sys_node WHERE id = $1 AND tenant_id = $2 AND deleted_at "
-                "IS NULL",
-                id, tenant_id);
-            if (current.empty()) {
-                service::common::throw_app_error(node_error::not_found);
-            }
-            service::common::throw_app_error(node_error::revision_conflict);
-        }
-        const auto cluster_id = std::string(rows.front()[1].value().value_or(""));
-        co_await service::cluster_dns::reconcile_cluster(transaction, tenant_id, cluster_id, origin);
-        co_await service::node_dispatch::exclude_pending_node_targets(transaction, tenant_id, id, origin);
-        co_await service::node_dispatch::cancel_node_config(transaction, tenant_id, id, origin);
+            std::string_view(release_id));
+        const auto cluster_id = std::string(current_cluster_id);
+        co_await service::dns_sync::mark_cluster_zone_dirty(transaction, tenant_id, cluster_id, work);
+        co_await service::node_dispatch::exclude_pending_node_targets(transaction, tenant_id, id, work);
+        work.changed(id);
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.node_config()
             .changed(service::live_resource::resource::nodes, id)
             .changed(service::live_resource::resource::clusters, cluster_id);
-        origin.add_changes(notification);
-        co_await service::live_resource::commit_and_notify(transaction, c, notification);
+        co_await service::sync_runtime::commit_work(transaction, c, std::move(notification), work);
         node_credentials_dto result(ruvia::model_options{.resource_ = c.pool()});
         result.set<"id">(id);
         result.set<"node_id">(agent_id);
         result.set<"secret">(secret.view());
-        result.set<"revision">(rows.front()[0].as<std::int64_t>().value_or(expected_revision + 1));
-        if (const auto operation_id = origin.operation_id()) {
-            result.set<"operation_id">(*operation_id);
-        }
+        result.set<"revision">(rows.front()[0].as<std::int64_t>().value_or(0));
         co_return result;
     }
 
 private:
-    static service::operation::work_origin start(ruvia::context& c, service::operation::action action,
-        const std::string& id) {
-        return service::operation::work_origin::start({.action_ = action,
-            .actor_id_ = service::middleware::current_principal(c).admin_id_,
-            .target_type_ = "node",
-            .target_id_ = id,
-            .summary_ = "{}"});
-    }
+    static constexpr service::common::revision_errors revision_errors_{node_error::not_found,
+        node_error::revision_conflict};
 
+    // Locks the enabled cluster and its zone; every endpoint line must be an
+    // enabled line of the zone.
     static ruvia::task<void> require_cluster(ruvia::db_transaction& transaction,
         const std::string& tenant_id,
         const std::string& cluster_id,
         const service::node_config::node_config_data& config) {
-        const auto rows = co_await transaction.query(
-            "SELECT zone.runtime::text FROM sys_cluster cluster INNER JOIN sys_dns_zone zone ON "
-            "zone.tenant_id = cluster.tenant_id AND zone.id = cluster.dns_zone_id WHERE "
-            "cluster.id = $1 AND cluster.tenant_id = $2 AND cluster.status = 'enabled' AND "
-            "cluster.deleted_at IS NULL AND zone.deleted_at IS NULL LIMIT 1 FOR SHARE OF cluster, "
-            "zone",
-            cluster_id, tenant_id);
-        if (rows.empty()) {
+        const auto zone_id = co_await service::cluster::lock_enabled_cluster(transaction, tenant_id, cluster_id);
+        const auto zone =
+            zone_id ? co_await service::dns_zone::lock_dns_zone(transaction, tenant_id, *zone_id) : std::nullopt;
+        if (!zone) {
             service::common::throw_app_error(node_error::cluster_unavailable);
         }
-        const auto runtime =
-            service::dns_sync::parse_stored_runtime(rows.front()[0].value().value_or("{}"));
+        const auto runtime = service::dns_sync::parse_stored_runtime(zone->runtime_json_);
         if (!runtime) {
             throw_corrupt_node_config();
         }

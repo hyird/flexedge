@@ -3,19 +3,18 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { fieldErrors } from '@/lib/form-errors'
-import { queryKeys } from '@/lib/query-keys'
 import { FormSheet } from '@/components/form-sheet'
 import { Choice, Field, Notice, Toggle } from '@/components/forms'
 import { QueryNotice } from '@/components/page'
 import { dnsZoneOptionsQuery } from '@/features/dns-zones/data'
-import { certificateProvidersQuery } from '@/features/providers/data'
+import { certificateProviderOptionsQuery } from '@/features/providers/data'
 import { providerLabel } from '@/features/providers/provider-display'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import {
   certificateFormSchema,
   type CertificateFormValues,
 } from './certificate-form'
-import { createCertificate } from './data'
+import { afterCertificateWrite, createCertificate } from './data'
 
 const emptyValues: CertificateFormValues = {
   domain: '',
@@ -38,7 +37,7 @@ export function RequestCertificateSheet({
   const [wasOpen, setWasOpen] = useState(isOpen)
   // Option pickers read one snapshot per opening.
   const providers = useQuery({
-    ...certificateProvidersQuery,
+    ...certificateProviderOptionsQuery,
     enabled: isOpen,
     gcTime: 0,
     staleTime: 0,
@@ -62,14 +61,8 @@ export function RequestCertificateSheet({
         config: { auto_renew: input.auto_renew },
       }),
     onSuccess: (response) => {
-      toastWriteSuccess(
-        response.message || '证书申请已提交，正在签发',
-        response.data
-      )
-      void client.invalidateQueries({
-        queryKey: queryKeys.certificates,
-        refetchType: 'none',
-      })
+      toastWriteSuccess(response.message || '证书申请已提交，正在签发')
+      void afterCertificateWrite(client)
       onClose()
     },
   })
@@ -149,12 +142,7 @@ export function RequestCertificateSheet({
       {providers.isSuccess && !providers.data.length && (
         <Notice>
           还没有证书供应商，请先在
-          <Link
-            href='/providers'
-            routerOptions={{ state: { providers: { tab: 'certificate' } } }}
-          >
-            供应商账号 › 证书供应商
-          </Link>
+          <Link href='/providers/certificate'>供应商账号 › 证书供应商</Link>
           中添加。
         </Notice>
       )}

@@ -2,6 +2,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { ArrowLeft, TrashBin } from '@gravity-ui/icons'
 import { Button } from '@heroui/react'
 import { useArrivalState } from '@/lib/history-state'
+import { describeStatus } from '@/lib/status'
 import { useTabSwitchGuard } from '@/lib/unsaved-changes'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
 import { DetailHeader, DetailHeaderSkeleton } from '@/components/detail-header'
@@ -14,7 +15,8 @@ import { providerLabel } from '@/features/providers/provider-display'
 import {
   displaySyncStatus,
   isZoneNotFound,
-  zoneSyncStatusLabels,
+  zoneSyncStatuses,
+  zoneSyncStatusReserve,
 } from './dns-zone-display'
 import { useZoneDetail } from './use-zone-detail'
 import { useZoneCommands } from './zone-commands'
@@ -79,8 +81,8 @@ export function ZoneDetailLayout() {
         title={zone.domain}
         status={
           <StatusChip
-            status={displaySyncStatus(zone)}
-            reserve={zoneSyncStatusLabels}
+            {...describeStatus(zoneSyncStatuses, displaySyncStatus(zone))}
+            reserve={zoneSyncStatusReserve}
           />
         }
         meta={[

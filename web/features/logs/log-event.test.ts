@@ -4,9 +4,9 @@ import {
   accessLogPageSchema,
   parseAccessLogs,
 } from '@/features/websites/access-log-schema'
+import { liveLogCapacity, mergeLiveLogs } from './log-event'
 
-const encode = (list: unknown[]) =>
-  JSON.stringify({ code: 0, message: '', data: { list } })
+const encode = (list: unknown[]) => ({ list })
 const nodeLog = {
   id: 'one',
   occurred_at: '2026-09-08T00:00:00Z',
@@ -41,16 +41,27 @@ describe('log event contracts', () => {
     ).toThrow()
   })
 
-  it('rejects malformed JSON, envelopes and business failures', () => {
-    for (const payload of [
-      '{',
-      'null',
-      '[]',
-      JSON.stringify({ code: 1, message: 'failure', data: { list: [] } }),
-      JSON.stringify({ code: 0, message: '', data: {} }),
-    ]) {
-      expect(() => parseNodeLogs(payload)).toThrow()
+  it('rejects frames without a record list', () => {
+    for (const data of [null, [], {}, { list: null }, { list: {} }]) {
+      expect(() => parseNodeLogs(data)).toThrow()
     }
+  })
+
+  it('merges batches by id, newest first, within the capacity', () => {
+    const at = (id: string, minute: number) => ({
+      id,
+      occurred_at: `2026-09-08T00:${String(minute).padStart(2, '0')}:00Z`,
+    })
+    expect(
+      mergeLiveLogs([at('a', 1), at('b', 2)], [at('b', 2), at('c', 3)])
+    ).toEqual([at('c', 3), at('b', 2), at('a', 1)])
+    const many = Array.from({ length: liveLogCapacity + 5 }, (_, index) => ({
+      id: String(index),
+      occurred_at: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+    }))
+    const merged = mergeLiveLogs(undefined, many)
+    expect(merged).toHaveLength(liveLogCapacity)
+    expect(merged[0].id).toBe(String(liveLogCapacity + 4))
   })
 
   it('accepts omitted optional access log fields without fabricating values', () => {

@@ -3,6 +3,7 @@ import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button, Chip, Tooltip } from '@heroui/react'
 import { pageLocally, useListState } from '@/lib/list-search'
+import { describeStatus } from '@/lib/status'
 import { DataTable } from '@/components/data-table'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
 import { Section } from '@/components/section'
@@ -10,7 +11,8 @@ import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { dnsLineIndex } from './dns-lines'
 import {
-  recordSyncStatusLabels,
+  recordSyncStatuses,
+  recordSyncStatusReserve,
   zoneRecordRows,
   type ZoneRecordRow,
 } from './dns-zone-display'
@@ -156,8 +158,8 @@ export function ZoneRecords() {
           <Tooltip delay={200}>
             <Tooltip.Trigger aria-label={state.last_error}>
               <StatusChip
-                status={state.sync_status}
-                reserve={recordSyncStatusLabels}
+                {...describeStatus(recordSyncStatuses, state.sync_status)}
+                reserve={recordSyncStatusReserve}
               />
             </Tooltip.Trigger>
             <Tooltip.Content className='max-w-xs'>
@@ -166,8 +168,8 @@ export function ZoneRecords() {
           </Tooltip>
         ) : state ? (
           <StatusChip
-            status={state.sync_status}
-            reserve={recordSyncStatusLabels}
+            {...describeStatus(recordSyncStatuses, state.sync_status)}
+            reserve={recordSyncStatusReserve}
           />
         ) : (
           <span className='text-muted'>—</span>

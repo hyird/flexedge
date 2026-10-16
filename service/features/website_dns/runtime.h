@@ -14,6 +14,7 @@
 
 #include "service/features/background/task_context.h"
 #include "service/features/node_config/mapper.h"
+#include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/website_config/mapper.h"
 #include "service/features/website_dns/attempt_detail.h"
@@ -223,6 +224,21 @@ inline ruvia::task<void> probe_website(service::background::task_context& contex
         result_transition, trace);
     save_step.complete();
     co_return;
+}
+
+// Records the failed attempt; the marker retries after the retry delay.
+inline ruvia::task<void> fail_website_task(service::background::task_context& context,
+    service::attempt_trace::recorder& trace, const service::sync_runtime::running_marker_lease& lease,
+    std::string_view error, std::string_view detail) {
+    const auto message = service::sync_runtime::attempt_error(trace, error);
+    auto transaction = co_await context.db().begin_transaction();
+    const auto result_transition =
+        co_await service::sync_runtime::fail_running_and_record_event(transaction, lease, message, detail);
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease, result_transition,
+        trace);
+    if (result_transition.marker_transitioned_) {
+        service::sync_runtime::log_attempt_failure("Website sync marker", lease.marker_.marker_id_, message);
+    }
 }
 
 }  // namespace service::website_dns

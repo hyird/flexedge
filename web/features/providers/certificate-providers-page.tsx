@@ -1,9 +1,11 @@
-import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useEffect, useEffectEvent } from 'react'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { getRouteApi } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button, Tooltip } from '@heroui/react'
-import { hasListFilters, pageLocally, useListState } from '@/lib/list-search'
+import { hasListFilters, useListSearch } from '@/lib/list-search'
+import { describeStatus } from '@/lib/status'
 import { DataTable } from '@/components/data-table'
 import { ListToolbar } from '@/components/list-toolbar'
 import { Mono } from '@/components/mono'
@@ -11,33 +13,39 @@ import { RelativeTime } from '@/components/relative-time'
 import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { CertificateProviderSheet } from './certificate-provider-sheet'
-import { certificateProvidersListQuery } from './data'
-import { providerLabel, providerStatusLabels } from './provider-display'
+import { certificateProvidersQuery } from './data'
+import {
+  providerLabel,
+  providerStatuses,
+  providerStatusReserve,
+} from './provider-display'
 import type { CertificateProvider } from './types'
 
-/** `/providers` 证书供应商 tab. The certificate provider stream returns the
- * whole (small) collection, so search and pagination run on the client; they
- * and the add/edit sheets are component state, and `initialQuery` is the
- * arrival keyword. */
-export function CertificateProvidersPage({
-  initialQuery,
-}: {
-  initialQuery?: string
-}) {
-  const list = useListState<{ q?: string }>({ q: initialQuery })
-  const [creating, setCreating] = useState(false)
-  const [editing, setEditing] = useState<CertificateProvider | null>(null)
-  const query = useQuery(certificateProvidersListQuery)
-  const keyword = list.keyword.toLowerCase()
-  const matches = query.data?.filter((item) =>
-    [
-      item.provider,
-      providerLabel(item.provider),
-      item.account_email ?? '',
-      item.access_key_hint ?? '',
-    ].some((value) => value.toLowerCase().includes(keyword))
-  )
-  const pageData = matches && pageLocally(matches, list.page, list.pageSize)
+const route = getRouteApi('/_authenticated/providers/certificate')
+
+/** `/providers/certificate`. Search, pagination and add/edit sheets live in
+ * the URL; GET and live snapshots use the same server-side page. */
+export function CertificateProvidersPage() {
+  const list = useListSearch(route)
+  const { sheet } = list
+  const query = useQuery({
+    ...certificateProvidersQuery({
+      page: list.page,
+      page_size: list.pageSize,
+      keyword: list.keyword || undefined,
+    }),
+    placeholderData: keepPreviousData,
+  })
+  const editing = sheet.editing
+    ? query.data?.list.find((item) => item.id === sheet.editing)
+    : undefined
+  // A missing edit id closes the sheet only after the requested page arrives.
+  const editMissing =
+    !!sheet.editing && query.isSuccess && !query.isPlaceholderData && !editing
+  const closeMissing = useEffectEvent(() => void sheet.close())
+  useEffect(() => {
+    if (editMissing) closeMissing()
+  }, [editMissing])
   const filtered = hasListFilters(list.search, [])
   const columns: DataGridColumn<CertificateProvider>[] = [
     {
@@ -70,19 +78,26 @@ export function CertificateProvidersPage({
       id: 'status',
       header: '状态',
       minWidth: 120,
-      cell: (item) =>
-        item.last_error ? (
+      cell: (item) => {
+        const chip = (
+          <StatusChip
+            {...describeStatus(providerStatuses, item.status)}
+            reserve={providerStatusReserve}
+          />
+        )
+        return item.last_error ? (
           <Tooltip delay={300}>
             <Tooltip.Trigger aria-label={item.last_error}>
-              <StatusChip status={item.status} reserve={providerStatusLabels} />
+              {chip}
             </Tooltip.Trigger>
             <Tooltip.Content className='max-w-80'>
               {item.last_error}
             </Tooltip.Content>
           </Tooltip>
         ) : (
-          <StatusChip status={item.status} reserve={providerStatusLabels} />
-        ),
+          chip
+        )
+      },
     },
     {
       id: 'verified',
@@ -105,7 +120,7 @@ export function CertificateProvidersPage({
           variant='tertiary'
           className='px-2'
           aria-label={`编辑证书供应商 ${providerLabel(item.provider)}`}
-          onPress={() => setEditing(item)}
+          onPress={() => void sheet.openEdit(item.id)}
         >
           编辑
         </Button>
@@ -113,7 +128,7 @@ export function CertificateProvidersPage({
     },
   ]
   const createButton = (
-    <Button size='sm' onPress={() => setCreating(true)}>
+    <Button size='sm' onPress={() => void sheet.openCreate()}>
       <Plus className='size-4' />
       添加供应商
     </Button>
@@ -135,7 +150,7 @@ export function CertificateProvidersPage({
       <DataTable
         label='证书供应商'
         columns={columns}
-        data={pageData?.list}
+        data={query.data?.list}
         isLoading={query.isPending}
         error={query.isError ? query.error : undefined}
         onRetry={() => query.refetch()}
@@ -156,22 +171,20 @@ export function CertificateProvidersPage({
           <TablePagination
             page={list.page}
             pageSize={list.pageSize}
-            total={pageData?.total ?? 0}
+            total={query.data?.total ?? 0}
             onPageChange={(page) => void list.setPage(page)}
             onPageSizeChange={(size) => void list.setPageSize(size)}
           />
         }
       />
-      {creating && (
-        <CertificateProviderSheet onClose={() => setCreating(false)} />
+      {sheet.isCreating && (
+        <CertificateProviderSheet onClose={() => void sheet.close()} />
       )}
       {editing && (
         <CertificateProviderSheet
           key={editing.id}
-          provider={
-            query.data?.find((item) => item.id === editing.id) ?? editing
-          }
-          onClose={() => setEditing(null)}
+          provider={editing}
+          onClose={() => void sheet.close()}
         />
       )}
     </div>

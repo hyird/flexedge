@@ -30,7 +30,7 @@ bool failed_with(const std::variant<claims, service::website::domain_claim_error
 int main() try {
     using service::website::domain_claim_error;
     using service::website::plan_domain_claims;
-    const std::array<service::website::dns_zone_reference, 2> zones{{
+    const std::array<service::dns_zone::dns_zone_reference, 2> zones{{
         {"specific", "sub.example.com"},
         {"parent", "example.com"},
     }};
@@ -43,7 +43,7 @@ int main() try {
     require(get_claims(result)->front().key_ == "www.sub.example.com");
     require(get_claims(result)->front().dns_mode_ == "managed");
     require(get_claims(result)->front().dns_zone_id_ == "specific");
-    const std::array<service::website::dns_zone_reference, 2> reversed_zones{{zones[1], zones[0]}};
+    const std::array<service::dns_zone::dns_zone_reference, 2> reversed_zones{{zones[1], zones[0]}};
     result = plan_domain_claims(domains, reversed_zones);
     require(get_claims(result) && get_claims(result)->front().dns_zone_id_ == "specific");
     domains[0].hostname_ = "*.www.example.com";

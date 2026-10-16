@@ -1,10 +1,9 @@
 import { useState } from 'react'
 import { Controller, useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
 import { TrashBin } from '@gravity-ui/icons'
 import {
-  Alert,
   Button,
   FieldError,
   InputGroup,
@@ -12,15 +11,16 @@ import {
   TextArea,
   TextField,
 } from '@heroui/react'
-import { apiErrorMessage, isRevisionConflict } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
+import { apiErrorMessage, type WriteResult } from '@/lib/api'
+import { useDraftForm, useRevisionDraft } from '@/lib/revision-draft'
 import { useUnsavedChangesGuard } from '@/lib/unsaved-changes'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { FormSheet } from '@/components/form-sheet'
 import { Choice, Field, Toggle } from '@/components/forms'
+import { RevisionConflictAlert } from '@/components/revision-conflict-alert'
 import { UnsavedChangesDialog } from '@/components/save-bar'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
-import { saveDnsRecords } from './data'
+import { afterDnsZoneWrite, saveDnsRecords } from './data'
 import { DnsLinePicker } from './dns-line-picker'
 import {
   applyRecordChange,
@@ -44,9 +44,9 @@ const contentLabels: Record<DnsRecord['type'], string> = {
 }
 
 /** Sheet that adds one custom record (`record` omitted) or edits one.
- * The zone revision is pinned when the form opens and the whole record set
- * is saved with it (`PUT /dns-zones/:id` takes the full set), so a change made
- * elsewhere meanwhile surfaces as a conflict instead of being overwritten.
+ * `PUT /dns-zones/:id` takes the whole record set, so it is saved from the
+ * zone revision the draft is based on: a change made elsewhere meanwhile
+ * surfaces as a conflict instead of being overwritten.
  * Enter saves; closing a dirty draft asks before discarding its changes. */
 export function RecordForm({
   zone,
@@ -63,68 +63,59 @@ export function RecordForm({
   const client = useQueryClient()
   const provider = zone.dns_provider
   const cloudflare = provider === 'cloudflare'
-  const [baseRevision, setBaseRevision] = useState(zone.revision)
   const [removing, setRemoving] = useState(false)
   const [discarding, setDiscarding] = useState(false)
-  const form = useForm<RecordFormValues, unknown, RecordInput>({
-    resolver: zodResolver(recordFormSchema(provider)),
-    defaultValues: recordFormValues(provider, record),
-  })
-  const type = useWatch({ control: form.control, name: 'type' })
-  const save = useMutation({
-    meta: { inlineError: true },
-    mutationFn: (change: RecordChange) =>
+  const draft = useRevisionDraft<DnsZone, RecordChange, WriteResult<never>>({
+    server: zone,
+    save: (change: RecordChange, revision) =>
       saveDnsRecords(
-        { ...zone, revision: baseRevision },
-        applyRecordChange(zone.config.records, change)
+        { ...base, revision: revision ?? base.revision },
+        applyRecordChange(base.config.records, change)
       ),
-    onSuccess: (response, change) => {
+    onSaved: (response, change) => {
       toastWriteSuccess(
         response.message ||
           (change.kind === 'remove'
             ? '记录已删除，正在同步到服务商'
             : '记录已保存，正在同步到服务商'),
-        response.data
+        { resourceType: 'dns_zone', resourceId: zone.id }
       )
-      void client.invalidateQueries({
-        queryKey: queryKeys.dnsZones,
-        refetchType: 'none',
-      })
+      void afterDnsZoneWrite(client)
       onClose()
     },
+    // Starts over from the latest records: the edited record's saved values
+    // (or a blank new record); a record removed elsewhere closes the sheet.
+    load: (latest) => {
+      const saved = record && savedRecord(latest ?? zone)
+      if (record && !saved) onClose()
+      else form.reset(recordFormValues(provider, saved))
+    },
   })
+  const base: DnsZone = draft.base ?? zone
+  const savedRecord = (source: DnsZone) =>
+    record && source.config.records.find((item) => item.id === record.id)
+  const form = useForm<RecordFormValues, unknown, RecordInput>({
+    resolver: zodResolver(recordFormSchema(provider)),
+    values: recordFormValues(provider, savedRecord(base) ?? record),
+  })
+  useDraftForm(form, draft.track)
+  const type = useWatch({ control: form.control, name: 'type' })
   const guard = useUnsavedChangesGuard(
-    form.formState.isDirty && !save.isPending
+    form.formState.isDirty && !draft.isSaving
   )
-  const isStale = zone.revision !== baseRevision
-  const isConflict = save.isError && isRevisionConflict(save.error)
-  // Starts over from the latest records: the edited record's saved values (or
-  // a blank new record) on the current revision; unsaved input is dropped.
-  const reload = () => {
-    const latest = record
-      ? zone.config.records.find((item) => item.id === record.id)
-      : undefined
-    if (record && !latest) {
-      onClose()
-      return
-    }
-    setBaseRevision(zone.revision)
-    form.reset(recordFormValues(provider, latest))
-    save.reset()
-  }
   const submit = form.handleSubmit((values) =>
-    save.mutate(
+    draft.save(
       record
         ? { kind: 'edit', record: { ...values, id: record.id } }
         : { kind: 'add', record: { ...values, id: crypto.randomUUID() } }
     )
   )
   const close = () => {
-    if (save.isPending) return
+    if (draft.isSaving) return
     if (form.formState.isDirty) setDiscarding(true)
     else onClose()
   }
-  const disabled = save.isPending
+  const disabled = draft.isSaving
   return (
     <>
       <FormSheet
@@ -133,30 +124,14 @@ export function RecordForm({
         title={record ? `编辑记录 ${record.name} ${record.type}` : '添加记录'}
         description={`为 ${zone.domain} 配置自定义解析记录，保存后同步到 DNS 服务商。`}
         onSubmit={submit}
-        isSubmitting={save.isPending}
+        isSubmitting={draft.isSaving}
         error={
-          save.isError && !isConflict ? apiErrorMessage(save.error) : undefined
+          draft.error && !draft.conflict
+            ? apiErrorMessage(draft.error)
+            : undefined
         }
       >
-        {(isStale || isConflict) && (
-          <Alert status='warning'>
-            <Alert.Indicator />
-            <Alert.Content>
-              <Alert.Title>记录已被其他人更新</Alert.Title>
-              <Alert.Description>
-                重新加载会载入最新记录并丢弃这里未保存的修改。
-              </Alert.Description>
-            </Alert.Content>
-            <Button
-              size='sm'
-              variant='tertiary'
-              className='shrink-0 self-center'
-              onPress={reload}
-            >
-              重新加载
-            </Button>
-          </Alert>
-        )}
+        <RevisionConflictAlert draft={draft} subject='记录' />
         <div className='grid gap-4 sm:grid-cols-2'>
           <Controller
             control={form.control}
@@ -335,7 +310,7 @@ export function RecordForm({
           title={`删除记录 ${record.name} ${record.type}？`}
           description='删除后会立即从服务商移除这条记录。'
           confirmLabel='删除记录'
-          onConfirm={() => save.mutateAsync({ kind: 'remove', id: record.id })}
+          onConfirm={() => draft.saveAsync({ kind: 'remove', id: record.id })}
         />
       )}
       <UnsavedChangesDialog

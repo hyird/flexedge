@@ -29,7 +29,6 @@ const dashboard = {
   client_ips_by_bytes: [],
   client_ips_by_requests: [],
 }
-const encode = (data: unknown) => JSON.stringify({ code: 0, message: '', data })
 
 describe('website dashboard contract', () => {
   it('preserves ASN totals independently of the capped client IP rankings', () => {
@@ -37,13 +36,12 @@ describe('website dashboard contract', () => {
       { label: 'AS4134 Chinanet', request_count: 123, response_bytes: 4096 },
       { label: '未知 ASN', request_count: 7, response_bytes: 512 },
     ]
-    expect(parseWebsiteDashboard(encode({ ...dashboard, asns })).asns).toEqual(
-      asns
-    )
+    expect(parseWebsiteDashboard({ ...dashboard, asns }).asns).toEqual(asns)
     expect(() =>
-      parseWebsiteDashboard(
-        encode({ ...dashboard, asns: [{ ...asns[0], request_count: '123' }] })
-      )
+      parseWebsiteDashboard({
+        ...dashboard,
+        asns: [{ ...asns[0], request_count: '123' }],
+      })
     ).toThrow()
   })
   it('preserves full AS names for both IP rankings and permits unavailable metadata', () => {
@@ -60,23 +58,22 @@ describe('website dashboard contract', () => {
       asn: '',
       as_name: '',
     }
-    const parsed = parseWebsiteDashboard(
-      encode({
-        ...dashboard,
-        client_ips_by_bytes: [ip, unknown],
-        client_ips_by_requests: [ip],
-      })
-    )
+    const parsed = parseWebsiteDashboard({
+      ...dashboard,
+      client_ips_by_bytes: [ip, unknown],
+      client_ips_by_requests: [ip],
+    })
     expect(parsed.client_ips_by_bytes).toEqual([ip, unknown])
     expect(parsed.client_ips_by_requests[0].as_name).toBe(ip.as_name)
     expect(() =>
-      parseWebsiteDashboard(
-        encode({ ...dashboard, client_ips_by_bytes: [{ ...ip, as_name: 123 }] })
-      )
+      parseWebsiteDashboard({
+        ...dashboard,
+        client_ips_by_bytes: [{ ...ip, as_name: 123 }],
+      })
     ).toThrow()
   })
   it('accepts a complete snapshot including empty rankings', () => {
-    expect(parseWebsiteDashboard(encode(dashboard))).toEqual(dashboard)
+    expect(parseWebsiteDashboard(dashboard)).toEqual(dashboard)
   })
   it('rejects malformed nested values before chart rendering', () => {
     for (const data of [
@@ -90,16 +87,7 @@ describe('website dashboard contract', () => {
       },
       { ...dashboard, daily: [{ ...dashboard.hourly[0], bandwidth_bps: '0' }] },
     ]) {
-      expect(() => parseWebsiteDashboard(encode(data))).toThrow()
-    }
-  })
-  it('rejects transport envelopes that do not contain a successful snapshot', () => {
-    for (const raw of [
-      '{',
-      '{}',
-      JSON.stringify({ code: 1, message: 'failed', data: dashboard }),
-    ]) {
-      expect(() => parseWebsiteDashboard(raw)).toThrow()
+      expect(() => parseWebsiteDashboard(data)).toThrow()
     }
   })
 })

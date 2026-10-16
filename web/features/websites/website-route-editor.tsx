@@ -9,11 +9,8 @@ import { ArrayLines } from './array-lines'
 import { conflictingRouteIndexes } from './route-conflicts'
 import { routeTabs, type RouteEditorView } from './route-tabs'
 import { CheckOption, FieldNotice, IconAction } from './settings-controls'
-import {
-  routeMethods,
-  routeRuleToForm,
-  type WebsiteRouteRuleForm,
-} from './website-form'
+import { routeMethods } from './types'
+import { routeRuleToForm, type WebsiteRouteRuleForm } from './website-form'
 import { routeRuleErrors, type WebsiteFormErrors } from './website-sections'
 
 type Rule = WebsiteRouteRuleForm

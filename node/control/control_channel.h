@@ -32,6 +32,7 @@
 #include "node/runtime/config_activation.h"
 #include "node/runtime/log_buffer.h"
 #include "node/runtime/node_credentials.h"
+#include "node/runtime/runtime_metrics.h"
 #include "node/runtime/runtime_state.h"
 #include "node/runtime/self_updater.h"
 #include "node/runtime/state_store.h"
@@ -139,27 +140,34 @@ private:
         value->set_active_release_id(runtime_.active_release_id());
         value->set_active_manifest_digest(runtime_.active_manifest_digest());
         value->set_agent_version(config_.agent_version_);
-        const auto metrics = data_plane_.metrics();
+        // The data plane answers with immutable copies made on its own loops.
+        const auto report = co_await data_plane_.report(config_.stop_token_);
+        std::optional<std::uint64_t> traffic_out_bytes;
+        if (report.load_) {
+            traffic_out_bytes = report.load_->traffic_out_bytes_;
+        }
+        const auto metrics = metrics_sampler_.sample(traffic_out_bytes);
         value->set_cpu_usage(metrics.cpu_usage_);
         value->set_memory_usage(metrics.memory_usage_);
         value->set_traffic_out_bps(metrics.traffic_out_bps_);
-        value->set_connection_count(metrics.connection_count_);
-        if (const auto connected_ips = co_await data_plane_.connected_ip_count(config_.stop_token_)) {
-            value->set_connected_ip_count(*connected_ips);
+        if (report.load_) {
+            value->set_connection_count(report.load_->connection_count_);
+            value->set_connected_ip_count(report.load_->connected_ip_count_);
         }
         value->set_load_1m(metrics.load1m_);
-        value->set_health(last_error_.empty() && data_plane_.healthy() ? "healthy" : "degraded");
+        value->set_health(
+            last_error_.empty() && report.origin_health_->all_healthy() ? "healthy" : "degraded");
         value->set_last_error(last_error_);
         value->set_queued_log_events(logs_.queued_events());
         value->set_dropped_log_events(logs_.dropped_events());
-        for (const auto& report : data_plane_.origin_health_reports()) {
+        for (const auto& origin : report.origin_health_->reports()) {
             auto* item = value->add_origin_health();
-            item->set_website_id(report.website_id_);
-            item->set_origin_id(report.origin_id_);
-            item->set_status(report.status_);
-            item->set_checked_at_unix_millis(report.checked_at_unix_millis_);
-            item->set_latency_millis(report.latency_millis_);
-            item->set_last_error(report.last_error_);
+            item->set_website_id(origin.website_id_);
+            item->set_origin_id(origin.origin_id_);
+            item->set_status(origin.status_);
+            item->set_checked_at_unix_millis(origin.checked_at_unix_millis_);
+            item->set_latency_millis(origin.latency_millis_);
+            item->set_last_error(origin.last_error_);
         }
         co_return envelope;
     }
@@ -240,19 +248,19 @@ private:
             throw std::runtime_error("control plane did not send desired state");
         }
         const auto& desired = envelope.desired_state();
-        if (!desired.has_node_spec() || !desired.has_release() ||
-            desired.node_spec().content().node_id() != node_id) {
+        const auto contents = open_state(desired);
+        if (!contents || contents->node_spec_.node_id() != node_id) {
             throw std::runtime_error("control plane sent invalid desired state");
         }
+        const auto& release = contents->release_;
 
         apply_trace trace;
         std::unordered_map<std::string, v2::DeliveryObject> objects_by_digest;
         std::vector<std::string> missing;
         std::size_t discarded_objects{};
-        objects_by_digest.reserve(
-            static_cast<std::size_t>(desired.release().content().objects_size()));
+        objects_by_digest.reserve(static_cast<std::size_t>(release.objects_size()));
         trace.run_step("load_objects", [&] {
-            for (const auto& reference : desired.release().content().objects()) {
+            for (const auto& reference : release.objects()) {
                 if (auto object = load_cached_object(reference.digest_sha256(), discarded_objects); object) {
                     objects_by_digest.emplace(reference.digest_sha256(), std::move(*object));
                 } else {
@@ -260,7 +268,7 @@ private:
                 }
             }
         });
-        const auto referenced = static_cast<std::size_t>(desired.release().content().objects_size());
+        const auto referenced = static_cast<std::size_t>(release.objects_size());
         trace.log(apply_log_level::info,
             "release has " + std::to_string(referenced) + " objects: " +
                 std::to_string(referenced - missing.size()) + " from the local cache, " +
@@ -279,7 +287,7 @@ private:
             v2::ClientEnvelope request;
             auto* payload = request.mutable_object_request();
             payload->set_node_id(node_id);
-            payload->set_release_id(desired.release().content().release_id());
+            payload->set_release_id(release.release_id());
             const auto end = (std::min)(missing.size(), offset + 64);
             for (auto index = offset; index < end; ++index) {
                 payload->add_digest_sha256(missing[index]);
@@ -287,7 +295,7 @@ private:
             auto replies = client.send(request);
             const auto response = co_await replies.receive();
             if (response.request_id() != request.request_id() || !response.has_object_batch() ||
-                response.object_batch().release_id() != desired.release().content().release_id()) {
+                response.object_batch().release_id() != release.release_id()) {
                 throw std::runtime_error("control plane did not return requested objects");
             }
             for (const auto& object : response.object_batch().objects()) {
@@ -300,8 +308,8 @@ private:
             trace.end_step(*fetch, true);
         }
         std::vector<v2::DeliveryObject> objects;
-        objects.reserve(static_cast<std::size_t>(desired.release().content().objects_size()));
-        for (const auto& reference : desired.release().content().objects()) {
+        objects.reserve(static_cast<std::size_t>(release.objects_size()));
+        for (const auto& reference : release.objects()) {
             const auto found = objects_by_digest.find(reference.digest_sha256());
             if (found == objects_by_digest.end()) {
                 throw std::runtime_error("control plane omitted a requested release object");
@@ -312,8 +320,8 @@ private:
         v2::ClientEnvelope acknowledgement;
         auto* result = acknowledgement.mutable_apply_result();
         result->set_node_id(node_id);
-        result->set_node_spec_revision(desired.node_spec().content().revision());
-        result->set_release_id(desired.release().content().release_id());
+        result->set_node_spec_revision(contents->node_spec_.revision());
+        result->set_release_id(release.release_id());
         result->set_manifest_digest(desired.release().digest_sha256());
         const auto failure = apply_desired_config(store_, data_plane_, desired, objects, trace, *result);
         if (!failure) {
@@ -456,7 +464,7 @@ private:
         }
         const auto& node_id = welcome.node_id();
         if (persistent.active_.has_node_spec() &&
-            persistent.active_.node_spec().content().node_id() != node_id) {
+            persistent.contents_.node_spec_.node_id() != node_id) {
             throw std::runtime_error("persisted state belongs to another node");
         }
         const auto worker = loop_.handle();
@@ -493,6 +501,7 @@ private:
     channel_log channel_log_;
     log_delivery log_delivery_;
     std::string last_error_;
+    runtime_metrics_sampler metrics_sampler_;
 };
 
 }  // namespace flexedge::node

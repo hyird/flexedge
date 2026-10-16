@@ -1,6 +1,8 @@
 import { expect, test } from 'vitest'
 import { ApiBusinessError } from '@/lib/api-response'
+import { describeStatus, statusOptions } from '@/lib/status'
 import {
+  certificateStatuses,
   formatFingerprint,
   isCertificateNotFound,
   isExpiring,
@@ -24,6 +26,17 @@ const base = {
   dns_zone_domain: 'example.com',
   website_count: 0,
 } satisfies Certificate
+
+test('the status filter and chips read one dictionary with the domain wording', () => {
+  expect(statusOptions(certificateStatuses)).toContainEqual({
+    id: 'pending',
+    label: '等待签发',
+  })
+  expect(describeStatus(certificateStatuses, 'pending')).toEqual({
+    label: '等待签发',
+    tone: 'warning',
+  })
+})
 
 test('the expiring highlight matches the overview expiring count', () => {
   expect(isExpiring({ ...base, remaining_days: 30 })).toBe(true)

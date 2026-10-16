@@ -1,9 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useEffectEvent } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { getRouteApi } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button, Link, Tooltip } from '@heroui/react'
-import { hasListFilters, useListState } from '@/lib/list-search'
+import { hasListFilters, useListSearch } from '@/lib/list-search'
+import { describeStatus } from '@/lib/status'
 import { DataTable } from '@/components/data-table'
 import { ListToolbar } from '@/components/list-toolbar'
 import { Mono } from '@/components/mono'
@@ -12,15 +14,20 @@ import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { dnsProvidersQuery } from './data'
 import { DnsProviderSheet } from './dns-provider-sheet'
-import { providerLabel, providerStatusLabels } from './provider-display'
+import {
+  providerLabel,
+  providerStatuses,
+  providerStatusReserve,
+} from './provider-display'
 import type { DnsProvider } from './types'
 
-/** `/providers` DNS 账号 tab. Search, pagination and the add/edit sheets are
- * component state; `initialQuery` is the arrival keyword. */
-export function DnsProvidersPage({ initialQuery }: { initialQuery?: string }) {
-  const list = useListState<{ q?: string }>({ q: initialQuery })
-  const [creating, setCreating] = useState(false)
-  const [editing, setEditing] = useState<DnsProvider | null>(null)
+const route = getRouteApi('/_authenticated/providers/dns')
+
+/** `/providers/dns`. Search, pagination and the add/edit sheets live in the
+ * URL; the list is paged by the server. */
+export function DnsProvidersPage() {
+  const list = useListSearch(route)
+  const { sheet } = list
   const query = useQuery({
     ...dnsProvidersQuery({
       page: list.page,
@@ -29,6 +36,17 @@ export function DnsProvidersPage({ initialQuery }: { initialQuery?: string }) {
     }),
     placeholderData: keepPreviousData,
   })
+  const editing = sheet.editing
+    ? query.data?.list.find((item) => item.id === sheet.editing)
+    : undefined
+  // An `edit` id missing from the loaded page (another page, or deleted)
+  // closes the sheet; while the page loads the sheet waits for it.
+  const editMissing =
+    !!sheet.editing && query.isSuccess && !query.isPlaceholderData && !editing
+  const closeMissing = useEffectEvent(() => void sheet.close())
+  useEffect(() => {
+    if (editMissing) closeMissing()
+  }, [editMissing])
   const filtered = hasListFilters(list.search, [])
   const columns: DataGridColumn<DnsProvider>[] = [
     {
@@ -81,19 +99,26 @@ export function DnsProvidersPage({ initialQuery }: { initialQuery?: string }) {
       id: 'status',
       header: '状态',
       minWidth: 120,
-      cell: (item) =>
-        item.last_error ? (
+      cell: (item) => {
+        const chip = (
+          <StatusChip
+            {...describeStatus(providerStatuses, item.status)}
+            reserve={providerStatusReserve}
+          />
+        )
+        return item.last_error ? (
           <Tooltip delay={300}>
             <Tooltip.Trigger aria-label={item.last_error}>
-              <StatusChip status={item.status} reserve={providerStatusLabels} />
+              {chip}
             </Tooltip.Trigger>
             <Tooltip.Content className='max-w-80'>
               {item.last_error}
             </Tooltip.Content>
           </Tooltip>
         ) : (
-          <StatusChip status={item.status} reserve={providerStatusLabels} />
-        ),
+          chip
+        )
+      },
     },
     {
       id: 'verified',
@@ -116,7 +141,7 @@ export function DnsProvidersPage({ initialQuery }: { initialQuery?: string }) {
           variant='tertiary'
           className='px-2'
           aria-label={`编辑 DNS 账号 ${item.name}`}
-          onPress={() => setEditing(item)}
+          onPress={() => void sheet.openEdit(item.id)}
         >
           编辑
         </Button>
@@ -124,7 +149,7 @@ export function DnsProvidersPage({ initialQuery }: { initialQuery?: string }) {
     },
   ]
   const createButton = (
-    <Button size='sm' onPress={() => setCreating(true)}>
+    <Button size='sm' onPress={() => void sheet.openCreate()}>
       <Plus className='size-4' />
       添加账号
     </Button>
@@ -173,14 +198,14 @@ export function DnsProvidersPage({ initialQuery }: { initialQuery?: string }) {
           />
         }
       />
-      {creating && <DnsProviderSheet onClose={() => setCreating(false)} />}
+      {sheet.isCreating && (
+        <DnsProviderSheet onClose={() => void sheet.close()} />
+      )}
       {editing && (
         <DnsProviderSheet
           key={editing.id}
-          provider={
-            query.data?.list.find((item) => item.id === editing.id) ?? editing
-          }
-          onClose={() => setEditing(null)}
+          provider={editing}
+          onClose={() => void sheet.close()}
         />
       )}
     </div>

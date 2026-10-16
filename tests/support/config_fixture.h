@@ -1,4 +1,7 @@
 #pragma once
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -8,35 +11,40 @@
 #include "node/proto/edge_control.pb.h"
 #include "node/proto/schema_version.h"
 namespace flexedge::testing {
+// Tests edit the parsed contents; finalize() packs them into the content-addressed
+// `active` state and `objects` the node receives.
 struct TestConfig final {
+    flexedge::node::v2::NodeSpecContent node_spec;
+    flexedge::node::v2::ClusterReleaseContent release;
+    std::vector<flexedge::node::v2::DeliveryObjectContent> contents;
     flexedge::node::v2::ActiveState active;
     std::vector<flexedge::node::v2::DeliveryObject> objects;
 
     flexedge::node::v2::Website* mutableWebsite() {
-        for (auto& object : objects) {
-            if (object.content().has_website()) {
-                return object.mutable_content()->mutable_website();
+        for (auto& content : contents) {
+            if (content.has_website()) {
+                return content.mutable_website();
             }
         }
         throw std::runtime_error("test website object is missing");
     }
 
     const flexedge::node::v2::Website& website() const {
-        for (const auto& object : objects) {
-            if (object.content().has_website()) {
-                return object.content().website();
+        for (const auto& content : contents) {
+            if (content.has_website()) {
+                return content.website();
             }
         }
         throw std::runtime_error("test website object is missing");
     }
 
     flexedge::node::v2::Certificate* mutableCertificate(std::size_t index) {
-        for (auto& object : objects) {
-            if (!object.content().has_certificate()) {
+        for (auto& content : contents) {
+            if (!content.has_certificate()) {
                 continue;
             }
             if (index == 0) {
-                return object.mutable_content()->mutable_certificate();
+                return content.mutable_certificate();
             }
             --index;
         }
@@ -44,70 +52,57 @@ struct TestConfig final {
     }
 
     flexedge::node::v2::Certificate* addCertificate() {
-        flexedge::node::v2::DeliveryObject object;
-        object.mutable_content()->mutable_certificate();
-        objects.push_back(std::move(object));
-        return objects.back().mutable_content()->mutable_certificate();
+        return contents.emplace_back().mutable_certificate();
     }
 
     void setGeneration(std::int64_t generation) {
-        active.mutable_node_spec()->mutable_content()->set_revision(generation);
-        active.mutable_release()->mutable_content()->set_generation(generation);
-        active.mutable_release()->mutable_content()->set_release_id("release-" +
-                                                                    std::to_string(generation));
+        node_spec.set_revision(generation);
+        release.set_generation(generation);
+        release.set_release_id("release-" + std::to_string(generation));
     }
 
     void duplicateWebsite() {
-        flexedge::node::v2::DeliveryObject duplicate;
-        *duplicate.mutable_content()->mutable_website() = website();
-        objects.push_back(std::move(duplicate));
+        flexedge::node::v2::DeliveryObjectContent duplicate;
+        *duplicate.mutable_website() = website();
+        contents.push_back(std::move(duplicate));
     }
 
     void finalize() {
-        for (auto& object : objects) {
-            if (object.content().has_certificate()) {
-                object.set_digest_sha256(flexedge::node::artifact_digest(object.content()));
+        std::vector<std::string> certificate_digests;
+        for (const auto& content : contents) {
+            if (content.has_certificate()) {
+                certificate_digests.push_back(
+                    flexedge::node::artifact_digest(flexedge::node::serialize_artifact(content)));
             }
         }
         auto* website = mutableWebsite();
         for (auto& domain : *website->mutable_domains()) {
-            if (!domain.https_enabled()) {
+            if (!domain.https_enabled() || certificate_digests.empty() ||
+                std::ranges::find(certificate_digests, domain.certificate_digest()) !=
+                    certificate_digests.end()) {
                 continue;
             }
-            bool resolved = false;
-            for (const auto& object : objects) {
-                resolved = resolved || (object.content().has_certificate() &&
-                                           object.digest_sha256() == domain.certificate_digest());
-            }
-            if (resolved) {
-                continue;
-            }
-            for (const auto& object : objects) {
-                if (object.content().has_certificate()) {
-                    domain.set_certificate_digest(object.digest_sha256());
-                    break;
-                }
-            }
+            domain.set_certificate_digest(certificate_digests.front());
         }
-        auto* manifest = active.mutable_release()->mutable_content();
-        manifest->clear_objects();
-        for (auto& object : objects) {
-            object.set_digest_sha256(flexedge::node::artifact_digest(object.content()));
-            auto* reference = manifest->add_objects();
-            reference->set_kind(object.content().has_website()
-                                    ? flexedge::node::v2::OBJECT_KIND_WEBSITE
-                                    : flexedge::node::v2::OBJECT_KIND_CERTIFICATE);
+        objects.clear();
+        release.clear_objects();
+        for (const auto& content : contents) {
+            auto& object =
+                objects.emplace_back(flexedge::node::pack_artifact<flexedge::node::v2::DeliveryObject>(content));
+            auto* reference = release.add_objects();
+            reference->set_kind(content.has_website() ? flexedge::node::v2::OBJECT_KIND_WEBSITE
+                                                      : flexedge::node::v2::OBJECT_KIND_CERTIFICATE);
             reference->set_digest_sha256(object.digest_sha256());
         }
-        active.mutable_node_spec()->set_digest_sha256(
-            flexedge::node::artifact_digest(active.node_spec().content()));
-        active.mutable_release()->set_digest_sha256(flexedge::node::artifact_digest(*manifest));
+        *active.mutable_node_spec() = flexedge::node::pack_artifact<flexedge::node::v2::NodeSpec>(node_spec);
+        *active.mutable_release() =
+            flexedge::node::pack_artifact<flexedge::node::v2::ClusterReleaseManifest>(release);
     }
 };
 
 inline TestConfig snapshot(bool forceHttps = true) {
     TestConfig value;
-    auto* nodeSpec = value.active.mutable_node_spec()->mutable_content();
+    auto* nodeSpec = &value.node_spec;
     nodeSpec->set_node_id("f3384ad8-afbe-4aa4-8fe5-b292809c4e04");
     nodeSpec->set_schema_version(flexedge::node::node_spec_schema_version);
     nodeSpec->set_revision(3);
@@ -117,15 +112,15 @@ inline TestConfig snapshot(bool forceHttps = true) {
     endpoint->set_ip_address("127.0.0.1");
     endpoint->set_http_port(80);
     endpoint->set_https_port(443);
-    auto* release = value.active.mutable_release()->mutable_content();
+    auto* release = &value.release;
     release->set_cluster_id("53a74853-e03f-4ec9-9560-a9acdf4fe780");
     release->set_release_id("release-3");
     release->set_generation(3);
     release->set_access_domain("edge.example.com");
     release->set_enabled(true);
     release->set_schema_version(flexedge::node::cluster_release_schema_version);
-    flexedge::node::v2::DeliveryObject websiteObject;
-    auto* website = websiteObject.mutable_content()->mutable_website();
+    flexedge::node::v2::DeliveryObjectContent websiteObject;
+    auto* website = websiteObject.mutable_website();
     website->set_id("website-1");
     website->set_enabled(true);
     website->set_revision(2);
@@ -170,13 +165,13 @@ inline TestConfig snapshot(bool forceHttps = true) {
     origin->set_role("primary");
     origin->set_weight(100);
     origin->set_enabled(true);
-    flexedge::node::v2::DeliveryObject certificateObject;
-    auto* certificate = certificateObject.mutable_content()->mutable_certificate();
+    flexedge::node::v2::DeliveryObjectContent certificateObject;
+    auto* certificate = certificateObject.mutable_certificate();
     certificate->set_id("certificate-1");
     certificate->set_certificate_chain_pem("certificate");
     certificate->set_private_key_pem("private-key");
-    value.objects.push_back(std::move(certificateObject));
-    value.objects.push_back(std::move(websiteObject));
+    value.contents.push_back(std::move(certificateObject));
+    value.contents.push_back(std::move(websiteObject));
     value.finalize();
     return value;
 }

@@ -3,12 +3,14 @@
 #include <ruvia/web/model_object.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -22,12 +24,21 @@
 #include <openssl/x509.h>
 
 #include "service/features/attempt_trace/recorder.h"
+#include "service/features/certificate/acme_transport.h"
+#include "service/features/certificate/provider.h"
+#include "service/features/dns/aliyun.h"
+#include "service/features/dns/cloudflare.h"
+#include "service/features/website_dns/probe.h"
 #include "support/attempt_trace_fixture.h"
 
 namespace {
 
 using namespace std::string_view_literals;
-using service::attempt_trace::outbound_operation;
+using service::attempt_trace::outbound_policy;
+namespace acme_trace = service::certificate_issuance::acme_trace;
+namespace aliyun_trace = service::dns::aliyun_trace;
+namespace cloudflare_trace = service::dns::cloudflare_trace;
+namespace zerossl_trace = service::certificate_issuance::zerossl_trace;
 using service::attempt_trace::recorder;
 using service::attempt_trace::step_code;
 using test_support::attempt_trace::canary;
@@ -160,7 +171,7 @@ void verify_aliyun_signed_query_and_echo() {
     canaries.push_back(signature);
     const auto nonce = remember(canary("nonce"));
     exchange call{.call_ = {.origin_alias_ = service::config::aliyun_dns_origin_alias,
-                      .operation_ = outbound_operation::aliyun_describe_domains},
+                      .policy_ = &aliyun_trace::describe_domains},
         .target_ = "/?AccessKeyId=" + access_key_id +
                    "&Action=DescribeDomains&Format=JSON&PageNumber=1&PageSize=100&Signature=" +
                    test_support::attempt_trace::percent_encoded(signature, true) +
@@ -212,7 +223,7 @@ void verify_cloudflare_token_account_and_cookies() {
     const auto cookie = remember(canary("cookie"));
     const auto unknown = remember(canary("unknown"));
     exchange verify{.call_ = {.origin_alias_ = service::config::cloudflare_origin_alias,
-                        .operation_ = outbound_operation::cloudflare_verify_token},
+                        .policy_ = &cloudflare_trace::verify_token},
         .target_ = "/client/v4/accounts/" + account + "/tokens/verify",
         .request_headers_ = {{"authorization", "Bearer " + token}, {"accept", "application/json"}},
         .status_ = 401,
@@ -221,7 +232,7 @@ void verify_cloudflare_token_account_and_cookies() {
         .response_body_ = R"({"success":false,"errors":[{"code":1000,"message":"Invalid API Token )" + token +
                           R"("}],"messages":[],"result":null,"x_unlisted":")" + unknown + R"("})"};
     exchange create{.call_ = {.origin_alias_ = service::config::cloudflare_origin_alias,
-                        .operation_ = outbound_operation::cloudflare_create_record,
+                        .policy_ = &cloudflare_trace::create_record,
                         .subject_ = "_acme-challenge TXT"},
         .method_ = "POST",
         .target_ = "/client/v4/zones/0123456789abcdef/dns_records",
@@ -308,12 +319,12 @@ void verify_acme_jws_problem_and_chain() {
     const auto [certificate_pem, private_key_pem] = self_signed_certificate();
     const auto eab_protected = R"({"alg":"HS256","kid":")" + eab_kid + R"(","url":"https://acme-v02.api.letsencrypt.org/acme/new-acct"})";
     std::vector<exchange> calls{
-        {.call_ = {.origin_alias_ = origin, .operation_ = outbound_operation::acme_new_nonce},
+        {.call_ = {.origin_alias_ = origin, .policy_ = &acme_trace::new_nonce},
             .method_ = "HEAD",
             .target_ = "/acme/new-nonce",
             .status_ = 200,
             .response_headers_ = {{"Replay-Nonce", nonce}, {"Cache-Control", "no-store"}}},
-        {.call_ = {.origin_alias_ = origin, .operation_ = outbound_operation::acme_new_account},
+        {.call_ = {.origin_alias_ = origin, .policy_ = &acme_trace::new_account},
             .method_ = "POST",
             .target_ = "/acme/new-acct",
             .request_headers_ = {{"content-type", "application/jose+json"}},
@@ -328,7 +339,7 @@ void verify_acme_jws_problem_and_chain() {
             .response_headers_ = {{"content-type", "application/json"},
                 {"location", "https://acme-v02.api.letsencrypt.org/acme/acct/42"}},
             .response_body_ = R"({"status":"valid","contact":["mailto:)" + email + R"(@example.com"],"orders":"https://acme-v02.api.letsencrypt.org/acme/acct/42/orders"})"},
-        {.call_ = {.origin_alias_ = origin, .operation_ = outbound_operation::acme_new_order},
+        {.call_ = {.origin_alias_ = origin, .policy_ = &acme_trace::new_order},
             .method_ = "POST",
             .target_ = "/acme/new-order",
             .request_headers_ = {{"content-type", "application/jose+json"}},
@@ -339,7 +350,7 @@ void verify_acme_jws_problem_and_chain() {
             .status_ = 201,
             .response_headers_ = {{"content-type", "application/json"}},
             .response_body_ = R"({"status":"pending","identifiers":[{"type":"dns","value":"www.example.com"}],"authorizations":["https://acme-v02.api.letsencrypt.org/acme/authz/1"],"finalize":"https://acme-v02.api.letsencrypt.org/acme/finalize/1"})"},
-        {.call_ = {.origin_alias_ = origin, .operation_ = outbound_operation::acme_authorization},
+        {.call_ = {.origin_alias_ = origin, .policy_ = &acme_trace::authorization},
             .method_ = "POST",
             .target_ = "/acme/authz/1",
             .request_headers_ = {{"content-type", "application/jose+json"}},
@@ -350,7 +361,7 @@ void verify_acme_jws_problem_and_chain() {
             .response_headers_ = {{"content-type", "application/json"}},
             .response_body_ = R"({"status":"invalid","identifier":{"type":"dns","value":"www.example.com"},"challenges":[{"type":"dns-01","status":"invalid","url":"https://acme-v02.api.letsencrypt.org/acme/chall/1","token":")" +
                               challenge_token + R"(","error":{"type":"urn:ietf:params:acme:error:unauthorized","detail":"Incorrect TXT record","status":403}}]})"},
-        {.call_ = {.origin_alias_ = origin, .operation_ = outbound_operation::acme_finalize},
+        {.call_ = {.origin_alias_ = origin, .policy_ = &acme_trace::finalize},
             .method_ = "POST",
             .target_ = "/acme/finalize/1",
             .request_headers_ = {{"content-type", "application/jose+json"}},
@@ -361,7 +372,7 @@ void verify_acme_jws_problem_and_chain() {
             .response_headers_ = {{"content-type", "application/problem+json"}},
             .response_body_ = R"({"type":"urn:ietf:params:acme:error:badNonce","detail":"JWS has an invalid anti-replay nonce: )" +
                               nonce + R"(","status":400})"},
-        {.call_ = {.origin_alias_ = origin, .operation_ = outbound_operation::acme_certificate},
+        {.call_ = {.origin_alias_ = origin, .policy_ = &acme_trace::certificate},
             .method_ = "POST",
             .target_ = "/acme/cert/1",
             .request_headers_ = {{"content-type", "application/jose+json"}},
@@ -371,7 +382,7 @@ void verify_acme_jws_problem_and_chain() {
             .status_ = 200,
             .response_headers_ = {{"content-type", "application/pem-certificate-chain"}},
             .response_body_ = certificate_pem + certificate_pem},
-        {.call_ = {.origin_alias_ = origin, .operation_ = outbound_operation::acme_certificate},
+        {.call_ = {.origin_alias_ = origin, .policy_ = &acme_trace::certificate},
             .method_ = "POST",
             .target_ = "/acme/cert/2",
             .request_headers_ = {{"content-type", "application/jose+json"}},
@@ -458,14 +469,14 @@ void verify_zerossl_credentials() {
     trace.register_secret(email + "@example.com");
     {
         auto step = trace.begin_step(step_code::load_eab);
-        perform(trace, {.call_ = {.origin_alias_ = origin, .operation_ = outbound_operation::zerossl_eab_by_access_key},
+        perform(trace, {.call_ = {.origin_alias_ = origin, .policy_ = &zerossl_trace::eab_by_access_key},
                            .method_ = "POST",
                            .target_ = "/acme/eab-credentials?access_key=" + access_key,
                            .request_headers_ = {{"accept", "application/json"}},
                            .status_ = 200,
                            .response_headers_ = {{"content-type", "application/json"}},
                            .response_body_ = R"({"success":true,"eab_kid":")" + kid + R"(","eab_hmac_key":")" + hmac + R"("})"});
-        perform(trace, {.call_ = {.origin_alias_ = origin, .operation_ = outbound_operation::zerossl_eab_by_email},
+        perform(trace, {.call_ = {.origin_alias_ = origin, .policy_ = &zerossl_trace::eab_by_email},
                            .method_ = "POST",
                            .target_ = "/acme/eab-credentials-email",
                            .request_headers_ = {{"content-type", "application/x-www-form-urlencoded"}},
@@ -556,25 +567,25 @@ void verify_json_bounds_and_text() {
     {
         auto step = trace.begin_step(step_code::list_records);
         perform(trace, {.call_ = {.origin_alias_ = service::config::cloudflare_origin_alias,
-                            .operation_ = outbound_operation::cloudflare_list_records},
+                            .policy_ = &cloudflare_trace::list_records},
                            .target_ = "/client/v4/zones/z/dns_records?page=1&per_page=100",
                            .status_ = 200,
                            .response_headers_ = {{"content-type", "application/json"}},
                            .response_body_ = nested});
         perform(trace, {.call_ = {.origin_alias_ = service::config::cloudflare_origin_alias,
-                            .operation_ = outbound_operation::cloudflare_list_zones},
+                            .policy_ = &cloudflare_trace::list_zones},
                            .target_ = "/client/v4/zones?page=2",
                            .status_ = 502,
                            .response_headers_ = {{"content-type", "text/html"}},
                            .response_body_ = wide});
         perform(trace, {.call_ = {.origin_alias_ = service::config::cloudflare_origin_alias,
-                            .operation_ = outbound_operation::cloudflare_find_zone},
+                            .policy_ = &cloudflare_trace::find_zone},
                            .target_ = "/client/v4/zones?name=example.com",
                            .status_ = 200,
                            .response_headers_ = {{"content-type", "application/json"}},
                            .response_body_ = R"({"result": [ not json )"});
         perform(trace, {.call_ = {.origin_alias_ = service::config::cloudflare_origin_alias,
-                            .operation_ = outbound_operation::cloudflare_find_zone},
+                            .policy_ = &cloudflare_trace::find_zone},
                            .target_ = "/client/v4/zones?name=example.org",
                            .failure_ = ruvia::http_client_error::code_type::timeout});
         step.complete();
@@ -624,7 +635,7 @@ void verify_dns_over_https() {
     {
         auto step = trace.begin_step(step_code::check_domain, "www.example.com");
         perform(trace, {.call_ = {.origin_alias_ = service::config::ali_dns_doh_origin_alias,
-                            .operation_ = outbound_operation::doh_resolve,
+                            .policy_ = &service::website_dns::doh_trace::resolve,
                             .subject_ = "www.example.com"},
                            .target_ = "/resolve?name=www.example.com&type=CNAME&cd=0&do=0",
                            .request_headers_ = {{"accept", "application/dns-json"}},
@@ -632,14 +643,14 @@ void verify_dns_over_https() {
                            .response_headers_ = {{"content-type", "application/json"}},
                            .response_body_ = R"({"Status":0,"TC":false,"Question":[{"name":"www.example.com.","type":5}],"Answer":[{"name":"www.example.com.","type":5,"TTL":600,"data":"edge.example.net."}]})"});
         perform(trace, {.call_ = {.origin_alias_ = service::config::ali_dns_doh_origin_alias,
-                            .operation_ = outbound_operation::doh_resolve,
+                            .policy_ = &service::website_dns::doh_trace::resolve,
                             .subject_ = "missing.example.com"},
                            .target_ = "/resolve?name=missing.example.com&type=CNAME&cd=0&do=0",
                            .status_ = 200,
                            .response_headers_ = {{"content-type", "application/json"}},
                            .response_body_ = R"({"Status":3,"Question":[{"name":"missing.example.com.","type":5}]})"});
         perform(trace, {.call_ = {.origin_alias_ = service::config::ali_dns_doh_origin_alias,
-                            .operation_ = outbound_operation::doh_resolve,
+                            .policy_ = &service::website_dns::doh_trace::resolve,
                             .subject_ = "down.example.com"},
                            .target_ = "/resolve?name=down.example.com&type=CNAME&cd=0&do=0",
                            .failure_ = ruvia::http_client_error::code_type::connect_failed});
@@ -665,29 +676,38 @@ void verify_dns_over_https() {
         "a failed DNS query still records the query");
 }
 
-void verify_policy_table() {
+void verify_policies() {
+    const std::array policies{&cloudflare_trace::verify_token, &cloudflare_trace::list_zones,
+        &cloudflare_trace::find_zone, &cloudflare_trace::list_records, &cloudflare_trace::find_record,
+        &cloudflare_trace::create_record, &cloudflare_trace::update_record, &cloudflare_trace::delete_record,
+        &aliyun_trace::describe_domains, &aliyun_trace::describe_domain_records, &aliyun_trace::describe_support_lines,
+        &aliyun_trace::add_domain_record, &aliyun_trace::update_domain_record, &aliyun_trace::delete_domain_record,
+        &acme_trace::directory, &acme_trace::new_nonce, &acme_trace::new_account, &acme_trace::new_order,
+        &acme_trace::authorization, &acme_trace::challenge, &acme_trace::finalize, &acme_trace::order,
+        &acme_trace::certificate, &zerossl_trace::eab_by_email, &zerossl_trace::eab_by_access_key,
+        &service::website_dns::doh_trace::resolve};
+    const auto listed = [](std::span<const std::string_view> values, std::string_view value) {
+        return std::find(values.begin(), values.end(), value) != values.end();
+    };
     std::set<std::string_view> codes;
-    for (const auto& policy : service::attempt_trace::outbound_policies) {
-        require(&service::attempt_trace::policy_for(policy.operation_) == &policy, "operation maps to its policy");
-        require(codes.insert(policy.code_).second, "operation codes are unique");
+    for (const outbound_policy* policy : policies) {
+        require(codes.insert(policy->code_).second, "operation codes are unique");
         for (const auto forbidden : {"AccessKeyId"sv, "Signature"sv, "SignatureNonce"sv, "access_key"sv, "token"sv,
                  "account.id"sv}) {
-            require(!service::attempt_trace::text_detail::contains(policy.query_, forbidden),
-                "credential parameter is never allow-listed");
+            require(!listed(policy->query_, forbidden), "credential parameter is never allow-listed");
         }
         for (const auto forbidden : {"eab_hmac_key"sv, "eab_kid"sv, "token"sv, "contact"sv, "key"sv, "csr"sv,
                  "challenges[].token"sv, "externalAccountBinding"sv}) {
-            require(!service::attempt_trace::text_detail::contains(policy.response_fields_, forbidden) &&
-                        !service::attempt_trace::text_detail::contains(policy.request_fields_, forbidden),
+            require(!listed(policy->response_fields_, forbidden) && !listed(policy->request_fields_, forbidden),
                 "credential field is never allow-listed");
         }
     }
     for (const auto header : {"authorization"sv, "cookie"sv, "x-auth-key"sv}) {
-        require(!service::attempt_trace::text_detail::contains(service::attempt_trace::request_header_allow_list, header),
+        require(!listed(service::attempt_trace::request_header_allow_list, header),
             "credential request header is never allow-listed");
     }
     for (const auto header : {"set-cookie"sv, "replay-nonce"sv}) {
-        require(!service::attempt_trace::text_detail::contains(service::attempt_trace::response_header_allow_list, header),
+        require(!listed(service::attempt_trace::response_header_allow_list, header),
             "credential response header is never allow-listed");
     }
 }
@@ -697,7 +717,7 @@ void verify_policy_table() {
 int main() {
     try {
         test_support::attempt_trace::ensure_outbound_origins();
-        verify_policy_table();
+        verify_policies();
         verify_aliyun_signed_query_and_echo();
         verify_cloudflare_token_account_and_cookies();
         verify_acme_jws_problem_and_chain();

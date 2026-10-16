@@ -1,4 +1,5 @@
-"""Local task-center reads and resource writes; run after the isolated --keep-fixture setup."""
+"""Local task-center reads and resource writes; run after the isolated --keep-fixture setup
+of task_center_read_model_test.py against the same database."""
 import http.cookies
 import json
 import os
@@ -13,12 +14,13 @@ if urllib.parse.urlparse(base).hostname not in {"127.0.0.1", "localhost", "::1"}
 cookie = ""
 
 
-def op(n):
-    return f"00000000-0000-4000-8000-0000000a{n:02d}00"
+def uid(n):
+    return f"00000000-0000-4000-8000-{n:012d}"
 
 
-def sub(n, i=1):
-    return f"00000000-0000-4000-8000-0000000b{n:02d}{i:02d}"
+Z1, Z2, Z3, Z4 = (uid(n) for n in (201, 202, 203, 204))
+P1, P2 = uid(101), uid(102)
+N1, N2, N3, N4, N5, N6 = (uid(n) for n in range(501, 507))
 
 
 def request(path, expected=200, body=None, authenticated=True, method=None, revision=None):
@@ -58,7 +60,7 @@ def frames(path, count=1):
             if line.startswith("event: "): event = line[7:]
             elif line.startswith("data: "): data = line[6:]
             elif not line and event:
-                if event not in ("ready", "heartbeat"):
+                if event != "ready":
                     result.append((event, json.loads(data)))
                     if len(result) == count:
                         return result
@@ -79,214 +81,189 @@ def snapshot(path, expected_code=0):
     return value.get("data")
 
 
+def read(path, expected_code=0, status=200):
+    """GET `data`, or asserts the error envelope and its HTTP status."""
+    value = request(path, status)
+    assert value["code"] == expected_code, (path, value)
+    return value.get("data")
+
+
 def total(query):
-    return snapshot("/api/operations/stream?" + query)["total"]
+    return snapshot("/api/tasks/stream?" + query)["total"]
 
 
-request("/api/operations/stream", 401, authenticated=False)
-request(f"/api/operations/{op(1)}/stream", 401, authenticated=False)
+request("/api/tasks/stream", 401, authenticated=False)
+request("/api/tasks", 401, authenticated=False)
+request(f"/api/tasks/dns_zone/{Z1}/stream", 401, authenticated=False)
+request(f"/api/tasks/dns_zone/{Z1}", 401, authenticated=False)
 request("/api/auth/login", body={"username": "admin", "password": os.environ["TASK_QA_PASSWORD"]})
 
-# List: pagination, tenant-wide counters, order created_at DESC.
-page = snapshot("/api/operations/stream?page=1&page_size=5")
-assert (page["total"], page["page"], page["page_size"], page["total_pages"]) == (12, 1, 5, 3), page
-assert (page["active"], page["attention"]) == (5, 5), page
-assert [item["id"] for item in page["list"]] == [op(n) for n in (1, 2, 3, 4, 5)], page["list"]
-assert [item["status"] for item in page["list"]] == ["queued", "running", "retrying", "partial_failed", "retrying"]
-last = snapshot("/api/operations/stream?page=3&page_size=5")
-assert [item["id"] for item in last["list"]] == [op(8), op(10)] and last["total"] == 12, last
-beyond = snapshot("/api/operations/stream?page=99&page_size=5")
-assert beyond["list"] == [] and beyond["total"] == 12 and beyond["active"] == 5, beyond
-assert snapshot("/api/operations/stream")["page_size"] == 20
+# List: pagination, tenant-wide counters, order updated_at DESC.
+order = [Z1, N3, Z2, Z3, Z4, P1, P2, N1, N2, N4]
+page = snapshot("/api/tasks/stream?page=1&page_size=4")
+assert (page["total"], page["page"], page["page_size"], page["total_pages"]) == (10, 1, 4, 3), page
+assert (page["active"], page["failed"]) == (4, 2), page
+assert [item["resource_id"] for item in page["list"]] == order[:4], page["list"]
+assert [item["status"] for item in page["list"]] == ["queued", "retrying", "running", "retrying"]
+last = snapshot("/api/tasks/stream?page=3&page_size=4")
+assert [item["resource_id"] for item in last["list"]] == order[8:] and last["total"] == 10, last
+beyond = snapshot("/api/tasks/stream?page=99&page_size=4")
+assert beyond["list"] == [] and beyond["total"] == 10 and beyond["active"] == 4, beyond
+assert snapshot("/api/tasks/stream")["page_size"] == 20
+# GET reads answer the stream's first snapshot.
+assert read("/api/tasks?page=1&page_size=4") == page
+assert read("/api/tasks?status=failed&page_size=100") == snapshot("/api/tasks/stream?status=failed&page_size=100")
+read("/api/tasks?status=unknown", 10001, 400)
+for item in snapshot("/api/tasks/stream?page_size=100")["list"]:
+    assert "version" not in item and "id" not in item and item["resource_id"] not in (N5, N6), item
 
 # Filters; counters ignore them.
-statuses = {"queued": 2, "running": 1, "retrying": 2, "failed": 1, "partial_failed": 1, "attention_required": 1,
-            "completed": 2, "merged": 1, "cancelled": 1, "active": 5, "attention": 5}
+statuses = {"queued": 1, "running": 1, "retrying": 2, "failed": 2, "completed": 3, "attention_required": 1,
+            "active": 4, "attention": 5}
 for status, count in statuses.items():
     assert total("status=" + status) == count, status
-filtered = snapshot("/api/operations/stream?status=merged")
-assert (filtered["active"], filtered["attention"]) == (5, 5) and filtered["list"][0]["id"] == op(6), filtered
-assert total("action=dns_zone.sync") == 2
-assert total("action=website.create") == 0 and total("action=no.such_action") == 0
-for target_type, count in {"dns_zone": 7, "cluster": 1, "node": 2, "provider": 2, "website": 0, "certificate": 0}.items():
-    assert total("target_type=" + target_type) == count, target_type
-assert total("actor=me") == 10 and total("actor=system") == 1
-assert total("days=0") == 12 and total("days=1") == 10 and total("days=7") == 11
-assert total("status=active&target_type=dns_zone") == 3
-for keyword, count in {"%25": 1, "_": 1, "100%25_": 1, "%27": 0, "%5C": 0, "QA-1.EXAMPLE": 2, "+qa-1.example.com+": 2,
-                       "000000000401": 1, "letsencrypt": 1}.items():
+filtered = snapshot("/api/tasks/stream?status=failed")
+assert (filtered["active"], filtered["failed"]) == (4, 2), filtered
+assert [item["resource_id"] for item in filtered["list"]] == [N2, N4], filtered
+for task_type, count in {"dns_zone": 4, "provider": 2, "node": 4, "website": 0, "certificate": 0}.items():
+    assert total("type=" + task_type) == count, task_type
+assert total("status=active&type=node") == 1
+for keyword, count in {"%25": 1, "_": 1, "%27": 0, "%5C": 0, "QA-1.EXAMPLE": 1, "+qa-1.example.com+": 1,
+                       "000000000201": 1, "qa+node": 4, "letsencrypt": 1}.items():
     assert total("keyword=" + keyword) == count, keyword
-for query in ("status=unknown", "status=ACTIVE", "target_type=unknown", "actor=other", "days=2", "days=x", "page=0",
-              "page=-1", "page_size=0", "page_size=101", "keyword=" + "a" * 201, "action=" + "a" * 49):
-    snapshot("/api/operations/stream?" + query, expected_code=10001)
+for query in ("status=unknown", "status=ACTIVE", "status=merged", "type=unknown", "type=cluster", "page=0",
+              "page=-1", "page_size=0", "page_size=101", "keyword=" + "a" * 201):
+    snapshot("/api/tasks/stream?" + query, expected_code=10001)
 
-# Detail snapshots (contract 3.3/3.4).
-detail = snapshot(f"/api/operations/{op(4)}/stream")
-assert (detail["status"], detail["subtask_count"], detail["settled_count"], detail["failed_count"]) == \
-    ("partial_failed", 3, 3, 1), detail
-assert (detail["target_type"], detail["target_name"], detail["target_deleted"]) == ("cluster", "QA cluster", False)
-assert detail["actor_type"] == "user" and detail["actor_name"] == "Administrator" and "target_kind" not in detail
-assert detail["error"] == "QA deployment error" and detail["finished_at"] and detail["next_attempt_at"] == ""
-assert detail["summary"] == {"sections": ["dns"]}
-subtasks = {item["id"]: item for item in detail["subtasks"]}
-assert [item["id"] for item in detail["subtasks"]] == [sub(4, 1), sub(4, 2), sub(4, 3)]
-assert subtasks[sub(4, 3)]["parent_id"] == sub(4, 1) and subtasks[sub(4, 1)]["parent_id"] == ""
-assert (subtasks[sub(4, 1)]["status"], subtasks[sub(4, 2)]["status"]) == ("completed", "failed")
-assert subtasks[sub(4, 2)]["error"] == "QA deployment error" and subtasks[sub(4, 2)]["finished_at"]
-child = subtasks[sub(4, 3)]
-assert (child["kind"], child["status"], child["warning"], child["resource_deleted"]) == \
-    ("dns_sync", "attention_required", "dns_conflict", True), child
-for item in detail["subtasks"]:
-    assert item["duration_ms"] >= 0 and item["running_since"] == "" and "merged_into" not in item, item
-    assert item["node_offline"] is False and "closed_by" not in item, item
+# Task snapshots.
+fields = {"resource_type", "resource_id", "resource_kind", "name", "operation", "status", "warning", "error",
+          "next_attempt_at", "updated_at", "last_success_at", "attempt_count", "failure_count", "node_offline"}
+retrying = snapshot(f"/api/tasks/dns_zone/{Z3}/stream")
+assert set(retrying) == fields, retrying
+assert (retrying["status"], retrying["operation"], retrying["error"], retrying["attempt_count"],
+        retrying["failure_count"]) == ("retrying", "sync", "QA: API read failed", 3, 2), retrying
+assert retrying["next_attempt_at"] and retrying["last_success_at"] == "" and retrying["name"] == "qa-3.example.com"
+running = snapshot(f"/api/tasks/dns_zone/{Z2}/stream")
+assert (running["status"], running["operation"], running["next_attempt_at"]) == ("running", "sync_local", "")
+attention = snapshot(f"/api/tasks/dns_zone/{Z4}/stream")
+assert (attention["status"], attention["warning"], attention["error"]) == ("attention_required", "dns_conflict", "")
+recovered = snapshot(f"/api/tasks/provider/{P1}/stream")
+assert (recovered["status"], recovered["resource_kind"], recovered["attempt_count"], recovered["failure_count"],
+        recovered["name"]) == ("completed", "dns", 2, 1, "QA 100%_dns"), recovered
+reinitiated = snapshot(f"/api/tasks/provider/{P2}/stream")
+assert (reinitiated["resource_kind"], reinitiated["name"], reinitiated["attempt_count"],
+        reinitiated["failure_count"]) == ("certificate", "letsencrypt", 2, 0), reinitiated
+healthy = snapshot(f"/api/tasks/node/{N1}/stream")
+assert (healthy["status"], healthy["operation"], healthy["attempt_count"], healthy["failure_count"],
+        healthy["node_offline"]) == ("completed", "publish", 3, 1, False), healthy
+publish_failed = snapshot(f"/api/tasks/node/{N2}/stream")
+assert (publish_failed["status"], publish_failed["error"], publish_failed["node_offline"]) == \
+    ("failed", "QA deployment error", True), publish_failed
+configure = snapshot(f"/api/tasks/node/{N3}/stream")
+assert (configure["status"], configure["operation"], configure["error"], configure["node_offline"],
+        configure["failure_count"]) == ("retrying", "configure", "QA: node rejected config", True, 1), configure
+configure_failed = snapshot(f"/api/tasks/node/{N4}/stream")
+assert (configure_failed["status"], configure_failed["error"], configure_failed["node_offline"]) == \
+    ("failed", "QA: node apply failed", False), configure_failed
+assert read(f"/api/tasks/dns_zone/{Z3}") == retrying
+assert read(f"/api/tasks/node/{N4}") == configure_failed
 
-retrying = snapshot(f"/api/operations/{op(5)}/stream")
-assert (retrying["status"], retrying["settled_count"], retrying["failed_count"]) == ("retrying", 1, 1), retrying
-assert retrying["finished_at"] == "" and retrying["next_attempt_at"] == "" and not retrying["target_deleted"]
-publish, config = retrying["subtasks"]
-assert publish["status"] == "completed" and publish["node_offline"] is False, publish
-assert (config["parent_id"], config["kind"], config["status"], config["node_offline"]) == \
-    (sub(5, 1), "node_config", "retrying", True), config
-assert config["error"] == "QA: node rejected config" and config["duration_ms"] == 0 and config["finished_at"] == ""
-
-running = snapshot(f"/api/operations/{op(2)}/stream")
-assert running["status"] == "running" and running["subtasks"][0]["running_since"], running
-assert running["summary"] == {"conflict_policy": "local"}
-merged = snapshot(f"/api/operations/{op(6)}/stream")
-assert merged["status"] == "merged" and merged["finished_at"], merged
-assert merged["subtasks"][0]["merged_into"] == {"operation_id": op(1), "subtask_id": sub(1), "action": "dns_zone.sync",
-                                                "target_name": "qa-1.example.com", "status": "queued"}, merged
-assert "closed_by" not in merged["subtasks"][0]
-cancelled = snapshot(f"/api/operations/{op(7)}/stream")
-assert cancelled["status"] == "cancelled" and cancelled["settled_count"] == 3, cancelled
-closers = [(item["status"], item.get("closed_by")) for item in cancelled["subtasks"]]
-assert closers == [
-    ("cancelled", {"operation_id": op(2), "action": "dns_zone.sync_local", "target_name": "qa-2.example.com"}),
-    ("merged", {"operation_id": op(3), "action": "dns_zone.update_records", "target_name": "qa-3.example.com"}),
-    ("cancelled", None)], closers
-system = snapshot(f"/api/operations/{op(8)}/stream")
-assert (system["actor_type"], system["actor_name"], system["status"], system["subtasks"]) == ("system", "", "completed", [])
-assert system["finished_at"] == system["created_at"], system
-recovered = snapshot(f"/api/operations/{op(9)}/stream")
-assert recovered["target_kind"] == "dns" and recovered["status"] == "completed", recovered
-item = recovered["subtasks"][0]
-assert (item["recovered"], item["attempt_count"], item["failure_count"], item["error"]) == (True, 2, 1, "")
-assert snapshot(f"/api/operations/{op(10)}/stream")["target_kind"] == "certificate"
-attention = snapshot(f"/api/operations/{op(12)}/stream")
-assert attention["status"] == "attention_required" and attention["subtasks"][0]["warning"] == "dns_conflict"
-failed = snapshot(f"/api/operations/{op(13)}/stream")
-assert failed["status"] == "failed" and failed["subtasks"][0]["node_offline"] is False, failed
-
-# Expanded subtask: snapshot first, then its history (newest first).
-retry_task = snapshot(f"/api/operations/{op(3)}/stream")
-assert retry_task["next_attempt_at"] and retry_task["error"] == "QA: API read failed", retry_task
-[(first, head), (second, body)] = frames(f"/api/operations/{op(3)}/stream?subtask_id={sub(3)}", 2)
+# The detail stream: snapshot first, then the history (newest first).
+[(first, head), (second, body)] = frames(f"/api/tasks/dns_zone/{Z3}/stream", 2)
 assert (first, head["code"], second, body["code"]) == ("snapshot", 0, "history", 0), (first, second)
-assert head["data"] == retry_task, head
+assert head["data"] == retrying, head
 history = body["data"]
-assert history["subtask_id"] == sub(3) and history["truncated"] is False, history
-assert [(entry["attempt"], entry["outcome"], entry["error"]) for entry in history["list"]] == \
-    [(2, "failed", "QA: API read failed"), (1, "failed", "QA: API timeout")], history["list"]
-assert [entry["trace"]["attempt_id"] for entry in history["list"]] == ["990002", "990001"]
-assert history["list"][0]["trace"]["state"] == "available" and history["list"][1]["trace"]["state"] == "none"
+assert set(history) == {"summary", "list"}, history
+assert [(entry["id"], entry["attempt"], entry["operation"], entry["outcome"], entry["error"])
+        for entry in history["list"]] == [("990003", 2, "sync", "failed", "QA: API read failed"),
+                                          ("990002", 1, "sync", "failed", "QA: API timeout"),
+                                          ("990001", 1, "sync", "failed", "QA: old version")], history["list"]
+assert [entry["trace"]["attempt_id"] for entry in history["list"]] == ["990003", "990002", "990001"]
+assert [entry["trace"]["state"] for entry in history["list"]] == ["available", "none", "none"]
 assert history["list"][1]["duration_ms"] == 2000 and history["list"][1]["started_at"]
 assert history["list"][1]["detail"] == {"kind": "none", "truncated": False}
 summary = history["summary"]
-assert (summary["attempt_count"], summary["failure_count"], summary["last_success_at"]) == (2, 2, ""), summary
-assert summary["first_failure_at"] == history["list"][1]["emitted_at"] and summary["next_attempt_at"], summary
-recovery = frames(f"/api/operations/{op(9)}/stream?subtask_id={sub(9)}", 2)[1][1]["data"]
+assert (summary["attempt_count"], summary["failure_count"], summary["last_success_at"]) == (3, 3, ""), summary
+assert summary["first_failure_at"] == history["list"][2]["emitted_at"], summary
+node_history = frames(f"/api/tasks/node/{N3}/stream", 2)[1][1]["data"]
+assert [(entry["operation"], entry["outcome"]) for entry in node_history["list"]] == \
+    [("configure", "failed"), ("configure", "failed")], node_history
+recovery = frames(f"/api/tasks/provider/{P1}/stream", 2)[1][1]["data"]
 assert [entry["outcome"] for entry in recovery["list"]] == ["completed", "failed"]
 assert recovery["summary"]["last_success_at"] == recovery["list"][0]["emitted_at"]
-for foreign in (sub(3), sub(11), "00000000-0000-4000-8000-00000000ffff"):
-    errors = frames(f"/api/operations/{op(1)}/stream?subtask_id={foreign}", 2)
-    assert [(event, value["code"]) for event, value in errors] == [("resource-error", 16705)] * 2, (foreign, errors)
-snapshot(f"/api/operations/{op(1)}/stream?subtask_id=invalid", expected_code=10001)
+isolated = frames(f"/api/tasks/dns_zone/{Z1}/stream", 2)[1][1]["data"]
+assert isolated["list"] == [] and isolated["summary"]["attempt_count"] == 0, isolated
 
-# Attempt traces.
-trace = snapshot(f"/api/operations/{op(3)}/attempts/990002/trace/stream")
-assert (trace["attempt_id"], trace["subtask_id"], trace["resource_type"], trace["resource_id"]) == \
-    ("990002", sub(3), "dns_zone", "00000000-0000-4000-8000-000000000203"), trace
+# Attempt traces: GET only.
+trace = read(f"/api/tasks/dns_zone/{Z3}/attempts/990003/trace")
+assert (trace["attempt_id"], trace["resource_type"], trace["resource_id"]) == ("990003", "dns_zone", Z3), trace
 assert (trace["state"], trace["kind"], trace["attempt"], trace["outcome"], trace["error"]) == \
     ("available", "none", 2, "failed", "QA: API read failed"), trace
 assert trace["worker_type"] == "dns-sync" and trace["capture"]["bytes"] == 64 and trace["steps"] == [], trace
 assert "task_id" not in trace
-untraced = snapshot(f"/api/operations/{op(3)}/attempts/990001/trace/stream")
+untraced = read(f"/api/tasks/dns_zone/{Z3}/attempts/990002/trace")
 assert (untraced["state"], untraced["attempt"], untraced["capture"]["bytes"]) == ("none", 1, 0), untraced
 assert untraced["worker_type"] == "dns-sync" and untraced["duration_ms"] == 2000, untraced
-# Another task's attempt, another tenant's attempt, an untracked attempt and
-# an unknown one are all "not found" for this task.
-for attempt_id in (990002, 990901, 990008, 999999999):
-    snapshot(f"/api/operations/{op(1)}/attempts/{attempt_id}/trace/stream", expected_code=16706)
-snapshot(f"/api/operations/{op(99)}/attempts/990002/trace/stream", expected_code=16706)
+# Another task's attempt, the same task under another type, another tenant's
+# attempt and an unknown one are all "not found".
+for path in (f"dns_zone/{Z1}/attempts/990003", f"node/{Z3}/attempts/990003", f"dns_zone/{Z1}/attempts/990901",
+             f"dns_zone/{Z3}/attempts/999999999"):
+    read(f"/api/tasks/{path}/trace", 16706, 404)
 for attempt_id in ("0", "-1", "not-a-number"):
-    snapshot(f"/api/operations/{op(3)}/attempts/{attempt_id}/trace/stream", expected_code=10001)
-snapshot("/api/operations/invalid/attempts/990002/trace/stream", expected_code=10001)
+    read(f"/api/tasks/dns_zone/{Z3}/attempts/{attempt_id}/trace", 10001, 400)
+read("/api/tasks/dns_zone/invalid/attempts/990003/trace", 10001, 400)
+read(f"/api/tasks/cluster/{Z3}/attempts/990003/trace", 10001, 400)
+request(f"/api/tasks/dns_zone/{Z3}/attempts/990003/trace/stream", 404)
 
-# Unknown and foreign-tenant tasks; the removed API.
-snapshot(f"/api/operations/{op(99)}/stream", expected_code=16701)
-snapshot(f"/api/operations/{op(11)}/stream", expected_code=16701)
-snapshot("/api/operations/invalid/stream", expected_code=10001)
-assert all(item["id"] != op(11) for item in snapshot("/api/operations/stream?page_size=100")["list"])
-request("/api/tasks/stream", 404)
+# Unknown tasks, tasks under the wrong type, removed nodes; invalid identities; the removed API.
+for path in (f"dns_zone/{uid(999)}", f"node/{Z1}", f"dns_zone/{N1}", f"node/{N5}", f"node/{N6}"):
+    snapshot(f"/api/tasks/{path}/stream", expected_code=16701)
+    read(f"/api/tasks/{path}", 16701, 404)
+snapshot("/api/tasks/dns_zone/invalid/stream", expected_code=10001)
+snapshot(f"/api/tasks/cluster/{Z1}/stream", expected_code=10001)
+read(f"/api/tasks/cluster/{Z1}", 10001, 400)
+request("/api/operations/stream", 404)
+
 
 # Actual authenticated writes, after all fixed-fixture count assertions.
-# Creating a provider and changing only its display name schedules no worker
-# or external API call, but each successful request still owns one task.
-def operation_ids():
-    page = snapshot("/api/operations/stream?page_size=100")
+# Creating a provider and changing only its display name schedules no
+# background work: no task appears and responses carry no task reference.
+def task_ids():
+    page = snapshot("/api/tasks/stream?page_size=100")
     assert page["total"] == len(page["list"]), page
-    return {item["id"] for item in page["list"]}
+    return {(item["resource_type"], item["resource_id"]) for item in page["list"]}
 
 
-def write_operation(path, action, body=None, method="POST", revision=None):
-    before = operation_ids()
+def write(path, body=None, method="POST", revision=None):
+    before = task_ids()
     response = request(path, body=body, method=method, revision=revision)
-    assert response["code"] == 0, response
-    operation_id = response.get("data", {}).get("operation_id")
-    assert operation_id and operation_id not in before, response
-    after = operation_ids()
-    assert after == before | {operation_id}, (path, before, after, operation_id)
-    task = snapshot(f"/api/operations/{operation_id}/stream")
-    assert task["action"] == action and task["actor_type"] == "user", task
-    assert (task["status"], task["subtask_count"], task["settled_count"], task["subtasks"]) == \
-        ("completed", 0, 0, []), task
-    assert task["finished_at"] == task["created_at"], task
-    return task
+    assert response["code"] == 0 and "data" not in response, response
+    assert task_ids() == before, (path, "a write without background work created a task")
+    return response
 
 
 def failed_write(path, status, code, body=None, method="POST", revision=None):
-    before = operation_ids()
+    before = task_ids()
     response = request(path, expected=status, body=body, method=method, revision=revision)
-    assert response["code"] == code and not response.get("data", {}).get("operation_id"), response
-    assert operation_ids() == before, (path, "failed write created a task")
+    assert response["code"] == code, response
+    assert task_ids() == before, (path, "failed write created a task")
 
 
 account_id = uuid.uuid4().hex
-provider_name = "Task operation QA " + account_id[:8]
+provider_name = "Task center QA " + account_id[:8]
 provider_body = {"name": provider_name, "provider": "cloudflare", "account_id": account_id,
                  "api_token": "qa-only-token-never-used-for-network"}
-created = write_operation("/api/providers/dns", "provider.create", provider_body)
-provider_id = created["target_id"]
-assert created["target_type"] == "provider" and created["target_kind"] == "dns", created
-assert created["target_name"] == provider_name and created["target_deleted"] is False, created
+write("/api/providers/dns", provider_body)
+providers = snapshot("/api/providers/dns/stream?page_size=100&keyword=" + urllib.parse.quote(provider_name))
+[provider_id] = [item["id"] for item in providers["list"] if item["name"] == provider_name]
 failed_write("/api/providers/dns", 409, 16102, provider_body)
-
-updated = write_operation(f"/api/providers/dns/{provider_id}", "provider.update",
-    {"name": provider_name + " renamed"}, method="PUT", revision=1)
-assert updated["target_id"] == provider_id and updated["summary"] == {"credentials_changed": False}, updated
-again = write_operation(f"/api/providers/dns/{provider_id}", "provider.update",
-    {"name": provider_name + " again"}, method="PUT", revision=2)
-assert len({created["id"], updated["id"], again["id"]}) == 3, (created, updated, again)
-failed_write(f"/api/providers/dns/{provider_id}", 412, 16107,
-    {"name": "Must not be saved"}, method="PUT", revision=1)
+write(f"/api/providers/dns/{provider_id}", {"name": provider_name + " renamed"}, method="PUT", revision=1)
+failed_write(f"/api/providers/dns/{provider_id}", 412, 16107, {"name": "Must not be saved"}, method="PUT", revision=1)
 provider = snapshot(f"/api/providers/dns/{provider_id}/stream")
-assert provider["name"] == provider_name + " again" and provider["revision"] == 3, provider
-
-deleted = write_operation(f"/api/providers/dns/{provider_id}", "provider.delete", method="DELETE", revision=3)
-assert deleted["target_id"] == provider_id and deleted["target_deleted"] is True, deleted
-assert deleted["target_name"] == provider_name + " again", deleted
+assert provider["name"] == provider_name + " renamed" and provider["revision"] == 2, provider
+write(f"/api/providers/dns/{provider_id}", method="DELETE", revision=2)
 snapshot(f"/api/providers/dns/{provider_id}/stream", expected_code=16101)
 
-print("Task SSE integration passed: authentication, pagination, filters, validation, detail roll-up, merged/closed_by, "
-      "target kinds, subtask history, attempt traces, tenant isolation, removed /api/tasks, "
-      "one root per actual resource write including zero-child operations, failed writes leave no task.")
+print("Task HTTP/SSE integration passed: authentication, pagination, filters, validation, GET/stream parity, "
+      "marker and node statuses, current-work failure counts, history, GET-only attempt traces, tenant isolation, "
+      "removed /api/operations, writes without background work create no task.")

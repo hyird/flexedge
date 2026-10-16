@@ -1,20 +1,9 @@
 #pragma once
 
-#include <ruvia/core/channel.h>
-#include <ruvia/core/event_loop.h>
-#include <ruvia/core/stop_token.h>
-#include <ruvia/core/task.h>
-#include <ruvia/core/worker_handle.h>
-
-#include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <optional>
-#include <span>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
 #include <asio/ip/address.hpp>
@@ -22,7 +11,7 @@
 namespace flexedge::node {
 
 // Open data-plane connections per client IP address on one worker. Only the owning worker loop
-// opens, closes and copies it; other loops receive immutable copies (count_connected_ips).
+// opens, closes and copies it; other loops receive immutable copies (collect_worker_load).
 class connected_clients final {
 public:
     // IPv6 form of the address: an IPv4 client and its IPv4-mapped spelling on a dual-stack
@@ -69,54 +58,5 @@ private:
 
     std::unordered_map<address_key, std::uint32_t, address_hash> connections_;
 };
-
-// One data-plane worker loop and the registry it owns.
-struct worker_connected_clients final {
-    ruvia::event_loop loop_;
-    const connected_clients* clients_{};
-};
-
-inline constexpr auto connected_clients_snapshot_timeout = std::chrono::seconds(2);
-
-// Distinct client IP addresses with an open connection on any of the workers; runs on `owner`.
-// SO_REUSEPORT spreads one client's connections across workers, so per-worker counts cannot be
-// added. Each worker copies its own address set on its loop and sends the copy here; the union
-// is counted. Empty when a worker cannot answer, so callers omit the value instead of
-// reporting a partial count.
-inline ruvia::task<std::optional<std::int64_t>> count_connected_ips(ruvia::worker_handle owner,
-    std::span<const worker_connected_clients> workers, ruvia::stop_token stop) {
-    if (workers.empty()) {
-        co_return 0;
-    }
-    using address_set = std::vector<connected_clients::address_key>;
-    auto [sender, receiver] =
-        ruvia::make_channel<address_set>(std::move(owner), {.capacity_ = workers.size()});
-    for (const auto& worker : workers) {
-        const auto posted = worker.loop_.post([sender, clients = worker.clients_] {
-            try {
-                (void)sender.send(clients->snapshot());
-            } catch (...) {
-                // Without this worker's copy no count is reported; closing ends the wait now.
-                sender.close();
-            }
-        });
-        if (!posted.accepted()) {
-            co_return std::nullopt;
-        }
-    }
-    address_set addresses;
-    for (std::size_t received = 0; received < workers.size(); ++received) {
-        auto copy = co_await receiver.receive_for(connected_clients_snapshot_timeout, stop);
-        if (!copy.has_value()) {
-            co_return std::nullopt;
-        }
-        const auto& worker_addresses = copy.value();
-        addresses.insert(addresses.end(), worker_addresses.begin(), worker_addresses.end());
-    }
-    std::ranges::sort(addresses);
-    const auto duplicates = std::ranges::unique(addresses);
-    addresses.erase(duplicates.begin(), duplicates.end());
-    co_return static_cast<std::int64_t>(addresses.size());
-}
 
 }  // namespace flexedge::node

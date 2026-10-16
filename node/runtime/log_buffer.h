@@ -10,7 +10,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -140,23 +139,6 @@ public:
         return producer(*this, worker_shard_offset_ == 0 ? 0 : 1);
     }
 
-    static std::string request_header_value(std::string_view name, std::string_view value) {
-        (void)name;
-        return std::string(value);
-    }
-
-    static std::string request_body_value(std::string_view value) {
-        return std::string(value);
-    }
-
-    static std::string response_header_value(std::string_view name, std::string_view value) {
-        return request_header_value(name, value);
-    }
-
-    static std::string cookie_value(std::string_view value) {
-        return std::string(value);
-    }
-
     bool access(access_record record) {
         return push(0, access_event(std::move(record)));
     }
@@ -191,38 +173,6 @@ public:
             result += shard->dropped_events_.load(std::memory_order_relaxed);
         }
         return result;
-    }
-
-    [[nodiscard]] bool wait_for_control_drain(std::chrono::milliseconds timeout) const noexcept {
-        const auto deadline = std::chrono::steady_clock::now() + timeout;
-        const auto control_shard_count =
-            worker_shard_offset_ == 0 ? std::size_t{1} : worker_shard_offset_;
-        const auto control_pending = [this, control_shard_count] {
-            for (std::size_t index = 0; index < control_shard_count; ++index) {
-                if (shards_[index]->retained_events_.load(std::memory_order_acquire) != 0) {
-                    return true;
-                }
-            }
-            return false;
-        };
-        while (control_pending()) {
-            if (std::chrono::steady_clock::now() >= deadline) {
-                return false;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        return true;
-    }
-
-    [[nodiscard]] bool wait_for_drain(std::chrono::milliseconds timeout) const noexcept {
-        const auto deadline = std::chrono::steady_clock::now() + timeout;
-        while (retained_events() != 0) {
-            if (std::chrono::steady_clock::now() >= deadline) {
-                return false;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        return true;
     }
 
     [[nodiscard]] std::optional<in_flight_delivery> take(std::string_view node_id) {

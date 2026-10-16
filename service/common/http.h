@@ -7,6 +7,7 @@
 #include <cctype>
 #include <charconv>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <optional>
 #include <string>
@@ -197,6 +198,20 @@ inline std::optional<std::string> require_keyword(std::optional<std::string_view
     return std::string(begin, end);
 }
 
+// A present query parameter must be one of `allowed`; absence means no filter.
+// A rejected value fails with the caller's `message`.
+inline std::optional<std::string> require_enum_query(ruvia::context& c, std::string_view name,
+    std::initializer_list<std::string_view> allowed, std::string_view message) {
+    const auto value = c.req().query(name);
+    if (!value) {
+        return std::nullopt;
+    }
+    if (std::find(allowed.begin(), allowed.end(), *value) == allowed.end()) {
+        throw_app_error(validation_error_code, message, 400);
+    }
+    return std::string(*value);
+}
+
 inline std::int64_t require_expected_revision(ruvia::context& c) {
     const auto header = c.req().header("If-Match");
     if (!header) {
@@ -217,17 +232,10 @@ inline std::string require_uuid_param(ruvia::context& c, std::string_view name) 
     return std::move(*value);
 }
 
-// `operation_id`: the resource operation, whether or not it needs background work.
-inline operation_response operation(ruvia::context& c, std::string_view message,
-    const std::optional<std::string>& operation_id = std::nullopt) {
+inline operation_response operation(ruvia::context& c, std::string_view message) {
     operation_response response({.resource_ = c.pool()});
     response.set<"code">(0);
     response.set<"message">(message);
-    if (operation_id) {
-        operation_reference_dto reference({.resource_ = c.pool()});
-        reference.set<"operation_id">(*operation_id);
-        response.set<"data">(std::move(reference));
-    }
     return response;
 }
 

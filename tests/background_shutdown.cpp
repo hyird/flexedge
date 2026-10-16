@@ -110,8 +110,9 @@ int main() {
         if (!database || !redis) {
             return 77;
         }
+        const test_support::postgres_test_database temporary_database(*database);
         auto& app = ruvia::app();
-        app.database({.config_ = *database});
+        app.database({.config_ = temporary_database.config()});
         app.redis({.config_ = *redis});
         app.get_http_client({.alias_ = "shutdown-test", .config_ = {.host_ = "127.0.0.1", .port_ = 1}});
         app.server({.worker_count_ = 2, .drain_timeout_ = std::chrono::milliseconds(0)});

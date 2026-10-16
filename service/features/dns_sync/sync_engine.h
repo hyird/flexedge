@@ -18,7 +18,6 @@
 #include "service/features/background/task_context.h"
 #include "service/features/dns/driver.h"
 #include "service/features/dns_sync/attempt_detail.h"
-#include "service/features/dns_sync/failure.h"
 #include "service/features/dns_sync/mapper.h"
 #include "service/features/dns_sync/reconciliation.h"
 #include "service/features/dns_sync/task.h"
@@ -187,13 +186,8 @@ inline ruvia::task<reconciled_zone> reconcile_zone_records(
                                                         : std::string_view{known->second},
                         managed.type_, managed.name_, managed.content_, managed.ttl_, managed.priority_,
                         managed.proxied_, managed.line_code_, remote_records);
-                } catch (const service::dns::cloudflare_error& error) {
-                    if (error.code() != service::dns::cloudflare_error_code::record_name_conflict) {
-                        throw;
-                    }
-                    unsynced_error = error.what();
-                } catch (const service::dns::aliyun_error& error) {
-                    if (error.code() != service::dns::aliyun_error_code::record_name_conflict) {
+                } catch (const service::dns::provider_error& error) {
+                    if (error.code() != service::dns::provider_error_code::record_name_conflict) {
                         throw;
                     }
                     unsynced_error = error.what();
@@ -294,20 +288,12 @@ inline ruvia::task<std::int64_t> sync_zone(service::background::task_context& co
     try {
         remote = co_await load_remote_zone_data(context, trace, lease, driver, state->account_id_,
             secret.view(), state->domain_);
-    } catch (const service::dns::cloudflare_error& error) {
-        if (task.operation_ == service::sync_runtime::marker_operation::remove &&
-            error.code() == service::dns::cloudflare_error_code::zone_not_found) {
-            remote_zone_missing = true;
-        } else {
+    } catch (const service::dns::provider_error& error) {
+        if (task.operation_ != service::sync_runtime::marker_operation::remove ||
+            error.code() != service::dns::provider_error_code::zone_not_found) {
             throw;
         }
-    } catch (const service::dns::aliyun_error& error) {
-        if (task.operation_ == service::sync_runtime::marker_operation::remove &&
-            error.code() == service::dns::aliyun_error_code::domain_not_found) {
-            remote_zone_missing = true;
-        } else {
-            throw;
-        }
+        remote_zone_missing = true;
     }
     if (remote_zone_missing) {
         co_await finish_deleted_zone_without_remote(context, task, lease);

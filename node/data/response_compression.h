@@ -11,20 +11,11 @@
 #include <string>
 #include <string_view>
 
-#include "node/data/buffered_origin_exchange.h"
+#include "node/data/buffered_proxy_response.h"
+#include "node/data/origin_request_codec.h"
 #include "node/proto/edge_control.pb.h"
 
 namespace flexedge::node {
-
-inline std::string_view proxy_header(const buffered_proxy_request& request,
-    std::string_view name) noexcept {
-    for (auto iterator = request.headers_.rbegin(); iterator != request.headers_.rend(); ++iterator) {
-        if (http_header_name(iterator->first, name)) {
-            return iterator->second;
-        }
-    }
-    return {};
-}
 
 inline std::string_view response_header(const buffered_proxy_response& response,
     std::string_view name) noexcept {
@@ -152,12 +143,14 @@ inline double encoding_quality(std::string_view field, std::string_view wanted) 
     return wildcard < 0 ? 0 : wildcard;
 }
 
-inline void apply_response_compression(const buffered_proxy_request& request,
-    const v2::Website& website, buffered_proxy_response& response) {
+// `target` is the request target sent to the origin and `accept_encoding` the client's
+// Accept-Encoding field value.
+inline void apply_response_compression(const v2::Website& website, std::string_view target,
+    std::string_view accept_encoding, buffered_proxy_response& response) {
     if (!website.response_compression_enabled() || response.status_ == 206) {
         return;
     }
-    const auto extension = request_extension(request.target_);
+    const auto extension = request_extension(target);
     if (!extension.empty() && matches_compression_extension(
                                   website.response_compression_excluded_extensions(), extension)) {
         return;
@@ -167,8 +160,7 @@ inline void apply_response_compression(const buffered_proxy_request& request,
             !matches_compression_extension(website.response_compression_extensions(), extension))) {
         return;
     }
-    const auto accepted = proxy_header(request, "Accept-Encoding");
-    if (accepted.empty()) {
+    if (accept_encoding.empty()) {
         return;
     }
     auto coding = ruvia::http_content_coding::identity;
@@ -179,7 +171,7 @@ inline void apply_response_compression(const buffered_proxy_request& request,
             continue;
         }
         const auto candidate_quality =
-            encoding_quality(accepted, ruvia::http_content_coding_token(*candidate));
+            encoding_quality(accept_encoding, ruvia::http_content_coding_token(*candidate));
         if (candidate_quality > quality) {
             coding = *candidate;
             quality = candidate_quality;
@@ -217,12 +209,10 @@ inline void apply_response_compression(const buffered_proxy_request& request,
         response.body_.assign(encoded.encoded()->bytes());
     }
     response.reservation_.shrink(original_size - 1);
-    response.headers_.erase(
-        std::remove_if(response.headers_.begin(), response.headers_.end(),
-            [](const auto& header) {
-                return http_header_name(header.first, "Content-Length") ||
-                       http_header_name(header.first, "Content-Encoding");
-            }),
+    response.headers_.erase(std::remove_if(response.headers_.begin(), response.headers_.end(),
+                                [](const auto& header) {
+                                    return http_header_name(header.first, "Content-Encoding");
+                                }),
         response.headers_.end());
     response.headers_.emplace_back("Content-Encoding", ruvia::http_content_coding_token(coding));
     const auto vary = std::string(response_header(response, "Vary"));

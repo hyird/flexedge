@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { enablementStatuses, statusIds } from '@/lib/status'
 import type { ClusterInput } from './data'
 import type { Cluster } from './types'
 
@@ -18,7 +19,7 @@ export const clusterFormSchema = z.object({
       /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/,
       '仅支持字母、数字和连字符，不能以连字符开头或结尾'
     ),
-  status: z.enum(['enabled', 'disabled']),
+  status: z.enum(statusIds(enablementStatuses)),
 })
 export type ClusterFormValues = z.infer<typeof clusterFormSchema>
 
@@ -27,6 +28,6 @@ export function clusterFormValues(cluster?: Cluster): ClusterInput {
     name: cluster?.name ?? '',
     dns_zone_id: cluster?.dns_zone_id ?? '',
     hostname_prefix: cluster?.hostname_prefix ?? '',
-    status: cluster?.status === 'disabled' ? 'disabled' : 'enabled',
+    status: cluster?.status ?? 'enabled',
   }
 }

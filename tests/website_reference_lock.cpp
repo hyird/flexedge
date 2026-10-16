@@ -1,7 +1,9 @@
 #include <array>
 #include <stdexcept>
 
-#include "service/domains/website/reference_store.h"
+#include "service/domains/certificate/certificate_reference.h"
+#include "service/domains/cluster/cluster_reference.h"
+#include "service/domains/dns_zone/dns_zone_reference.h"
 #include "support/postgres_test.h"
 
 namespace {
@@ -20,7 +22,8 @@ ruvia::task<void> verify_body(ruvia::db_client& client, ruvia::db_client& peer, 
     (void)co_await setup.execute("CREATE SCHEMA flexedge_website_lock_qa");
     (void)co_await setup.execute("SET LOCAL search_path = flexedge_website_lock_qa");
     (void)co_await setup.execute(
-        "CREATE TABLE sys_cluster (id uuid PRIMARY KEY, tenant_id uuid, status text, deleted_at timestamptz)");
+        "CREATE TABLE sys_cluster (id uuid PRIMARY KEY, tenant_id uuid, status text, deleted_at timestamptz, "
+        "dns_zone_id uuid)");
     (void)co_await setup.execute(
         "CREATE TABLE sys_certificate (id uuid PRIMARY KEY, tenant_id uuid, issued_revision bigint, "
         "expires_at timestamptz, deleted_at timestamptz, subject_alt_names varchar(253)[])");
@@ -38,10 +41,10 @@ ruvia::task<void> verify_body(ruvia::db_client& client, ruvia::db_client& peer, 
 
     auto reader = co_await db.begin_transaction();
     (void)co_await reader.execute("SET LOCAL search_path = flexedge_website_lock_qa");
-    require(co_await service::website::lock_available_cluster(reader, tenant, id));
+    require((co_await service::cluster::lock_enabled_cluster(reader, tenant, id)).has_value());
     const std::array<std::string, 1> certificates{id};
-    require((co_await service::website::lock_available_certificates(reader, tenant, certificates)).has_value());
-    require((co_await service::website::lock_dns_zone_references(reader, tenant)).size() == 1);
+    require((co_await service::certificate::lock_usable_certificates(reader, tenant, certificates)).has_value());
+    require((co_await service::dns_zone::lock_live_dns_zones(reader, tenant)).size() == 1);
 
     const std::array<const char*, 3> mutations{
         "UPDATE sys_cluster SET status='disabled'",
@@ -70,9 +73,9 @@ ruvia::task<void> verify_body(ruvia::db_client& client, ruvia::db_client& peer, 
     for (const auto* mutation : mutations) {
         (void)co_await writer.execute(mutation);
     }
-    require(!(co_await service::website::lock_available_cluster(writer, tenant, id)));
-    require(!(co_await service::website::lock_available_certificates(writer, tenant, certificates)));
-    const auto zones = co_await service::website::lock_dns_zone_references(writer, tenant);
+    require(!(co_await service::cluster::lock_enabled_cluster(writer, tenant, id)));
+    require(!(co_await service::certificate::lock_usable_certificates(writer, tenant, certificates)));
+    const auto zones = co_await service::dns_zone::lock_live_dns_zones(writer, tenant);
     require(zones.size() == 1 && zones.front().domain_ == "changed.example.com");
     co_await writer.rollback();
 }

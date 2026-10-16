@@ -5,6 +5,7 @@ import type { DataGridColumn } from '@heroui-pro/react'
 import { Button } from '@heroui/react'
 import { formatDate } from '@/lib/format'
 import { hasListFilters, useListSearch } from '@/lib/list-search'
+import { describeStatus, statusOptions } from '@/lib/status'
 import { cn } from '@/lib/utils'
 import { DataTable } from '@/components/data-table'
 import { LinkButton } from '@/components/link-button'
@@ -15,20 +16,20 @@ import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { providerLabel } from '@/features/providers/provider-display'
 import {
-  certificateStatusLabels,
   certificateStatuses,
+  certificateStatusReserve,
   isExpiring,
 } from './certificate-display'
+import { certificateFilterKeys } from './certificate-search'
 import { certificatesQuery } from './data'
 import { RequestCertificateSheet } from './request-certificate-sheet'
 import type { Certificate } from './types'
 
 const route = getRouteApi('/_authenticated/certificates/')
-const filterKeys = ['status', 'expiring', 'abnormal'] as const
+const statusFilterOptions = statusOptions(certificateStatuses)
 
 export function CertificatesPage() {
   const list = useListSearch(route)
-  const navigate = route.useNavigate()
   const { status, expiring, abnormal } = list.search
   const query = useQuery({
     ...certificatesQuery({
@@ -42,14 +43,9 @@ export function CertificatesPage() {
     placeholderData: keepPreviousData,
     meta: { inlineError: true },
   })
-  const filtered = hasListFilters(list.search, filterKeys)
-  const setCreateOpen = (open: boolean) =>
-    void navigate({
-      search: (previous) => ({ ...previous, create: open ? 1 : undefined }),
-      replace: true,
-    })
+  const filtered = hasListFilters(list.search, certificateFilterKeys)
   const createAction = (
-    <Button size='sm' onPress={() => setCreateOpen(true)}>
+    <Button size='sm' onPress={() => void list.sheet.openCreate()}>
       <Plus className='size-4' />
       申请证书
     </Button>
@@ -89,7 +85,10 @@ export function CertificatesPage() {
       header: '状态',
       minWidth: 110,
       cell: (item) => (
-        <StatusChip status={item.status} reserve={certificateStatusLabels} />
+        <StatusChip
+          {...describeStatus(certificateStatuses, item.status)}
+          reserve={certificateStatusReserve}
+        />
       ),
     },
     {
@@ -178,7 +177,7 @@ export function CertificatesPage() {
                   status: (value || undefined) as typeof status,
                 })
               }
-              options={[...certificateStatuses]}
+              options={statusFilterOptions}
             />
             <FilterSelect
               label='关注'
@@ -197,7 +196,7 @@ export function CertificatesPage() {
           </>
         }
         hasFilters={filtered}
-        onClearFilters={() => void list.clearFilters(filterKeys)}
+        onClearFilters={() => void list.clearFilters(certificateFilterKeys)}
         onRefresh={() => query.refetch()}
         isRefreshing={query.isRefetching}
         actions={createAction}
@@ -232,8 +231,8 @@ export function CertificatesPage() {
         }
       />
       <RequestCertificateSheet
-        isOpen={list.search.create === 1}
-        onClose={() => setCreateOpen(false)}
+        isOpen={list.sheet.isCreating}
+        onClose={() => void list.sheet.close()}
       />
     </Page>
   )

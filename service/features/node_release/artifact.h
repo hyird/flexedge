@@ -31,10 +31,6 @@ public:
         if (error) {
             throw std::runtime_error("node release artifact is unavailable");
         }
-        source_modified_ = std::filesystem::last_write_time(source_path, error);
-        if (error) {
-            throw std::runtime_error("node release artifact is unavailable");
-        }
 #else
         descriptor_ = ::open(source_path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
         if (descriptor_ < 0) {
@@ -47,7 +43,6 @@ public:
             throw std::runtime_error("node release artifact is not a regular file");
         }
         source_size_ = static_cast<std::uintmax_t>(metadata.st_size);
-        source_stamp_ = stamp(metadata);
         path_ = "/proc/self/fd/" + std::to_string(descriptor_);
 #endif
         try {
@@ -135,50 +130,9 @@ public:
         return result;
     }
 
-    [[nodiscard]] bool matches_source(const std::filesystem::path& source_path) const noexcept {
-#ifdef _WIN32
-        std::error_code error;
-        return std::filesystem::file_size(source_path, error) == source_size_ && !error &&
-               std::filesystem::last_write_time(source_path, error) == source_modified_ && !error;
-#else
-        struct stat metadata{};
-        return ::lstat(source_path.c_str(), &metadata) == 0 && S_ISREG(metadata.st_mode) &&
-               stamp(metadata) == source_stamp_;
-#endif
-    }
-
 private:
 #ifndef _WIN32
-    struct source_stamp final {
-        std::uint64_t device_{};
-        std::uint64_t inode_{};
-        std::uint64_t size_{};
-        std::int64_t modified_seconds_{};
-        std::int64_t modified_nanoseconds_{};
-
-        bool operator==(const source_stamp&) const = default;
-    };
-
-    [[nodiscard]] static source_stamp stamp(const struct stat& metadata) noexcept {
-#if defined(__APPLE__)
-        return {.device_ = static_cast<std::uint64_t>(metadata.st_dev),
-            .inode_ = static_cast<std::uint64_t>(metadata.st_ino),
-            .size_ = static_cast<std::uint64_t>(metadata.st_size),
-            .modified_seconds_ = metadata.st_mtimespec.tv_sec,
-            .modified_nanoseconds_ = metadata.st_mtimespec.tv_nsec};
-#else
-        return {.device_ = static_cast<std::uint64_t>(metadata.st_dev),
-            .inode_ = static_cast<std::uint64_t>(metadata.st_ino),
-            .size_ = static_cast<std::uint64_t>(metadata.st_size),
-            .modified_seconds_ = metadata.st_mtim.tv_sec,
-            .modified_nanoseconds_ = metadata.st_mtim.tv_nsec};
-#endif
-    }
-
     int descriptor_{-1};
-    source_stamp source_stamp_;
-#else
-    std::filesystem::file_time_type source_modified_{};
 #endif
     std::uintmax_t source_size_{};
     std::filesystem::path path_;

@@ -2,11 +2,10 @@ import { type FormEvent, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiErrorMessage } from '@/lib/api'
 import { fieldErrors } from '@/lib/form-errors'
-import { queryKeys } from '@/lib/query-keys'
 import { FormSheet } from '@/components/form-sheet'
 import { Choice, Field } from '@/components/forms'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
-import { saveDnsProvider } from './data'
+import { afterProviderWrite, saveDnsProvider } from './data'
 import {
   dnsProviderFormSchema,
   dnsProviderTokenLength,
@@ -30,7 +29,7 @@ export function DnsProviderSheet({
   const client = useQueryClient()
   const [initial] = useState<DnsProviderFormValues>(() => ({
     name: provider?.name ?? '',
-    provider: provider?.provider === 'aliyun' ? 'aliyun' : 'cloudflare',
+    provider: provider?.provider ?? 'cloudflare',
     account_id: provider?.account_id ?? '',
     api_token: '',
   }))
@@ -46,11 +45,8 @@ export function DnsProviderSheet({
     mutationFn: (input: DnsProviderFormValues) =>
       saveDnsProvider(input, provider),
     onSuccess: (response) => {
-      toastWriteSuccess(response.message || '已保存', response.data)
-      void client.invalidateQueries({
-        queryKey: [...queryKeys.providers, 'dns'],
-        refetchType: 'none',
-      })
+      toastWriteSuccess(response.message || '已保存')
+      void afterProviderWrite(client, 'dns')
       onClose()
     },
   })

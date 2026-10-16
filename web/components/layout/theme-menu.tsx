@@ -1,6 +1,6 @@
 import { Sun } from '@gravity-ui/icons'
 import { Button, Dropdown, Label, Tooltip } from '@heroui/react'
-import { themeOptions, useTheme } from '@/context/theme-context'
+import { themeOptions, useTheme } from '@/components/theme-context'
 
 /** Navbar theme switcher (light / dark / system). */
 export function ThemeMenu() {

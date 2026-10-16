@@ -13,12 +13,14 @@
 
 #include "service/common/database.h"
 #include "service/common/http.h"
+#include "service/domains/certificate/certificate_reference.h"
 #include "service/domains/provider/certificate_provider_error.h"
-#include "service/domains/provider/certificate_provider_read_service.h"
 #include "service/domains/provider/certificate_provider_types.h"
+#include "service/features/background/queued_work.h"
 #include "service/features/certificate/provider_config_mapper.h"
 #include "service/features/live_resource/notification_outbox.h"
 #include "service/features/provider_verification/queue.h"
+#include "service/features/sync_runtime/work_commit.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
 
@@ -26,12 +28,7 @@ namespace service::provider {
 
 class certificate_provider_service final {
 public:
-    ruvia::task<ruvia::array<certificate_provider_dto>> list(ruvia::context& c,
-        const std::string& tenant_id) {
-        co_return co_await get_certificate_provider_read_service().list(c, tenant_id);
-    }
-
-    ruvia::task<std::optional<std::string>> create(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<std::int64_t> create(ruvia::context& c, const std::string& tenant_id,
         const create_certificate_provider_body& body) {
         const auto& provider_input = body.get<"provider">();
         const auto& credential_mode_input = body.get<"credential_mode">();
@@ -61,13 +58,11 @@ public:
             const auto inserted = co_await transaction.query(
                 "INSERT INTO sys_provider (tenant_id, kind, provider, revision, config, "
                 "runtime, status, created_at, updated_at) VALUES ($1, 'certificate', $2, 1, "
-                "$3::jsonb, '{}'::jsonb, 'unverified', NOW(), NOW()) RETURNING id",
+                "$3::jsonb, '{}'::jsonb, 'unverified', NOW(), NOW()) RETURNING id, revision",
                 tenant_id, std::string_view(provider), std::string_view(config));
             const auto id = std::string(inserted.front()[0].value().value_or(""));
-            auto origin = start(c, service::operation::action::provider_create, id);
-            (void)co_await origin.require_operation(transaction, tenant_id);
-            co_await commit_changes(transaction, c, tenant_id, id, origin);
-            co_return origin.operation_id();
+            co_await commit_changes(transaction, c, tenant_id, id, service::background::queued_work{});
+            co_return inserted.front()[1].as<std::int64_t>().value_or(1);
         } catch (const ruvia::db_error& error) {
             if (service::common::is_unique_constraint_violation(error,
                     "uk_provider_certificate_type")) {
@@ -77,19 +72,14 @@ public:
         }
     }
 
-    ruvia::task<std::optional<std::string>> update(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<std::int64_t> update(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, std::int64_t expected_revision, const update_certificate_provider_body& body) {
         const auto rows = co_await c.db().query(
-            "SELECT provider, revision, config::text FROM sys_provider WHERE id = $1 AND "
+            "SELECT revision, provider, config::text FROM sys_provider WHERE id = $1 AND "
             "tenant_id = $2 AND kind = 'certificate' AND deleted_at IS NULL LIMIT 1",
             id, tenant_id);
-        if (rows.empty()) {
-            service::common::throw_app_error(certificate_provider_error::not_found);
-        }
-        if (rows.front()[1].as<std::int64_t>().value_or(0) != expected_revision) {
-            service::common::throw_app_error(certificate_provider_error::revision_conflict);
-        }
-        const auto provider = std::string(rows.front()[0].value().value_or(""));
+        service::common::require_current_revision(rows, expected_revision, revision_errors_);
+        const auto provider = std::string(rows.front()[1].value().value_or(""));
         const auto current = service::certificate_issuance::parse_certificate_provider_config(
             rows.front()[2].value().value_or("{}"), c.pool());
         const auto& credential_mode_input = body.get<"credential_mode">();
@@ -127,98 +117,71 @@ public:
                              account_email != current.account_email_ || submitted_key.has_value();
         const auto config = service::certificate_issuance::serialize_certificate_provider_config(
             credential_mode, account_email, envelope, hint, c.pool());
-        auto origin = start(c, service::operation::action::provider_update, id,
-            changed ? R"({"credentials_changed":true})" : R"({"credentials_changed":false})");
         auto transaction = co_await c.db().begin_transaction();
-        const auto result = co_await transaction.execute(
+        const auto updated = co_await transaction.query(
             "UPDATE sys_provider SET revision = revision + 1, config = $1::jsonb, runtime = CASE "
             "WHEN $2::BOOLEAN THEN '{}'::jsonb ELSE runtime END, status = CASE WHEN $2::BOOLEAN "
             "THEN 'unverified' ELSE status END, last_verified_at = CASE WHEN $2::BOOLEAN THEN "
             "NULL ELSE last_verified_at END, verification_generation = verification_generation "
             "+ 1, last_error = NULL, updated_at = NOW() WHERE id = $3 AND tenant_id = $4 AND "
-            "revision = $5 AND kind = 'certificate' AND deleted_at IS NULL",
+            "revision = $5 AND kind = 'certificate' AND deleted_at IS NULL RETURNING revision",
             std::string_view(config), changed, id, tenant_id, expected_revision);
-        if (result.affected_rows() == 0) {
-            service::common::throw_app_error(certificate_provider_error::revision_conflict);
-        }
-        (void)co_await origin.require_operation(transaction, tenant_id);
+        co_await service::common::require_revision_written(transaction, !updated.empty(), "sys_provider", tenant_id,
+            id, revision_errors_);
+        service::background::queued_work work;
         if (changed) {
-            co_await service::provider_verification::mark_current(transaction, tenant_id, id, origin);
+            co_await service::provider_verification::mark_current(transaction, tenant_id, id, work);
         } else {
-            co_await service::provider_verification::remove(transaction, tenant_id, id, origin);
+            co_await service::provider_verification::remove(transaction, tenant_id, id, work);
         }
-        co_await commit_changes(transaction, c, tenant_id, id, origin);
-        co_return origin.operation_id();
+        co_await commit_changes(transaction, c, tenant_id, id, work);
+        co_return updated.front()[0].as<std::int64_t>().value_or(0);
     }
 
-    ruvia::task<std::optional<std::string>> verify(ruvia::context& c, const std::string& tenant_id,
+    // Verification leaves the revision unchanged; returns it.
+    ruvia::task<std::int64_t> verify(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, std::int64_t expected_revision) {
-        auto origin = start(c, service::operation::action::provider_verify, id);
+        service::background::queued_work work;
         auto transaction = co_await c.db().begin_transaction();
-        (void)co_await origin.require_operation(transaction, tenant_id);
-        if (!co_await service::provider_verification::enqueue_certificate(transaction, tenant_id, id,
-                expected_revision, origin)) {
-            const auto current = co_await transaction.query(
-                "SELECT revision FROM sys_provider WHERE id = $1 AND tenant_id = $2 AND kind "
-                "= 'certificate' AND deleted_at IS NULL",
-                id, tenant_id);
-            if (current.empty()) {
-                service::common::throw_app_error(certificate_provider_error::not_found);
-            }
-            service::common::throw_app_error(certificate_provider_error::revision_conflict);
-        }
-        co_await commit_changes(transaction, c, tenant_id, id, origin);
-        co_return origin.operation_id();
+        const auto enqueued = co_await service::provider_verification::enqueue_certificate(transaction, tenant_id,
+            id, expected_revision, work);
+        co_await service::common::require_revision_written(transaction, enqueued, "sys_provider", tenant_id, id,
+            revision_errors_);
+        co_await commit_changes(transaction, c, tenant_id, id, work);
+        co_return expected_revision;
     }
 
-    ruvia::task<std::optional<std::string>> remove(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<std::int64_t> remove(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, std::int64_t expected_revision) {
-        auto origin = start(c, service::operation::action::provider_delete, id);
         auto transaction = co_await c.db().begin_transaction();
         const auto rows = co_await transaction.query(
             "SELECT revision FROM sys_provider WHERE id = $1 AND tenant_id = $2 AND kind = "
             "'certificate' AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
             id, tenant_id);
-        if (rows.empty()) {
-            service::common::throw_app_error(certificate_provider_error::not_found);
-        }
-        if (rows.front()[0].as<std::int64_t>().value_or(0) != expected_revision) {
-            service::common::throw_app_error(certificate_provider_error::revision_conflict);
-        }
-        const auto used = co_await transaction.query(
-            "SELECT id FROM sys_certificate WHERE tenant_id = $1 AND provider_id = $2 AND "
-            "deleted_at IS NULL LIMIT 1",
-            tenant_id, id);
-        if (!used.empty()) {
+        service::common::require_current_revision(rows, expected_revision, revision_errors_);
+        if (co_await service::certificate::certificates_use_provider(transaction, tenant_id, id)) {
             service::common::throw_app_error(certificate_provider_error::in_use);
         }
-        (void)co_await origin.require_operation(transaction, tenant_id);
-        (void)co_await transaction.execute(
+        const auto removed = co_await transaction.query(
             "UPDATE sys_provider SET config = '{}'::jsonb, runtime = '{}'::jsonb, revision = "
             "revision + 1, verification_generation = verification_generation + 1, deleted_at = "
-            "NOW(), updated_at = NOW() WHERE id = $1 AND tenant_id = $2 AND revision = $3",
-            id, tenant_id, expected_revision);
-        co_await service::provider_verification::remove(transaction, tenant_id, id, origin);
-        co_await commit_changes(transaction, c, tenant_id, id, origin);
-        co_return origin.operation_id();
+            "NOW(), updated_at = NOW() WHERE id = $1 AND tenant_id = $2 RETURNING revision",
+            id, tenant_id);
+        service::background::queued_work work;
+        co_await service::provider_verification::remove(transaction, tenant_id, id, work);
+        co_await commit_changes(transaction, c, tenant_id, id, work);
+        co_return removed.front()[0].as<std::int64_t>().value_or(0);
     }
 
 private:
-    static service::operation::work_origin start(ruvia::context& c, service::operation::action action,
-        const std::string& id, std::string summary = "{}") {
-        return service::operation::work_origin::start({.action_ = action,
-            .actor_id_ = service::middleware::current_principal(c).admin_id_,
-            .target_type_ = "provider",
-            .target_id_ = id,
-            .summary_ = std::move(summary)});
-    }
+    static constexpr service::common::revision_errors revision_errors_{certificate_provider_error::not_found,
+        certificate_provider_error::revision_conflict};
 
     static ruvia::task<void> commit_changes(ruvia::db_transaction& transaction, ruvia::context& c, const std::string& tenant_id, const std::string& id,
-        const service::operation::work_origin& origin) {
+        const service::background::queued_work& work) {
         service::live_resource::notifications::resource_notification notification(tenant_id);
         notification.changed(service::live_resource::resource::providers, id);
-        origin.add_changes(notification);
-        co_await service::live_resource::commit_and_notify(transaction, c, notification);
+        co_await service::sync_runtime::commit_work(transaction, c, std::move(notification), work);
     }
 
     static std::string trim(std::string_view input) {

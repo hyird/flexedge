@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "service/common/database.h"
 #include "service/common/http.h"
 #include "service/domains/certificate/certificate_error.h"
 #include "service/domains/certificate/certificate_filter.h"
@@ -32,57 +33,39 @@ public:
         std::int64_t skip, const std::optional<std::string>& keyword,
         std::optional<std::string_view> status, std::optional<bool> usable, bool expiring,
         bool abnormal) const {
-        std::string where =
-            " FROM sys_certificate cert INNER JOIN sys_dns_zone zone ON zone.tenant_id = "
-            "cert.tenant_id AND zone.id = cert.dns_zone_id INNER JOIN sys_provider provider ON "
-            "provider.tenant_id = cert.tenant_id AND provider.id = cert.provider_id AND "
-            "provider.kind = 'certificate' LEFT JOIN LATERAL (SELECT task.operation, "
-            "CASE WHEN task.lease_until IS NOT NULL THEN 'running' WHEN task.is_done AND "
-            "task.is_ok THEN 'completed' WHEN task.count_fails > 0 THEN 'retry' ELSE 'pending' END "
-            "AS sync_status, task.count_fails AS sync_count_fails FROM sys_sync_task task WHERE "
-            "task.resource_type = 'certificate' AND "
-            "task.tenant_id = cert.tenant_id AND task.resource_id = cert.id AND task.version = "
-            "cert.issuance_revision ORDER BY task.updated_at DESC LIMIT 1) latest_task ON TRUE "
-            "WHERE cert.deleted_at IS NULL AND "
-            "cert.tenant_id = $1";
-        std::vector<ruvia::db_value> params{ruvia::db_value{tenant_id}};
         std::optional<std::string> pattern;
         if (keyword) {
             pattern = "%" + service::common::escape_like_pattern(*keyword) + "%";
-            where += " AND cert.domain ILIKE $" + std::to_string(params.size() + 1);
-            params.emplace_back(std::string_view(*pattern));
         }
-        if (status && !status->empty()) {
-            where += " AND cert.status = $" + std::to_string(params.size() + 1);
-            params.emplace_back(*status);
-        }
-        if (usable) {
-            where +=
-                " AND COALESCE(cert.issued_revision > 0 AND cert.expires_at > NOW(), FALSE) "
-                "= $" +
-                std::to_string(params.size() + 1);
-            params.emplace_back(*usable);
-        }
-        if (expiring) {
-            where += " AND " + certificate_expiring_sql();
-        }
-        if (abnormal) {
-            where += " AND " + certificate_abnormal_sql();
-        }
-        const auto count_rows = co_await c.db().query("SELECT COUNT(*)" + where, params);
-        const auto total = count_rows.empty() ? std::int64_t{0}
-                                              : count_rows.front()[0].template as<std::int64_t>().value_or(0);
-        const auto rows =
-            co_await c.db().query(certificate_columns() + where + " ORDER BY cert.sort DESC LIMIT " +
-                                      std::to_string(page_size) + " OFFSET " + std::to_string(skip),
-                params);
+        const auto filter = [&](ruvia::db_query& query) {
+            source(query, tenant_id);
+            if (pattern) {
+                query.and_where(query.sql({"cert.domain ILIKE ", ""}, {query.value(*pattern)}));
+            }
+            if (status && !status->empty()) {
+                query.and_where(query.sql({"cert.status = ", ""}, {query.value(*status)}));
+            }
+            if (usable) {
+                query.and_where(query.sql(
+                    {"COALESCE(cert.issued_revision > 0 AND cert.expires_at > NOW(), FALSE) = ", ""},
+                    {query.value(*usable)}));
+            }
+            if (expiring) {
+                query.and_where(certificate_expiring_predicate(query, "cert"));
+            }
+            if (abnormal) {
+                query.and_where(certificate_abnormal_predicate(query, "cert"));
+            }
+        };
+        const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
+        const auto total = page_rows.total_;
         certificate_page_data_dto result({.resource_ = c.pool()});
         result.template set<"total">(total);
         result.template set<"page">(page);
         result.template set<"page_size">(page_size);
         result.template set<"total_pages">(page_size > 0 ? (total + page_size - 1) / page_size : 0);
         auto& items = result.template ensure<"list">();
-        for (const auto& row : rows) {
+        for (const auto& row : page_rows.rows_) {
             fill_certificate(c, items.emplace_back(), row);
         }
         co_return result;
@@ -90,24 +73,12 @@ public:
 
     ruvia::task<certificate_dto> get(auto& c, const std::string& tenant_id,
         const std::string& id) const {
-        const auto rows = co_await c.db().query(
-            certificate_columns() +
-                " FROM sys_certificate cert INNER JOIN sys_dns_zone zone ON zone.tenant_id = "
-                "cert.tenant_id AND zone.id = cert.dns_zone_id INNER JOIN sys_provider "
-                "provider ON provider.tenant_id = cert.tenant_id AND provider.id = "
-                "cert.provider_id AND provider.kind = 'certificate' LEFT JOIN LATERAL (SELECT "
-                "task.operation, CASE WHEN task.lease_until IS NOT NULL THEN 'running' WHEN "
-                "task.is_done AND task.is_ok THEN 'completed' WHEN task.count_fails > 0 THEN "
-                "'retry' "
-                "ELSE 'pending' END AS sync_status, task.count_fails AS sync_count_fails FROM "
-                "sys_sync_task task "
-                "WHERE "
-                "task.resource_type = 'certificate' AND task.tenant_id = cert.tenant_id AND "
-                "task.resource_id = cert.id AND task.version = cert.issuance_revision ORDER BY "
-                "task.updated_at DESC LIMIT 1) latest_task ON TRUE WHERE cert.id = $1 AND "
-                "cert.tenant_id = $2 AND "
-                "cert.deleted_at IS NULL LIMIT 1",
-            id, tenant_id);
+        ruvia::db_query query(c.pool());
+        source(query, tenant_id);
+        query.and_where(query.sql({"cert.id = ", ""}, {query.value(id)}));
+        project(query);
+        query.limit(1);
+        const auto rows = co_await c.db().query(query);
         if (rows.empty()) {
             service::common::throw_app_error(certificate_error::not_found);
         }
@@ -153,22 +124,53 @@ public:
     }
 
 private:
-    static std::string certificate_columns() {
-        return "SELECT cert.id, cert.revision, cert.config::text, cert.status, "
-               "cert.material::text, TO_CHAR(cert.expires_at, "
-               "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), cert.last_error, "
-               "TO_CHAR(cert.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-               "TO_CHAR(cert.updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-               "cert.dns_zone_id, zone.domain, CASE WHEN cert.expires_at IS NULL THEN NULL ELSE "
-               "GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (cert.expires_at - NOW())) / 86400))::BIGINT "
-               "END, cert.subject_alt_names[1], cert.subject_alt_names[2], provider.id, "
-               "provider.provider, latest_task.sync_status, latest_task.sync_count_fails, "
-               "(SELECT COUNT(DISTINCT website.id) FROM "
-               "sys_website_certificate_binding binding INNER JOIN sys_website website ON "
-               "website.id = binding.website_id AND website.tenant_id = cert.tenant_id "
-               "AND website.deleted_at IS NULL WHERE binding.tenant_id = cert.tenant_id "
-               "AND binding.certificate_id = cert.id), COALESCE(cert.issued_revision > 0 AND "
-               "cert.expires_at > NOW(), FALSE)";
+    static void source(ruvia::db_query& query, const std::string& tenant_id) {
+        ruvia::db_query latest_task(query.resource());
+        latest_task
+            .select({latest_task.sql("task.operation"),
+                latest_task.alias(
+                    latest_task.sql("CASE WHEN task.lease_until IS NOT NULL THEN 'running' WHEN "
+                                    "task.is_done AND task.is_ok THEN 'completed' WHEN "
+                                    "task.count_fails > 0 THEN 'retry' ELSE 'pending' END"),
+                    "sync_status"),
+                latest_task.alias(latest_task.sql("task.count_fails"), "sync_count_fails")})
+            .from("sys_sync_task", "task")
+            .where(latest_task.sql("task.resource_type = 'certificate' AND task.tenant_id = "
+                                   "cert.tenant_id AND task.resource_id = cert.id AND task.version = "
+                                   "cert.issuance_revision"))
+            .order_by(latest_task.sql("task.updated_at"), ruvia::db_order_direction::desc)
+            .limit(1);
+        query.from("sys_certificate", "cert")
+            .join(ruvia::db_join_type::inner, "sys_dns_zone",
+                query.sql("zone.tenant_id = cert.tenant_id AND zone.id = cert.dns_zone_id"), "zone")
+            .join(ruvia::db_join_type::inner, "sys_provider",
+                query.sql("provider.tenant_id = cert.tenant_id AND provider.id = cert.provider_id AND "
+                          "provider.kind = 'certificate'"),
+                "provider")
+            .join(ruvia::db_join_type::left, latest_task, query.sql("TRUE"), "latest_task",
+                {.lateral_ = true})
+            .where(query.sql("cert.deleted_at IS NULL"))
+            .and_where(query.sql({"cert.tenant_id = ", ""}, {query.value(tenant_id)}));
+    }
+
+    static void project(ruvia::db_query& query) {
+        query
+            .select(service::common::sql_columns(query,
+                {"cert.id", "cert.revision", "cert.config::text", "cert.status", "cert.material::text",
+                    "TO_CHAR(cert.expires_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')", "cert.last_error",
+                    "TO_CHAR(cert.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')",
+                    "TO_CHAR(cert.updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')", "cert.dns_zone_id",
+                    "zone.domain",
+                    "CASE WHEN cert.expires_at IS NULL THEN NULL ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH "
+                    "FROM (cert.expires_at - NOW())) / 86400))::BIGINT END",
+                    "cert.subject_alt_names[1]", "cert.subject_alt_names[2]", "provider.id",
+                    "provider.provider", "latest_task.sync_status", "latest_task.sync_count_fails",
+                    "SELECT COUNT(DISTINCT website.id) FROM sys_website_certificate_binding binding "
+                    "INNER JOIN sys_website website ON website.id = binding.website_id AND "
+                    "website.tenant_id = cert.tenant_id AND website.deleted_at IS NULL WHERE "
+                    "binding.tenant_id = cert.tenant_id AND binding.certificate_id = cert.id",
+                    "COALESCE(cert.issued_revision > 0 AND cert.expires_at > NOW(), FALSE)"}))
+            .order_by(query.sql("cert.sort"), ruvia::db_order_direction::desc);
     }
 };
 

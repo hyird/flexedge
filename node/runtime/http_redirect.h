@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 
+#include "common/route_policy.h"
 #include "node/runtime/compiled_config.h"
 
 namespace flexedge::node {
@@ -27,7 +28,7 @@ http_to_https_redirect(const compiled_config& config, std::string_view host, std
         target = "/";
     }
     http_redirect result;
-    result.location_ = "https://" + normalize_hostname(host) + std::string(target);
+    result.location_ = "https://" + flexedge::route_policy::hostname(host) + std::string(target);
     return result;
 }
 

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { parseApiResponse, requireResponseData } from '@/lib/api-response'
+import { ApiProtocolError } from '@/lib/api-response'
 
 const seriesPoint = z.object({
   timestamp: z.string(),
@@ -40,8 +40,9 @@ const websiteDashboardSchema = z.object({
 export type WebsiteDashboard = z.infer<typeof websiteDashboardSchema>
 export type WebsiteDashboardRanking = z.infer<typeof ranking>
 export type WebsiteDashboardClientIpRanking = z.infer<typeof clientIpRanking>
-export function parseWebsiteDashboard(raw: string) {
-  return websiteDashboardSchema.parse(
-    requireResponseData(parseApiResponse(JSON.parse(raw)))
-  )
+/** Parses one `dashboard` frame (its envelope data). */
+export function parseWebsiteDashboard(value: unknown) {
+  const result = websiteDashboardSchema.safeParse(value)
+  if (!result.success) throw new ApiProtocolError()
+  return result.data
 }

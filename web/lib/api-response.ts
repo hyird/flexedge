@@ -40,3 +40,14 @@ export function requireResponseData<T>(response: ApiResponse<T>): T {
   if (response.data === undefined) throw new ApiProtocolError()
   return response.data
 }
+
+/** Parses response data (HTTP or stream frame) with its DTO schema; data that
+ * does not match the contract is a protocol error, never a partial object. */
+export function parseResponseData<T extends z.ZodType>(
+  schema: T,
+  value: unknown
+): z.output<T> {
+  const result = schema.safeParse(value)
+  if (!result.success) throw new ApiProtocolError()
+  return result.data
+}

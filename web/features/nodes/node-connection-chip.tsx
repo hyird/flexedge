@@ -2,7 +2,11 @@ import { Tooltip } from '@heroui/react'
 import { useDisplayNow } from '@/lib/display-clock'
 import { describeStatus } from '@/lib/status'
 import { StatusChip } from '@/components/status-chip'
-import { connectionLabels, heartbeatSummary } from './node-status'
+import {
+  connectionStatusReserve,
+  connectionStatuses,
+  heartbeatSummary,
+} from './node-display'
 import type { Node } from './types'
 
 /** The node's one online state (在线 / 离线 / 未接入) on a single line of
@@ -15,16 +19,14 @@ export function NodeConnectionChip({
 }) {
   const now = useDisplayNow()
   const summary = heartbeatSummary(runtime, now)
+  const status = describeStatus(connectionStatuses, runtime.connection_status)
   return (
     <Tooltip delay={300}>
       <Tooltip.Trigger
-        aria-label={`${describeStatus(runtime.connection_status).label}，${summary}`}
+        aria-label={`${status.label}，${summary}`}
         className='inline-flex shrink-0 rounded-full align-middle'
       >
-        <StatusChip
-          status={runtime.connection_status}
-          reserve={connectionLabels}
-        />
+        <StatusChip {...status} reserve={connectionStatusReserve} />
       </Tooltip.Trigger>
       <Tooltip.Content>{summary}</Tooltip.Content>
     </Tooltip>

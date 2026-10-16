@@ -1,13 +1,7 @@
 import { z } from 'zod'
-import type { DnsRecord } from './types'
+import { dnsRecordTypeSchema, type DnsRecord } from './types'
 
-export const recordTypes: DnsRecord['type'][] = [
-  'A',
-  'AAAA',
-  'CNAME',
-  'TXT',
-  'MX',
-]
+export const recordTypes = dnsRecordTypeSchema.options
 export const maxRecords = 10000
 const aliyunMinTtl = 600
 
@@ -45,7 +39,7 @@ function integerIssue(
 export function recordFormSchema(provider: string) {
   return z
     .object({
-      type: z.enum(['A', 'AAAA', 'CNAME', 'TXT', 'MX']),
+      type: dnsRecordTypeSchema,
       name: z.string(),
       content: z.string(),
       ttl: z.string(),

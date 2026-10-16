@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 
+#include "service/features/background/queued_work.h"
 #include "service/features/sync_runtime/state.h"
 
 namespace service::certificate_issuance {
@@ -15,7 +16,7 @@ namespace service::certificate_issuance {
 inline ruvia::task<std::string>
 enqueue_certificate_revision(ruvia::db_transaction& transaction, std::string_view tenant_id,
     std::string_view certificate_id, std::int64_t revision,
-    service::sync_runtime::marker_operation operation, service::operation::work_origin& origin) {
+    service::sync_runtime::marker_operation operation, service::background::queued_work& work) {
     const auto rows = co_await transaction.query(
         "SELECT id FROM sys_certificate WHERE tenant_id = $1 AND id = $2 AND "
         "issuance_revision = $3 AND deleted_at IS NULL LIMIT 1",
@@ -25,7 +26,7 @@ enqueue_certificate_revision(ruvia::db_transaction& transaction, std::string_vie
     }
     co_return co_await service::sync_runtime::upsert_marker(
         transaction, tenant_id, service::sync_runtime::marker_resource_type::certificate,
-        certificate_id, operation, revision, origin);
+        certificate_id, operation, revision, work);
 }
 
 }  // namespace service::certificate_issuance

@@ -7,41 +7,46 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "service/domains/certificate/certificate_filter.h"
 #include "service/domains/dns_zone/dns_zone_filter.h"
-#include "service/domains/node/node_connection.h"
 #include "service/domains/overview/overview_types.h"
+#include "service/features/node_presence/node_connection.h"
 
 namespace service::overview {
 
 class overview_service final {
 public:
     ruvia::task<overview_data_dto> get(auto& c, const std::string& tenant_id) {
-        const auto summary_rows = co_await c.db().query(
-            "SELECT "
-            "(SELECT COUNT(*) FROM sys_website website WHERE website.tenant_id = $1 AND "
-            "website.deleted_at IS NULL), "
-            "(SELECT COUNT(*) FROM sys_website_domain_claim claim INNER JOIN sys_website "
-            "website ON website.tenant_id = claim.tenant_id AND website.id = claim.website_id "
-            "WHERE claim.tenant_id = $1 AND website.deleted_at IS NULL), "
-            "(SELECT COUNT(*) FROM sys_certificate certificate WHERE certificate.tenant_id = $1 "
-            "AND certificate.deleted_at IS NULL), "
-            "(SELECT COUNT(*) FROM sys_cluster cluster WHERE cluster.tenant_id = $1 AND "
-            "cluster.deleted_at IS NULL), "
-            "(SELECT COUNT(*) FROM sys_dns_zone zone WHERE zone.tenant_id = $1 AND "
-            "zone.deleted_at IS NULL AND " +
-                service::dns_zone::dns_zone_issue_sql() +
-                "), "
-                "(SELECT COUNT(*) FROM sys_certificate cert WHERE cert.tenant_id = $1 "
-                "AND cert.deleted_at IS NULL AND " +
-                service::certificate::certificate_expiring_sql() +
-                "), "
-                "(SELECT COUNT(*) FROM sys_certificate cert WHERE cert.tenant_id = $1 "
-                "AND cert.deleted_at IS NULL AND " +
-                service::certificate::certificate_abnormal_sql() + ")",
-            tenant_id);
+        ruvia::db_query summary(c.pool());
+        const auto tenant = summary.value(tenant_id);
+        const auto tenant_count = [&](std::string_view prefix, std::string_view suffix) {
+            return summary.sql({prefix, suffix}, {tenant});
+        };
+        summary.select({
+            tenant_count("SELECT COUNT(*) FROM sys_website website WHERE website.tenant_id = ",
+                " AND website.deleted_at IS NULL"),
+            tenant_count("SELECT COUNT(*) FROM sys_website_domain_claim claim INNER JOIN sys_website "
+                         "website ON website.tenant_id = claim.tenant_id AND website.id = "
+                         "claim.website_id WHERE claim.tenant_id = ",
+                " AND website.deleted_at IS NULL"),
+            tenant_count("SELECT COUNT(*) FROM sys_certificate certificate WHERE certificate.tenant_id = ",
+                " AND certificate.deleted_at IS NULL"),
+            tenant_count("SELECT COUNT(*) FROM sys_cluster cluster WHERE cluster.tenant_id = ",
+                " AND cluster.deleted_at IS NULL"),
+            summary.sql({"SELECT COUNT(*) FROM sys_dns_zone zone WHERE zone.tenant_id = ",
+                            " AND zone.deleted_at IS NULL AND ", ""},
+                {tenant, service::dns_zone::dns_zone_issue_predicate(summary, "zone")}),
+            summary.sql({"SELECT COUNT(*) FROM sys_certificate cert WHERE cert.tenant_id = ",
+                            " AND cert.deleted_at IS NULL AND ", ""},
+                {tenant, service::certificate::certificate_expiring_predicate(summary, "cert")}),
+            summary.sql({"SELECT COUNT(*) FROM sys_certificate cert WHERE cert.tenant_id = ",
+                            " AND cert.deleted_at IS NULL AND ", ""},
+                {tenant, service::certificate::certificate_abnormal_predicate(summary, "cert")}),
+        });
+        const auto summary_rows = co_await c.db().query(summary);
 
         // Same online rule as node lists and Redis presence deadlines, which publish the
         // overview on every registration, enable/disable and online/offline change.

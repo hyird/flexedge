@@ -1,32 +1,24 @@
 import { ApiBusinessError } from '@/lib/api-response'
-import { statusLabels, type StatusTone } from '@/lib/status'
+import {
+  statusReserve,
+  type StatusDictionary,
+  type StatusTone,
+} from '@/lib/status'
 import type { Certificate } from './types'
 
-export const certificateStatuses = [
-  { id: 'pending', label: '等待签发' },
-  { id: 'issuing', label: '签发中' },
-  { id: 'valid', label: '有效' },
-  { id: 'renewing', label: '续期中' },
-  { id: 'expired', label: '已过期' },
-  { id: 'failed', label: '失败' },
-] as const
-export const certificateStatusIds = certificateStatuses.map(({ id }) => id) as [
-  (typeof certificateStatuses)[number]['id'],
-  ...(typeof certificateStatuses)[number]['id'][],
-]
-
-/** Every label a certificate's `status` chip can show, for `reserve`. */
-export const certificateStatusLabels = statusLabels(certificateStatusIds)
-
-/** Labels of the node distribution `sync_status`, for `reserve`. */
-export const certificateSyncStatusLabels = statusLabels([
-  'pending',
-  'queued',
-  'running',
-  'retrying',
-  'completed',
-  'failed',
-])
+/** Certificate `status` (`ck_certificate_status` in service/config/schema.h);
+ * the list filter, its search param and the status chips share it. */
+export const certificateStatuses = {
+  pending: { label: '等待签发', tone: 'warning' },
+  issuing: { label: '签发中', tone: 'accent' },
+  valid: { label: '有效', tone: 'success' },
+  renewing: { label: '续期中', tone: 'accent' },
+  expired: { label: '已过期', tone: 'danger' },
+  failed: { label: '失败', tone: 'danger' },
+} as const satisfies StatusDictionary<
+  'pending' | 'issuing' | 'valid' | 'renewing' | 'expired' | 'failed'
+>
+export const certificateStatusReserve = statusReserve(certificateStatuses)
 
 /** Days before expiry at which a valid certificate counts as "即将到期",
  * matching the overview's `certificate_expiring_count`. */

@@ -1,109 +1,126 @@
 #include "node/data/origin_health.h"
 
-#include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <latch>
 #include <stdexcept>
-#include <thread>
+#include <string>
 #include <type_traits>
-#include <vector>
+#include <utility>
 
 #define REQUIRE(condition)                                                             \
     do {                                                                               \
         if (!(condition)) throw std::runtime_error("requirement failed: " #condition); \
     } while (false)
 
-static_assert(!std::is_default_constructible_v<flexedge::node::origin_health_registry::prepared_states>);
+static_assert(!std::is_default_constructible_v<flexedge::node::origin_health_state::prepared>);
+static_assert(!std::is_copy_constructible_v<flexedge::node::origin_health_state::prepared>);
+
+namespace {
+
+using flexedge::node::origin_health_key;
+using flexedge::node::origin_health_key_set;
+using flexedge::node::origin_health_key_view;
+using flexedge::node::origin_health_state;
+
+const origin_health_key_view origin_key{"website", "origin"};
+
+origin_health_key_set keys_of(origin_health_key_view key) {
+    return {origin_health_key{.website_id_ = std::string(key.website_id_),
+        .origin_id_ = std::string(key.origin_id_)}};
+}
+
+std::uint64_t id_of(const origin_health_state& state, origin_health_key_view key) {
+    const auto snapshot = state.snapshot();
+    const auto* origin = snapshot->find(key.website_id_, key.origin_id_);
+    REQUIRE(origin != nullptr);
+    return origin->id_;
+}
+
+bool healthy(const origin_health_state& state, origin_health_key_view key) {
+    return state.snapshot()->healthy(key.website_id_, key.origin_id_);
+}
+
+}  // namespace
 
 int main() {
-    flexedge::node::origin_health_registry health_state;
-    health_state.publish(health_state.prepare({flexedge::node::origin_health_registry::get_key("website", "origin")}));
-    REQUIRE(health_state.healthy("website", "origin"));
-    health_state.get_target("website", "origin").failure(2);
-    REQUIRE(health_state.healthy("website", "origin"));
-    health_state.get_target("website", "origin").failure(2);
-    REQUIRE(!health_state.healthy("website", "origin"));
-    health_state.get_target("website", "origin").success(2);
-    REQUIRE(!health_state.healthy("website", "origin"));
-    health_state.get_target("website", "origin").success(2);
-    REQUIRE(health_state.healthy("website", "origin"));
-    flexedge::node::origin_health_registry::key_set retained_health_keys;
-    retained_health_keys.emplace(flexedge::node::origin_health_registry::get_key("website", "origin"));
-    health_state.publish(health_state.prepare(retained_health_keys));
-    REQUIRE(health_state.healthy("website", "origin"));
-    health_state.get_target("website", "origin").failure(1);
-    const auto pending_removal = health_state.prepare({});
-    REQUIRE(!health_state.healthy("website", "origin"));
-    (void)pending_removal;
-    const auto pending_retention = health_state.prepare(retained_health_keys);
-    health_state.get_target("website", "origin").success(1);
-    health_state.publish(pending_retention);
-    REQUIRE(health_state.healthy("website", "origin"));
-    health_state.get_target("website", "origin").failure(1);
-    std::vector<std::thread> health_reporters;
-    for (std::size_t index = 0; index < 8; ++index) {
-        health_reporters.emplace_back([&] { health_state.get_target("website", "origin").success(1); });
+    origin_health_state health_state;
+    {
+        auto next = health_state.prepare(keys_of(origin_key));
+        REQUIRE(next.snapshot()->find("website", "origin") != nullptr);
+        REQUIRE(health_state.snapshot()->find("website", "origin") == nullptr);
+        health_state.activate(std::move(next));
     }
-    for (auto& reporter : health_reporters) {
-        reporter.join();
-    }
-    REQUIRE(health_state.healthy("website", "origin"));
-    const auto retired_probe = health_state.get_target("website", "origin");
-    retained_health_keys.clear();
-    health_state.publish(health_state.prepare(retained_health_keys));
-    REQUIRE(health_state.healthy("website", "origin"));
+    const auto id = id_of(health_state, origin_key);
+    REQUIRE(healthy(health_state, origin_key));
+    // A healthy origin whose last outcome succeeded is settled for successes only.
+    REQUIRE(health_state.snapshot()->find("website", "origin")->settled(true));
+    REQUIRE(!health_state.snapshot()->find("website", "origin")->settled(false));
+    REQUIRE(!health_state.record(origin_key, id, true, 2));
 
-    health_state.get_target("website", "origin").failure(1);
-    health_state.get_target("website", "origin").success(1);
-    health_state.get_target("website", "origin").record_probe(false, 1, 42, "late result");
-    REQUIRE(!health_state.claim_due("website", "origin", std::chrono::seconds(1)));
-    REQUIRE(health_state.reports().empty());
+    // Consecutive outcomes cross the threshold; the direction change is visible before it.
+    REQUIRE(health_state.record(origin_key, id, false, 2));
+    REQUIRE(healthy(health_state, origin_key));
+    REQUIRE(health_state.record(origin_key, id, false, 2));
+    REQUIRE(!healthy(health_state, origin_key));
+    REQUIRE(health_state.snapshot()->find("website", "origin")->settled(false));
+    REQUIRE(!health_state.snapshot()->all_healthy());
+    REQUIRE(health_state.record(origin_key, id, true, 2));
+    REQUIRE(!healthy(health_state, origin_key));
+    REQUIRE(health_state.record(origin_key, id, true, 2));
+    REQUIRE(healthy(health_state, origin_key));
+    REQUIRE(health_state.snapshot()->all_healthy());
 
-    retained_health_keys.emplace(flexedge::node::origin_health_registry::get_key("website", "origin"));
-    health_state.publish(health_state.prepare(retained_health_keys));
-    auto old_probe = retired_probe;
-    old_probe.failure(1);
-    old_probe.success(1);
-    old_probe.record_probe(false, 1, 42, "retired probe");
-    REQUIRE(health_state.healthy("website", "origin"));
-    REQUIRE(health_state.reports().front().checked_at_unix_millis_ == 0);
-    std::atomic<bool> observe_health{true};
-    std::atomic<std::uint64_t> health_observations{};
-    std::latch readers_started(8);
-    std::vector<std::thread> health_readers;
-    for (std::size_t index = 0; index < 8; ++index) {
-        health_readers.emplace_back([&] {
-            if (health_state.healthy("website", "origin")) {
-                health_observations.fetch_add(1, std::memory_order_relaxed);
-            }
-            readers_started.count_down();
-            while (observe_health.load(std::memory_order_relaxed)) {
-                if (health_state.healthy("website", "origin")) {
-                    health_observations.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
-        });
+    // Retained memberships keep their state and id, including results recorded while the
+    // next configuration is pending.
+    REQUIRE(health_state.record(origin_key, id, false, 1));
+    {
+        auto pending_removal = health_state.prepare({});
+        REQUIRE(!healthy(health_state, origin_key));
+        (void)pending_removal;
     }
-    readers_started.wait();
-    for (std::size_t index = 0; index < 64; ++index) {
-        health_state.publish(health_state.prepare(retained_health_keys));
-        health_state.get_target("website", "origin").success(1);
+    {
+        auto pending_retention = health_state.prepare(keys_of(origin_key));
+        REQUIRE(health_state.record(origin_key, id, true, 1));
+        health_state.activate(std::move(pending_retention));
     }
-    observe_health.store(false, std::memory_order_relaxed);
-    for (auto& reader : health_readers) {
-        reader.join();
-    }
-    REQUIRE(health_observations.load(std::memory_order_relaxed) >= 8);
-    REQUIRE(health_state.healthy("website", "origin"));
+    REQUIRE(id_of(health_state, origin_key) == id);
+    REQUIRE(healthy(health_state, origin_key));
 
-    flexedge::node::origin_health_registry origin_health;
-    origin_health.publish(origin_health.prepare(
-        {flexedge::node::origin_health_registry::get_key("website-1", "origin-1")}));
-    origin_health.get_target("website-1", "origin-1").record_probe(false, 1, 42, "timeout");
-    const auto health_reports = origin_health.reports();
+    // A retired origin ignores late outcomes and probe results and is not probed.
+    const auto retired_probe = health_state.probe_target(origin_key);
+    health_state.activate(health_state.prepare({}));
+    REQUIRE(health_state.snapshot()->find("website", "origin") == nullptr);
+    REQUIRE(healthy(health_state, origin_key));
+    REQUIRE(!health_state.record(origin_key, id, false, 1));
+    auto late_probe = retired_probe;
+    late_probe.record_probe(false, 1, 42, "late result");
+    REQUIRE(!health_state.claim_due(origin_key, std::chrono::seconds(1)));
+    REQUIRE(health_state.snapshot()->reports().empty());
+
+    // Re-adding it is a new membership: outcomes of the old one stay discarded.
+    health_state.activate(health_state.prepare(keys_of(origin_key)));
+    const auto readded_id = id_of(health_state, origin_key);
+    REQUIRE(readded_id != id);
+    REQUIRE(!health_state.record(origin_key, id, false, 1));
+    late_probe.record_probe(false, 1, 42, "retired probe");
+    REQUIRE(healthy(health_state, origin_key));
+    REQUIRE(health_state.snapshot()->reports().front().checked_at_unix_millis_ == 0);
+    REQUIRE(health_state.snapshot()->reports().front().status_ == "unknown");
+
+    REQUIRE(health_state.claim_due(origin_key, std::chrono::seconds(60)));
+    REQUIRE(!health_state.claim_due(origin_key, std::chrono::seconds(60)));
+    REQUIRE(health_state.claim_due(origin_key, std::chrono::seconds(0)));
+
+    // Snapshots are immutable: later changes do not alter one already taken.
+    const auto before_probe = health_state.snapshot();
+    health_state.probe_target(origin_key).record_probe(false, 1, 42, "timeout");
+    REQUIRE(before_probe->healthy("website", "origin"));
+    const auto health_reports = health_state.snapshot()->reports();
     REQUIRE(health_reports.size() == 1);
+    REQUIRE(health_reports.front().website_id_ == "website");
+    REQUIRE(health_reports.front().origin_id_ == "origin");
     REQUIRE(health_reports.front().status_ == "unhealthy");
     REQUIRE(health_reports.front().latency_millis_ == 42);
     REQUIRE(health_reports.front().last_error_ == "timeout");
+    REQUIRE(health_reports.front().checked_at_unix_millis_ > 0);
 }

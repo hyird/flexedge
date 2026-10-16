@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "service/common/domain_name.h"
+#include "service/domains/dns_zone/dns_zone_reference.h"
 #include "service/domains/website/domain_claim_types.h"
 #include "service/features/website_config/model.h"
 
@@ -19,7 +20,7 @@ enum class domain_claim_error { managed_zone_not_found };
 
 inline std::variant<std::vector<domain_claim>, domain_claim_error> plan_domain_claims(
     std::span<const service::website_config::website_domain_data> domains,
-    std::span<const dns_zone_reference> zones) {
+    std::span<const service::dns_zone::dns_zone_reference> zones) {
     std::vector<domain_claim> claims;
     claims.reserve(domains.size());
     for (const auto& domain : domains) {
@@ -29,7 +30,7 @@ inline std::variant<std::vector<domain_claim>, domain_claim_error> plan_domain_c
         });
         domain_claim claim{.id_ = domain.id_, .key_ = std::move(key), .dns_mode_ = domain.dns_mode_};
         if (claim.dns_mode_ == "managed") {
-            const dns_zone_reference* owner = nullptr;
+            const service::dns_zone::dns_zone_reference* owner = nullptr;
             std::size_t owner_length = 0;
             for (const auto& zone : zones) {
                 if (!service::common::domain_belongs_to_zone(domain.hostname_, zone.domain_)) {

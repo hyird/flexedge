@@ -14,12 +14,15 @@
 #include <utility>
 
 #include "service/features/attempt_trace/recorder.h"
+#include "service/features/certificate/acme_transport.h"
+#include "service/features/dns/cloudflare.h"
 #include "support/attempt_trace_fixture.h"
 
 namespace {
 
 using service::attempt_trace::log_level;
-using service::attempt_trace::outbound_operation;
+using service::attempt_trace::outbound_policy;
+namespace acme_trace = service::certificate_issuance::acme_trace;
 using service::attempt_trace::recorder;
 using service::attempt_trace::step_code;
 using test_support::attempt_trace::exchange;
@@ -88,9 +91,9 @@ recorder new_recorder() {
     return recorder(service::attempt_trace::trace_kind::certificate, "certificate", std::chrono::steady_clock::now());
 }
 
-exchange acme_call(outbound_operation operation, std::string target, std::string body) {
-    return {.call_ = {.origin_alias_ = service::config::lets_encrypt_origin_alias, .operation_ = operation},
-        .method_ = operation == outbound_operation::acme_new_nonce ? "HEAD" : "POST",
+exchange acme_call(const outbound_policy& policy, std::string target, std::string body) {
+    return {.call_ = {.origin_alias_ = service::config::lets_encrypt_origin_alias, .policy_ = &policy},
+        .method_ = &policy == &acme_trace::new_nonce ? "HEAD" : "POST",
         .target_ = std::move(target),
         .status_ = 200,
         .response_headers_ = {{"content-type", "application/json"}, {"replay-nonce", "nonce-value-123456"}},
@@ -107,11 +110,11 @@ void verify_steps_failures_and_folding() {
     {
         auto step = trace.begin_step(step_code::validation, "www.example.com");
         for (int poll = 0; poll < 5; ++poll) {
-            perform(trace, acme_call(outbound_operation::acme_new_nonce, "/acme/new-nonce", ""));
-            perform(trace, acme_call(outbound_operation::acme_authorization, "/acme/authz/1", R"({"status":"pending"})"));
+            perform(trace, acme_call(acme_trace::new_nonce, "/acme/new-nonce", ""));
+            perform(trace, acme_call(acme_trace::authorization, "/acme/authz/1", R"({"status":"pending"})"));
             trace.log(log_level::info, "授权状态 pending");
         }
-        perform(trace, acme_call(outbound_operation::acme_authorization, "/acme/authz/1", R"({"status":"invalid"})"));
+        perform(trace, acme_call(acme_trace::authorization, "/acme/authz/1", R"({"status":"invalid"})"));
         trace.mark_invalid_response("authorization became invalid");
         // Left without complete(): an exception unwinding records a failure.
     }
@@ -120,11 +123,10 @@ void verify_steps_failures_and_folding() {
         step.skip("没有写入 DNS 验证记录，无需清理");
     }
     trace.mark_failure("ACME DNS-01 验证失败");
-    trace.link_task({.task_id_ = "t", .resource_type_ = "dns_zone", .resource_id_ = "r", .label_ = "DNS 同步"});
+    trace.link_task({.resource_type_ = "dns_zone", .resource_id_ = "r", .label_ = "DNS 同步"});
     {
         auto step = trace.begin_step(step_code::record_failure);
-        trace.link_task({.task_id_ = "00000000-0000-4000-8000-000000000001",
-            .resource_type_ = "dns_zone",
+        trace.link_task({.resource_type_ = "dns_zone",
             .resource_id_ = "00000000-0000-4000-8000-000000000002",
             .label_ = "DNS 同步"});
         // Still open when the result commits: finish() completes it.
@@ -183,7 +185,7 @@ void verify_bounds() {
         auto step = trace.begin_step(step_code::reconcile_records);
         for (int index = 0; index < 150; ++index) {
             perform(trace, {.call_ = {.origin_alias_ = service::config::cloudflare_origin_alias,
-                                .operation_ = outbound_operation::cloudflare_update_record,
+                                .policy_ = &service::dns::cloudflare_trace::update_record,
                                 .subject_ = "host-" + std::to_string(index) + " A"},
                                .method_ = "PUT",
                                .target_ = "/client/v4/zones/z/dns_records/" + std::to_string(index),
@@ -226,7 +228,7 @@ void verify_failures_never_escape() {
     {
         auto step = trace.begin_step(step_code::order);
         // An origin that is not configured: capture fails, the attempt does not.
-        perform(trace, {.call_ = {.origin_alias_ = "not-configured", .operation_ = outbound_operation::acme_new_order},
+        perform(trace, {.call_ = {.origin_alias_ = "not-configured", .policy_ = &acme_trace::new_order},
                            .method_ = "POST",
                            .target_ = "/acme/new-order",
                            .status_ = 200});
@@ -238,7 +240,7 @@ void verify_failures_never_escape() {
     require(result.document_.get<"steps">().size() == 1, "what was captured before degradation remains");
 
     auto unscoped = new_recorder();
-    perform(unscoped, acme_call(outbound_operation::acme_directory, "/directory", R"({"newNonce":"x"})"));
+    perform(unscoped, acme_call(acme_trace::directory, "/directory", R"({"newNonce":"x"})"));
     unscoped.log(log_level::info, "outside any step");
     unscoped.mark_failure("failure outside any step");
     const auto outside = finish(unscoped);
@@ -254,7 +256,7 @@ void verify_failures_never_escape() {
         const std::string target = "/acme/cert/1";
         const ruvia::http_client_request_view request{.method_ = "POST", .target_ = target};
         (void)pending.begin_http({.origin_alias_ = service::config::lets_encrypt_origin_alias,
-                                     .operation_ = outbound_operation::acme_certificate},
+                                     .policy_ = &acme_trace::certificate},
             request);
         const auto cancelled = finish(pending);
         require(cancelled.document_.get<"steps">()[0].get<"calls">()[0].get<"outcome">().view() == "cancelled",

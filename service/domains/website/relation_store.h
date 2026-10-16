@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ruvia/core/task.h>
+#include <ruvia/web/db/db_query.h>
 #include <ruvia/web/db/db_transaction.h>
 
 #include <cstdint>
@@ -25,25 +26,21 @@ inline ruvia::task<bool> has_conflicting_domain_claims(
     if (claims.empty()) {
         co_return false;
     }
-    std::vector<ruvia::db_value> params{ruvia::db_value{tenant_id}};
-    params.reserve(1 + claims.size() + (excluded_website_id ? 1 : 0));
-    std::string placeholders;
+    ruvia::db_query query;
+    std::vector<ruvia::db_expression> keys;
+    keys.reserve(claims.size());
     for (const auto& claim : claims) {
-        if (!placeholders.empty()) {
-            placeholders += ", ";
-        }
-        placeholders += "$" + std::to_string(params.size() + 1);
-        params.emplace_back(std::string_view{claim.key_});
+        keys.push_back(query.value(claim.key_));
     }
-    std::string sql =
-        "SELECT 1 FROM sys_website_domain_claim WHERE tenant_id = $1 AND domain_key IN (" +
-        placeholders + ")";
+    query.select(query.sql("1"))
+        .from("sys_website_domain_claim")
+        .where(query.sql({"tenant_id = ", ""}, {query.value(tenant_id)}))
+        .and_where(query.binary(query.sql("domain_key"), ruvia::db_binary_operator::in, query.list(keys)));
     if (excluded_website_id) {
-        sql += " AND website_id <> $" + std::to_string(params.size() + 1);
-        params.emplace_back(std::string_view{*excluded_website_id});
+        query.and_where(query.sql({"website_id <> ", ""}, {query.value(*excluded_website_id)}));
     }
-    sql += " LIMIT 1";
-    co_return !(co_await transaction.query(sql, params)).empty();
+    query.limit(1);
+    co_return !(co_await transaction.query(query)).empty();
 }
 
 inline ruvia::task<void> clear_relation_projections(ruvia::db_transaction& transaction,
@@ -65,62 +62,27 @@ replace_relation_projections(ruvia::db_transaction& transaction, const std::stri
     co_await clear_relation_projections(transaction, tenant_id, website_id);
 
     if (!domain_claims.empty()) {
-        std::vector<ruvia::db_value> domain_insert_params;
-        domain_insert_params.reserve(domain_claims.size() * 6);
-        std::string domain_insert_sql =
-            "INSERT INTO sys_website_domain_claim (tenant_id, website_id, domain_id, "
-            "domain_key, dns_mode, dns_zone_id) VALUES ";
-        const auto append_param = [&](ruvia::db_value value) {
-            domain_insert_sql += "$" + std::to_string(domain_insert_params.size() + 1);
-            domain_insert_params.push_back(std::move(value));
-        };
+        ruvia::db_query insert;
+        insert.insert_into("sys_website_domain_claim",
+            {"tenant_id", "website_id", "domain_id", "domain_key", "dns_mode", "dns_zone_id"});
         for (const auto& claim : domain_claims) {
-            if (!domain_insert_params.empty()) {
-                domain_insert_sql += ", ";
-            }
-            domain_insert_sql += "(";
-            append_param(ruvia::db_value{tenant_id});
-            domain_insert_sql += ", ";
-            append_param(ruvia::db_value{website_id});
-            domain_insert_sql += ", ";
-            append_param(ruvia::db_value{std::string_view{claim.id_}});
-            domain_insert_sql += ", ";
-            append_param(ruvia::db_value{std::string_view{claim.key_}});
-            domain_insert_sql += ", ";
-            append_param(ruvia::db_value{std::string_view{claim.dns_mode_}});
-            domain_insert_sql += ", ";
-            append_param(claim.dns_zone_id_ ? ruvia::db_value{std::string_view{*claim.dns_zone_id_}}
-                                            : ruvia::db_value{nullptr});
-            domain_insert_sql += ")";
+            insert.values({insert.value(tenant_id), insert.value(website_id), insert.value(claim.id_),
+                insert.value(claim.key_), insert.value(claim.dns_mode_),
+                claim.dns_zone_id_ ? insert.value(*claim.dns_zone_id_) : insert.null_value()});
         }
-        (void)co_await transaction.execute(domain_insert_sql, domain_insert_params);
+        (void)co_await transaction.execute(insert);
     }
 
     if (!certificate_ids.empty()) {
-        std::vector<ruvia::db_value> certificate_insert_params;
-        certificate_insert_params.reserve(certificate_ids.size() * 4);
-        std::string certificate_insert_sql =
-            "INSERT INTO sys_website_certificate_binding (tenant_id, website_id, "
-            "certificate_id, position) VALUES ";
-        const auto append_param = [&](ruvia::db_value value) {
-            certificate_insert_sql += "$" + std::to_string(certificate_insert_params.size() + 1);
-            certificate_insert_params.push_back(std::move(value));
-        };
+        ruvia::db_query insert;
+        insert.insert_into("sys_website_certificate_binding",
+            {"tenant_id", "website_id", "certificate_id", "position"});
         for (std::size_t position = 0; position < certificate_ids.size(); ++position) {
-            if (position > 0) {
-                certificate_insert_sql += ", ";
-            }
-            certificate_insert_sql += "(";
-            append_param(ruvia::db_value{tenant_id});
-            certificate_insert_sql += ", ";
-            append_param(ruvia::db_value{website_id});
-            certificate_insert_sql += ", ";
-            append_param(ruvia::db_value{certificate_ids[position]});
-            certificate_insert_sql += ", ";
-            append_param(ruvia::db_value{static_cast<std::int64_t>(position)});
-            certificate_insert_sql += ")";
+            insert.values({insert.value(tenant_id), insert.value(website_id),
+                insert.value(certificate_ids[position]),
+                insert.value(static_cast<std::int64_t>(position))});
         }
-        (void)co_await transaction.execute(certificate_insert_sql, certificate_insert_params);
+        (void)co_await transaction.execute(insert);
     }
     co_return;
 }

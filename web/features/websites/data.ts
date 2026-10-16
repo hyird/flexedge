@@ -1,33 +1,41 @@
 import { z } from 'zod'
-import { queryOptions } from '@tanstack/react-query'
-import { sendData, streamPath, type PageData } from '@/lib/api'
-import { ApiBusinessError, ApiProtocolError } from '@/lib/api-response'
-import { readLiveQuery, snapshotQueryOptions } from '@/lib/live-query'
+import { queryOptions, type QueryClient } from '@tanstack/react-query'
+import {
+  apiErrorCode,
+  getData,
+  pageDataSchema,
+  sendData,
+  streamPath,
+} from '@/lib/api'
+import { parseResponseData } from '@/lib/api-response'
+import { readLiveEvent, readLiveQuery } from '@/lib/live-query'
 import { queryKeys } from '@/lib/query-keys'
+import { resourceListSearchQuery } from '@/lib/resource'
 import { dnsZoneOptionsQuery } from '@/features/dns-zones/data'
-import { accessLogPageSchema } from './access-log-schema'
-import type { Website, WebsiteConfig } from './types'
+import { liveLogsQuery } from '@/features/logs/data'
+import { accessLogPageSchema, parseAccessLogs } from './access-log-schema'
+import { parseWebsiteDashboard } from './dashboard-schema'
+import {
+  websiteOriginRuntimePatchSchema,
+  websiteSchema,
+  type Website,
+  type WebsiteConfig,
+} from './types'
+import { websiteName } from './website-display'
 
+const websitePageSchema = pageDataSchema(websiteSchema)
+
+/** Applies an `origin-runtime` event (one node's origin health for one
+ * website) to the website detail frame; stale or foreign reports leave it
+ * unchanged. */
 export function patchWebsiteOriginRuntime(
   current: Website | undefined,
-  value: unknown
+  value: unknown,
+  event: string
 ): Website | undefined {
-  if (!current || !value || typeof value !== 'object') return current
-  const patch = value as {
-    id?: string
-    node_id?: string
-    node_revision?: number
-    reported_at?: string
-    origin_states?: Website['runtime']['origin_states']
-  }
-  if (
-    patch.id !== current.id ||
-    !patch.node_id ||
-    patch.node_revision === undefined ||
-    !patch.reported_at ||
-    !Array.isArray(patch.origin_states)
-  )
-    return current
+  if (!current || event !== 'origin-runtime') return current
+  const patch = parseResponseData(websiteOriginRuntimePatchSchema, value)
+  if (patch.id !== current.id) return current
   const source = current.runtime.origin_sources?.find(
     (item) => item.node_id === patch.node_id
   )
@@ -55,7 +63,7 @@ export function patchWebsiteOriginRuntime(
       ...current.runtime,
       origin_sources: (current.runtime.origin_sources ?? []).map((item) =>
         item.node_id === patch.node_id
-          ? { ...item, reported_at: patch.reported_at! }
+          ? { ...item, reported_at: patch.reported_at }
           : item
       ),
       origin_states: [
@@ -70,15 +78,14 @@ export function patchWebsiteOriginRuntime(
 
 type WebsiteInput = {
   cluster_id: string
-  status: string
+  status: Website['status']
   config: WebsiteConfig
 }
 
+/** `website_created_dto` (service/domains/website/website_types.h). */
 const createdWebsiteSchema = z.object({
   id: z.string().uuid(),
   revision: z.number().int().positive(),
-  // Contract (operation-tasks §6): the task the creation started.
-  operation_id: z.string().optional(),
 })
 
 /** `POST /websites?cluster_id=` answers `{ id, revision }` of the new website. */
@@ -88,9 +95,7 @@ export async function createWebsite(values: WebsiteInput) {
     status: values.status,
     config: values.config,
   })
-  const result = createdWebsiteSchema.safeParse(response.data)
-  if (!result.success) throw new ApiProtocolError()
-  return result.data
+  return parseResponseData(createdWebsiteSchema, response.data)
 }
 
 export function updateWebsite(
@@ -106,42 +111,6 @@ export function updateWebsite(
   )
 }
 
-export type WebsitesListParams = {
-  page: number
-  page_size: number
-  keyword?: string
-  cluster_id?: string
-  certificate_id?: string
-  status?: string
-}
-
-export function websitesQuery(params: WebsitesListParams) {
-  return queryOptions({
-    retry: false,
-    meta: { inlineError: true },
-    queryKey: [...queryKeys.websites, 'list', params],
-    queryFn: ({ queryKey, signal }) =>
-      readLiveQuery<PageData<Website>>(
-        streamPath('/websites', params),
-        queryKey,
-        signal
-      ),
-  })
-}
-
-/** One-shot page of `/websites/stream` for pages whose live stream belongs to
- * another resource (e.g. websites referencing a certificate). Re-read with
- * `refetch()` or by invalidating `websitesSnapshotKey`. */
-export const websitesSnapshotKey = [...queryKeys.websites, 'list-snapshot']
-export function websitesSnapshotQuery(params: WebsitesListParams) {
-  return queryOptions({
-    ...snapshotQueryOptions<PageData<Website>>(
-      streamPath('/websites', params),
-      [...websitesSnapshotKey, params]
-    ),
-    meta: { inlineError: true },
-  })
-}
 export function removeWebsite(target: Pick<Website, 'id' | 'revision'>) {
   return sendData(
     'delete',
@@ -150,25 +119,91 @@ export function removeWebsite(target: Pick<Website, 'id' | 'revision'>) {
     target.revision
   )
 }
+
+/** After a confirmed delete: every read of the website (detail, snapshot,
+ * access logs, dashboard: `[...websites, kind, id, ...]`) is dropped so it
+ * never reports 404, and every other website read is refreshed. */
+export function afterWebsiteRemove(client: QueryClient, id: string) {
+  client.removeQueries({
+    queryKey: queryKeys.websites,
+    predicate: (query) => query.queryKey[2] === id,
+  })
+  return client.invalidateQueries({ queryKey: queryKeys.websites })
+}
+
+export type WebsitesListParams = {
+  page: number
+  page_size: number
+  keyword?: string
+  cluster_id?: string
+  certificate_id?: string
+  status?: Website['status']
+}
+
+export function websitesQuery(params: WebsitesListParams) {
+  return queryOptions({
+    retry: false,
+    meta: { inlineError: true },
+    queryKey: [...queryKeys.websites, 'list', params],
+    queryFn: ({ queryKey, signal }) =>
+      readLiveQuery(
+        streamPath('/websites', params),
+        queryKey,
+        signal,
+        (value) => parseResponseData(websitePageSchema, value)
+      ),
+  })
+}
+
+/** Command palette search of websites. */
+export function websiteSearchQuery(keyword: string) {
+  return resourceListSearchQuery(
+    '/websites',
+    queryKeys.websites,
+    keyword,
+    websiteSchema.pick({ id: true, config: true, access_domain: true }),
+    (website) => ({ id: website.id, label: websiteName(website) })
+  )
+}
+
+/** One read of `GET /api/websites` for pages whose live stream belongs to
+ * another resource (e.g. websites referencing a certificate). Re-read with
+ * `refetch()` or by invalidating `websitesSnapshotKey`. */
+export const websitesSnapshotKey = [...queryKeys.websites, 'list-snapshot']
+export function websitesSnapshotQuery(params: WebsitesListParams) {
+  return queryOptions({
+    retry: false,
+    gcTime: 0,
+    meta: { inlineError: true },
+    queryKey: [...websitesSnapshotKey, params],
+    queryFn: async ({ signal }) =>
+      parseResponseData(
+        websitePageSchema,
+        await getData<unknown>('/websites', params, signal)
+      ),
+  })
+}
+
 export function websiteDetailQuery(id: string | undefined) {
   return queryOptions({
     retry: false,
     // The detail layout renders "网站不存在" and stream errors itself.
     meta: { inlineError: true },
-    queryKey: [...queryKeys.websites, id, 'detail'],
+    queryKey: [...queryKeys.websites, 'detail', id],
     enabled: !!id,
     queryFn: ({ queryKey, signal }) => {
       if (!id) throw new Error('网站不存在')
-      return readLiveQuery<Website>(
+      return readLiveQuery(
         streamPath('/websites/' + id),
         queryKey,
         signal,
-        undefined,
+        (value) => parseResponseData(websiteSchema, value),
         patchWebsiteOriginRuntime
       )
     },
   })
 }
+
 /** Hosted zones for managed domains. The domains group and the editor's
  * validation share this snapshot, read only while some domain is managed;
  * the domains group shows failures inline with a retry. */
@@ -179,28 +214,37 @@ export function hostedZoneOptionsQuery(enabled: boolean) {
     meta: { inlineError: true },
   })
 }
-/** One-shot read of the website detail stream for the detail header on tabs
- * whose own live stream is something else (traffic, logs). */
+
+/** One read of `GET /api/websites/:id` for the detail header on tabs whose
+ * own live stream is something else (traffic, logs). */
+export const websiteSnapshotKey = [...queryKeys.websites, 'snapshot']
 export function websiteSnapshotQuery(id: string) {
   return queryOptions({
-    ...snapshotQueryOptions<Website>(streamPath('/websites/' + id), [
-      ...queryKeys.websites,
-      id,
-      'header',
-    ]),
+    retry: false,
+    gcTime: 0,
     meta: { inlineError: true },
+    queryKey: [...websiteSnapshotKey, id],
+    queryFn: async ({ signal }) =>
+      parseResponseData(
+        websiteSchema,
+        await getData<unknown>('/websites/' + id, undefined, signal)
+      ),
   })
 }
-/** `WebsiteError::NOT_FOUND` (service/domains/website/website_error.h), sent as
- * the detail stream's `resource-error` for unknown or deleted websites. */
+
+/** `WebsiteError::NOT_FOUND` (service/domains/website/website_error.h), the
+ * detail stream's `resource-error` or the detail read's error response for
+ * unknown or deleted websites. */
 const websiteNotFoundCode = 16601
 export function isWebsiteNotFound(error: unknown) {
-  return error instanceof ApiBusinessError && error.code === websiteNotFoundCode
+  return apiErrorCode(error) === websiteNotFoundCode
 }
+
 export function probeWebsiteDns(id: string | undefined) {
   if (!id) throw new Error('网站不存在')
   return sendData('post', '/websites/' + id + '/dns-probe')
 }
+
 export function websiteAccessLogHistoryQuery(
   id: string,
   params: {
@@ -214,13 +258,42 @@ export function websiteAccessLogHistoryQuery(
   return queryOptions({
     retry: false,
     meta: { inlineError: true },
-    queryKey: [...queryKeys.websites, id, 'access-logs', params],
+    queryKey: [...queryKeys.websites, 'access-logs', id, params],
+    queryFn: async ({ signal }) =>
+      parseResponseData(
+        accessLogPageSchema,
+        await getData<unknown>(
+          '/websites/' + id + '/access-logs/history',
+          params,
+          signal
+        )
+      ),
+  })
+}
+
+/** Live access log tail of the 访问日志 tab. */
+export function websiteAccessLogsQuery(id: string) {
+  return liveLogsQuery(
+    streamPath('/websites/' + id + '/access-logs'),
+    [...queryKeys.websites, 'access-logs', id, 'live'],
+    parseAccessLogs
+  )
+}
+
+/** Live statistics of the 流量分析 tab: `dashboard` frames of the website's
+ * dashboard stream. */
+export function websiteDashboardQuery(id: string) {
+  return queryOptions({
+    retry: false,
+    meta: { inlineError: true },
+    queryKey: [...queryKeys.websites, 'dashboard', id],
     queryFn: ({ queryKey, signal }) =>
-      readLiveQuery(
-        streamPath('/websites/' + id + '/access-logs/history', params),
+      readLiveEvent(
+        streamPath('/websites/' + id + '/dashboard'),
+        'dashboard',
         queryKey,
         signal,
-        (page) => accessLogPageSchema.parse(page)
+        parseWebsiteDashboard
       ),
   })
 }

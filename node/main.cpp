@@ -9,7 +9,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 
 #include <asio/signal_set.hpp>
 
@@ -157,10 +156,8 @@ int main(int argc, char* argv[]) {
             return 0;
         }
         if (shutting_down.load()) {
-            const auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-            while (!data_plane.drained() && std::chrono::steady_clock::now() < drain_deadline) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
+            // Each worker reports when its last connection closes; stop after 10 s regardless.
+            (void)loop.start(data_plane.wait_drained(std::chrono::seconds(10))).get();
         }
         loop_shutdown.stop_and_join();
         if (restart_requested.load()) {

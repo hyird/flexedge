@@ -4,6 +4,7 @@ import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button } from '@heroui/react'
 import { hasListFilters, useListSearch } from '@/lib/list-search'
+import { describeStatus } from '@/lib/status'
 import { DataTable } from '@/components/data-table'
 import { LinkButton } from '@/components/link-button'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
@@ -19,7 +20,8 @@ import { dnsZonesQuery } from './data'
 import {
   displaySyncStatus,
   zoneSyncFilters,
-  zoneSyncStatusLabels,
+  zoneSyncStatuses,
+  zoneSyncStatusReserve,
 } from './dns-zone-display'
 import type { DnsZone } from './types'
 
@@ -43,15 +45,8 @@ export function DnsZonesPage() {
     meta: { inlineError: true },
   })
   const filtered = hasListFilters(list.search, filterKeys)
-  const navigate = route.useNavigate()
-  // The sheet flag is not a filter: toggling it keeps the current page.
-  const setCreateOpen = (open: boolean) =>
-    void navigate({
-      search: (previous) => ({ ...previous, create: open ? 1 : undefined }),
-      replace: true,
-    })
   const createAction = (
-    <Button size='sm' onPress={() => setCreateOpen(true)}>
+    <Button size='sm' onPress={() => void list.sheet.openCreate()}>
       <Plus className='size-4' />
       添加域名
     </Button>
@@ -108,8 +103,8 @@ export function DnsZonesPage() {
       minWidth: 130,
       cell: (zone) => (
         <StatusChip
-          status={displaySyncStatus(zone)}
-          reserve={zoneSyncStatusLabels}
+          {...describeStatus(zoneSyncStatuses, displaySyncStatus(zone))}
+          reserve={zoneSyncStatusReserve}
         />
       ),
     },
@@ -171,7 +166,7 @@ export function DnsZonesPage() {
                   sync_status: (value || undefined) as typeof syncFilter,
                 })
               }
-              options={[...zoneSyncFilters]}
+              options={zoneSyncFilters}
             />
           </>
         }
@@ -212,8 +207,8 @@ export function DnsZonesPage() {
         }
       />
       <CreateZoneSheet
-        isOpen={list.search.create === 1}
-        onClose={() => setCreateOpen(false)}
+        isOpen={list.sheet.isCreating}
+        onClose={() => void list.sheet.close()}
       />
     </Page>
   )

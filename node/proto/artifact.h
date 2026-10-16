@@ -7,14 +7,17 @@
 #include <array>
 #include <cstddef>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <openssl/evp.h>
 
 #include "common/hex.h"
 #include "common/sha256.h"
+#include "node/proto/edge_control.pb.h"
 
 namespace flexedge::node {
 
@@ -50,8 +53,53 @@ inline std::string artifact_digest(std::string_view bytes) {
     return flexedge::crypto::hex_encode(digest);
 }
 
-inline std::string artifact_digest(const google::protobuf::MessageLite& message) {
-    return artifact_digest(serialize_artifact(message));
+[[nodiscard]] inline bool artifact_matches(std::string_view digest, std::string_view bytes) {
+    return artifact_digest(bytes) == digest;
+}
+
+// Content-addressed envelopes (v2::NodeSpec, v2::ClusterReleaseManifest, v2::DeliveryObject)
+// carry the exact content bytes they are addressed by. The digest always covers the bytes as
+// received, so fields unknown to the reader never change it.
+template <typename envelope_type>
+[[nodiscard]] envelope_type pack_artifact(const google::protobuf::MessageLite& content) {
+    envelope_type envelope;
+    auto bytes = serialize_artifact(content);
+    envelope.set_digest_sha256(artifact_digest(bytes));
+    envelope.set_content(std::move(bytes));
+    return envelope;
+}
+
+// Hashes the received bytes and parses them only when they match `digest`.
+template <typename content_type>
+[[nodiscard]] std::optional<content_type> open_artifact(std::string_view digest,
+    std::string_view bytes) {
+    content_type content;
+    if (!artifact_matches(digest, bytes) || !parse_artifact(bytes, content)) {
+        return std::nullopt;
+    }
+    return content;
+}
+
+struct state_contents final {
+    v2::NodeSpecContent node_spec_;
+    v2::ClusterReleaseContent release_;
+};
+
+// Opens both content-addressed parts of a v2::DesiredState or v2::ActiveState. A missing part
+// has an empty digest and never verifies.
+template <typename state_type>
+[[nodiscard]] std::optional<state_contents> open_state(const state_type& state) {
+    auto node_spec = open_artifact<v2::NodeSpecContent>(state.node_spec().digest_sha256(),
+        state.node_spec().content());
+    if (!node_spec) {
+        return std::nullopt;
+    }
+    auto release = open_artifact<v2::ClusterReleaseContent>(state.release().digest_sha256(),
+        state.release().content());
+    if (!release) {
+        return std::nullopt;
+    }
+    return state_contents{.node_spec_ = std::move(*node_spec), .release_ = std::move(*release)};
 }
 
 }  // namespace flexedge::node

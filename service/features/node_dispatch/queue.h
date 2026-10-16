@@ -8,8 +8,10 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "node/proto/artifact.h"
+#include "service/features/background/queued_work.h"
 #include "service/features/node_dispatch/deployment_source_store.h"
 #include "service/features/node_dispatch/object_store.h"
 #include "service/features/node_dispatch/protocol.h"
@@ -19,10 +21,11 @@
 namespace service::node_dispatch {
 
 // Builds and activates a new release of the cluster in the caller's
-// transaction; `origin` owns the node publish subtasks it creates.
-inline ruvia::task<void> publish_cluster_release(ruvia::db_transaction& transaction,
+// transaction; the node tasks of its targets change in `work`. Returns the
+// new current release id.
+inline ruvia::task<std::string> publish_cluster_release(ruvia::db_transaction& transaction,
     std::string_view tenant_id,
-    std::string_view cluster_id, service::operation::work_origin& origin) {
+    std::string_view cluster_id, service::background::queued_work& work) {
     const auto allocation = co_await allocate_cluster_release(transaction, tenant_id, cluster_id,
         static_cast<std::int64_t>(flexedge::node::cluster_release_schema_version));
     const auto& release_id = allocation.id_;
@@ -39,29 +42,31 @@ inline ruvia::task<void> publish_cluster_release(ruvia::db_transaction& transact
     }
     const auto manifest_bytes = flexedge::node::serialize_artifact(artifact.manifest_);
     const auto manifest_envelope = service::utils::seal_secret(manifest_bytes);
-    co_await activate_cluster_release(transaction, tenant_id, cluster_id, release_id, generation,
-        artifact.manifest_.digest_sha256(), manifest_envelope, origin);
+    co_await activate_cluster_release(transaction, tenant_id, cluster_id, release_id,
+        artifact.manifest_.digest_sha256(), manifest_envelope, work);
 
-    co_return;
+    co_return release_id;
 }
 
-// Publishes only when the cluster has no release of the current schema.
-inline ruvia::task<void> ensure_cluster_release(ruvia::db_transaction& transaction,
+// Publishes only when the cluster has no release of the current schema;
+// returns the cluster's current release id.
+inline ruvia::task<std::string> ensure_cluster_release(ruvia::db_transaction& transaction,
     std::string_view tenant_id,
-    std::string_view cluster_id, service::operation::work_origin& origin) {
-    const auto schema = co_await lock_current_release_schema_version(transaction, tenant_id, cluster_id);
-    if (schema != static_cast<std::int64_t>(flexedge::node::cluster_release_schema_version)) {
-        co_await publish_cluster_release(transaction, tenant_id, cluster_id, origin);
+    std::string_view cluster_id, service::background::queued_work& work) {
+    auto current = co_await lock_current_release(transaction, tenant_id, cluster_id);
+    if (!current ||
+        current->schema_version_ != static_cast<std::int64_t>(flexedge::node::cluster_release_schema_version)) {
+        co_return co_await publish_cluster_release(transaction, tenant_id, cluster_id, work);
     }
-    co_return;
+    co_return std::move(current->id_);
 }
 
 inline ruvia::task<void> enqueue_certificate_consumers(ruvia::db_transaction& transaction,
     std::string_view tenant_id,
-    std::string_view certificate_id, service::operation::work_origin& origin) {
+    std::string_view certificate_id, service::background::queued_work& work) {
     const auto clusters = co_await find_certificate_consumer_clusters(transaction, tenant_id, certificate_id);
     for (const auto& cluster : clusters) {
-        co_await publish_cluster_release(transaction, tenant_id, cluster, origin);
+        co_await publish_cluster_release(transaction, tenant_id, cluster, work);
     }
     co_return;
 }

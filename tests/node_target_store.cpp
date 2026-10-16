@@ -1,5 +1,8 @@
 #include <stdexcept>
+#include <string>
+#include <vector>
 
+#include "service/features/background/queued_work.h"
 #include "service/features/node_dispatch/target_store.h"
 #include "support/postgres_test.h"
 namespace {
@@ -13,7 +16,7 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     auto db = client.handle();
     auto tx = co_await db.begin_transaction();
     (void)co_await tx.execute("CREATE TEMP TABLE sys_cluster_release (tenant_id text,id text,cluster_id text) ON COMMIT DROP");
-    (void)co_await tx.execute("CREATE TEMP TABLE sys_node_release_target (fixture_id int GENERATED ALWAYS AS IDENTITY,tenant_id text,release_id text,node_id text,status text,updated_at timestamptz,failed_phase text DEFAULT 'qa',error_code text DEFAULT 'qa',last_error text DEFAULT 'qa',retryable boolean DEFAULT true,applied_at timestamptz,subtask_id text) ON COMMIT DROP");
+    (void)co_await tx.execute("CREATE TEMP TABLE sys_node_release_target (fixture_id int GENERATED ALWAYS AS IDENTITY,tenant_id text,release_id text,node_id text,status text,updated_at timestamptz,failed_phase text DEFAULT 'qa',error_code text DEFAULT 'qa',last_error text DEFAULT 'qa',retryable boolean DEFAULT true,applied_at timestamptz) ON COMMIT DROP");
     for (const auto* tenant : {"t1", "t2"}) {
         for (const auto* release : {"r1", "r2"}) {
             (void)co_await tx.execute("INSERT INTO sys_cluster_release VALUES ($1,$2,$2)", tenant, release);
@@ -27,17 +30,17 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     (void)co_await tx.execute("CREATE TEMP TABLE original ON COMMIT DROP AS TABLE sys_node_release_target");
     for (int scenario = 0; scenario < 5; ++scenario) {
         (void)co_await tx.execute("SAVEPOINT scenario");
-        // Unowned targets (written by a server without task tracking) are
-        // excluded without settling any subtask or creating a task.
-        auto origin = service::operation::work_origin::start(
-            {.action_ = service::operation::action::node_update, .actor_id_ = {}, .target_type_ = "node", .target_id_ = "n1", .summary_ = "{}"});
+        // Excluding changes the node's task (the node task id is the node id)
+        // and queues no work; nothing excluded changes no task.
+        service::background::queued_work work;
         if (scenario == 0) {
-            co_await service::node_dispatch::exclude_pending_node_targets(tx, "t1", "n1", origin);
+            co_await service::node_dispatch::exclude_pending_node_targets(tx, "t1", "n1", work);
         }
         if (scenario == 1) {
-            co_await service::node_dispatch::exclude_pending_node_cluster_targets(tx, "t1", "n1", "r1", origin);
+            co_await service::node_dispatch::exclude_pending_node_cluster_targets(tx, "t1", "n1", "r1", work);
         }
-        require(!origin.operation_id() && origin.touched().empty());
+        require(work.claims().empty() &&
+                work.changed_tasks() == (scenario <= 1 ? std::vector<std::string>{"n1"} : std::vector<std::string>{}));
         if (scenario == 2) {
             co_await service::node_dispatch::mark_node_target_applied(tx, "t1", "r1", "n1");
         }

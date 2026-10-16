@@ -4,6 +4,7 @@
 #include <ruvia/core/task_scope.h>
 #include <ruvia/core/timer.h>
 #include <ruvia/web/db/db_client.h>
+#include <ruvia/web/db/db_migration.h>
 #include <ruvia/web/redis/redis_client.h>
 
 #include <chrono>
@@ -17,7 +18,8 @@
 #include <vector>
 
 #include "service/config/schema.h"
-#include "service/features/live_resource/notification_reader.h"
+#include "service/features/log_ingest/ingest.h"
+#include "service/features/node_presence/notification_relay.h"
 #include "support/postgres_test.h"
 #include "support/redis_test.h"
 
@@ -38,25 +40,12 @@ struct delivery_context final {
     ruvia::redis_client* redis_;
     ruvia::stop_source stop_;
     std::size_t* database_calls_{};
-    service::background::work_available::signals signals_{};
-    live::hub resources_{};
-    service::log_ingest::fanout::hub logs_{};
-    service::node_dispatch::fanout::hub dispatch_{};
-    service::node_channel::report_waits reports_{};
+    service::background::work_available::claim_signals claims_{};
 
     template <typename state_type>
     state_type& worker_state() {
-        if constexpr (std::is_same_v<state_type, service::background::work_available::signals>) {
-            return signals_;
-        } else if constexpr (std::is_same_v<state_type, live::hub>) {
-            return resources_;
-        } else if constexpr (std::is_same_v<state_type, service::log_ingest::fanout::hub>) {
-            return logs_;
-        } else if constexpr (std::is_same_v<state_type, service::node_dispatch::fanout::hub>) {
-            return dispatch_;
-        } else {
-            return reports_;
-        }
+        static_assert(std::is_same_v<state_type, service::background::work_available::claim_signals>);
+        return claims_;
     }
 
     ruvia::db_handle db() const {
@@ -81,8 +70,13 @@ ruvia::task<std::int64_t> row_count(ruvia::db_handle db) {
     co_return rows[0][0].as<std::int64_t>().value();
 }
 
+// The outbox participants of the rows this test commits.
+ruvia::task<bool> relay_batch(delivery_context& context) {
+    co_return co_await outbox::deliver_batch<service::node_presence::resource_relay, service::log_ingest::log_relay>(context);
+}
+
 ruvia::task<void> deliver(delivery_context& context, bool& delivered) {
-    delivered = co_await outbox::deliver_batch(context);
+    delivered = co_await relay_batch(context);
 }
 
 std::unordered_set<std::string> event_ids(const ruvia::redis_value& reply) {
@@ -114,23 +108,19 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
     co_await redis.connect();
     co_await peer_redis.connect();
     co_await lost.connect();
-    const auto schema = "outbox_qa_" + service::utils::random_token().substr(0, 16);
     auto db = first.handle();
     auto peer_db = second.handle();
     auto observer_db = observer.handle();
     const auto redis_handle = redis.handle();
-    const auto task_stream = std::string(service::background::work_available::stream_key);
+    // Outbox mechanics are exercised with node log notifications: a small,
+    // cache-neutral kind published to its own stream.
+    const auto event_stream = std::string(service::log_ingest::notifications::stream_key);
+    const std::vector<std::pair<std::string, std::string>> log_fields{
+        {"tenant_id", "outbox-tenant"}, {"resource_type", "node"}, {"resource_id", "outbox-node"}};
+    const auto log_payload = outbox::pack(log_fields);
     std::vector<std::string> created_ids;
-    (void)co_await db.execute("CREATE SCHEMA " + schema);
     std::exception_ptr failure;
     try {
-        (void)co_await db.execute("SET search_path TO " + schema);
-        (void)co_await peer_db.execute("SET search_path TO " + schema);
-        for (const auto& migration : service::config::schema_detail::notification_outbox_migration()) {
-            // Execute the SQL produced by the real structured migration, not
-            // a parallel table declaration or a regex extraction from source.
-            (void)co_await db.execute(migration.sql());
-        }
         const auto first_pid = co_await db.query("SELECT pg_backend_pid()");
         const auto second_pid = co_await peer_db.query("SELECT pg_backend_pid()");
         const auto pid_a = first_pid[0][0].as<std::int64_t>().value();
@@ -157,15 +147,15 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
         created_ids.push_back(duplicate_id);
         co_await transaction.commit();
         const auto stream_before = co_await redis_handle.command("XLEN", live::notifications::stream_key);
-        co_await outbox::publish(redis_handle, duplicate_id, "resource", payload);
+        co_await service::node_presence::resource_relay::publish(redis_handle, duplicate_id, payload);
         const auto after = co_await cache::read(redis_handle, key);
         require(before.generation_ != after.generation_, "publication invalidates the affected Redis projection");
-        co_await outbox::publish(redis_handle, duplicate_id, "resource", payload);
+        co_await service::node_presence::resource_relay::publish(redis_handle, duplicate_id, payload);
         const auto repeated = co_await cache::read(redis_handle, key);
         const auto stream_after = co_await redis_handle.command("XLEN", live::notifications::stream_key);
         require(after.generation_ == repeated.generation_, "retrying a published id does not invalidate again");
         require(stream_after.integer() == stream_before.integer() + 1, "retrying a published id does not duplicate its stream entry");
-        require(co_await outbox::deliver_batch(context), "durable retry claims the already-published event");
+        require(co_await relay_batch(context), "durable retry claims the already-published event");
         require(co_await row_count(db) == 0, "retry removes the durable event after idempotent publication");
         require((co_await cache::read(redis_handle, key)).generation_ == repeated.generation_,
             "recovery after Redis success and before database deletion does not invalidate twice");
@@ -178,7 +168,7 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
         bool rejected_presence{};
         try {
             const auto invalid_fields = live::notifications::encode(invalid_presence);
-            co_await outbox::publish(redis_handle, invalid_id, "resource", outbox::pack(invalid_fields));
+            co_await service::node_presence::resource_relay::publish(redis_handle, invalid_id, outbox::pack(invalid_fields));
         } catch (const std::exception&) {
             rejected_presence = true;
         }
@@ -195,20 +185,20 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
         auto committed = co_await db.begin_transaction();
         co_await live::commit_and_notify(committed, failed_context, value);
         require(co_await row_count(db) == 1, "Redis failure preserves the committed outbox row");
-        require(co_await outbox::deliver_batch(failed_context), "failed delivery still claims durable work");
+        require(co_await relay_batch(failed_context), "failed delivery still claims durable work");
         const auto deferred = co_await db.query("SELECT id,attempts,available_at > NOW() FROM sys_notification_outbox");
         require(deferred.size() == 1 && deferred[0][1].as<int>() == 1 && deferred[0][2].as<bool>().value(),
             "failed delivery records attempts and bounded retry time");
         created_ids.emplace_back(deferred[0][0].value().value());
-        require(!(co_await outbox::deliver_batch(context)), "a deferred event is not reclaimed before it is due");
+        require(!(co_await relay_batch(context)), "a deferred event is not reclaimed before it is due");
         (void)co_await db.execute("UPDATE sys_notification_outbox SET available_at = NOW()");
-        require(co_await outbox::deliver_batch(context), "restored Redis delivers due work");
+        require(co_await relay_batch(context), "restored Redis delivers due work");
         require(co_await row_count(db) == 0, "successful recovery acknowledges durable work");
 
-        (void)co_await redis_handle.del(task_stream);
+        (void)co_await redis_handle.del(event_stream);
         auto batch = co_await db.begin_transaction();
         for (int index = 0; index != 64; ++index) {
-            created_ids.push_back(co_await outbox::insert(batch, "task", "dns-sync"));
+            created_ids.push_back(co_await outbox::insert(batch, "log", log_payload));
         }
         co_await batch.commit();
         // Hold each claimant at its first DELETE after it has claimed its
@@ -255,7 +245,7 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
         require(remaining[0][0].as<int>() == 0,
             "two independent claimants finish all 64 events; remaining=" + std::string(remaining[0][0].value().value()) +
                 ", max_attempts=" + std::string(remaining[0][1].value().value()));
-        const auto entries = co_await redis_handle.command("XRANGE", task_stream, "-", "+");
+        const auto entries = co_await redis_handle.command("XRANGE", event_stream, "-", "+");
         require(event_ids(entries).size() == 64 && entries.array().size() == 64,
             "concurrent delivery publishes each durable event exactly once");
 
@@ -263,8 +253,7 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
         std::size_t database_calls{};
         delivery_context stopping{.database_ = first, .redis_ = &redis, .stop_ = {}, .database_calls_ = &database_calls};
         ruvia::task_scope worker(first.worker());
-        worker.spawn(outbox::run_worker(stopping));
-        worker.spawn(live::run_notification_reader(stopping));
+        worker.spawn(outbox::run_worker<service::node_presence::resource_relay, service::log_ingest::log_relay>(stopping));
         for (int attempt = 0; attempt != 100 && database_calls < 2; ++attempt) {
             (void)co_await ruvia::sleep_for(first.worker(), std::chrono::milliseconds(10));
         }
@@ -274,17 +263,18 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
         std::exception_ptr scheduling_failure;
         try {
             auto future = co_await peer_db.begin_transaction();
-            created_ids.push_back(co_await outbox::insert(future, "task", "dns-sync"));
+            created_ids.push_back(co_await outbox::insert(future, "log", log_payload));
             (void)co_await future.execute("UPDATE sys_notification_outbox SET available_at = NOW() + INTERVAL '10 seconds'");
             co_await future.commit();
-            co_await outbox::wake(peer_redis.handle());
+            // The committing worker wakes only its own claim loop.
+            live::wake_own_outbox(stopping);
             (void)co_await ruvia::sleep_for(first.worker(), std::chrono::milliseconds(80));
             require(co_await row_count(peer_db) == 1, "future durable work is not delivered early");
             const auto scheduled_calls = database_calls;
             (void)co_await ruvia::sleep_for(first.worker(), std::chrono::milliseconds(120));
             require(database_calls == scheduled_calls, "a future retry waits for its deadline without database polling");
             (void)co_await peer_db.execute("UPDATE sys_notification_outbox SET available_at = NOW()");
-            co_await outbox::wake(peer_redis.handle());
+            live::wake_own_outbox(stopping);
             bool released{};
             for (int attempt = 0; attempt != 100; ++attempt) {
                 if (co_await row_count(peer_db) == 0) {
@@ -293,14 +283,14 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
                 }
                 (void)co_await ruvia::sleep_for(first.worker(), std::chrono::milliseconds(10));
             }
-            require(released, "a committed reschedule wakes Redis and replaces its previous future deadline");
+            require(released, "a committed reschedule wakes the committer's own loop and replaces its previous future deadline");
 
-            // A producer can die after committing but before appending its
-            // best-effort wakeup. This known missed hint must recover within
-            // the explicit 15-second durable-claim fallback.
+            // Another worker can commit without waking this one, or its
+            // committer can exit before waking its own loop. That work is
+            // recovered within the explicit 15-second durable-claim fallback.
             (void)co_await ruvia::sleep_for(first.worker(), std::chrono::milliseconds(30));
             auto missed = co_await peer_db.begin_transaction();
-            created_ids.push_back(co_await outbox::insert(missed, "task", "dns-sync"));
+            created_ids.push_back(co_await outbox::insert(missed, "log", log_payload));
             co_await missed.commit();
             const auto missed_at = std::chrono::steady_clock::now();
             bool recovered_missed{};
@@ -326,17 +316,14 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
         require(idle_queries_stopped, "an idle outbox performs no empty scan before its 15-second fallback");
         require(std::chrono::steady_clock::now() - stopped_at < std::chrono::milliseconds(500),
             "worker cancellation promptly joins its owned operations");
-        std::cout << "rollback, durable retry, atomic idempotence, generation fencing, two-client SKIP LOCKED, Redis wakeup, 15-second missed-hint recovery and cancellation passed\n";
+        std::cout << "rollback, durable retry, atomic idempotence, generation fencing, two-client SKIP LOCKED, own-loop wakeup, 15-second missed-hint recovery and cancellation passed\n";
     } catch (...) {
         failure = std::current_exception();
     }
-    (void)co_await db.execute("SET search_path TO public");
-    (void)co_await peer_db.execute("SET search_path TO public");
-    (void)co_await db.execute("DROP SCHEMA " + schema + " CASCADE");
     for (const auto& id : created_ids) {
         (void)co_await redis_handle.del("flexedge:notification-published:v1:" + id);
     }
-    (void)co_await redis_handle.del(task_stream);
+    (void)co_await redis_handle.del(event_stream);
     if (failure) {
         std::rethrow_exception(failure);
     }
@@ -351,9 +338,13 @@ int main() {
         if (!postgres || !redis_config) {
             return 77;
         }
+        const test_support::postgres_test_database temporary_database(*postgres);
+        const ruvia::db_migrator migrator(temporary_database.config(), {.table_ = "schema_migrations"});
+        (void)migrator.migrate(service::config::schema_migrations);
         ruvia::event_loop_pool loops({.loop_count_ = 1});
         const auto loop = loops.loop(0);
-        ruvia::db_client first(loop, *postgres), second(loop, *postgres), observer(loop, *postgres);
+        ruvia::db_client first(loop, temporary_database.config()), second(loop, temporary_database.config()),
+            observer(loop, temporary_database.config());
         ruvia::redis_client redis(loop, *redis_config), peer_redis(loop, *redis_config), lost(loop, *redis_config);
         loops.start();
         std::exception_ptr failure;
@@ -362,9 +353,18 @@ int main() {
         } catch (...) {
             failure = std::current_exception();
         }
-        loop.start(first.shutdown()).get();
-        loop.start(second.shutdown()).get();
-        loop.start(observer.shutdown()).get();
+        try {
+            loop.start(first.shutdown()).get();
+            loop.start(second.shutdown()).get();
+            loop.start(observer.shutdown()).get();
+        } catch (...) {
+            if (!failure) {
+                failure = std::current_exception();
+            }
+        }
+        first.close();
+        second.close();
+        observer.close();
         redis.close();
         peer_redis.close();
         lost.close();

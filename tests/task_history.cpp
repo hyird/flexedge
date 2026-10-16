@@ -26,9 +26,10 @@
 #include "service/features/node_dispatch/target_store.h"
 #include "service/features/provider_verification/attempt_detail.h"
 #include "service/features/sync_runtime/state.h"
+#include "service/features/sync_runtime/worker.h"
 #include "service/features/website_dns/attempt_detail.h"
-#include "support/operation_fixture.h"
 #include "support/postgres_test.h"
+#include "support/read_context.h"
 #include "support/recorded_notifications.h"
 
 namespace {
@@ -87,8 +88,6 @@ RUVIA_MODEL(node_detail_input, RUVIA_REQUIRED_FIELD(kind, ruvia::string), RUVIA_
 RUVIA_MODEL(none_detail_input, RUVIA_REQUIRED_FIELD(kind, ruvia::string),
     RUVIA_REQUIRED_FIELD(truncated, ruvia::bool_value));
 
-constexpr std::string_view fresh_database = "task_history_fresh_auth_qa";
-constexpr std::string_view upgrade_database = "task_history_upgrade_auth_qa";
 constexpr std::string_view worker = "task-history-qa";
 constexpr std::string_view tenant = "00000000-0000-4000-8000-0000000000a1";
 constexpr std::string_view other_tenant = "00000000-0000-4000-8000-0000000000a2";
@@ -107,48 +106,9 @@ constexpr std::string_view certificate_marker = "00000000-0000-4000-8000-0000000
 constexpr std::string_view website_marker = "00000000-0000-4000-8000-000000000073";
 constexpr std::string_view provider_marker = "00000000-0000-4000-8000-000000000074";
 constexpr std::string_view summary_marker = "00000000-0000-4000-8000-000000000075";
-// Rows recorded before migration 0023 (task id is not a live marker); 0025
-// deletes every attempt retained before tasks existed.
-constexpr std::string_view legacy_task = "00000000-0000-4000-8000-000000000061";
-constexpr std::string_view legacy_resource = "00000000-0000-4000-8000-000000000062";
 
 using read_context = test_support::read_context<ruvia::db_handle>;
 
-// The subtasks doing the fixture's work (one task each; both release
-// targets belong to one task).
-struct fixture_owners final {
-    service::operation::work_owner dns_;
-    service::operation::work_owner summary_;
-    service::operation::work_owner certificate_;
-    service::operation::work_owner website_;
-    service::operation::work_owner provider_;
-    service::operation::work_owner node_a_;
-    service::operation::work_owner node_b_;
-};
-fixture_owners owners;
-
-ruvia::db_config with_database(const ruvia::db_config& base, std::string_view database) {
-    auto config = base;
-    config.database_ = std::string(database);
-    return config;
-}
-
-// Migrations up to `last` (inclusive).
-std::vector<ruvia::db_migration> migrations_through(std::string_view last) {
-    const auto& all = service::config::schema_migrations;
-    const auto found =
-        std::find_if(all.begin(), all.end(), [&](const auto& migration) { return migration.id() == last; });
-    require(found != all.end(), std::string(last) + " is part of the migrations");
-    return {all.begin(), found + 1};
-}
-
-// Migrations up to, but excluding, 0023: the state an existing database had
-// before attempt details.
-std::vector<ruvia::db_migration> migrations_before_attempt_details() {
-    auto migrations = migrations_through("0023_task_attempt_details");
-    migrations.pop_back();
-    return migrations;
-}
 
 std::int64_t integer(const ruvia::db_rows& rows, std::size_t column = 0) {
     return rows.front()[column].as<std::int64_t>().value_or(-1);
@@ -173,15 +133,6 @@ void require_no_sensitive_terms(std::string_view detail) {
              "account_id", "revision", "generation", "digest", "password", "token"}) {
         require(detail.find(term) == std::string_view::npos,
             "detail leaks a sensitive term '" + std::string(term) + "': " + std::string(detail));
-    }
-}
-
-ruvia::task<void> recreate_databases(ruvia::db_client& client) {
-    co_await client.connect();
-    auto db = client.handle();
-    for (const auto database : {fresh_database, upgrade_database}) {
-        (void)co_await db.execute("DROP DATABASE IF EXISTS " + std::string(database) + " WITH (FORCE)");
-        (void)co_await db.execute("CREATE DATABASE " + std::string(database));
     }
 }
 
@@ -212,63 +163,13 @@ ruvia::task<void> verify_schema(ruvia::db_client& client) {
     require(text(defaults).find("none") != std::string::npos, "detail default is none: " + text(defaults));
 }
 
-ruvia::task<void> insert_legacy_rows(ruvia::db_client& client) {
+ruvia::task<void> insert_tenants(ruvia::db_client& client) {
     co_await client.connect();
     auto db = client.handle();
     (void)co_await db.execute(
         "INSERT INTO sys_tenant(id, name, slug) VALUES ($1, 'History QA', 'history-qa'), "
         "($2, 'History other', 'history-other')",
         tenant, other_tenant);
-    // Two versions of one task plus another tenant, recorded before 0023.
-    (void)co_await db.execute(
-        "INSERT INTO sys_sync_event(tenant_id, task_id, resource_type, resource_id, operation, version, outcome, "
-        "error, emitted_at) VALUES "
-        "($1, $3, 'dns_zone', $4, 'sync', 1, 'failed', 'legacy one', NOW() - INTERVAL '3 hours'), "
-        "($1, $3, 'dns_zone', $4, 'sync', 1, 'failed', 'legacy two', NOW() - INTERVAL '2 hours'), "
-        "($1, $3, 'dns_zone', $4, 'sync', 1, 'completed', '', NOW() - INTERVAL '1 hour'), "
-        "($1, $3, 'dns_zone', $4, 'sync', 2, 'failed', 'legacy next', NOW() - INTERVAL '30 minutes'), "
-        "($2, $3, 'dns_zone', $4, 'sync', 1, 'completed', '', NOW() - INTERVAL '10 minutes')",
-        tenant, other_tenant, legacy_task, legacy_resource);
-    const auto rejected = co_await db.query(
-        "SELECT count(*) FROM pg_constraint WHERE conname = 'ck_sync_event_resource_type' AND "
-        "pg_get_constraintdef(oid) LIKE '%node%'");
-    require(integer(rejected) == 0, "node attempts are new in 0023");
-}
-
-ruvia::task<void> verify_legacy_rows(ruvia::db_client& client) {
-    co_await client.connect();
-    auto db = client.handle();
-    const auto rows = co_await db.query(
-        "SELECT string_agg(version || '/' || attempt || '/' || outcome || '/' || (started_at IS NULL) || '/' || "
-        "duration_ms || '/' || (next_attempt_at IS NULL) || '/' || (detail = '{\"kind\":\"none\",\"truncated\":false}'), "
-        "',' ORDER BY id) FROM sys_sync_event WHERE task_id = $1 AND tenant_id = $2",
-        legacy_task, tenant);
-    require(text(rows) ==
-                "1/1/failed/true/0/true/true,1/2/failed/true/0/true/true,1/3/completed/true/0/true/true,"
-                "2/1/failed/true/0/true/true",
-        "legacy rows numbered per version with unknown metadata: " + text(rows));
-    const auto other = co_await db.query("SELECT attempt FROM sys_sync_event WHERE tenant_id = $1", other_tenant);
-    require(integer(other) == 1, "legacy numbering is per tenant");
-    bool rejected = false;
-    try {
-        (void)co_await db.execute(
-            "INSERT INTO sys_sync_event(tenant_id, task_id, resource_type, resource_id, operation, version, "
-            "outcome, attempt) VALUES ($1, $2, 'dns_zone', $3, 'sync', 1, 'failed', 0)",
-            tenant, legacy_task, legacy_resource);
-    } catch (const ruvia::db_error&) {
-        rejected = true;
-    }
-    require(rejected, "attempt numbers start at 1");
-    rejected = false;
-    try {
-        (void)co_await db.execute(
-            "INSERT INTO sys_sync_event(tenant_id, task_id, resource_type, resource_id, operation, version, "
-            "outcome, attempt, detail) VALUES ($1, $2, 'dns_zone', $3, 'sync', 1, 'failed', 1, '[]')",
-            tenant, legacy_task, legacy_resource);
-    } catch (const ruvia::db_error&) {
-        rejected = true;
-    }
-    require(rejected, "detail must be an object");
 }
 
 ruvia::task<void> insert_fixture(ruvia::db_handle& db) {
@@ -293,11 +194,13 @@ ruvia::task<void> insert_fixture(ruvia::db_handle& db) {
         cluster, tenant, zone);
     (void)co_await db.execute("INSERT INTO sys_website(id, tenant_id, cluster_id, config) VALUES ($1, $2, $3, '{}')", website,
         tenant, cluster);
+    // Both nodes run their current node spec: only release work is pending.
     (void)co_await db.execute(
-        "INSERT INTO sys_node(id, tenant_id, cluster_id, name, runtime, agent_id, node_secret_hash, "
-        "node_secret_envelope) VALUES ($1, $3, $4, 'History node A', '{\"agent_version\":\"2.4.0\"}', "
-        "repeat('a', 32), repeat('c', 64), 'qa-only'), ($2, $3, $4, 'History node B', '{}', repeat('b', 32), "
-        "repeat('d', 64), 'qa-only')",
+        "INSERT INTO sys_node(id, tenant_id, cluster_id, name, runtime, registration_status, registered_at, "
+        "applied_node_spec_revision, agent_id, node_secret_hash, node_secret_envelope) VALUES ($1, $3, $4, "
+        "'History node A', '{\"agent_version\":\"2.4.0\"}', 'registered', NOW(), 1, repeat('a', 32), repeat('c', 64), "
+        "'qa-only'), ($2, $3, $4, 'History node B', '{}', 'registered', NOW(), 1, repeat('b', 32), repeat('d', 64), "
+        "'qa-only')",
         node_a, node_b, tenant, cluster);
     (void)co_await db.execute(
         "INSERT INTO sys_cluster_release(id, tenant_id, cluster_id, generation, status, manifest_digest, "
@@ -323,29 +226,29 @@ ruvia::task<void> insert_fixture(ruvia::db_handle& db) {
         "INSERT INTO sys_sync_task(id, tenant_id, resource_type, provider_id, operation, "
         "version) VALUES ($1, $2, 'provider', $3, 'verify', 1)",
         provider_marker, tenant, dns_provider);
-    using service::operation::action;
-    using service::operation::subtask_kind;
-    owners.dns_ = co_await test_support::own_work(db, tenant, action::dns_zone_sync, "dns_zone", zone,
-        subtask_kind::dns_sync, "dns_zone", zone, 4, dns_marker);
-    owners.summary_ = co_await test_support::own_work(db, tenant, action::dns_zone_sync, "dns_zone", summary_zone,
-        subtask_kind::dns_sync, "dns_zone", summary_zone, 1, summary_marker);
-    owners.certificate_ = co_await test_support::own_work(db, tenant, action::certificate_renew, "certificate",
-        certificate, subtask_kind::certificate_renew, "certificate", certificate, 2, certificate_marker);
-    owners.website_ = co_await test_support::own_work(db, tenant, action::website_check_domains, "website", website,
-        subtask_kind::website_check, "website", website, 5, website_marker);
-    owners.provider_ = co_await test_support::own_work(db, tenant, action::provider_verify, "provider", dns_provider,
-        subtask_kind::provider_verify, "provider", dns_provider, 1, provider_marker);
-    // One cluster publish: a node publish subtask per release target.
-    auto publish = service::operation::work_origin::system(action::system_release_upgrade, "cluster",
-        std::string(cluster));
-    for (const auto& [node, owner] : {std::pair{node_a, &owners.node_a_}, std::pair{node_b, &owners.node_b_}}) {
-        const auto subtask =
-            co_await publish.require_subtask(db, tenant, subtask_kind::node_publish, "node", node, 3);
+}
+
+ruvia::task<void> verify_event_constraints(ruvia::db_handle& db) {
+    bool rejected = false;
+    try {
         (void)co_await db.execute(
-            "UPDATE sys_node_release_target SET subtask_id = $3::uuid WHERE release_id = $1 AND node_id = $2", release,
-            node, std::string_view(subtask.value_or("")));
-        *owner = {.operation_id_ = publish.operation_id().value_or(""), .subtask_id_ = subtask.value_or("")};
+            "INSERT INTO sys_sync_event(tenant_id, task_id, resource_type, resource_id, operation, version, "
+            "outcome, attempt) VALUES ($1, $2, 'dns_zone', $3, 'sync', 4, 'failed', 0)",
+            tenant, dns_marker, zone);
+    } catch (const ruvia::db_error&) {
+        rejected = true;
     }
+    require(rejected, "attempt numbers start at 1");
+    rejected = false;
+    try {
+        (void)co_await db.execute(
+            "INSERT INTO sys_sync_event(tenant_id, task_id, resource_type, resource_id, operation, version, "
+            "outcome, attempt, detail) VALUES ($1, $2, 'dns_zone', $3, 'sync', 4, 'failed', 1, '[]')",
+            tenant, dns_marker, zone);
+    } catch (const ruvia::db_error&) {
+        rejected = true;
+    }
+    require(rejected, "detail must be an object");
 }
 
 ruvia::task<void> lease(ruvia::db_handle& db, std::string_view marker) {
@@ -374,13 +277,14 @@ service::sync_runtime::running_marker_lease running(std::string_view marker, std
     return service::sync_runtime::make_running_lease(tenant, marker, version, worker, started, type, resource);
 }
 
-ruvia::task<service::task::subtask_history_dto> history(read_context& context,
-    const service::operation::work_owner& owner) {
-    co_return co_await service::task::get_task_service().history(context, std::string(tenant), owner.operation_id_,
-        owner.subtask_id_);
+// The history of the task of (`type`, `resource`): every attempt of the resource.
+ruvia::task<service::task::task_history_dto> history(read_context& context, std::string_view type,
+    std::string_view resource) {
+    co_return co_await service::task::get_task_service().history(context, std::string(tenant), std::string(type),
+        std::string(resource));
 }
 
-const service::task::attempt_dto& newest(const service::task::subtask_history_dto& data) {
+const service::task::attempt_dto& newest(const service::task::task_history_dto& data) {
     require(!data.get<"list">().empty(), "history has attempts");
     return data.get<"list">()[0];
 }
@@ -408,12 +312,16 @@ ruvia::task<void> verify_dns_sync(ruvia::db_handle& db, read_context& context, s
         true, completed.to_json(pool));
     require(second.event_recorded_, "dns completion recorded");
 
-    const auto data = co_await history(context, owners.dns_);
+    const auto data = co_await history(context, "dns_zone", zone);
     const auto& list = data.get<"list">();
-    require(list.size() == 2 && !data.get<"truncated">().value_, "two dns attempts");
+    require(list.size() == 2, "two dns attempts");
     const auto& success = list[0];
     const auto& failure = list[1];
-    require(success.get<"attempt">().value_ == 2 && failure.get<"attempt">().value_ == 1, "attempt order");
+    require(success.get<"attempt">().value_ == 2 && failure.get<"attempt">().value_ == 1 &&
+                success.get<"id">().view() == std::to_string(*second.event_id_) &&
+                failure.get<"id">().view() == std::to_string(*first.event_id_) &&
+                success.get<"operation">().view() == "sync" && failure.get<"operation">().view() == "sync",
+        "attempt order, ids and operation");
     require(success.get<"outcome">().view() == "completed" && success.get<"error">().view().empty() &&
                 success.get<"next_attempt_at">().view().empty(),
         "completion fields");
@@ -460,7 +368,7 @@ ruvia::task<void> verify_dns_sync(ruvia::db_handle& db, read_context& context, s
         running(dns_marker, 4, service::sync_runtime::marker_resource_type::dns_zone, zone,
             std::chrono::steady_clock::now()),
         true, conflicting.to_json(pool));
-    const auto conflict_data = co_await history(context, owners.dns_);
+    const auto conflict_data = co_await history(context, "dns_zone", zone);
     const auto conflicts = parse_detail<dns_detail_input>(newest(conflict_data));
     require(conflicts.get<"conflict_count">().value_ == 1 &&
                 conflicts.get<"conflicts">()[0].get<"remote_content">().view() == "（远端已删除）" &&
@@ -491,9 +399,10 @@ ruvia::task<void> verify_certificate(ruvia::db_handle& db, read_context& context
         running(certificate_marker, 2, service::sync_runtime::marker_resource_type::certificate, certificate,
             std::chrono::steady_clock::now()),
         true, completed.to_json(pool));
-    const auto data = co_await history(context, owners.certificate_);
+    const auto data = co_await history(context, "certificate", certificate);
     const auto success = parse_detail<certificate_detail_input>(data.get<"list">()[0]);
     const auto failure = parse_detail<certificate_detail_input>(data.get<"list">()[1]);
+    require(data.get<"list">()[0].get<"operation">().view() == "renew", "certificate attempts carry their operation");
     require(failure.get<"stage">().view() == "dns_challenge" && failure.get<"issuer">().view().empty() &&
                 failure.get<"domains">().size() == 2 && failure.get<"operation">().view() == "renew",
         "failed issuance reports its stage");
@@ -526,7 +435,7 @@ ruvia::task<void> verify_website(ruvia::db_handle& db, read_context& context, st
         running(website_marker, 5, service::sync_runtime::marker_resource_type::website, website,
             std::chrono::steady_clock::now()),
         false, attempt.to_json(pool), "网站同步标记 lease 已失效");
-    const auto data = co_await history(context, owners.website_);
+    const auto data = co_await history(context, "website", website);
     const auto detail = parse_detail<website_detail_input>(newest(data));
     require(detail.get<"domain_count">().value_ == 3 && detail.get<"checked_count">().value_ == 2 &&
                 detail.get<"domains">().size() == 2,
@@ -545,7 +454,7 @@ ruvia::task<void> verify_provider(ruvia::db_handle& db, read_context& context, s
         running(provider_marker, 1, service::sync_runtime::marker_resource_type::provider, dns_provider,
             std::chrono::steady_clock::now()),
         true, attempt.to_json(pool));
-    const auto data = co_await history(context, owners.provider_);
+    const auto data = co_await history(context, "provider", dns_provider);
     const auto detail = parse_detail<provider_detail_input>(newest(data));
     require(detail.get<"provider">().view() == "cloudflare" && detail.get<"provider_kind">().view() == "dns" &&
                 detail.get<"zone_count">().value_ == 2 && detail.get<"zones">()[1].get<"status">().view() == "pending" &&
@@ -561,7 +470,7 @@ ruvia::task<void> verify_provider(ruvia::db_handle& db, read_context& context, s
 }
 
 ruvia::task<void> verify_node_apply(ruvia::db_handle& db, read_context& context, std::pmr::memory_resource* pool) {
-    // Mirrors agent_command_service: the target transition, then its attempt.
+    // Mirrors node_channel/report_service.h: the target transition, then its attempt.
     const auto record = [&](service::node_dispatch::node_apply_attempt attempt) -> ruvia::task<bool> {
         auto transaction = co_await db.begin_transaction();
         const auto changed =
@@ -621,9 +530,9 @@ ruvia::task<void> verify_node_apply(ruvia::db_handle& db, read_context& context,
                 .elapsed_milliseconds_ = std::nullopt})),
         "no attempt without a release target of the tenant");
 
-    const auto data = co_await history(context, owners.node_a_);
+    const auto data = co_await history(context, "node", node_a);
     const auto& list = data.get<"list">();
-    require(list.size() == 2, "node history narrowed to its node");
+    require(list.size() == 2 && list[0].get<"operation">().view() == "publish", "node history narrowed to its node");
     const auto applied = parse_detail<node_detail_input>(list[0]);
     const auto failed = parse_detail<node_detail_input>(list[1]);
     require(list[0].get<"attempt">().value_ == 2 && list[0].get<"duration_ms">().value_ == 900 &&
@@ -638,27 +547,23 @@ ruvia::task<void> verify_node_apply(ruvia::db_handle& db, read_context& context,
                 failed.get<"error_code">().view() == "artifact_invalid" && failed.get<"source">().view() == "apply_result",
         "failed node detail");
     require_no_sensitive_terms(list[1].get<"detail">().view());
-    const auto heartbeat = co_await history(context, owners.node_b_);
+    const auto heartbeat = co_await history(context, "node", node_b);
     const auto confirmed = parse_detail<node_detail_input>(newest(heartbeat));
     require(confirmed.get<"source">().view() == "heartbeat" && newest(heartbeat).get<"started_at">().view().empty() &&
                 newest(heartbeat).get<"duration_ms">().value_ == 0 && confirmed.get<"agent_version">().view().empty(),
         "heartbeat confirmation has no timing");
-    // The release's task shows one node publish subtask per target, each with
-    // its own attempts; node attempts never leak into another subtask.
-    const auto task = co_await service::task::get_task_service().detail(context, std::string(tenant),
-        owners.node_a_.operation_id_);
-    const auto& subtasks = task.get<"subtasks">();
-    require(subtasks.size() == 2 && task.get<"status">().view() == "completed" &&
-                task.get<"settled_count">().value_ == 2 && task.get<"failed_count">().value_ == 0,
-        "release task rolls up its targets");
-    for (const auto& subtask : subtasks) {
-        const bool first_node = subtask.get<"id">().view() == owners.node_a_.subtask_id_;
-        require(subtask.get<"kind">().view() == "node_publish" && subtask.get<"status">().view() == "completed" &&
-                    subtask.get<"attempt_count">().value_ == (first_node ? 2 : 1) &&
-                    subtask.get<"failure_count">().value_ == (first_node ? 1 : 0) &&
-                    subtask.get<"recovered">().value_ == first_node &&
-                    subtask.get<"resource_name">().view() == (first_node ? "History node A" : "History node B"),
-            "node publish subtask per target");
+    // Each node has its own task: the failure before the success counts as
+    // 「失败 1 次后成功」, and node attempts never leak into another node's task.
+    for (const auto node : {node_a, node_b}) {
+        const bool first_node = node == node_a;
+        const auto task = co_await service::task::get_task_service().detail(context, std::string(tenant), "node",
+            std::string(node));
+        require(task.get<"resource_type">().view() == "node" && task.get<"resource_id">().view() == node &&
+                    task.get<"status">().view() == "completed" && task.get<"error">().view().empty() &&
+                    task.get<"attempt_count">().value_ == (first_node ? 2 : 1) &&
+                    task.get<"failure_count">().value_ == (first_node ? 1 : 0) &&
+                    task.get<"name">().view() == (first_node ? "History node A" : "History node B"),
+            "node task per registered node");
     }
 }
 
@@ -680,13 +585,13 @@ ruvia::task<void> verify_summary_beyond_limit(ruvia::db_handle& db, read_context
         running(summary_marker, 1, service::sync_runtime::marker_resource_type::dns_zone, summary_zone,
             std::chrono::steady_clock::now()),
         false, detail);
-    const auto data = co_await history(context, owners.summary_);
+    const auto data = co_await history(context, "dns_zone", summary_zone);
     const auto& summary = data.get<"summary">();
     const auto& list = data.get<"list">();
-    require(list.size() == 100 && data.get<"truncated">().value_, "list stays at 100");
+    require(list.size() == 50, "list stays at 50");
     require(summary.get<"attempt_count">().value_ == 122 && summary.get<"failure_count">().value_ == 121,
         "summary counts every retained attempt");
-    require(list[0].get<"attempt">().value_ == 122 && list[99].get<"attempt">().value_ == 23, "contiguous numbering");
+    require(list[0].get<"attempt">().value_ == 122 && list[49].get<"attempt">().value_ == 73, "contiguous numbering");
     const auto first = co_await db.query(
         "SELECT TO_CHAR(min(emitted_at), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), TO_CHAR(max(emitted_at) FILTER "
         "(WHERE outcome = 'completed'), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), (SELECT TO_CHAR(next_attempt_at, "
@@ -695,15 +600,19 @@ ruvia::task<void> verify_summary_beyond_limit(ruvia::db_handle& db, read_context
     require(summary.get<"first_failure_at">().view() == text(first, 0) &&
                 summary.get<"last_success_at">().view() == text(first, 1),
         "first failure is older than the listed window, last success is retained");
-    require(summary.get<"next_attempt_at">().view() == text(first, 2), "summary shows the scheduled retry");
+    const auto retrying_task = co_await service::task::get_task_service().detail(
+        context, std::string(tenant), "dns_zone", std::string(summary_zone));
+    require(retrying_task.get<"next_attempt_at">().view() == text(first, 2), "task shows the scheduled retry");
     co_await lease(db, summary_marker);
-    const auto running_data = co_await history(context, owners.summary_);
-    require(running_data.get<"summary">().get<"next_attempt_at">().view().empty(),
+    const auto running_task = co_await service::task::get_task_service().detail(
+        context, std::string(tenant), "dns_zone", std::string(summary_zone));
+    require(running_task.get<"next_attempt_at">().view().empty(),
         "no scheduled retry while an attempt runs");
     bool foreign = false;
     try {
-        (void)co_await service::task::get_task_service().history(context, std::string(other_tenant),
-            owners.summary_.operation_id_, owners.summary_.subtask_id_);
+        const auto foreign_history = co_await service::task::get_task_service().history(context,
+            std::string(other_tenant), "dns_zone", std::string(summary_zone));
+        foreign = foreign_history.get<"list">().empty();
     } catch (const std::exception&) {
         foreign = true;
     }
@@ -744,7 +653,7 @@ ruvia::task<void> verify_bounds_and_failures(ruvia::db_handle& db, read_context&
                 std::chrono::steady_clock::now()),
             false, unusable, "detail rejected");
         require(transition.marker_transitioned_ && transition.event_recorded_, "result survives an unusable detail");
-        const auto data = co_await history(context, owners.dns_);
+        const auto data = co_await history(context, "dns_zone", zone);
         const auto none = parse_detail<none_detail_input>(newest(data));
         require(none.get<"kind">().view() == "none" && none.get<"truncated">().value_ &&
                     newest(data).get<"error">().view() == "detail rejected",
@@ -765,7 +674,7 @@ ruvia::task<void> verify_bounds_and_failures(ruvia::db_handle& db, read_context&
         running(dns_marker, 4, service::sync_runtime::marker_resource_type::dns_zone, zone,
             std::chrono::steady_clock::time_point{}),
         false, service::sync_runtime::detail_none_json);
-    const auto unknown = co_await history(context, owners.dns_);
+    const auto unknown = co_await history(context, "dns_zone", zone);
     require(newest(unknown).get<"started_at">().view().empty() && newest(unknown).get<"duration_ms">().value_ == 0,
         "unknown start");
 }
@@ -785,21 +694,20 @@ ruvia::task<void> verify_live_history(ruvia::db_handle& db, read_context& contex
         trace);
     require(worker.sent_.size() == 1 && worker.committed_[0], "one notification, sent after the commit");
     const auto& sent = worker.sent_[0];
-    require(sent.tenant_id_ == tenant && sent.task_attempts_.size() == 1 &&
-                sent.task_attempts_[0].task_id_ == owners.dns_.operation_id_ &&
-                sent.task_attempts_[0].notice_.subtask_id_ == owners.dns_.subtask_id_ &&
-                sent.task_attempts_[0].notice_.event_id_ == *transition.event_id_ && sent.changes_.size() == 1 &&
-                sent.changes_[0].resource_ == resource::dns_zones,
-        "the notification names the task, the subtask, the recorded attempt and the zone");
+    require(sent.tenant_id_ == tenant && sent.task_attempts_.size() == 1 && sent.task_attempts_[0].task_id_ == zone &&
+                sent.task_attempts_[0].notice_.event_id_ == *transition.event_id_ && sent.changes_.size() == 2 &&
+                sent.changes_[0].resource_ == resource::tasks && sent.changes_[0].id_ == zone &&
+                sent.changes_[1].resource_ == resource::dns_zones,
+        "the notification names the zone's task, the recorded attempt and the zone");
 
-    // The open history of this subtask reads exactly that attempt and the new summary.
+    // The open history of this task reads exactly that attempt and the new summary.
     const auto events = co_await service::task::get_task_service().recorded_attempts(context, std::string(tenant),
-        owners.dns_.subtask_id_,
+        "dns_zone", std::string(zone),
         std::span<const service::live_resource::task_attempt_notice>(&sent.task_attempts_[0].notice_, 1));
     require(events.size() == 1, "one attempt event");
-    const auto event = ruvia::from_json<service::task::subtask_attempt_event_dto>(events[0]);
-    const auto snapshot = co_await history(context, owners.dns_);
-    require(event && event->get<"subtask_id">().view() == owners.dns_.subtask_id_ &&
+    const auto event = ruvia::from_json<service::task::task_attempt_event_dto>(events[0]);
+    const auto snapshot = co_await history(context, "dns_zone", zone);
+    require(event && event->get<"item">().get<"id">().view() == std::to_string(*transition.event_id_) &&
                 event->get<"item">().get<"attempt">().value_ == newest(snapshot).get<"attempt">().value_ &&
                 event->get<"item">().get<"error">().view() == "live failure" &&
                 event->get<"summary">().get<"attempt_count">().value_ ==
@@ -807,14 +715,13 @@ ruvia::task<void> verify_live_history(ruvia::db_handle& db, read_context& contex
                 event->get<"summary">().get<"failure_count">().value_ ==
                     snapshot.get<"summary">().get<"failure_count">().value_,
         "the event carries the listed attempt and the current summary");
-    // Other subtasks and other tenants read nothing.
+    // Other tasks and other tenants read nothing.
     const auto notice = sent.task_attempts_[0].notice_;
-    const auto other_subtask = co_await service::task::get_task_service().recorded_attempts(context,
-        std::string(tenant), owners.summary_.subtask_id_, std::span(&notice, 1));
+    const auto other_task = co_await service::task::get_task_service().recorded_attempts(context,
+        std::string(tenant), "dns_zone", std::string(summary_zone), std::span(&notice, 1));
     const auto other_tenant_events = co_await service::task::get_task_service().recorded_attempts(context,
-        std::string(other_tenant), owners.dns_.subtask_id_, std::span(&notice, 1));
-    require(other_subtask.empty() && other_tenant_events.empty(),
-        "attempt events stay within their subtask and tenant");
+        std::string(other_tenant), "dns_zone", std::string(zone), std::span(&notice, 1));
+    require(other_task.empty() && other_tenant_events.empty(), "attempt events stay within their task and tenant");
     (void)pool;
 
     // Retention resets the open histories of the pruned tasks.
@@ -822,8 +729,10 @@ ruvia::task<void> verify_live_history(ruvia::db_handle& db, read_context& contex
         "UPDATE sys_sync_event SET emitted_at = NOW() - INTERVAL '8 days' WHERE task_id = $1", release);
     test_support::recorded_notifications pruner{.handle_ = db};
     co_await service::sync_runtime::prune_result_events(pruner);
-    require(pruner.sent_.size() == 1 && pruner.sent_[0].task_history_resets_.size() == 1 &&
-                pruner.sent_[0].task_history_resets_[0] == owners.node_a_.operation_id_,
+    const auto& resets = pruner.sent_.empty() ? std::vector<std::string>{} : pruner.sent_[0].task_history_resets_;
+    require(pruner.sent_.size() == 1 && resets.size() == 2 &&
+                std::find(resets.begin(), resets.end(), node_a) != resets.end() &&
+                std::find(resets.begin(), resets.end(), node_b) != resets.end(),
         "retention notifies a history reset per pruned task");
 }
 
@@ -833,6 +742,7 @@ ruvia::task<void> verify_records(ruvia::db_client& client) {
     std::pmr::monotonic_buffer_resource pool;
     read_context context{.handle_ = client.handle(), .pool_ = &pool};
     co_await insert_fixture(db);
+    co_await verify_event_constraints(db);
     co_await verify_dns_sync(db, context, &pool);
     co_await verify_certificate(db, context, &pool);
     co_await verify_website(db, context, &pool);
@@ -842,16 +752,19 @@ ruvia::task<void> verify_records(ruvia::db_client& client) {
     co_await verify_bounds_and_failures(db, context, &pool);
     co_await verify_live_history(db, context, &pool);
 
-    // Attempts retained before tasks existed were removed by 0025.
-    const auto legacy = co_await db.query("SELECT count(*) FROM sys_sync_event WHERE task_id = $1", legacy_task);
-    require(integer(legacy) == 0, "legacy attempts removed");
-
-    // Retention still removes attempts older than 7 days, node attempts included.
-    (void)co_await db.execute("UPDATE sys_sync_event SET emitted_at = NOW() - INTERVAL '8 days' WHERE task_id = $1",
-        release);
+    // Retention removes every attempt older than 7 days, node attempts
+    // included, once per interval: the run above claimed this interval, so a
+    // prune before the job is due again keeps them.
+    (void)co_await db.execute("UPDATE sys_sync_event SET emitted_at = NOW() - INTERVAL '8 days'");
+    test_support::recorded_notifications early{.handle_ = db};
+    co_await service::sync_runtime::prune_result_events(early);
+    const auto kept = co_await db.query("SELECT count(*) FROM sys_sync_event");
+    require(integer(kept) > 0 && early.sent_.empty(), "retention runs once per interval");
+    (void)co_await db.execute("UPDATE sys_scheduled_job SET next_run_at = NOW() WHERE name = $1",
+        service::sync_runtime::retention_job);
     test_support::recorded_notifications pruner{.handle_ = db};
     co_await service::sync_runtime::prune_result_events(pruner);
-    const auto pruned = co_await db.query("SELECT count(*) FROM sys_sync_event WHERE task_id = $1", release);
+    const auto pruned = co_await db.query("SELECT count(*) FROM sys_sync_event");
     require(integer(pruned) == 0, "7 day retention");
 }
 
@@ -879,27 +792,13 @@ int main() {
     if (!base) {
         return 77;
     }
-    const auto fresh = with_database(*base, fresh_database);
-    const auto upgrade = with_database(*base, upgrade_database);
     const auto& all = service::config::schema_migrations;
-    const auto before = migrations_before_attempt_details();
-    const auto through_traces = migrations_through("0024_task_attempt_traces");
     try {
-        if (test_support::run_postgres_test(*base, recreate_databases) != 0 ||
-            // New database: every migration, then a repeated run changes nothing.
-            migrate(fresh, all, all.size(), "fresh install") != 0 || migrate(fresh, all, 0, "fresh repeat") != 0 ||
-            test_support::run_postgres_test(fresh, verify_schema) != 0 ||
-            // Existing database with retained attempts: 0023 and 0024 keep them...
-            migrate(upgrade, before, before.size(), "pre-0023 install") != 0 ||
-            test_support::run_postgres_test(upgrade, insert_legacy_rows) != 0 ||
-            migrate(upgrade, through_traces, through_traces.size() - before.size(), "0023 upgrade") != 0 ||
-            test_support::run_postgres_test(upgrade, verify_schema) != 0 ||
-            test_support::run_postgres_test(upgrade, verify_legacy_rows) != 0 ||
-            // ...and 0025 removes them; a repeated run changes nothing.
-            migrate(upgrade, all, all.size() - through_traces.size(), "0025 upgrade") != 0 ||
-            migrate(upgrade, all, 0, "upgrade repeat") != 0 ||
-            test_support::run_postgres_test(upgrade, verify_schema) != 0 ||
-            test_support::run_postgres_test(upgrade, verify_records) != 0) {
+        const test_support::postgres_test_database fresh(*base);
+        if (migrate(fresh.config(), all, all.size(), "fresh install") != 0 ||
+            fresh.run(verify_schema) != 0 ||
+            fresh.run(insert_tenants) != 0 ||
+            fresh.run(verify_records) != 0) {
             return 1;
         }
     } catch (const std::exception& error) {

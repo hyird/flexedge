@@ -31,6 +31,19 @@ const input: NodeInput = {
   config: { endpoints: [] },
 }
 
+const nodeDto = {
+  id,
+  revision: 2,
+  created_at: '2026-09-01T00:00:00Z',
+  updated_at: '2026-09-01T00:00:00Z',
+  cluster_id: id,
+  cluster_name: 'cluster',
+  name: 'edge',
+  status: 'enabled',
+  node_spec_revision: 1,
+  config: { endpoints: [] },
+}
+
 function respond(data: unknown) {
   api.defaults.adapter = async (config) => ({
     config,
@@ -53,14 +66,8 @@ describe('node API contracts', () => {
     setLiveQueryQueryClient(client, undefined, () => source as never)
     const params = { page: 1, page_size: 100 }
     const node = {
-      id,
-      revision: 2,
-      cluster_id: id,
-      cluster_name: 'cluster',
-      name: 'edge',
+      ...nodeDto,
       status: 'disabled',
-      node_spec_revision: 1,
-      config: { endpoints: [] },
       runtime: {
         registration_status: 'registered',
         connection_status: 'offline',
@@ -223,21 +230,14 @@ describe('node API contracts', () => {
     expect(await updateNode({ id, revision: 7 }, input)).toEqual({
       code: 0,
       message: 'updated',
-      data: undefined,
     })
   })
 
   it('does not expose unsolicited update data as credentials', async () => {
     respond({ code: 0, message: 'updated', data: { secret: 'unvalidated' } })
-    expect((await updateNode({ id, revision: 7 }, input)).data).toBeUndefined()
-    // Only the started task survives (operation-tasks contract §6).
-    respond({
+    expect(await updateNode({ id, revision: 7 }, input)).toEqual({
       code: 0,
       message: 'updated',
-      data: { secret: 'unvalidated', operation_id: 'op-1' },
-    })
-    expect((await updateNode({ id, revision: 7 }, input)).data).toEqual({
-      operation_id: 'op-1',
     })
   })
 
@@ -256,13 +256,13 @@ describe('node API contracts', () => {
       return source as never
     })
     const node = {
-      id,
+      ...nodeDto,
       revision: 4,
-      name: 'edge',
       runtime: {
         registration_status: 'registered',
         connection_status: 'online',
         last_heartbeat_at: '2026-09-09T00:00:00Z',
+        applied_node_spec_revision: 1,
         cpu_usage: 0.1,
       },
     }
@@ -282,8 +282,10 @@ describe('node API contracts', () => {
             id,
             node_revision: revision,
             runtime: {
+              registration_status: 'registered',
               connection_status: 'offline',
               last_heartbeat_at: '2026-09-09T00:01:00Z',
+              applied_node_spec_revision: 1,
               cpu_usage: cpu,
             },
           }),
@@ -314,13 +316,13 @@ describe('node API contracts', () => {
       return source as never
     })
     const node = {
-      id,
+      ...nodeDto,
       revision: 4,
-      name: 'edge',
       runtime: {
         registration_status: 'registered',
         connection_status: 'online',
         last_heartbeat_at: '2026-09-09T00:00:00Z',
+        applied_node_spec_revision: 1,
         connected_ip_count: 3,
       },
     }
@@ -339,7 +341,12 @@ describe('node API contracts', () => {
           data: JSON.stringify({
             id,
             node_revision: 4,
-            runtime: { last_heartbeat_at: heartbeat, ...runtime },
+            runtime: {
+              ...node.runtime,
+              connected_ip_count: undefined,
+              last_heartbeat_at: heartbeat,
+              ...runtime,
+            },
           }),
         })
       )
@@ -372,22 +379,25 @@ describe('cluster node transitions', () => {
     cluster_id: string
     runtime: Record<string, unknown>
   }
+  const runtime = (connection_status: string) => ({
+    registration_status: 'registered',
+    connection_status,
+    last_heartbeat_at: '2026-10-14T00:00:00Z',
+    applied_node_spec_revision: 1,
+    cpu_usage: 0.1,
+  })
   const node = (nodeId: string, connection_status: string): TestNode => ({
+    ...nodeDto,
     id: nodeId,
     revision: 1,
     name: nodeId,
     cluster_id: clusterId,
-    runtime: {
-      registration_status: 'registered',
-      connection_status,
-      last_heartbeat_at: '2026-10-14T00:00:00Z',
-      cpu_usage: 0.1,
-    },
+    runtime: runtime(connection_status),
   })
   const page = (...list: TestNode[]) => ({
     code: 0,
     message: 'ok',
-    data: { list, total: list.length, page: 1, page_size: 20 },
+    data: { list, total: list.length, page: 1, page_size: 20, total_pages: 1 },
   })
   // `advanceTimersByTimeAsync` is Vitest-only; `bun test` runs the same suite.
   const advance = async (ms: number) => {
@@ -426,6 +436,7 @@ describe('cluster node transitions', () => {
           id: 'a',
           node_revision: 1,
           runtime: {
+            ...runtime('offline'),
             last_heartbeat_at: '2026-10-14T00:00:05Z',
             cpu_usage: cpu,
           },

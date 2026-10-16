@@ -1,4 +1,4 @@
-import { statusLabels } from '@/lib/status'
+import { statusReserve, type StatusDictionary } from '@/lib/status'
 
 export function providerLabel(provider: string) {
   if (provider === 'cloudflare') return 'Cloudflare'
@@ -8,10 +8,12 @@ export function providerLabel(provider: string) {
   return provider
 }
 
-/** Every label a provider account's `status` can show (unverified after
- * create/credential change, then verified or invalid), for `reserve`. */
-export const providerStatusLabels = statusLabels([
-  'unverified',
-  'verified',
-  'invalid',
-])
+/** A provider account's credential check: unverified after create or a
+ * credential change, then verified or invalid. */
+export const providerStatuses = {
+  unverified: { label: '未验证', tone: 'warning' },
+  verified: { label: '已验证', tone: 'success' },
+  invalid: { label: '无效', tone: 'danger' },
+} as const satisfies StatusDictionary<'unverified' | 'verified' | 'invalid'>
+
+export const providerStatusReserve = statusReserve(providerStatuses)

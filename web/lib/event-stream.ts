@@ -1,201 +1,309 @@
-type Options = {
-  createSource?: (url: string) => EventSource
-  /** First reconnect delay; doubles per consecutive failed attempt. */
+/** One dispatched server-sent event. */
+export type ServerSentEvent = {
+  type: string
+  data: string
+  lastEventId: string
+}
+
+/** Incremental `text/event-stream` parser (WHATWG HTML, "Parsing an event
+ * stream"). Lines end with CRLF, LF or CR, also across chunk boundaries.
+ * Comment lines (`:`) and blank lines without data dispatch nothing; `data`
+ * lines join with LF; `id` (without NUL) sets the last event ID even when no
+ * event follows; a numeric `retry` reports the reconnection time. A block
+ * still open when the stream ends is discarded by not calling `push` again.
+ * The caller decodes UTF-8 (`TextDecoder` strips the BOM). */
+export function createEventStreamParser(
+  handlers: {
+    event: (event: ServerSentEvent) => void
+    retry?: (delayMs: number) => void
+  },
+  lastEventId = ''
+) {
+  let buffer = ''
+  // A chunk ended with CR: a LF opening the next chunk ends the same line.
+  let skipLineFeed = false
+  let data = ''
+  let type = ''
+  let idBuffer = lastEventId
+
+  const dispatch = () => {
+    lastEventId = idBuffer
+    if (data === '') {
+      type = ''
+      return
+    }
+    const event = {
+      type: type || 'message',
+      data: data.endsWith('\n') ? data.slice(0, -1) : data,
+      lastEventId,
+    }
+    data = ''
+    type = ''
+    handlers.event(event)
+  }
+
+  const line = (text: string) => {
+    if (text === '') {
+      dispatch()
+      return
+    }
+    if (text.startsWith(':')) return
+    const colon = text.indexOf(':')
+    const field = colon < 0 ? text : text.slice(0, colon)
+    let value = colon < 0 ? '' : text.slice(colon + 1)
+    if (value.startsWith(' ')) value = value.slice(1)
+    if (field === 'event') type = value
+    else if (field === 'data') data += value + '\n'
+    else if (field === 'id') {
+      if (!value.includes('\0')) idBuffer = value
+    } else if (field === 'retry' && /^\d+$/.test(value))
+      handlers.retry?.(Number(value))
+  }
+
+  return {
+    push(chunk: string) {
+      let text = chunk
+      if (skipLineFeed && text) {
+        skipLineFeed = false
+        if (text.startsWith('\n')) text = text.slice(1)
+      }
+      buffer += text
+      let start = 0
+      for (let index = 0; index < buffer.length; index++) {
+        const code = buffer.charCodeAt(index)
+        if (code !== 10 && code !== 13) continue
+        line(buffer.slice(start, index))
+        if (code === 13) {
+          if (index + 1 === buffer.length) skipLineFeed = true
+          else if (buffer.charCodeAt(index + 1) === 10) index++
+        }
+        start = index + 1
+      }
+      buffer = buffer.slice(start)
+    },
+    /** The last event ID: sent as `Last-Event-ID` when reconnecting. */
+    get lastEventId() {
+      return lastEventId
+    },
+  }
+}
+
+export type EventStreamOptions = {
+  fetch?: (input: string, init: RequestInit) => Promise<Response>
+  /** First reconnect delay, doubled per consecutive failed attempt; a
+   * `retry` field from the server replaces it. */
   retryDelayMs?: number
   /** Upper bound of the reconnect backoff. */
   maxRetryDelayMs?: number
-  /** Consecutive refused handshakes (HTTP error, readyState CLOSED) before
-   * the stream gives up and emits `exhausted`; a successful open resets it. */
+  /** Consecutive refused handshakes (HTTP error) before the stream gives up
+   * and emits `exhausted`; an accepted handshake resets it. */
   maxRejectedAttempts?: number
-  // null for endpoints whose heartbeat frames are not dispatched as DOM events.
-  idleTimeoutMs?: number | null
-  // Cursor streams replace connections themselves so a fixed query cursor never
-  // overrides a newer Last-Event-ID header during a native retry.
-  resumeQueryParam?: string
+  /** Silence after which the connection is treated as dead and replaced.
+   * Every received byte renews it, keep-alive frames included. */
+  idleTimeoutMs?: number
   /** Target of `pagehide` / `pageshow` (the window; null outside a browser). */
   pageLifecycle?: EventTarget | null
 }
 
 /** Event dispatched once when refused handshakes exhausted the retries. */
 export const streamExhaustedEvent = 'exhausted'
+/** Event dispatched when the server ends the session (`session-expired`
+ * frame or a 401 handshake); the stream stops. */
+export const streamSessionExpiredEvent = 'session-expired'
 
-/** Native EventSource retries interrupted streams, but terminal HTTP errors
- * (for example a proxy's 500 during deployment, or an endpoint this server
- * does not provide) leave it CLOSED. Those handshakes are retried with a
- * bounded exponential backoff and abandoned after a few consecutive refusals,
- * so a missing endpoint never turns into a reconnect loop; the caller shows
- * the failure and offers a manual retry. A proxy can also leave a dead
- * connection open. Heartbeats bound that silence; reconnecting ready
- * reconciles current data without HTTP polling.
+export type EventStream = {
+  addEventListener(type: string, handler: EventListener): void
+  close(): void
+}
+
+/** A server-sent event stream over `fetch`. Every server event is dispatched
+ * as a `MessageEvent` of its type; `open` follows an accepted handshake and
+ * `error` each interruption, after which the stream reconnects with a
+ * bounded exponential backoff and sends the last event ID as
+ * `Last-Event-ID`. Refused handshakes (for example a proxy's 500 during
+ * deployment, or an endpoint this server does not provide) are abandoned
+ * after a few consecutive attempts with `exhausted`, so a missing endpoint
+ * never turns into a reconnect loop; the caller offers a manual retry.
+ *
+ * A proxy can also leave a dead connection open: the server's keep-alive
+ * frames bound the silence, and a connection silent for `idleTimeoutMs` is
+ * replaced; the reconnect reconciles data without HTTP polling.
  *
  * A page entering the back/forward cache must not keep its connection: on
  * `pagehide` the connection closes and pending retries stop; when the page is
- * restored (`pageshow` with `persisted`), an open stream reconnects once
- * through the same path as a replacement, so the server sends one recovery
- * snapshot (or resumes from the cursor). Closed streams stay closed.
- */
-export function reconnectingEventSource(url: string, options: Options = {}) {
-  const createSource =
-    options.createSource ??
-    ((path: string) => new EventSource(path, { withCredentials: true }))
-  const listeners = new Map<string, Set<EventListener>>()
-  let source: EventSource | undefined
-  let detachListeners: Array<() => void> = []
-  let stopped = false
-  let timer: ReturnType<typeof setTimeout> | undefined
-  let idleTimer: ReturnType<typeof setTimeout> | undefined
-  let lastEventId = ''
-  // Consecutive replacement attempts without an opened connection.
-  let failures = 0
-  let rejected = 0
-  // Closed for the back/forward cache; reconnects when the page is restored.
-  let suspended = false
+ * restored (`pageshow` with `persisted`) an open stream reconnects once, so
+ * the server sends one recovery snapshot (or resumes from the last event ID).
+ * Closed streams stay closed. */
+export function openEventStream(
+  url: string,
+  options: EventStreamOptions = {}
+): EventStream {
+  const request = options.fetch ?? ((input, init) => fetch(input, init))
+  const target = new EventTarget()
   const pageLifecycle =
     options.pageLifecycle === undefined
       ? typeof window === 'undefined'
         ? null
         : window
       : options.pageLifecycle
-  const connectionUrl = () => {
-    if (!options.resumeQueryParam || !lastEventId) return url
-    const hashIndex = url.indexOf('#')
-    const base = hashIndex < 0 ? url : url.slice(0, hashIndex)
-    const hash = hashIndex < 0 ? '' : url.slice(hashIndex)
-    const queryIndex = base.indexOf('?')
-    const path = queryIndex < 0 ? base : base.slice(0, queryIndex)
-    const query = new URLSearchParams(
-      queryIndex < 0 ? '' : base.slice(queryIndex + 1)
-    )
-    query.set(options.resumeQueryParam, lastEventId)
-    return `${path}?${query}${hash}`
+  let connection: AbortController | undefined
+  let stopped = false
+  // Closed for the back/forward cache; reconnects when the page is restored.
+  let suspended = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let idleTimer: ReturnType<typeof setTimeout> | undefined
+  let lastEventId = ''
+  let retryDelayMs = options.retryDelayMs ?? 3000
+  // Consecutive attempts without an accepted handshake.
+  let failures = 0
+  let rejected = 0
+
+  const emit = (event: Event) => {
+    if (!stopped) target.dispatchEvent(event)
   }
-  const retireSource = () => {
-    const retired = source
-    source = undefined
-    for (const detach of detachListeners) detach()
-    detachListeners = []
-    retired?.close()
-  }
-  const reconnect = () => {
-    if (stopped || suspended) return
-    if (timer !== undefined) clearTimeout(timer)
-    timer = undefined
-    retireSource()
-    connect()
+  const retire = () => {
+    clearTimeout(idleTimer)
+    idleTimer = undefined
+    connection?.abort()
+    connection = undefined
   }
   const stop = () => {
     stopped = true
     clearTimeout(timer)
-    clearTimeout(idleTimer)
+    timer = undefined
+    retire()
     pageLifecycle?.removeEventListener('pagehide', suspend)
     pageLifecycle?.removeEventListener('pageshow', resume)
-    retireSource()
   }
-  const exhaust = () => {
-    stop()
-    const handlers = [...(listeners.get(streamExhaustedEvent) ?? [])]
-    listeners.clear()
-    for (const handler of handlers) handler(new Event(streamExhaustedEvent))
+  const interrupt = (refused: boolean) => {
+    retire()
+    emit(new Event('error'))
+    if (stopped || suspended) return
+    if (refused && ++rejected >= (options.maxRejectedAttempts ?? 4)) {
+      emit(new Event(streamExhaustedEvent))
+      stop()
+      return
+    }
+    const delay = Math.min(
+      retryDelayMs * 2 ** failures,
+      options.maxRetryDelayMs ?? 30000
+    )
+    failures++
+    timer = setTimeout(() => {
+      timer = undefined
+      void connect()
+    }, delay)
   }
-  const activity = () => {
-    if (idleTimer !== undefined) clearTimeout(idleTimer)
-    if (!stopped && !suspended && options.idleTimeoutMs !== null)
-      idleTimer = setTimeout(reconnect, options.idleTimeoutMs ?? 45000)
+  const activity = (attempt: AbortController) => {
+    clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => {
+      if (connection === attempt) interrupt(false)
+    }, options.idleTimeoutMs ?? 45000)
+  }
+  const connect = async () => {
+    const attempt = new AbortController()
+    connection = attempt
+    activity(attempt)
+    const headers: Record<string, string> = { Accept: 'text/event-stream' }
+    if (lastEventId) headers['Last-Event-ID'] = lastEventId
+    let response: Response
+    try {
+      response = await request(url, {
+        headers,
+        credentials: 'include',
+        cache: 'no-store',
+        signal: attempt.signal,
+      })
+    } catch {
+      if (connection === attempt) interrupt(false)
+      return
+    }
+    if (connection !== attempt) {
+      void response.body?.cancel().catch(() => undefined)
+      return
+    }
+    if (response.status === 401) {
+      void response.body?.cancel().catch(() => undefined)
+      emit(new Event(streamSessionExpiredEvent))
+      stop()
+      return
+    }
+    const eventStream =
+      response.headers
+        .get('content-type')
+        ?.toLowerCase()
+        .startsWith('text/event-stream') ?? false
+    if (!response.ok || !response.body || !eventStream) {
+      void response.body?.cancel().catch(() => undefined)
+      interrupt(true)
+      return
+    }
+    failures = 0
+    rejected = 0
+    activity(attempt)
+    emit(new Event('open'))
+    const parser = createEventStreamParser(
+      {
+        event: (event) => {
+          if (connection !== attempt) return
+          lastEventId = event.lastEventId
+          emit(
+            new MessageEvent(event.type, {
+              data: event.data,
+              lastEventId: event.lastEventId,
+            })
+          )
+          if (event.type === streamSessionExpiredEvent) stop()
+        },
+        retry: (delayMs) => {
+          retryDelayMs = delayMs
+        },
+      },
+      lastEventId
+    )
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    try {
+      while (connection === attempt) {
+        const { done, value } = await reader.read()
+        if (connection !== attempt) break
+        if (done) {
+          interrupt(false)
+          break
+        }
+        activity(attempt)
+        parser.push(decoder.decode(value, { stream: true }))
+        if (connection === attempt) lastEventId = parser.lastEventId
+      }
+    } catch {
+      if (connection === attempt) interrupt(false)
+    } finally {
+      if (connection !== attempt) void reader.cancel().catch(() => undefined)
+    }
   }
   function suspend() {
     if (stopped || suspended) return
     suspended = true
     clearTimeout(timer)
-    clearTimeout(idleTimer)
-    timer = idleTimer = undefined
-    retireSource()
+    timer = undefined
+    retire()
   }
   function resume(event: Event) {
     if (stopped || !suspended || !(event as PageTransitionEvent).persisted)
       return
     suspended = false
-    connect()
+    void connect()
   }
-  const attach = (
-    connection: EventSource,
-    type: string,
-    handler: EventListener
-  ) => {
-    const listener: EventListener = (event) => {
-      if (stopped || source !== connection) return
-      if (event.type !== 'error' && connection.readyState === 2) return
-      if (
-        options.resumeQueryParam &&
-        event instanceof MessageEvent &&
-        event.lastEventId
-      ) {
-        lastEventId = event.lastEventId
-      }
-      activity()
-      handler(event)
-      if (event.type === 'session-expired') {
-        stop()
-        listeners.clear()
-      }
-    }
-    connection.addEventListener(type, listener)
-    detachListeners.push(() => connection.removeEventListener(type, listener))
-  }
-  const connect = () => {
-    const connection = createSource(connectionUrl())
-    source = connection
-    activity()
-    attach(connection, 'open', () => {
-      failures = 0
-      rejected = 0
-    })
-    attach(connection, 'heartbeat', () => undefined)
-    for (const [type, handlers] of listeners) {
-      for (const handler of handlers) attach(connection, type, handler)
-    }
-    const onError = () => {
-      // Snapshot streams retain native retries; cursor streams use their latest
-      // delivered id for every replacement, including transport interruption.
-      const refused = connection.readyState === 2
-      if (
-        stopped ||
-        source !== connection ||
-        (!options.resumeQueryParam && !refused) ||
-        timer !== undefined
-      )
-        return
-      if (options.resumeQueryParam) connection.close()
-      if (refused && ++rejected >= (options.maxRejectedAttempts ?? 4)) {
-        exhaust()
-        return
-      }
-      const delay = Math.min(
-        (options.retryDelayMs ?? 3000) * 2 ** failures,
-        options.maxRetryDelayMs ?? 30000
-      )
-      failures++
-      timer = setTimeout(reconnect, delay)
-    }
-    connection.addEventListener('error', onError)
-    detachListeners.push(() => connection.removeEventListener('error', onError))
-  }
-  connect()
+
+  void connect()
   pageLifecycle?.addEventListener('pagehide', suspend)
   pageLifecycle?.addEventListener('pageshow', resume)
   return {
-    addEventListener(type: string, handler: EventListener) {
-      if (stopped) return
-      const handlers = listeners.get(type) ?? new Set<EventListener>()
-      if (handlers.has(handler)) return
-      handlers.add(handler)
-      listeners.set(type, handlers)
-      // While suspended the next connection attaches every listener.
-      if (source) attach(source, type, handler)
+    addEventListener(type, handler) {
+      if (!stopped) target.addEventListener(type, handler)
     },
     close() {
-      if (stopped) return
-      stop()
-      listeners.clear()
+      if (!stopped) stop()
     },
   }
 }

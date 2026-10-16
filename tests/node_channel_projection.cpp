@@ -6,12 +6,14 @@
 #include <chrono>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
-#include "service/domains/agent/agent_channel_service.h"
+#include "service/features/node_channel/channel_service.h"
 #include "service/features/node_channel/projection.h"
 #include "support/postgres_test.h"
 #include "support/redis_test.h"
@@ -63,6 +65,7 @@ struct connection_context final {
     ruvia::stop_source stop_;
     service::node_dispatch::fanout::hub configuration_changes_;
     service::node_channel::report_waits report_waits_;
+    service::background::work_available::claim_signals claims_;
 
     ruvia::redis_handle redis() const {
         return redis_.handle().with_options({.stop_token_ = get_stop_token()});
@@ -77,6 +80,8 @@ struct connection_context final {
     state_type& worker_state() {
         if constexpr (std::is_same_v<state_type, service::node_dispatch::fanout::hub>) {
             return configuration_changes_;
+        } else if constexpr (std::is_same_v<state_type, service::background::work_available::claim_signals>) {
+            return claims_;
         } else {
             static_assert(std::is_same_v<state_type, service::node_channel::report_waits>);
             return report_waits_;
@@ -84,11 +89,25 @@ struct connection_context final {
     }
 };
 
+flexedge::node::v2::NodeSpecContent spec_content(const flexedge::node::v2::DesiredState& state) {
+    auto content = flexedge::node::open_artifact<flexedge::node::v2::NodeSpecContent>(
+        state.node_spec().digest_sha256(), state.node_spec().content());
+    require(content.has_value(), "projected node spec content matches its digest");
+    return std::move(*content);
+}
+
+flexedge::node::v2::ClusterReleaseContent release_content(const flexedge::node::v2::DesiredState& state) {
+    auto content = flexedge::node::open_artifact<flexedge::node::v2::ClusterReleaseContent>(
+        state.release().digest_sha256(), state.release().content());
+    require(content.has_value(), "projected release content matches its digest");
+    return std::move(*content);
+}
+
 ruvia::task<void> collect_desired(connection_context& context,
-    const service::agent::agent_principal& principal,
+    const service::node_channel::agent_principal& principal,
     std::optional<flexedge::node::v2::DesiredState>& result, std::exception_ptr& failure) {
     try {
-        result = co_await service::agent::get_agent_channel_service().desired_state(context, principal);
+        result = (co_await service::node_channel::get_channel_service().desired_state(context, principal)).state_;
     } catch (...) {
         failure = std::current_exception();
     }
@@ -107,7 +126,7 @@ ruvia::task<std::string> read_ready(ruvia::redis_handle redis) {
 }
 
 ruvia::task<flexedge::node::v2::DesiredState> read_desired(ruvia::redis_handle redis,
-    const service::agent::agent_principal& principal) {
+    const service::node_channel::agent_principal& principal) {
     const auto value = co_await channel::desired(redis, principal);
     require(value.has_value(), "registered node has its desired state");
     const auto plaintext = service::utils::open_secret(*value);
@@ -132,7 +151,7 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
     const auto rotated_agent = service::utils::random_token().substr(0, 32);
     std::vector<std::string> agents{agent, other_agent, rotated_agent};
     projection_context context{.database_ = first, .redis_ = redis, .stop_ = {}};
-    connection_context connection{.redis_ = peer, .worker_ = first.worker(), .stop_ = {}, .configuration_changes_ = {}, .report_waits_ = {}};
+    connection_context connection{.redis_ = peer, .worker_ = first.worker(), .stop_ = {}, .configuration_changes_ = {}, .report_waits_ = {}, .claims_ = {}};
     (void)co_await db.execute("CREATE SCHEMA " + schema);
     std::exception_ptr failure;
     try {
@@ -171,23 +190,22 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
                     (co_await cache.command("TTL", channel::node_index_key(tenant, node))).integer() == -1,
             "materialized identity and reverse index have no query-triggering TTL");
         require(!(co_await channel::identity(peer.handle(), other_agent)), "tenant refresh does not project another tenant");
-        const service::agent::agent_principal principal{node, cluster, tenant, agent};
+        const service::node_channel::agent_principal principal{node, cluster, tenant, agent};
         require(!(co_await channel::desired(peer.handle(), principal)), "pending identity has no desired configuration");
 
         flexedge::node::v2::DeliveryObjectContent object;
         object.mutable_certificate()->set_id(uuid());
         object.mutable_certificate()->set_private_key_pem("projection-private-material");
-        const auto digest = flexedge::node::artifact_digest(object);
+        const auto digest = flexedge::node::artifact_digest(flexedge::node::serialize_artifact(object));
         const auto envelope = service::utils::seal_secret(flexedge::node::serialize_artifact(object));
-        flexedge::node::v2::ClusterReleaseManifest manifest;
-        auto* content = manifest.mutable_content();
-        content->set_release_id(release);
-        content->set_cluster_id(cluster);
-        content->set_generation(1);
-        auto* reference = content->add_objects();
+        flexedge::node::v2::ClusterReleaseContent content;
+        content.set_release_id(release);
+        content.set_cluster_id(cluster);
+        content.set_generation(1);
+        auto* reference = content.add_objects();
         reference->set_kind(flexedge::node::v2::OBJECT_KIND_CERTIFICATE);
         reference->set_digest_sha256(digest);
-        manifest.set_digest_sha256(flexedge::node::artifact_digest(*content));
+        const auto manifest = flexedge::node::pack_artifact<flexedge::node::v2::ClusterReleaseManifest>(content);
         const auto manifest_envelope = service::utils::seal_secret(flexedge::node::serialize_artifact(manifest));
         (void)co_await db.execute("INSERT INTO sys_cluster_release VALUES($1,$2,$3,$4,$5)",
             std::vector<ruvia::db_value>{ruvia::db_value{tenant}, ruvia::db_value{release}, ruvia::db_value{cluster}, ruvia::db_value{manifest.digest_sha256()}, ruvia::db_value{manifest_envelope}});
@@ -201,13 +219,13 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
         co_await channel::refresh(delivery, cache, tenant);
         co_await delivery.rollback();
         auto state = co_await read_desired(peer.handle(), principal);
-        require(state.node_spec().content().revision() == 1, "single-connection delivery reuses its outer transaction without waiting for another lease");
+        require(spec_content(state).revision() == 1, "single-connection delivery reuses its outer transaction without waiting for another lease");
         const auto rolled_back_digest = co_await db.query("SELECT node_spec_digest IS NULL FROM sys_node WHERE id=$1",
             std::vector<ruvia::db_value>{ruvia::db_value{node}});
         require(rolled_back_digest[0][0].as<bool>().value(), "outer rollback may leave a valid Redis projection but rolls back its derived SQL digest");
         co_await channel::refresh(context, tenant);
         state = co_await read_desired(peer.handle(), principal);
-        require(state.node_spec().content().node_id() == node && state.node_spec().content().revision() == 1 &&
+        require(spec_content(state).node_id() == node && spec_content(state).revision() == 1 &&
                     state.release().digest_sha256() == manifest.digest_sha256(),
             "registered projection binds node revision and validated release");
         const auto recorded = co_await db.query("SELECT node_spec_digest FROM sys_node WHERE id=$1", std::vector<ruvia::db_value>{ruvia::db_value{node}});
@@ -242,7 +260,7 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
         }
         require(rejected, "duplicate object digests are rejected");
 
-        const auto& service = service::agent::get_agent_channel_service();
+        const auto& service = service::node_channel::get_channel_service();
         co_await prepare_repair(cache);
         const auto ready_generation = co_await read_ready(cache);
         for (const auto& id : {service::utils::random_token().substr(0, 32), agent}) {
@@ -310,7 +328,7 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
             if (recovery_failure) {
                 std::rethrow_exception(recovery_failure);
             }
-            require(requested_repair && recovered_state && recovered_state->release().content().release_id() == release,
+            require(requested_repair && recovered_state && release_content(*recovered_state).release_id() == release,
                 "missing and corrupt desired payloads request repair and resume the same Redis-only connection");
         }
 
@@ -374,7 +392,7 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
         co_await refresh_tasks.join();
         require(locked, "projector uses a real PostgreSQL row lock");
         state = co_await read_desired(peer.handle(), principal);
-        require(state.node_spec().content().revision() == 2 && state.node_spec().content().name() == "committed new name", "lock acquisition reads the committed source version");
+        require(spec_content(state).revision() == 2 && spec_content(state).name() == "committed new name", "lock acquisition reads the committed source version");
 
         // Invalid immutable artifacts fail the transaction without replacing a
         // previously usable projection or persisting a speculative spec digest.
@@ -393,7 +411,7 @@ ruvia::task<void> verify(ruvia::db_client& first, ruvia::db_client& second,
         // it back; reconnecting has the default search_path again.
         (void)co_await db.execute("SET search_path TO " + schema);
         state = co_await read_desired(peer.handle(), principal);
-        require(state.node_spec().content().revision() == 2, "failed refresh keeps its last complete Redis record");
+        require(spec_content(state).revision() == 2, "failed refresh keeps its last complete Redis record");
         const auto failed_digest = co_await db.query("SELECT node_spec_digest FROM sys_node WHERE id=$1", std::vector<ruvia::db_value>{ruvia::db_value{node}});
         require(failed_digest[0][0].as<std::string>() == state.node_spec().digest_sha256(), "failed artifact validation rolls back the spec digest update");
         (void)co_await db.execute("UPDATE sys_delivery_object SET payload_envelope=$1 WHERE tenant_id=$2 AND digest_sha256=$3",
@@ -539,10 +557,11 @@ int main() {
         if (!postgres || !redis_config) {
             return 77;
         }
+        const test_support::postgres_test_database temporary_database(*postgres);
         service::utils::configure_secret_key(std::string(64, '1'));
         ruvia::event_loop_pool loops({.loop_count_ = 1});
         const auto loop = loops.loop(0);
-        ruvia::db_client first(loop, *postgres), second(loop, *postgres);
+        ruvia::db_client first(loop, temporary_database.config()), second(loop, temporary_database.config());
         ruvia::redis_client redis(loop, *redis_config), peer(loop, *redis_config);
         loops.start();
         std::exception_ptr failure;
@@ -551,8 +570,16 @@ int main() {
         } catch (...) {
             failure = std::current_exception();
         }
-        loop.start(first.shutdown()).get();
-        loop.start(second.shutdown()).get();
+        try {
+            loop.start(first.shutdown()).get();
+            loop.start(second.shutdown()).get();
+        } catch (...) {
+            if (!failure) {
+                failure = std::current_exception();
+            }
+        }
+        first.close();
+        second.close();
         redis.close();
         peer.close();
         loops.stop();

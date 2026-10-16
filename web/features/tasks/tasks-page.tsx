@@ -6,6 +6,7 @@ import type { DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Button, Link as HeroLink, Skeleton } from '@heroui/react'
 import { hasListFilters, useListSearch } from '@/lib/list-search'
+import { describeStatus } from '@/lib/status'
 import { cn } from '@/lib/utils'
 import { DataTable } from '@/components/data-table'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
@@ -13,56 +14,55 @@ import { Page } from '@/components/page'
 import { RelativeTime } from '@/components/relative-time'
 import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
-import { operationsQuery } from './data'
+import { tasksQuery } from './data'
 import { taskFilterKeys, type TasksSearch } from './search'
 import { TaskDetailSheet } from './task-detail-sheet'
 import {
-  actionLabel,
-  actorLabel,
-  describeOperationStatus,
-  operationActions,
-  operationActorLabels,
-  operationStatusGroups,
-  operationStatuses,
-  operationStatusLabels,
-  operationTarget,
-  operationTargetTypeLabels,
-  operationTitle,
+  parseTaskKey,
+  taskKey,
+  taskStatuses,
+  taskStatusGroups,
+  taskStatusReserve,
+  taskTarget,
+  taskTitle,
+  taskTypeLabel,
+  taskTypeLabels,
 } from './task-display'
-import type { Operation } from './types'
+import { TaskNoteSlot } from './task-note'
+import { taskRefOf, type Task } from './types'
 
 const route = getRouteApi('/_authenticated/tasks/')
 
-const optionsOf = (labels: Record<string, string>) =>
-  Object.entries(labels).map(([id, label]) => ({ id, label }))
-
 const statusOptions = [
-  ...optionsOf(operationStatusGroups),
-  ...Object.entries(operationStatuses).map(([id, status]) => ({
+  ...Object.entries(taskStatusGroups).map(([id, label]) => ({ id, label })),
+  ...Object.entries(taskStatuses).map(([id, status]) => ({
     id,
     label: status.label,
   })),
 ]
+// Certificate tasks are named by their operation (签发 / 续期).
+const typeOptions = Object.entries({
+  ...taskTypeLabels,
+  certificate: '证书签发 / 续期',
+}).map(([id, label]) => ({ id, label }))
 
 export function TasksPage() {
   const list = useListSearch(route)
   const { search } = list
   const navigate = route.useNavigate()
-  // The open detail sheet owns the page's only live stream; the list pauses
-  // and keeps its last snapshot underneath.
+  const openTask = search.task ? parseTaskKey(search.task) : undefined
+  // An open detail sheet takes over the page's only live stream; the list
+  // keeps its last snapshot underneath and recovers when the sheet closes.
   const query = useQuery({
-    ...operationsQuery({
+    ...tasksQuery({
       page: list.page,
       page_size: list.pageSize,
       keyword: list.keyword || undefined,
       status: search.status,
-      action: search.action,
-      target_type: search.target_type,
-      actor: search.actor,
-      days: search.days,
+      type: search.type,
     }),
-    enabled: !search.task,
     placeholderData: keepPreviousData,
+    enabled: !openTask,
   })
   const filtered = hasListFilters(search, taskFilterKeys)
   const openSheet = (task: string | undefined) =>
@@ -70,73 +70,52 @@ export function TasksPage() {
       search: (previous) => ({ ...previous, task }),
       replace: task === undefined,
     })
-  const columns: DataGridColumn<Operation>[] = [
+  const columns: DataGridColumn<Task>[] = [
     {
-      id: 'operation',
-      header: '操作',
+      id: 'task',
+      header: '任务',
       isRowHeader: true,
-      minWidth: 260,
-      cell: (operation) => <OperationCell operation={operation} />,
-    },
-    {
-      id: 'actor',
-      header: '发起人',
-      minWidth: 110,
-      cell: (operation) => (
-        <span
-          className={cn(
-            'block truncate text-sm',
-            operation.actor_type === 'system' && 'text-muted'
-          )}
-        >
-          {actorLabel(operation) || '—'}
-        </span>
-      ),
-    },
-    {
-      id: 'created',
-      header: '时间',
-      minWidth: 110,
-      cell: (operation) => (
-        <RelativeTime
-          value={operation.created_at}
-          className='text-sm text-muted'
-        />
-      ),
+      minWidth: 280,
+      cell: (task) => <TaskCell task={task} />,
     },
     {
       id: 'status',
       header: '状态',
-      minWidth: 110,
-      cell: (operation) => {
-        const status = describeOperationStatus(operation.status)
-        return (
+      minWidth: 240,
+      cell: (task) => (
+        <span className='flex min-w-0 items-center gap-2 whitespace-nowrap'>
           <StatusChip
-            label={status.label}
-            tone={status.tone}
-            reserve={operationStatusLabels}
+            {...describeStatus(taskStatuses, task.status)}
+            reserve={taskStatusReserve}
           />
-        )
-      },
+          <TaskNoteSlot
+            task={task}
+            className='w-32 shrink-0 truncate text-xs leading-5'
+          />
+        </span>
+      ),
     },
     {
-      id: 'subtasks',
-      header: '子任务',
-      minWidth: 80,
+      id: 'updated',
+      header: '最近执行',
+      minWidth: 110,
+      cell: (task) => (
+        <RelativeTime value={task.updated_at} className='text-sm text-muted' />
+      ),
+    },
+    {
+      id: 'failures',
+      header: '失败次数',
+      minWidth: 90,
       align: 'end',
-      cell: (operation) => (
-        <span className='text-sm tabular-nums'>
-          <span
-            className={cn(operation.failed_count > 0 && 'text-danger')}
-            aria-label={
-              operation.failed_count > 0
-                ? `${operation.failed_count} 个失败或重试中`
-                : undefined
-            }
-          >
-            {operation.settled_count}
-          </span>
-          <span className='text-muted'>/{operation.subtask_count}</span>
+      cell: (task) => (
+        <span
+          className={cn(
+            'text-sm tabular-nums',
+            task.failure_count > 0 ? 'text-danger' : 'text-muted'
+          )}
+        >
+          {task.failure_count}
         </span>
       ),
     },
@@ -144,13 +123,13 @@ export function TasksPage() {
       id: 'actions',
       header: <span className='sr-only'>详情</span>,
       width: 72,
-      cell: (operation) => (
+      cell: (task) => (
         <Button
           size='sm'
           variant='tertiary'
           className='px-2'
-          aria-label={`任务 ${operationTitle(operation)} 的详情`}
-          onPress={() => void openSheet(operation.id)}
+          aria-label={`任务 ${taskTitle(task)} 的详情`}
+          onPress={() => void openSheet(taskKey(taskRefOf(task)))}
         >
           详情
         </Button>
@@ -166,10 +145,10 @@ export function TasksPage() {
           value={query.data?.active}
         />
         <TaskKpi
-          title='需关注'
+          title='失败'
           icon={<CircleExclamation />}
-          status='warning'
-          value={query.data?.attention}
+          status='danger'
+          value={query.data?.failed}
         />
       </div>
       <div className='flex flex-col gap-3'>
@@ -192,49 +171,14 @@ export function TasksPage() {
                 options={statusOptions}
               />
               <FilterSelect
-                label='操作'
-                value={search.action ?? ''}
+                label='类型'
+                value={search.type ?? ''}
                 onChange={(value) =>
                   void list.setSearch({
-                    action: (value || undefined) as TasksSearch['action'],
+                    type: (value || undefined) as TasksSearch['type'],
                   })
                 }
-                options={optionsOf(operationActions)}
-              />
-              <FilterSelect
-                label='对象'
-                value={search.target_type ?? ''}
-                onChange={(value) =>
-                  void list.setSearch({
-                    target_type: (value ||
-                      undefined) as TasksSearch['target_type'],
-                  })
-                }
-                options={optionsOf(operationTargetTypeLabels)}
-              />
-              <FilterSelect
-                label='发起人'
-                value={search.actor ?? ''}
-                onChange={(value) =>
-                  void list.setSearch({
-                    actor: (value || undefined) as TasksSearch['actor'],
-                  })
-                }
-                options={optionsOf(operationActorLabels)}
-              />
-              <FilterSelect
-                label='时间'
-                value={search.days ? String(search.days) : ''}
-                allLabel='全部保留记录'
-                onChange={(value) =>
-                  void list.setSearch({
-                    days: value ? (Number(value) as 1 | 7) : undefined,
-                  })
-                }
-                options={[
-                  { id: '1', label: '最近 24 小时' },
-                  { id: '7', label: '最近 7 天' },
-                ]}
+                options={typeOptions}
               />
             </>
           }
@@ -247,6 +191,7 @@ export function TasksPage() {
           label='任务'
           columns={columns}
           data={query.data?.list}
+          getRowId={(task) => taskKey(taskRefOf(task))}
           isLoading={query.isPending}
           error={query.isError ? query.error : undefined}
           onRetry={() => query.refetch()}
@@ -263,10 +208,10 @@ export function TasksPage() {
           }
         />
       </div>
-      {search.task && (
+      {openTask && (
         <TaskDetailSheet
           key={search.task}
-          operationId={search.task}
+          task={openTask}
           onClose={() => void openSheet(undefined)}
         />
       )}
@@ -274,30 +219,27 @@ export function TasksPage() {
   )
 }
 
-/** `动作 · 对象` on one line: the action is plain text (the 「详情」 button
- * opens the sheet), the object links to its resource unless deleted. */
-function OperationCell({ operation }: { operation: Operation }) {
-  const target = operationTarget(operation)
+/** `类型 · 对象` on one line: the type is plain text (the 「详情」 button
+ * opens the sheet), the object links to its resource page. */
+function TaskCell({ task }: { task: Task }) {
+  const target = taskTarget(task)
   return (
     <span className='flex min-w-0 items-center gap-1.5 text-sm whitespace-nowrap'>
       <span className='shrink-0 font-medium text-foreground'>
-        {actionLabel(operation.action)}
+        {taskTypeLabel(task)}
       </span>
       <span aria-hidden className='text-muted'>
         ·
       </span>
       {target ? (
         <HeroLink
-          href={target.href}
-          routerOptions={target.state && { state: target.state }}
+          href={target}
           className='min-w-0 truncate text-sm no-underline hover:underline'
         >
-          {operation.target_name}
+          {task.name}
         </HeroLink>
       ) : (
-        <span className='min-w-0 truncate text-muted'>
-          {operation.target_name}
-        </span>
+        <span className='min-w-0 truncate text-muted'>{task.name}</span>
       )}
     </span>
   )
@@ -311,7 +253,7 @@ function TaskKpi({
 }: {
   title: string
   icon: ReactNode
-  status?: 'warning'
+  status?: 'danger'
   value: number | undefined
 }): ReactNode {
   return (
@@ -330,7 +272,7 @@ function TaskKpi({
           <Skeleton className='h-7 w-16 rounded-md' />
         ) : (
           <KPI.Value
-            className={cn(status && value > 0 && 'text-warning')}
+            className={cn(status && value > 0 && 'text-danger')}
             value={value}
             maximumFractionDigits={0}
           />

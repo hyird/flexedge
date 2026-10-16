@@ -6,12 +6,14 @@
 
 #include <chrono>
 #include <cstdint>
+#include <exception>
 #include <iostream>
 #include <memory_resource>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 #include "node/proto/schema_version.h"
 #include "service/config/schema.h"
@@ -51,7 +53,7 @@ struct report_context final {
     ruvia::db_client& database_;
     ruvia::redis_client& redis_;
     ruvia::worker_handle worker_;
-    service::background::work_available::signals signals_;
+    service::background::work_available::claim_signals claims_;
     ruvia::stop_source stop_;
     ruvia::db_handle db() const {
         return database_.handle();
@@ -70,7 +72,8 @@ struct report_context final {
     }
     template <typename state_type>
     state_type& worker_state() {
-        return signals_;
+        static_assert(std::is_same_v<state_type, service::background::work_available::claim_signals>);
+        return claims_;
     }
 };
 
@@ -119,13 +122,14 @@ ruvia::task<std::int64_t> scalar(ruvia::db_handle db, std::string_view sql) {
 }
 
 ruvia::task<void> fixture(report_context& context) {
-    flexedge::node::v2::ClusterReleaseManifest manifest;
-    manifest.mutable_content()->set_release_id(release);
-    manifest.mutable_content()->set_cluster_id(cluster);
-    manifest.mutable_content()->set_generation(1);
-    manifest.mutable_content()->set_schema_version(flexedge::node::cluster_release_schema_version);
-    digest = flexedge::node::artifact_digest(manifest.content());
-    manifest.set_digest_sha256(digest);
+    flexedge::node::v2::ClusterReleaseContent content;
+    content.set_release_id(release);
+    content.set_cluster_id(cluster);
+    content.set_generation(1);
+    content.set_schema_version(flexedge::node::cluster_release_schema_version);
+    const auto manifest =
+        flexedge::node::pack_artifact<flexedge::node::v2::ClusterReleaseManifest>(content);
+    digest = manifest.digest_sha256();
     const auto manifest_envelope = service::utils::seal_secret(flexedge::node::serialize_artifact(manifest));
     auto db = context.db();
     (void)co_await db.execute("INSERT INTO sys_tenant(id,name,slug) VALUES($1,'Node reports QA','node-reports-qa')", tenant);
@@ -138,7 +142,7 @@ ruvia::task<void> fixture(report_context& context) {
     (void)co_await db.execute("INSERT INTO sys_node_release_target(tenant_id,release_id,node_id,status) VALUES($1,$2,$3,'pending')", tenant, release, node);
     (void)co_await context.redis().command("DEL", queue::stream_key, queue::bytes_key, queue::retry_key, queue::attempts_key, queue::positions_key,
         queue::cleanup_key, queue::cleanup_identity_key, queue::failed_key, queue::failed_bytes_key, channel::completion_stream_key,
-        service::background::work_available::stream_key, identity_key);
+        identity_key);
     (void)co_await context.redis().command("HSET", identity_key, "tenant_id", tenant, "node_id", node, "cluster_id", cluster,
         "secret_hash", hash, "status", "registered", "agent_id", agent);
     co_await queue::initialize(context.redis());
@@ -200,9 +204,6 @@ ruvia::task<void> verify_queue(report_context& context) {
     require(!(co_await queue::owns(context.redis(), other_consumer, entry)), "another consumer cannot acknowledge its peer's report");
     require(co_await queue::complete(context.redis(), other_consumer, entry, true, "") == -1,
         "completion Lua fences a stale owner");
-    const auto hints = co_await context.redis().command("XRANGE", service::background::work_available::stream_key, "-", "+");
-    require(hints.array().size() == 1 && hints.array()[0].array()[1].array().size() == 2,
-        "atomic broadcast hint contains type only, with no event or trace payload");
     (void)co_await context.redis().command("SET", queue::failed_bytes_key, std::to_string(queue::max_failed_bytes));
     require(co_await queue::complete(context.redis(), consumer, entry, false, "qa_queue_only") == 0 &&
                 !(co_await channel::completion(context.redis(), entry.report_id_)) && co_await queue::owns(context.redis(), consumer, entry),
@@ -230,13 +231,16 @@ ruvia::task<void> verify_apply_transaction(report_context& context) {
     }
     (void)co_await context.db().execute("DROP TRIGGER reject_report_outbox ON sys_notification_outbox");
     require(co_await channel::persist_report(context, consumer, entry, report), "database recovery commits the retained immutable report");
+    // A failed apply of an unapplied node spec records the publish and the
+    // configure attempt of the node task; the trace belongs to the first.
     require(co_await scalar(context.db(), "SELECT count(*) FROM sys_node_report_receipt") == 1 &&
-                co_await scalar(context.db(), "SELECT count(*) FROM sys_sync_event") == 1 &&
+                co_await scalar(context.db(), "SELECT count(*) FROM sys_sync_event WHERE operation = 'publish'") == 1 &&
+                co_await scalar(context.db(), "SELECT count(*) FROM sys_sync_event WHERE operation = 'configure'") == 1 &&
                 co_await scalar(context.db(), "SELECT count(*) FROM sys_sync_event_trace") == 1,
-        "one transaction stores receipt, attempt and trace");
+        "one transaction stores receipt, attempts and trace");
     require(!(co_await channel::completion(context.redis(), entry.report_id_)), "DB commit alone does not fabricate a Redis completion");
     require(co_await channel::persist_report(context, consumer, entry, report), "crash after DB commit can safely replay before Redis finish");
-    require(co_await scalar(context.db(), "SELECT count(*) FROM sys_sync_event") == 1,
+    require(co_await scalar(context.db(), "SELECT count(*) FROM sys_sync_event") == 2,
         "same report ID cannot create a second failure attempt");
     (void)co_await context.redis().command("XCLAIM", queue::stream_key, queue::group, other_consumer, "0", entry.id_);
     require(!(co_await channel::persist_report(context, consumer, entry, report)),
@@ -253,8 +257,8 @@ ruvia::task<void> verify_apply_transaction(report_context& context) {
         "safe cleanup removes completed ledger rows without retaining heartbeat history forever");
     require(!(co_await channel::persist_report(context, other_consumer, entry, report)),
         "a delayed old owner cannot reapply after the ledger row was cleaned");
-    require(co_await scalar(context.db(), "SELECT count(*) FROM sys_sync_event") == 1,
-        "cleanup preserves exactly one durable business attempt");
+    require(co_await scalar(context.db(), "SELECT count(*) FROM sys_sync_event") == 2,
+        "cleanup preserves exactly the durable business attempts of the report");
 }
 
 ruvia::task<void> delayed_persistence(report_context& context, const queue::entry& entry, const channel::report& report,
@@ -284,12 +288,12 @@ ruvia::task<void> verify_delayed_owner(report_context& context, report_context& 
 }
 
 ruvia::task<void> verify_worker_loop(report_context& context) {
-    (void)service::background::work_available::get_signals(context).for_type("node-reports");
     ruvia::task_scope tasks(context.worker());
     tasks.spawn(channel::run_reports(context));
     const auto id = co_await channel::enqueue(context.redis(), heartbeat(now_ms() + 2));
     require(id.has_value(), "a new report is accepted while the replica claim loop is running");
-    service::background::work_available::get_signals(context).for_type("node-reports").notify();
+    // The enqueuing worker wakes only its own claim loop.
+    channel::wake_own_reports(context);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     std::optional<bool> complete;
     while (!(complete = co_await channel::completion(context.redis(), *id)) && std::chrono::steady_clock::now() < deadline) {
@@ -384,26 +388,44 @@ int main() {
         if (!postgres || !redis_config) {
             return 77;
         }
+        const test_support::postgres_test_database temporary_database(*postgres);
         service::utils::configure_secret_key(std::string(64, 'a'));
-        const ruvia::db_migrator migrator(*postgres, {.table_ = "schema_migrations"});
+        const ruvia::db_migrator migrator(temporary_database.config(), {.table_ = "schema_migrations"});
         (void)migrator.migrate(service::config::schema_migrations);
         ruvia::event_loop_pool loops({.loop_count_ = 1});
         const auto worker = loops.loop(0);
-        ruvia::db_client database(worker, *postgres);
-        ruvia::db_client peer_database(worker, *postgres);
+        ruvia::db_client database(worker, temporary_database.config());
+        ruvia::db_client peer_database(worker, temporary_database.config());
         ruvia::redis_client redis(worker, *redis_config);
-        report_context context{.database_ = database, .redis_ = redis, .worker_ = worker.handle(), .signals_ = {}, .stop_ = {}};
-        report_context peer{.database_ = peer_database, .redis_ = redis, .worker_ = worker.handle(), .signals_ = {}, .stop_ = {}};
+        report_context context{.database_ = database, .redis_ = redis, .worker_ = worker.handle(), .claims_ = {}, .stop_ = {}};
+        report_context peer{.database_ = peer_database, .redis_ = redis, .worker_ = worker.handle(), .claims_ = {}, .stop_ = {}};
         loops.start();
-        worker.start(database.connect()).get();
-        worker.start(peer_database.connect()).get();
-        worker.start(redis.connect()).get();
-        worker.start(verify(context, peer)).get();
-        worker.start(database.shutdown()).get();
-        worker.start(peer_database.shutdown()).get();
-        worker.start(redis.shutdown()).get();
+        std::exception_ptr failure;
+        try {
+            worker.start(database.connect()).get();
+            worker.start(peer_database.connect()).get();
+            worker.start(redis.connect()).get();
+            worker.start(verify(context, peer)).get();
+        } catch (...) {
+            failure = std::current_exception();
+        }
+        try {
+            worker.start(database.shutdown()).get();
+            worker.start(peer_database.shutdown()).get();
+            worker.start(redis.shutdown()).get();
+        } catch (...) {
+            if (!failure) {
+                failure = std::current_exception();
+            }
+        }
+        database.close();
+        peer_database.close();
+        redis.close();
         loops.stop();
         loops.join();
+        if (failure) {
+            std::rethrow_exception(failure);
+        }
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

@@ -12,7 +12,7 @@ export function websiteToFormValues(
   const config = structuredClone(website?.config ?? defaultWebsiteConfig())
   return {
     cluster_id: website?.cluster_id ?? '',
-    status: (website?.status as WebsiteFormValues['status']) ?? 'enabled',
+    status: website?.status ?? 'enabled',
     name: config.name ?? '',
     domains:
       config.domains.length > 0
@@ -59,12 +59,7 @@ export function websiteToFormValues(
     access_log_cookies: config.access_log_cookies,
     access_log_referer: config.access_log_referer,
     access_log_user_agent: config.access_log_user_agent,
-    access_log_status_code_ranges: config.access_log_status_code_ranges.filter(
-      (
-        range
-      ): range is WebsiteFormValues['access_log_status_code_ranges'][number] =>
-        ['1xx', '2xx', '3xx', '4xx', '5xx'].includes(range)
-    ),
+    access_log_status_code_ranges: config.access_log_status_code_ranges,
     access_log_client_abort: config.access_log_client_abort,
     https_enabled: config.https_enabled,
     certificate_ids: config.certificate_ids,
@@ -74,13 +69,7 @@ export function websiteToFormValues(
     response_compression_enabled: config.response_compression_enabled,
     response_compression_min_bytes: config.response_compression_min_bytes,
     response_compression_max_bytes: config.response_compression_max_bytes,
-    response_compression_algorithms:
-      config.response_compression_algorithms.filter(
-        (
-          algorithm
-        ): algorithm is WebsiteFormValues['response_compression_algorithms'][number] =>
-          ['br', 'zstd', 'gzip'].includes(algorithm)
-      ),
+    response_compression_algorithms: config.response_compression_algorithms,
     response_compression_mime_types: config.response_compression_mime_types,
     response_compression_extensions: config.response_compression_extensions,
     response_compression_excluded_extensions:

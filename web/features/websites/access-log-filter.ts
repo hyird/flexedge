@@ -1,3 +1,4 @@
+import type { StatusDescriptor } from '@/lib/status'
 import type { AccessLog } from './access-log-schema'
 
 type AccessLogFilter = {
@@ -34,10 +35,11 @@ export function filterAccessLogs(
   )
 }
 
-/** Status chip tone by response class. */
-export function accessLogStatusTone(code: number) {
-  if (code >= 500) return 'danger' as const
-  if (code >= 400) return 'warning' as const
-  if (code >= 300) return 'accent' as const
-  return 'success' as const
+/** Status chip of a response: the code, toned by its class. */
+export function accessLogStatus(code: number): StatusDescriptor {
+  const label = String(code)
+  if (code >= 500) return { label, tone: 'danger' }
+  if (code >= 400) return { label, tone: 'warning' }
+  if (code >= 300) return { label, tone: 'accent' }
+  return { label, tone: 'success' }
 }

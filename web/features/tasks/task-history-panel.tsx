@@ -4,26 +4,33 @@ import { ListCheck } from '@gravity-ui/icons'
 import { Button, Disclosure, Skeleton } from '@heroui/react'
 import { useDisplaySeconds } from '@/lib/display-clock'
 import { formatDate, parseDate } from '@/lib/format'
+import {
+  describeStatus,
+  statusReserve,
+  type StatusDictionary,
+} from '@/lib/status'
 import { cn } from '@/lib/utils'
 import { navigationItemFor } from '@/components/layout/navigation'
 import { CopyButton } from '@/components/copy-button'
 import { EmptyState, QueryNotice } from '@/components/page'
 import { StatusChip } from '@/components/status-chip'
-import { subtaskHistoryQuery } from './data'
+import { taskHistoryQuery } from './data'
 import { TaskAttemptDetail } from './task-attempt-detail'
 import { AttemptTimeline, RedactedText } from './task-attempt-trace'
+import { operationLabel } from './task-display'
 import {
   formatAttemptDuration,
   formatRetryCountdown,
   groupAttempts,
 } from './task-history'
-import { known, type SubtaskHistory, type TaskAttempt } from './types'
+import type { TaskAttempt, TaskHistory, TaskRef } from './types'
 
 const outcomes = {
   completed: { label: '成功', tone: 'success' },
   failed: { label: '失败', tone: 'danger' },
-} as const
-const outcomeLabels = [outcomes.completed.label, outcomes.failed.label]
+  progressed: { label: '已推进', tone: 'accent' },
+} as const satisfies StatusDictionary
+const outcomeReserve = statusReserve(outcomes)
 // One attempt (or folded run) per row, separated by a hairline.
 const attemptRow = 'flex min-w-0 flex-col gap-2 py-3 first:pt-0 last:pb-0'
 const resourceMenuPaths: Record<string, string> = {
@@ -34,27 +41,23 @@ const resourceMenuPaths: Record<string, string> = {
   node: '/nodes',
 }
 
-/** 执行记录 of the expanded subtask: the `history` event of the task detail
- * stream, kept current by its `attempt` events (no refresh button; the
- * stream recovers by itself). Each attempt shows its execution timeline;
- * full traces are read per attempt once on screen. `showErrors` is off while
- * the sheet already reports the shared stream's failure. */
-export function SubtaskHistoryPanel({
-  operationId,
-  subtaskId,
-  resourceType,
+/** 执行记录 of a task: the `history` event of the task detail stream, kept
+ * current by its `attempt` events (no refresh button; the stream recovers by
+ * itself). Each attempt shows its execution timeline; full traces are read
+ * per attempt once on screen. `showErrors` is off while the sheet already
+ * reports the shared stream's failure. */
+export function TaskHistoryPanel({
+  task,
   showErrors = true,
 }: {
-  operationId: string
-  subtaskId: string
-  resourceType: string
+  task: TaskRef
   showErrors?: boolean
 }) {
   const Icon =
-    navigationItemFor(resourceMenuPaths[resourceType] ?? '/tasks')?.icon ??
+    navigationItemFor(resourceMenuPaths[task.resourceType] ?? '/tasks')?.icon ??
     ListCheck
   const history = useQuery({
-    ...subtaskHistoryQuery(operationId, subtaskId),
+    ...taskHistoryQuery(task),
     meta: { inlineError: true },
   })
   const data = history.data
@@ -70,11 +73,7 @@ export function SubtaskHistoryPanel({
       {data ? (
         <>
           <HistorySummary summary={data.summary} />
-          <AttemptList
-            operationId={operationId}
-            history={data}
-            icon={<Icon aria-hidden />}
-          />
+          <AttemptList task={task} history={data} icon={<Icon aria-hidden />} />
         </>
       ) : (
         history.isPending && (
@@ -96,9 +95,9 @@ export function SubtaskHistoryPanel({
 
 const summaryValue = 'text-[13px] leading-5 font-medium tabular-nums'
 
-function HistorySummary({ summary }: { summary: SubtaskHistory['summary'] }) {
+function HistorySummary({ summary }: { summary: TaskHistory['summary'] }) {
   return (
-    <dl className='grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl bg-surface-secondary p-3 sm:grid-cols-3'>
+    <dl className='grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl bg-surface-secondary p-3'>
       <SummaryItem label='累计尝试'>
         <span className={summaryValue}>{summary.attempt_count}</span>
       </SummaryItem>
@@ -112,16 +111,6 @@ function HistorySummary({ summary }: { summary: SubtaskHistory['summary'] }) {
           {summary.failure_count}
         </span>
       </SummaryItem>
-      <SummaryItem label='下次重试'>
-        {summary.next_attempt_at ? (
-          <RetryCountdown
-            value={summary.next_attempt_at}
-            className={cn(summaryValue, 'text-warning')}
-          />
-        ) : (
-          <span className={cn(summaryValue, 'text-muted')}>—</span>
-        )}
-      </SummaryItem>
       <SummaryItem label='首次失败'>
         <SummaryTime value={summary.first_failure_at} />
       </SummaryItem>
@@ -133,8 +122,8 @@ function HistorySummary({ summary }: { summary: SubtaskHistory['summary'] }) {
 }
 
 /** Countdown to a scheduled retry on the shared 1 s display clock. It only
- * re-renders this label and never reads data. `note` words it for a subtask
- * row (`12 秒后重试`, `即将重试`). */
+ * re-renders this label and never reads data. `note` words it for a task's
+ * note slot (`12 秒后重试`, `即将重试`). */
 export function RetryCountdown({
   value,
   note = false,
@@ -180,12 +169,12 @@ function SummaryTime({ value }: { value: string }) {
 }
 
 function AttemptList({
-  operationId,
+  task,
   history,
   icon,
 }: {
-  operationId: string
-  history: SubtaskHistory
+  task: TaskRef
+  history: TaskHistory
   icon: ReactNode
 }) {
   if (!history.list.length) return <EmptyState size='sm' title='暂无执行记录' />
@@ -199,17 +188,13 @@ function AttemptList({
         group.attempts.length > 1 ? (
           <AttemptRun
             key={group.key}
-            operationId={operationId}
+            task={task}
             attempts={group.attempts}
             icon={icon}
           />
         ) : (
           <li key={group.key} className={attemptRow}>
-            <AttemptBody
-              operationId={operationId}
-              attempt={group.attempts[0]}
-              icon={icon}
-            />
+            <AttemptBody task={task} attempt={group.attempts[0]} icon={icon} />
           </li>
         )
       )}
@@ -226,19 +211,13 @@ function AttemptHeader({
   outcome: TaskAttempt['outcome']
   aside: ReactNode
 }) {
-  // Outcomes from a newer backend show their raw value in a neutral chip.
-  const shown = known(outcomes, outcome) ?? {
-    label: outcome || '未知结果',
-    tone: 'default' as const,
-  }
   return (
     <div className='flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1'>
       <div className='flex shrink-0 items-center gap-2'>
         <h3 className='subsection-title whitespace-nowrap'>{title}</h3>
         <StatusChip
-          label={shown.label}
-          tone={shown.tone}
-          reserve={outcomeLabels}
+          {...describeStatus(outcomes, outcome)}
+          reserve={outcomeReserve}
         />
       </div>
       <span className='text-sm whitespace-nowrap text-muted tabular-nums'>
@@ -267,28 +246,24 @@ function AttemptMeta({
 }
 
 function AttemptBody({
-  operationId,
+  task,
   attempt,
   icon,
 }: {
-  operationId: string
+  task: TaskRef
   attempt: TaskAttempt
   icon: ReactNode
 }) {
   return (
     <>
       <AttemptHeader
-        title={`第 ${attempt.attempt} 次`}
+        title={`第 ${attempt.attempt} 次 · ${operationLabel(attempt.operation)}`}
         outcome={attempt.outcome}
         aside={<AttemptMeta attempt={attempt} />}
       />
       {attempt.error && <AttemptError error={attempt.error} />}
       <TaskAttemptDetail detail={attempt.detail} outcome={attempt.outcome} />
-      <AttemptTimeline
-        operationId={operationId}
-        trace={attempt.trace}
-        icon={icon}
-      />
+      <AttemptTimeline task={task} trace={attempt.trace} icon={icon} />
     </>
   )
 }
@@ -309,11 +284,11 @@ function AttemptError({ error }: { error: string }) {
  * newest attempt's detail and timeline represent the run; opening the run
  * lists every attempt, older ones with their own timeline. */
 function AttemptRun({
-  operationId,
+  task,
   attempts,
   icon,
 }: {
-  operationId: string
+  task: TaskRef
   attempts: TaskAttempt[]
   icon: ReactNode
 }) {
@@ -323,7 +298,7 @@ function AttemptRun({
   return (
     <li className={attemptRow}>
       <AttemptHeader
-        title={`第 ${oldest.attempt}–${newest.attempt} 次`}
+        title={`第 ${oldest.attempt}–${newest.attempt} 次 · ${operationLabel(newest.operation)}`}
         outcome='failed'
         aside={
           <AttemptMeta attempt={newest} extra={`共 ${attempts.length} 次`} />
@@ -331,11 +306,7 @@ function AttemptRun({
       />
       <AttemptError error={newest.error} />
       <TaskAttemptDetail detail={newest.detail} outcome={newest.outcome} />
-      <AttemptTimeline
-        operationId={operationId}
-        trace={newest.trace}
-        icon={icon}
-      />
+      <AttemptTimeline task={task} trace={newest.trace} icon={icon} />
       <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}>
         <Disclosure.Heading>
           <Button
@@ -359,7 +330,7 @@ function AttemptRun({
               >
                 {attempts.map((attempt, index) => (
                   <li
-                    key={`${attempt.attempt}:${attempt.emitted_at}`}
+                    key={attempt.id}
                     className='flex min-w-0 flex-col gap-1.5'
                   >
                     <div className='flex min-w-0 items-center justify-between gap-3 text-xs'>
@@ -372,7 +343,7 @@ function AttemptRun({
                     </div>
                     {index > 0 && (
                       <AttemptTimeline
-                        operationId={operationId}
+                        task={task}
                         trace={attempt.trace}
                         icon={icon}
                       />

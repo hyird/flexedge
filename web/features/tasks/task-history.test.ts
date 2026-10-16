@@ -2,17 +2,17 @@ import { createElement } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'vitest'
-import { subtaskHistoryQuery, taskAttemptTraceQuery } from './data'
+import { taskAttemptTraceQuery, taskHistoryQuery } from './data'
 import { TaskAttemptDetail } from './task-attempt-detail'
 import {
   formatAttemptDuration,
   formatRetryCountdown,
   groupAttempts,
 } from './task-history'
-import { SubtaskHistoryPanel } from './task-history-panel'
+import { TaskHistoryPanel } from './task-history-panel'
 import {
-  subtaskHistorySchema,
   taskAttemptTraceSchema,
+  taskHistorySchema,
   type TaskAttempt,
 } from './types'
 
@@ -22,7 +22,9 @@ function attempt(
   error = ''
 ): TaskAttempt {
   return {
+    id: String(number),
     attempt: number,
+    operation: 'sync',
     outcome,
     error,
     started_at: `2026-10-14T00:0${number}:00Z`,
@@ -37,15 +39,11 @@ function attempt(
 const runs = (list: TaskAttempt[]) =>
   groupAttempts(list).map((group) => group.attempts.map((item) => item.attempt))
 
-const recordsKey = subtaskHistoryQuery('op-1', 'sub-1').queryKey
-const panel = createElement(SubtaskHistoryPanel, {
-  operationId: 'op-1',
-  subtaskId: 'sub-1',
-  resourceType: 'dns_zone',
-})
+const ref = { resourceType: 'dns_zone', resourceId: 'zone-1' }
+const recordsKey = taskHistoryQuery(ref).queryKey
+const panel = createElement(TaskHistoryPanel, { task: ref })
 /** Parsed like the wire `history` event so degraded shapes are the real ones. */
-const parseHistory = (value: object) =>
-  subtaskHistorySchema.parse({ subtask_id: 'sub-1', ...value })
+const parseHistory = (value: object) => taskHistorySchema.parse(value)
 
 test('consecutive identical failures collapse into one run, newest first', () => {
   const list = [
@@ -98,6 +96,7 @@ test('retry countdown ticks in seconds under a minute and never goes negative', 
 
 test('unknown values and a malformed detail only affect their own attempt', () => {
   const base = {
+    operation: 'sync',
     error: '',
     started_at: '2026-10-14T00:00:00Z',
     emitted_at: '2026-10-14T00:00:01Z',
@@ -112,17 +111,18 @@ test('unknown values and a malformed detail only affect their own attempt', () =
       failure_count: 2,
       first_failure_at: '',
       last_success_at: '',
-      next_attempt_at: '',
     },
     list: [
       {
         ...base,
+        id: '4',
         attempt: 4,
         outcome: 'cancelled',
         detail: { kind: 'none', truncated: false },
       },
       {
         ...base,
+        id: '3',
         attempt: 3,
         outcome: 'failed',
         error: 'apply failed',
@@ -141,6 +141,7 @@ test('unknown values and a malformed detail only affect their own attempt', () =
       },
       {
         ...base,
+        id: '2',
         attempt: 2,
         outcome: 'failed',
         error: 'broken detail',
@@ -148,6 +149,7 @@ test('unknown values and a malformed detail only affect their own attempt', () =
       },
       {
         ...base,
+        id: '1',
         attempt: 1,
         outcome: 'completed',
         detail: {
@@ -175,8 +177,9 @@ test('unknown values and a malformed detail only affect their own attempt', () =
   const html = renderToStaticMarkup(
     createElement(QueryClientProvider, { client }, panel)
   )
-  // Every attempt renders in one list.
-  for (const number of [4, 3, 2, 1]) expect(html).toContain(`第 ${number} 次`)
+  // Every attempt renders in one list, titled with its operation.
+  for (const number of [4, 3, 2, 1])
+    expect(html).toContain(`第 ${number} 次 · 同步`)
   expect(html).toContain('aria-label="执行记录"')
   // Unknown outcome / phase / domain status show their raw values.
   expect(html).toContain('cancelled')
@@ -217,7 +220,6 @@ test('truncated detail keeps facts and generation errors without omission captio
       failure_count: 0,
       first_failure_at: '',
       last_success_at: '',
-      next_attempt_at: '',
     },
     list: [
       {
@@ -260,11 +262,12 @@ test('history and timeline show absolute times in the same console time, without
       failure_count: 1,
       first_failure_at: startedAt,
       last_success_at: '',
-      next_attempt_at: '2026-10-14T14:17:44+00',
     },
     list: [
       {
+        id: '48213',
         attempt: 1,
+        operation: 'configure',
         outcome: 'failed',
         error: 'apply failed',
         started_at: startedAt,
@@ -300,7 +303,7 @@ test('history and timeline show absolute times in the same console time, without
   })
   const client = new QueryClient()
   client.setQueryData(recordsKey, history)
-  client.setQueryData(taskAttemptTraceQuery('op-1', '48213').queryKey, trace)
+  client.setQueryData(taskAttemptTraceQuery(ref, '48213').queryKey, trace)
   // Machine-readable attributes dropped: only formatted times remain.
   const html = renderToStaticMarkup(
     createElement(QueryClientProvider, { client }, panel)
@@ -338,7 +341,6 @@ test('a folded failure run shows only its newest timeline until opened', () => {
       failure_count: 3,
       first_failure_at: '',
       last_success_at: '',
-      next_attempt_at: '',
     },
     list: [3, 2, 1].map((number) => ({
       ...attempt(number, 'failed', 'timeout'),

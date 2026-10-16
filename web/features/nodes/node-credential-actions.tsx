@@ -5,11 +5,10 @@ import { Button, toast } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Section } from '@/components/section'
-import { clusterSnapshotKey } from '@/features/clusters/data'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import {
+  afterNodeWrite,
   getNodeCredentials,
-  nodeSnapshotKey,
   resetNodeCredentials,
   type NodeCredentials,
 } from './data'
@@ -63,12 +62,9 @@ export function NodeCredentialActions({ node }: { node: Node }) {
         onConfirm={async () => {
           const result = await resetNodeCredentials(node)
           // The credentials response carries the generic envelope message "ok".
-          toastWriteSuccess('接入凭据已重置', result.data)
+          toastWriteSuccess('接入凭据已重置')
           setCredentials(result.data)
-          // The node stream pushes the new registration state; header
-          // snapshots (logs tab, cluster detail) re-read.
-          void client.invalidateQueries({ queryKey: nodeSnapshotKey })
-          void client.invalidateQueries({ queryKey: clusterSnapshotKey })
+          afterNodeWrite(client)
         }}
       />
       <NodeCredentialsSheet

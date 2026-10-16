@@ -11,6 +11,7 @@
 
 #include "service/features/background/task_context.h"
 #include "service/features/certificate/acme_types.h"
+#include "service/features/certificate/issuance_state.h"
 #include "service/features/certificate/provider_config_mapper.h"
 #include "service/features/certificate/task.h"
 #include "service/features/dns/driver.h"
@@ -30,6 +31,8 @@ struct certificate_work final {
     std::string dns_zone_id_;
     std::string zone_domain_;
     std::int64_t dns_minimum_record_ttl_;
+    // Progress a previous attempt of this issuance revision left to resume.
+    std::optional<issuance_state> progress_;
 };
 
 inline ruvia::task<certificate_work> load_work(service::background::task_context& context,
@@ -39,7 +42,8 @@ inline ruvia::task<certificate_work> load_work(service::background::task_context
         "certificate.subject_alt_names[2], certificate.provider_id, certificate.dns_zone_id, "
         "provider.provider, provider.status, provider.revision, provider.config::text, "
         "provider.runtime::text, "
-        "zone.domain, dns_provider.provider, dns_provider.status FROM sys_certificate certificate "
+        "zone.domain, dns_provider.provider, dns_provider.status, certificate.issuance_state::text FROM "
+        "sys_certificate certificate "
         "INNER JOIN "
         "sys_provider provider ON provider.tenant_id = certificate.tenant_id AND "
         "provider.id = certificate.provider_id AND provider.kind = 'certificate' INNER JOIN "
@@ -118,6 +122,7 @@ inline ruvia::task<certificate_work> load_work(service::background::task_context
         .zone_domain_ = std::string(row[10].value().value_or("")),
         .dns_minimum_record_ttl_ =
             service::dns::dns_provider_driver(row[11].value().value_or("")).minimum_record_ttl(),
+        .progress_ = parse_issuance_state(row[13].value().value_or(""), task.version_, context.pool()),
     };
 }
 

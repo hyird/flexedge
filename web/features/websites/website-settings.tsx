@@ -1,18 +1,13 @@
-import { type ReactNode, useEffect, useRef, useState } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
-import {
-  Alert,
-  Button,
-  Chip,
-  Skeleton,
-  Tabs,
-  useMediaQuery,
-} from '@heroui/react'
-import { apiErrorMessage, isRevisionConflict } from '@/lib/api'
+import { Chip, Skeleton, Tabs, useMediaQuery } from '@heroui/react'
+import { apiErrorMessage } from '@/lib/api'
 import { useArrivalState } from '@/lib/history-state'
+import { useRevisionDraft } from '@/lib/revision-draft'
 import { LinkButton } from '@/components/link-button'
 import { Page, QueryNotice } from '@/components/page'
+import { RevisionConflictAlert } from '@/components/revision-conflict-alert'
 import { SaveBar } from '@/components/save-bar'
 import {
   TabPanelHoldContext,
@@ -240,81 +235,68 @@ function WebsiteEditor({
   onReload?: () => Promise<Website | undefined>
 }) {
   const navigate = useNavigate()
-  // `base` is the revision the draft was loaded from; If-Match uses it, not
-  // the live detail stream, so concurrent edits surface as conflicts.
-  const [base, setBase] = useState(website)
-  const [initial, setInitial] = useState(() => websiteToFormValues(website))
-  const [values, setValues] = useState(initial)
+  // The user's changes; absent while the draft shows the clean values.
+  const [edits, setEdits] = useState<WebsiteFormValues>()
   const [formVersion, setFormVersion] = useState(0)
   const [showErrors, setShowErrors] = useState(false)
-  const [saveError, setSaveError] = useState('')
-  const [conflict, setConflict] = useState(false)
-  const [savedFrom, setSavedFrom] = useState<number | null>(null)
   const [routeView, setRouteView] = useState(initialRouteEditorView)
   const [pendingFocus, setPendingFocus] = useState<WebsiteSectionId | null>(
     null
   )
   const contentRef = useRef<HTMLDivElement>(null)
-  const dirty = JSON.stringify(values) !== JSON.stringify(initial)
-
-  const mutation = useMutation({
-    meta: { inlineError: true },
-    mutationFn: async ({ data }: SaveInput) => {
+  const draft = useRevisionDraft({
+    server: website,
+    save: async ({ data }: SaveInput, revision) => {
       const input = {
         cluster_id: data.cluster_id,
         status: data.status,
         config: websiteFormToConfig(data),
       }
-      if (!base) {
+      if (!website || revision === undefined) {
         const created = await createWebsite(input)
-        return { created, data: created }
+        return { created, revision: created.revision }
       }
-      return { created: null, data: (await updateWebsite(input, base)).data }
+      const result = await updateWebsite(input, { id: website.id, revision })
+      return { created: null, revision: result.revision }
     },
-    onSuccess: ({ created, data: response }, { draft }) => {
-      if (!base) {
-        toastWriteSuccess('网站已创建，配置正在分发到边缘节点', response)
-        if (created)
-          void navigate({
-            to: '/websites/$websiteId',
-            params: { websiteId: created.id },
-            ignoreBlocker: true,
-          })
+    onSaved: ({ created }) => {
+      if (created) {
+        toastWriteSuccess('网站已创建，配置正在分发到边缘节点', {
+          resourceType: 'website',
+          resourceId: created.id,
+        })
+        void navigate({
+          to: '/websites/$websiteId',
+          params: { websiteId: created.id },
+          ignoreBlocker: true,
+        })
         return
       }
-      toastWriteSuccess('配置已保存，正在分发到边缘节点', response)
-      setInitial(draft)
-      setSavedFrom(base.revision)
+      if (!website) return
+      toastWriteSuccess('配置已保存，正在分发到边缘节点', {
+        resourceType: 'website',
+        resourceId: website.id,
+      })
+      setEdits(undefined)
       setShowErrors(false)
     },
-    onError: (error) => {
-      setConflict(isRevisionConflict(error))
-      setSaveError(apiErrorMessage(error))
+    load: () => {
+      setEdits(undefined)
+      setFormVersion((version) => version + 1)
+      setShowErrors(false)
     },
+    reload: onReload,
   })
-
-  function adopt(next: Website, keepDraft = false) {
-    const loaded = websiteToFormValues(next)
-    setBase(next)
-    setInitial(loaded)
-    setSavedFrom(null)
-    if (keepDraft) return
-    setValues(loaded)
-    setFormVersion((version) => version + 1)
-    setShowErrors(false)
-    setSaveError('')
-    setConflict(false)
-  }
-
-  // Follow the live detail stream: our own save, or a remote change while the
-  // draft is clean, rebases silently; a remote change under a dirty draft is
-  // reported instead (and saving would fail with a revision conflict).
-  if (website && base && website.revision !== base.revision) {
-    if (savedFrom === base.revision) adopt(website, dirty)
-    else if (!dirty && !mutation.isPending) adopt(website)
-  }
-  const remoteChanged =
-    !!website && !!base && website.revision !== base.revision
+  const base = draft.base
+  // Clean values: the last save until the server reaches it, else `base`'s.
+  const savedDraft = draft.savedValues?.draft
+  const clean = useMemo(
+    () => savedDraft ?? websiteToFormValues(base),
+    [savedDraft, base]
+  )
+  const values = edits ?? clean
+  const dirty =
+    edits !== undefined && JSON.stringify(edits) !== JSON.stringify(clean)
 
   // Managed domains are validated against their hosted zone once the list
   // is known; until then only the hostname format is checked here.
@@ -323,11 +305,13 @@ function WebsiteEditor({
       values.domains.some((domain) => domain.dns_mode === 'managed')
     )
   ).data
-  // Names of selectable and already bound certificates: the HTTPS section
-  // loads the options snapshot; this only reads it from the cache.
+  // Names of selectable and already bound certificates. The editor reads the
+  // options itself whenever HTTPS is on, so validation never depends on the
+  // HTTPS section having been opened (the section shares this read).
   const loadedCertificates = useQuery({
     ...usableCertificateOptionsQuery,
-    enabled: false,
+    enabled: values.https_enabled,
+    meta: { inlineError: true },
   }).data
   const knownCertificates = [
     ...(loadedCertificates ?? []),
@@ -366,11 +350,16 @@ function WebsiteEditor({
     return () => cancelAnimationFrame(frame)
   }, [pendingFocus, section])
 
+  function replace(change: (current: WebsiteFormValues) => WebsiteFormValues) {
+    setEdits((current) => change(current ?? clean))
+    draft.track(true)
+  }
+
   function update<K extends keyof WebsiteFormValues>(
     key: K,
     value: WebsiteFormValues[K]
   ) {
-    setValues((current) => ({ ...current, [key]: value }))
+    replace((current) => ({ ...current, [key]: value }))
   }
 
   function save() {
@@ -379,7 +368,6 @@ function WebsiteEditor({
       const found = collectWebsiteFormErrors(parsed.error.issues)
       const target = firstWebsiteErrorTarget(found)
       setShowErrors(true)
-      setSaveError('')
       if (!target) return
       if (target.routeRuleIndex !== undefined) {
         const rule = values.route_rules[target.routeRuleIndex]
@@ -394,31 +382,14 @@ function WebsiteEditor({
       if (target.section !== section) onSectionChange(target.section)
       return
     }
-    setSaveError('')
-    setConflict(false)
-    mutation.mutate({ data: parsed.data, draft: values })
+    draft.save({ data: parsed.data, draft: values })
   }
-
-  function discard() {
-    setValues(initial)
-    setFormVersion((version) => version + 1)
-    setShowErrors(false)
-    setSaveError('')
-    setConflict(false)
-  }
-
-  const reload = useMutation({
-    mutationFn: async () => (await onReload?.()) ?? website,
-    onSuccess: (latest) => {
-      if (latest) adopt(latest)
-    },
-  })
 
   const sectionProps: WebsiteSectionProps = {
     values,
     errors,
     update,
-    replace: setValues,
+    replace,
     website: base,
   }
   const SectionContent =
@@ -427,28 +398,7 @@ function WebsiteEditor({
 
   return (
     <>
-      {(conflict || remoteChanged) && (
-        <Alert status={conflict ? 'danger' : 'warning'}>
-          <Alert.Indicator />
-          <Alert.Content>
-            <Alert.Title>
-              {conflict ? '数据已被其他人更新' : '此网站已在其他地方更新'}
-            </Alert.Title>
-            <Alert.Description>
-              此配置已被其他人更新，重新加载会载入最新配置并丢弃本页未保存的更改。
-            </Alert.Description>
-          </Alert.Content>
-          <Button
-            size='sm'
-            variant='tertiary'
-            className='shrink-0 self-center'
-            isPending={reload.isPending}
-            onPress={() => reload.mutate()}
-          >
-            重新加载
-          </Button>
-        </Alert>
-      )}
+      <RevisionConflictAlert draft={draft} />
       <SectionNav
         section={section}
         onChange={onSectionChange}
@@ -456,8 +406,10 @@ function WebsiteEditor({
       >
         <div
           ref={contentRef}
-          key={formVersion}
-          inert={mutation.isPending}
+          // A load or a clean draft following the server remounts the
+          // fields; the first change keeps `base`, so editing never does.
+          key={`${formVersion}:${base?.revision ?? 'new'}`}
+          inert={draft.isSaving}
           className='flex min-w-0 flex-col gap-4'
         >
           {SectionContent ? (
@@ -477,15 +429,17 @@ function WebsiteEditor({
       </SectionNav>
       <SaveBar
         isDirty={dirty}
-        isSaving={mutation.isPending}
+        isSaving={draft.isSaving}
         onSave={save}
-        onDiscard={discard}
+        onDiscard={draft.discard}
         saveLabel={base ? '保存并分发' : '创建网站'}
         message={base ? '有未保存的更改' : '新网站尚未创建'}
         error={
           Object.keys(errors).length
             ? `${Object.keys(errors).length} 处配置需要修改`
-            : saveError
+            : draft.error
+              ? apiErrorMessage(draft.error)
+              : undefined
         }
       />
     </>

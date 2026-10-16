@@ -1,5 +1,5 @@
-import { isAxiosError } from 'axios'
 import type { QueryClient } from '@tanstack/react-query'
+import { isUnauthorized } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { sessionQueryOptions } from './data'
 import { replaceSession, sessionVersion } from './session-lifecycle'
@@ -12,7 +12,7 @@ export function createSessionExpiryHandler(
 ) {
   let expiring = false
   return (error: unknown) => {
-    if (!isAxiosError(error) || error.response?.status !== 401) return false
+    if (!isUnauthorized(error)) return false
     if (expiring) return true
     // Initial login failures belong to their form/route, not session teardown.
     if (client.getQueryData(queryKeys.session) === undefined) return false
@@ -40,7 +40,7 @@ export async function recoverStreamSession(client: QueryClient) {
     if (sessionVersion(client) !== version) return false
     // A dropped network connection is not proof of an expired session. Let
     // the stream's reconnect path try again without clearing a valid cache.
-    if (!isAxiosError(error) || error.response?.status !== 401) return true
+    if (!isUnauthorized(error)) return true
     await replaceSession(client)
     return false
   }

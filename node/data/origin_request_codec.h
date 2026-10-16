@@ -14,16 +14,18 @@
 #include <string_view>
 #include <vector>
 
+#include "common/route_policy.h"
 #include "node/data/http1_request_reader.h"
 #include "node/data/route_rules.h"
 #include "node/proto/edge_control.pb.h"
-#include "node/runtime/compiled_config.h"
 
 namespace flexedge::node {
 
+// `target_` is the request target after route rewriting.
 struct prepared_origin_request final {
     std::string bytes_;
     ruvia::http1_client_exchange_state response_exchange_;
+    std::string target_;
 };
 
 struct origin_request_view final {
@@ -85,7 +87,7 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
     const route_patterns* patterns = nullptr) {
     const auto authority =
         website.origin_host_header().empty() || website.origin_host_header() == "$host"
-            ? normalize_hostname(incoming_host)
+            ? flexedge::route_policy::hostname(incoming_host)
             : website.origin_host_header();
     std::vector<std::pair<std::string, std::string>> owned_headers;
     owned_headers.reserve(incoming.headers_.size() + 2 +
@@ -119,7 +121,7 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
 
     ruvia::http_client_request_view request;
     request.method_ = incoming.method_;
-    const auto target = route_target(incoming.target_, route, patterns);
+    auto target = route_target(incoming.target_, route, patterns);
     if (target.empty()) {
         return std::nullopt;
     }
@@ -134,7 +136,7 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
         .close_policy_ = close_after_response ? ruvia::http1_close_policy::close_after_response
                                               : ruvia::http1_close_policy::allow_reuse};
     std::vector<char> head(16384);
-    auto finish = [](const auto& prepared) -> std::optional<prepared_origin_request> {
+    auto finish = [&target](const auto& prepared) -> std::optional<prepared_origin_request> {
         if (!prepared.prepared()) {
             return std::nullopt;
         }
@@ -143,7 +145,8 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
             bytes.append(content->bytes());
         }
         return prepared_origin_request{.bytes_ = std::move(bytes),
-            .response_exchange_ = prepared.prepared()->exchange_state()};
+            .response_exchange_ = prepared.prepared()->exchange_state(),
+            .target_ = std::move(target)};
     };
     auto prepared = ruvia::http1_client_request_writer().prepare(origin, request, head, policy);
     if (const auto* small = prepared.buffer_too_small()) {

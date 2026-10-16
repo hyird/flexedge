@@ -18,20 +18,19 @@ public:
         if (!current) {
             return;
         }
-        const auto spec_revision = config.node_spec().content().revision();
-        const auto current_spec_revision = current->node_spec().content().revision();
+        const auto spec_revision = config.node_spec().revision();
+        const auto current_spec_revision = current->node_spec().revision();
         if (spec_revision < current_spec_revision ||
             (spec_revision == current_spec_revision &&
-                config.node_spec().digest_sha256() != current->node_spec().digest_sha256())) {
+                config.node_spec_digest() != current->node_spec_digest())) {
             throw std::runtime_error("stale or conflicting node spec");
         }
-        const auto release_generation = config.release().content().generation();
-        const auto current_release_generation = current->release().content().generation();
+        const auto release_generation = config.release().generation();
+        const auto current_release_generation = current->release().generation();
         if (release_generation < current_release_generation ||
             (release_generation == current_release_generation &&
-                (config.release().content().release_id() !=
-                        current->release().content().release_id() ||
-                    config.release().digest_sha256() != current->release().digest_sha256()))) {
+                (config.release().release_id() != current->release().release_id() ||
+                    config.release_digest() != current->release_digest()))) {
             throw std::runtime_error("stale or conflicting cluster release");
         }
     }
@@ -46,17 +45,17 @@ public:
 
     [[nodiscard]] std::int64_t applied_node_spec_revision() const noexcept {
         const auto value = config();
-        return value ? value->node_spec().content().revision() : 0;
+        return value ? value->node_spec().revision() : 0;
     }
 
     [[nodiscard]] std::string active_release_id() const {
         const auto value = config();
-        return value ? value->release().content().release_id() : std::string{};
+        return value ? value->release().release_id() : std::string{};
     }
 
     [[nodiscard]] std::string active_manifest_digest() const {
         const auto value = config();
-        return value ? value->release().digest_sha256() : std::string{};
+        return value ? value->release_digest() : std::string{};
     }
 
 private:

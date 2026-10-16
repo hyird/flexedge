@@ -8,6 +8,7 @@
 #include <ruvia/web/web_worker.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -18,8 +19,11 @@
 #include <utility>
 #include <vector>
 
+#include "service/features/background/work_available.h"
 #include "service/features/live_resource/notification_outbox.h"
+#include "service/features/live_resource/redis_snapshot_cache.h"
 #include "service/features/log_ingest/envelope.h"
+#include "service/features/log_ingest/notifications.h"
 #include "service/features/log_ingest/queue.h"
 #include "service/features/logging/logger.h"
 
@@ -29,6 +33,52 @@ class invalid_delivery final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
+
+// The work type of the log ingest claim loop.
+inline constexpr std::string_view work_type{"log-ingest"};
+
+// Rows of outbox kind "log" carry log notifications of committed log rows.
+struct log_relay final {
+    static constexpr std::string_view kind{"log"};
+
+    static ruvia::task<void> publish(ruvia::redis_handle redis, std::string_view id, std::string_view payload) {
+        namespace live = service::live_resource;
+        live::outbox::publication output{.stream_ = notifications::stream_key, .max_entries_ = notifications::max_entries};
+        output.fields_ = live::outbox::unpack(payload);
+        std::string_view tenant, type, resource_id;
+        for (const auto& [name, value] : output.fields_) {
+            if (name == "tenant_id") {
+                tenant = value;
+            }
+            if (name == "resource_type") {
+                type = value;
+            }
+            if (name == "resource_id") {
+                resource_id = value;
+            }
+        }
+        if (tenant.empty() || resource_id.empty() || (type != "access" && type != "node")) {
+            throw std::runtime_error("invalid log outbox notification");
+        }
+        if (type == "access") {
+            output.invalidations_ = live::redis_snapshot_cache::invalidation_scopes(tenant, live::resource::access_history, resource_id);
+            output.invalidations_.push_back(live::redis_snapshot_cache::resource_scope(tenant, live::resource::overview_traffic));
+        }
+        co_await live::outbox::publish(redis, id, std::move(output));
+    }
+};
+
+template <typename transaction_type>
+ruvia::task<void> enqueue_log(transaction_type& transaction, std::string_view type,
+    std::string_view tenant_id, std::string_view resource_id) {
+    if (type != "access" && type != "node") {
+        throw std::invalid_argument("unsupported outbox log resource");
+    }
+    const std::vector<std::pair<std::string, std::string>> fields{
+        {"tenant_id", std::string(tenant_id)}, {"resource_type", std::string(type)}, {"resource_id", std::string(resource_id)}};
+    (void)co_await service::live_resource::outbox::insert(transaction, log_relay::kind,
+        service::live_resource::outbox::pack(fields));
+}
 
 inline bool is_permanent_database_failure(const ruvia::db_error& error) {
     const auto state = error.sql_state();
@@ -43,6 +93,14 @@ inline std::int64_t bounded_occurred_ms(std::uint64_t value, std::int64_t receiv
     return static_cast<std::int64_t>(value);
 }
 
+// The enqueuing Worker (the node connection's Worker) wakes its own log
+// ingest loop; other Workers find the delivery at their next bounded scan.
+template <typename context_type>
+void wake_own_ingest(context_type& context) {
+    static constexpr std::array work{work_type};
+    service::background::work_available::wake_own_claims(context, work);
+}
+
 inline ruvia::task<bool> enqueue(ruvia::context& c, std::string_view tenant_id,
     std::string_view node_id, std::string_view agent_id,
     const flexedge::node::v2::LogDelivery& delivery) {
@@ -51,7 +109,11 @@ inline ruvia::task<bool> enqueue(ruvia::context& c, std::string_view tenant_id,
             co_return false;
         }
         const auto payload = serialize_envelope(tenant_id, agent_id, delivery);
-        co_return co_await queue::push(c.redis(), payload);
+        if (!(co_await queue::push(c.redis(), payload))) {
+            co_return false;
+        }
+        wake_own_ingest(c);
+        co_return true;
     } catch (const std::exception& error) {
         service::logging::error("Log enqueue failed: " + std::string(error.what()));
         co_return false;
@@ -234,14 +296,14 @@ inline ruvia::task<void> insert_envelope(context_t_type& context,
         node_inserted = inserted.affected_rows() > 0;
     }
     for (const auto& website_id : inserted_website_ids) {
-        co_await service::live_resource::enqueue_log(transaction, "access",
-            tenant_id, website_id);
+        co_await enqueue_log(transaction, "access", tenant_id, website_id);
     }
     if (node_inserted) {
-        co_await service::live_resource::enqueue_log(transaction, "node",
-            tenant_id, node_id);
+        co_await enqueue_log(transaction, "node", tenant_id, node_id);
     }
     co_await transaction.commit();
+    // The ingesting Worker relays the log notifications it committed.
+    service::live_resource::wake_own_outbox(context);
 }
 
 template <typename context_t_type>
@@ -309,7 +371,9 @@ inline ruvia::task<void> run_worker(context_t_type& context, std::string consume
     if (consumer.empty()) {
         throw std::invalid_argument("log ingest consumer name cannot be empty");
     }
-    auto& signal = service::background::work_available::get_signals(context).for_type("log-ingest");
+    // Subscribe before the first claim: deliveries this worker enqueues later
+    // wake it at once.
+    const auto own = service::background::work_available::subscribe(context, work_type);
     bool initialized{};
     auto next_recovery = std::chrono::steady_clock::now();
     while (!context.get_stop_token().stop_requested()) {
@@ -339,7 +403,7 @@ inline ruvia::task<void> run_worker(context_t_type& context, std::string consume
             const auto recovery_wait = std::chrono::duration_cast<std::chrono::milliseconds>(
                 next_recovery - std::chrono::steady_clock::now());
             const auto wait = co_await queue::retry_wait(context.redis(), recovery_wait);
-            co_await signal.wait(wait, context.get_stop_token());
+            (void)co_await own.receive_for(wait, context.get_stop_token());
         } catch (const std::exception& error) {
             if (context.get_stop_token().stop_requested()) {
                 co_return;

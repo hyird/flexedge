@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "service/common/database.h"
 #include "service/common/http.h"
 #include "service/domains/website/website_error.h"
 #include "service/domains/website/website_runtime_mapper.h"
@@ -31,48 +32,40 @@ public:
         const std::optional<std::string>& cluster_id,
         const std::optional<std::string>& status,
         const std::optional<std::string>& certificate_id) const {
-        std::string where =
-            " FROM sys_website website INNER JOIN sys_cluster cluster ON cluster.tenant_id = "
-            "website.tenant_id AND cluster.id = website.cluster_id INNER JOIN sys_dns_zone "
-            "zone ON zone.tenant_id = cluster.tenant_id AND zone.id = cluster.dns_zone_id "
-            "WHERE website.tenant_id = $1 AND website.deleted_at IS NULL AND "
-            "cluster.deleted_at IS NULL AND zone.deleted_at IS NULL";
-        std::vector<ruvia::db_value> params{ruvia::db_value{tenant_id}};
-        if (cluster_id) {
-            where += " AND website.cluster_id = $" + std::to_string(params.size() + 1);
-            params.emplace_back(*cluster_id);
-        }
-        if (status) {
-            where += " AND website.status = $" + std::to_string(params.size() + 1);
-            params.emplace_back(std::string_view(*status));
-        }
-        if (certificate_id) {
-            where +=
-                " AND EXISTS (SELECT 1 FROM sys_website_certificate_binding binding WHERE "
-                "binding.tenant_id = website.tenant_id AND binding.website_id = website.id "
-                "AND binding.certificate_id = $" +
-                std::to_string(params.size() + 1) + ")";
-            params.emplace_back(*certificate_id);
-        }
         std::optional<std::string> keyword_pattern;
         if (keyword) {
             keyword_pattern = "%" + service::common::escape_like_pattern(*keyword) + "%";
-            const auto placeholder = "$" + std::to_string(params.size() + 1);
-            where += " AND (cluster.name ILIKE " + placeholder +
-                     " OR EXISTS (SELECT 1 FROM sys_website_domain_claim claim WHERE "
-                     "claim.tenant_id = website.tenant_id AND claim.website_id = "
-                     "website.id AND claim.domain_key ILIKE " +
-                     placeholder + "))";
-            params.emplace_back(std::string_view(*keyword_pattern));
         }
-
-        const auto count_rows = co_await c.db().query("SELECT COUNT(*)" + where, params);
-        const auto total = count_rows.empty() ? std::int64_t{0}
-                                              : count_rows.front()[0].template as<std::int64_t>().value_or(0);
-        const auto rows =
-            co_await c.db().query(select_columns() + where + " ORDER BY website.sort DESC LIMIT " +
-                                      std::to_string(page_size) + " OFFSET " + std::to_string(skip),
-                params);
+        const auto filter = [&](ruvia::db_query& query) {
+            source(query, tenant_id);
+            if (cluster_id) {
+                query.and_where(query.sql({"website.cluster_id = ", ""}, {query.value(*cluster_id)}));
+            }
+            if (status) {
+                query.and_where(query.sql({"website.status = ", ""}, {query.value(*status)}));
+            }
+            if (certificate_id) {
+                query.and_where(query.sql(
+                    {"EXISTS (SELECT 1 FROM sys_website_certificate_binding binding WHERE "
+                     "binding.tenant_id = website.tenant_id AND binding.website_id = website.id AND "
+                     "binding.certificate_id = ",
+                        ")"},
+                    {query.value(*certificate_id)}));
+            }
+            if (keyword_pattern) {
+                const auto pattern = query.value(*keyword_pattern);
+                query.and_where(query.sql(
+                    {"cluster.name ILIKE ",
+                        " OR EXISTS (SELECT 1 FROM sys_website_domain_claim claim WHERE "
+                        "claim.tenant_id = website.tenant_id AND claim.website_id = website.id AND "
+                        "claim.domain_key ILIKE ",
+                        ")"},
+                    {pattern, pattern}));
+            }
+        };
+        const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
+        const auto total = page_rows.total_;
+        const auto& rows = page_rows.rows_;
         std::vector<std::string> website_ids;
         website_ids.reserve(rows.size());
         for (const auto& row : rows) {
@@ -97,16 +90,12 @@ public:
 
     ruvia::task<website_dto> detail(auto& c, const std::string& tenant_id,
         const std::string& id) const {
-        const auto rows = co_await c.db().query(
-            select_columns() +
-                " FROM sys_website website INNER JOIN sys_cluster cluster ON "
-                "cluster.tenant_id = website.tenant_id AND cluster.id = website.cluster_id "
-                "INNER JOIN sys_dns_zone zone ON zone.tenant_id = cluster.tenant_id AND "
-                "zone.id = cluster.dns_zone_id WHERE website.id = $1 AND website.tenant_id = "
-                "$2 AND "
-                "website.deleted_at IS NULL AND cluster.deleted_at IS NULL AND zone.deleted_at "
-                "IS NULL LIMIT 1",
-            id, tenant_id);
+        ruvia::db_query query(c.pool());
+        source(query, tenant_id);
+        query.and_where(query.sql({"website.id = ", ""}, {query.value(id)}));
+        project(query);
+        query.limit(1);
+        const auto rows = co_await c.db().query(query);
         if (rows.empty()) {
             service::common::throw_app_error(website_error::not_found);
         }
@@ -130,20 +119,36 @@ private:
         std::unordered_map<std::string, std::vector<bound_certificate>>;
     using origin_runtime_state = detail::origin_runtime_state;
 
-    static std::string select_columns() {
-        return "SELECT website.id, website.cluster_id, cluster.name, "
-               "cluster.hostname_prefix || '.' || zone.domain, website.revision, "
-               "website.config::text, website.runtime::text, (SELECT COUNT(*) FROM sys_node "
-               "node WHERE node.tenant_id = website.tenant_id AND node.cluster_id = "
-               "website.cluster_id AND node.deleted_at IS NULL AND "
-               "node.status = 'enabled' AND node.registration_status = 'registered'), (SELECT "
-               "COUNT(*) FROM sys_node node WHERE node.tenant_id = website.tenant_id AND "
-               "node.cluster_id = website.cluster_id AND node.deleted_at IS NULL AND node.status "
-               "= 'enabled' AND node.registration_status = 'registered' AND "
-               "node.desired_release_id IS NOT NULL AND node.active_release_id = "
-               "node.desired_release_id), TO_CHAR(website.created_at, "
-               "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), TO_CHAR(website.updated_at, "
-               "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), website.status";
+    static void source(ruvia::db_query& query, const std::string& tenant_id) {
+        query.from("sys_website", "website")
+            .join(ruvia::db_join_type::inner, "sys_cluster",
+                query.sql("cluster.tenant_id = website.tenant_id AND cluster.id = website.cluster_id"),
+                "cluster")
+            .join(ruvia::db_join_type::inner, "sys_dns_zone",
+                query.sql("zone.tenant_id = cluster.tenant_id AND zone.id = cluster.dns_zone_id"),
+                "zone")
+            .where(query.sql({"website.tenant_id = ", ""}, {query.value(tenant_id)}))
+            .and_where(query.sql("website.deleted_at IS NULL AND cluster.deleted_at IS NULL AND "
+                                 "zone.deleted_at IS NULL"));
+    }
+
+    static void project(ruvia::db_query& query) {
+        query
+            .select(service::common::sql_columns(query,
+                {"website.id", "website.cluster_id", "cluster.name",
+                    "cluster.hostname_prefix || '.' || zone.domain", "website.revision",
+                    "website.config::text", "website.runtime::text",
+                    "SELECT COUNT(*) FROM sys_node node WHERE node.tenant_id = website.tenant_id AND "
+                    "node.cluster_id = website.cluster_id AND node.deleted_at IS NULL AND "
+                    "node.status = 'enabled' AND node.registration_status = 'registered'",
+                    "SELECT COUNT(*) FROM sys_node node WHERE node.tenant_id = website.tenant_id AND "
+                    "node.cluster_id = website.cluster_id AND node.deleted_at IS NULL AND node.status "
+                    "= 'enabled' AND node.registration_status = 'registered' AND "
+                    "node.desired_release_id IS NOT NULL AND node.active_release_id = "
+                    "node.desired_release_id",
+                    "TO_CHAR(website.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')",
+                    "TO_CHAR(website.updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')", "website.status"}))
+            .order_by(query.sql("website.sort"), ruvia::db_order_direction::desc);
     }
 
     static service::website_config::website_config_data parse_config(auto& c,
@@ -167,27 +172,29 @@ private:
         if (website_ids.empty()) {
             co_return result;
         }
-        std::vector<ruvia::db_value> params{ruvia::db_value{tenant_id}};
-        params.reserve(1 + website_ids.size());
-        std::string placeholders;
+        ruvia::db_query query(c.pool());
+        std::vector<ruvia::db_expression> ids;
+        ids.reserve(website_ids.size());
         for (const auto& website_id : website_ids) {
-            if (!placeholders.empty()) {
-                placeholders += ", ";
-            }
-            placeholders += "$" + std::to_string(params.size() + 1);
-            params.emplace_back(website_id);
+            ids.push_back(query.value(website_id));
         }
-        const auto rows = co_await c.db().query(
-            "SELECT binding.website_id, certificate.id, certificate.subject_alt_names[1], "
-            "certificate.subject_alt_names[2], COALESCE(certificate.issued_revision > 0 AND "
-            "certificate.expires_at > NOW(), FALSE) FROM "
-            "sys_website_certificate_binding binding INNER JOIN sys_certificate certificate ON "
-            "certificate.tenant_id = binding.tenant_id AND certificate.id = "
-            "binding.certificate_id WHERE binding.tenant_id = $1 AND binding.website_id IN (" +
-                placeholders +
-                ") AND certificate.deleted_at IS NULL ORDER BY binding.website_id, "
-                "binding.position",
-            params);
+        query
+            .select(service::common::sql_columns(query,
+                {"binding.website_id", "certificate.id", "certificate.subject_alt_names[1]",
+                    "certificate.subject_alt_names[2]",
+                    "COALESCE(certificate.issued_revision > 0 AND certificate.expires_at > NOW(), FALSE)"}))
+            .from("sys_website_certificate_binding", "binding")
+            .join(ruvia::db_join_type::inner, "sys_certificate",
+                query.sql("certificate.tenant_id = binding.tenant_id AND certificate.id = "
+                          "binding.certificate_id"),
+                "certificate")
+            .where(query.sql({"binding.tenant_id = ", ""}, {query.value(tenant_id)}))
+            .and_where(query.binary(query.sql("binding.website_id"), ruvia::db_binary_operator::in,
+                query.list(ids)))
+            .and_where(query.sql("certificate.deleted_at IS NULL"))
+            .order_by(query.sql("binding.website_id"))
+            .add_order_by(query.sql("binding.position"));
+        const auto rows = co_await c.db().query(query);
         for (const auto& row : rows) {
             std::vector<std::string> domains;
             if (const auto value = row[2].value()) {

@@ -1,12 +1,16 @@
 import { replaceEqualDeep } from '@tanstack/react-query'
 import { expect, test } from 'vitest'
 import { ApiBusinessError } from '@/lib/api-response'
+import { describeStatus } from '@/lib/status'
 import {
   displaySyncStatus,
   isZoneNotFound,
+  recordSyncStatuses,
   zoneRecordRows,
+  zoneSyncFilters,
+  zoneSyncStatuses,
 } from './dns-zone-display'
-import type { DnsRecord, DnsZone } from './types'
+import { dnsZoneSchema, type DnsRecord, type DnsZone } from './types'
 
 const record = (id: string): DnsRecord => ({
   id,
@@ -28,6 +32,8 @@ const zone = (patch: Partial<DnsZone> = {}): DnsZone => ({
   dns_provider_name: 'Aliyun',
   domain: 'example.com',
   sync_status: 'synced',
+  desired_revision: 1,
+  synced_revision: 1,
   website_count: 0,
   config: { records: [record('custom')] },
   runtime: {
@@ -38,6 +44,7 @@ const zone = (patch: Partial<DnsZone> = {}): DnsZone => ({
       {
         id: 'custom',
         sync_status: 'failed',
+        synced_revision: 0,
         last_error: 'x',
       },
     ],
@@ -50,6 +57,41 @@ test('a conflict status without remaining conflicts displays as consistent', () 
   expect(displaySyncStatus(zone({ sync_status: 'conflict' }))).toBe(
     'consistent'
   )
+})
+
+test('the fixture is a valid zone DTO', () => {
+  expect(dnsZoneSchema.parse(zone())).toEqual(zone())
+})
+
+test('every displayed zone status has its own label', () => {
+  for (const status of [
+    'synced',
+    'pending',
+    'queued',
+    'syncing',
+    'failed',
+    'out_of_sync',
+    'consistent',
+  ])
+    expect(describeStatus(zoneSyncStatuses, status).label).not.toBe(status)
+  expect(
+    describeStatus(
+      zoneSyncStatuses,
+      displaySyncStatus(zone({ sync_status: 'conflict' }))
+    )
+  ).toEqual({ label: '一致', tone: 'success' })
+})
+
+test('sync filters and chips word the same status the same way', () => {
+  for (const { id, label } of zoneSyncFilters) {
+    if (id === 'issue') expect(label).toBe('同步异常')
+    else expect(describeStatus(zoneSyncStatuses, id).label).toBe(label)
+  }
+  expect(describeStatus(zoneSyncStatuses, 'pending').label).toBe('等待同步')
+  for (const id of Object.keys(recordSyncStatuses))
+    expect(describeStatus(recordSyncStatuses, id)).toEqual(
+      describeStatus(zoneSyncStatuses, id)
+    )
 })
 
 test('record rows list system records first and attach their sync state', () => {
@@ -72,7 +114,12 @@ test('a rejected website CNAME keeps its failed state on the system row', () => 
         lines: [],
         projected_records: [{ ...record('website'), type: 'CNAME', name: '@' }],
         record_states: [
-          { id: 'website', sync_status: 'failed', last_error: lastError },
+          {
+            id: 'website',
+            sync_status: 'failed',
+            synced_revision: 0,
+            last_error: lastError,
+          },
         ],
         conflicts: [],
       },

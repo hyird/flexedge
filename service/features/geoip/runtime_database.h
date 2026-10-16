@@ -1,37 +1,38 @@
 #pragma once
 
-#include <cstdlib>
+#include <optional>
+#include <stdexcept>
 
+#include "service/config/geoip.h"
 #include "service/features/geoip/xdb_database.h"
 
 namespace service::geoip {
+
 namespace detail {
-[[nodiscard]] inline std::optional<std::string> environment_value(const char* name) {
-#ifdef _WIN32
-    char* raw{};
-    std::size_t length{};
-    if (_dupenv_s(&raw, &length, name) != 0 || !raw) {
-        return std::nullopt;
-    }
-    std::string result{raw, length > 0 ? length - 1 : 0};
-    std::free(raw);
-    return result;
-#else
-    const auto* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return std::nullopt;
-    }
-    return std::string{raw};
-#endif
+
+inline std::optional<xdb_database>& xdb_database_storage() {
+    static std::optional<xdb_database> database;
+    return database;
 }
 
 }  // namespace detail
 
+// Loads the configured XDB files once at startup, before Workers start; the
+// database is immutable afterwards.
+inline void configure_xdb_database(const service::config::geoip_configuration& config) {
+    auto& storage = detail::xdb_database_storage();
+    if (storage) {
+        throw std::logic_error("xdb database already configured");
+    }
+    storage.emplace(config.ipv4_path_, config.ipv6_path_);
+}
+
 [[nodiscard]] inline const xdb_database& get_xdb_database() {
-    static const xdb_database database(
-        detail::environment_value("FLEXEDGE_XDB_V4_PATH").value_or(""),
-        detail::environment_value("FLEXEDGE_XDB_V6_PATH").value_or(""));
-    return database;
+    const auto& storage = detail::xdb_database_storage();
+    if (!storage) {
+        throw std::logic_error("xdb database is not configured");
+    }
+    return *storage;
 }
 
 }  // namespace service::geoip

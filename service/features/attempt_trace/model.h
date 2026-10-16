@@ -287,9 +287,8 @@ RUVIA_MODEL(trace_call_dto, RUVIA_REQUIRED_FIELD(index, ruvia::int64), RUVIA_REQ
 RUVIA_MODEL(trace_log_dto, RUVIA_REQUIRED_FIELD(at, ruvia::string), RUVIA_REQUIRED_FIELD(offset_ms, ruvia::int64),
     RUVIA_REQUIRED_FIELD(level, ruvia::string), RUVIA_REQUIRED_FIELD(message, ruvia::string),
     RUVIA_REQUIRED_FIELD(repeat_count, ruvia::int64));
-RUVIA_MODEL(trace_related_task_dto, RUVIA_REQUIRED_FIELD(task_id, ruvia::string),
-    RUVIA_REQUIRED_FIELD(resource_type, ruvia::string), RUVIA_REQUIRED_FIELD(resource_id, ruvia::string),
-    RUVIA_REQUIRED_FIELD(label, ruvia::string), RUVIA_REQUIRED_FIELD(subtask_id, ruvia::string));
+RUVIA_MODEL(trace_related_task_dto, RUVIA_REQUIRED_FIELD(resource_type, ruvia::string),
+    RUVIA_REQUIRED_FIELD(resource_id, ruvia::string), RUVIA_REQUIRED_FIELD(label, ruvia::string));
 RUVIA_MODEL(trace_step_dto, RUVIA_REQUIRED_FIELD(index, ruvia::int64), RUVIA_REQUIRED_FIELD(code, ruvia::string),
     RUVIA_REQUIRED_FIELD(label, ruvia::string), RUVIA_REQUIRED_FIELD(subject, ruvia::string),
     RUVIA_REQUIRED_FIELD(started_at, ruvia::string), RUVIA_REQUIRED_FIELD(offset_ms, ruvia::int64),

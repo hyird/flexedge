@@ -11,6 +11,7 @@ import {
 import { Alert, Button, Label, ProgressBar } from '@heroui/react'
 import { formatDate } from '@/lib/format'
 import { useListSearch } from '@/lib/list-search'
+import { describeStatus } from '@/lib/status'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
 import { CopyButton } from '@/components/copy-button'
 import { DetailHeader, DetailHeaderSkeleton } from '@/components/detail-header'
@@ -21,11 +22,15 @@ import { RelativeTime } from '@/components/relative-time'
 import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { providerLabel } from '@/features/providers/provider-display'
+import {
+  syncTaskStatuses,
+  syncTaskStatusReserve,
+} from '@/features/tasks/task-display'
 import { WebsitesTable } from '@/features/websites/websites-table'
 import { useCertificateCommands } from './certificate-commands'
 import {
-  certificateStatusLabels,
-  certificateSyncStatusLabels,
+  certificateStatuses,
+  certificateStatusReserve,
   formatFingerprint,
   isCertificateNotFound,
   validityProgress,
@@ -91,8 +96,8 @@ export function CertificateDetailPage() {
         title={certificate.domains[0] ?? certificate.id}
         status={
           <StatusChip
-            status={certificate.status}
-            reserve={certificateStatusLabels}
+            {...describeStatus(certificateStatuses, certificate.status)}
+            reserve={certificateStatusReserve}
           />
         }
         meta={[
@@ -163,8 +168,11 @@ export function CertificateDetailPage() {
                 label: '节点分发',
                 value: certificate.sync_status ? (
                   <StatusChip
-                    status={certificate.sync_status}
-                    reserve={certificateSyncStatusLabels}
+                    {...describeStatus(
+                      syncTaskStatuses,
+                      certificate.sync_status
+                    )}
+                    reserve={syncTaskStatusReserve}
                   />
                 ) : (
                   '—'
@@ -345,8 +353,8 @@ function ValiditySection({
 
 /** Websites binding this certificate: the shared website list filtered by
  * `certificate_id` on the server, with its search and paging in the URL.
- * A one-shot snapshot (the page keeps a single live stream, the
- * certificate's); the toolbar refresh and this page's writes re-read it. */
+ * One read of the list (the page's live stream is the certificate's); the
+ * toolbar refresh and this page's writes re-read it. */
 function ReferencingWebsites({ certificate }: { certificate: Certificate }) {
   const list = useListSearch(route)
   return (

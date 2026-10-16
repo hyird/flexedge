@@ -4,8 +4,6 @@
 #include <cstdint>
 #include <string>
 
-#include "service/features/operation/work_origin.h"
-
 namespace service::provider_verification::detail {
 
 struct verification_task final {
@@ -23,8 +21,6 @@ struct verification_task final {
     std::string runtime_json_;
     // Monotonic instant the claim acquired the lease: the attempt start.
     std::chrono::steady_clock::time_point claimed_at_{};
-    // The verification subtask, empty for work of no task.
-    service::operation::work_owner owner_{};
 };
 
 }  // namespace service::provider_verification::detail

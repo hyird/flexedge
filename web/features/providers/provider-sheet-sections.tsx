@@ -1,13 +1,14 @@
 import { useState } from 'react'
 import { TrashBin } from '@gravity-ui/icons'
 import { Button } from '@heroui/react'
+import { describeStatus } from '@/lib/status'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Notice } from '@/components/forms'
 import { RelativeTime } from '@/components/relative-time'
 import { DescriptionList } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { useProviderActions } from './provider-actions'
-import { providerStatusLabels } from './provider-display'
+import { providerStatuses, providerStatusReserve } from './provider-display'
 import type { CertificateProvider, DnsProvider, ProviderTarget } from './types'
 
 type ProviderRecord = DnsProvider | CertificateProvider
@@ -51,8 +52,8 @@ export function ProviderVerification({
             label: '状态',
             value: (
               <StatusChip
-                status={provider.status}
-                reserve={providerStatusLabels}
+                {...describeStatus(providerStatuses, provider.status)}
+                reserve={providerStatusReserve}
               />
             ),
           },

@@ -18,9 +18,8 @@
 #include "service/features/certificate/acme.h"
 #include "service/features/dns/aliyun.h"
 #include "service/features/dns/cloudflare.h"
-#include "service/features/dns_sync/failure.h"
 #include "service/features/logging/logger.h"
-#include "service/features/provider_verification/failure.h"
+#include "service/features/outbound_http/error.h"
 #include "service/features/sync_runtime/error.h"
 #include "support/attempt_trace_fixture.h"
 
@@ -91,8 +90,8 @@ std::string aliyun_signature_mismatch(std::string_view access_key_id, std::strin
 }
 
 // The reply as the driver turns it into an error, then the stored task
-// error (DNS sync and provider verification classify Aliyun errors) and the
-// log line written for it.
+// error (every provider attempt classifies its failure the same way) and
+// the log lines written for it.
 void verify_aliyun_signature_mismatch() {
     const auto access_key_id = secret("akid");
     const auto access_key_secret = secret("aksecret");
@@ -105,35 +104,31 @@ void verify_aliyun_signature_mismatch() {
     // As aliyun_client::send does before every request.
     trace.register_secret(access_key_id);
     trace.register_secret(access_key_secret);
-    const auto error = service::dns::detail::aliyun_reply_error(trace, body, service::dns::aliyun_error_code::upstream_failed,
-        "阿里云 DNS 域名查询失败", &pool);
+    const auto error = service::dns::detail::aliyun_reply_error(trace, body,
+        service::dns::provider_error_code::upstream_failed, "阿里云 DNS 域名查询失败", &pool);
     const std::string_view text = error.what();
-    require(error.code() == service::dns::aliyun_error_code::credential_invalid, "SignatureDoesNotMatch is a credential error");
+    require(error.code() == service::dns::provider_error_code::credential_invalid,
+        "SignatureDoesNotMatch is a credential error");
     require(text.starts_with("SignatureDoesNotMatch: Specified signature is not matched with our calculation."),
         "code and message stay readable: " + std::string(text));
     require(contains(text, "server string to sign is:[REDACTED]"), "string to sign dropped: " + std::string(text));
     test_support::attempt_trace::require_no_canary(text, canaries, "aliyun error");
 
-    const auto dns_failure = service::dns_sync::detail::classify_task_failure(std::make_exception_ptr(error));
-    require(dns_failure.permanent_, "credential errors are permanent");
-    const auto dns_stored = service::sync_runtime::attempt_error(trace, dns_failure.message_);
-    require(dns_stored == text, "stored DNS task error is the redacted text");
-    test_support::attempt_trace::require_no_canary(dns_stored, canaries, "DNS task error");
-    service::sync_runtime::log_attempt_failure("DNS sync task", "aliyun-dns-task", dns_stored);
-
-    const auto provider_failure =
-        service::provider_verification::detail::classify_task_failure(std::make_exception_ptr(error));
-    const auto provider_stored = service::sync_runtime::attempt_error(trace, provider_failure.message_);
-    test_support::attempt_trace::require_no_canary(provider_stored, canaries, "provider task error");
-    service::sync_runtime::log_attempt_failure("Provider verification marker", "aliyun-provider-task", provider_stored);
+    const auto failure = service::outbound_http::classify_attempt_failure(std::make_exception_ptr(error), "");
+    require(failure.permanent_, "credential errors are permanent");
+    const auto stored = service::sync_runtime::attempt_error(trace, failure.message_);
+    require(stored == text, "stored task error is the redacted text");
+    test_support::attempt_trace::require_no_canary(stored, canaries, "DNS task error");
+    service::sync_runtime::log_attempt_failure("DNS sync task", "aliyun-dns-task", stored);
+    service::sync_runtime::log_attempt_failure("Provider verification marker", "aliyun-provider-task", stored);
 
     // Without any registered credential the patterns alone drop the echo.
     const auto unregistered_id = secret("akidplain");
     const auto unregistered_nonce = secret("nonceplain");
     auto bare = new_recorder();
     const auto bare_error = service::dns::detail::aliyun_reply_error(bare,
-        aliyun_signature_mismatch(unregistered_id, unregistered_nonce, ""), service::dns::aliyun_error_code::upstream_failed,
-        "阿里云 DNS 域名查询失败", &pool);
+        aliyun_signature_mismatch(unregistered_id, unregistered_nonce, ""),
+        service::dns::provider_error_code::upstream_failed, "阿里云 DNS 域名查询失败", &pool);
     test_support::attempt_trace::require_no_canary(bare_error.what(), canaries, "aliyun error without credentials");
 }
 
@@ -151,13 +146,13 @@ void verify_cloudflare_token_echo() {
     trace.register_secret(token);
     trace.register_secret(account);
     const auto error = service::dns::detail::cloudflare_reply_error(trace, parsed,
-        service::dns::cloudflare_error_code::dns_failed, "Cloudflare DNS 记录保存失败");
+        service::dns::provider_error_code::dns_failed, "Cloudflare DNS 记录保存失败");
     const std::string_view text = error.what();
     require(text.starts_with("Invalid format for Authorization header: Authorization: Bearer [REDACTED]"),
         "message stays readable: " + std::string(text));
     test_support::attempt_trace::require_no_canary(text, canaries, "cloudflare error");
 
-    const auto failure = service::dns_sync::detail::classify_task_failure(std::make_exception_ptr(error));
+    const auto failure = service::outbound_http::classify_attempt_failure(std::make_exception_ptr(error), "");
     const auto stored = service::sync_runtime::attempt_error(trace, failure.message_);
     test_support::attempt_trace::require_no_canary(stored, canaries, "cloudflare task error");
     service::sync_runtime::log_attempt_failure("DNS sync task", "cloudflare-dns-task", stored);
@@ -169,8 +164,10 @@ void verify_cloudflare_token_echo() {
     const auto bare_parsed = ruvia::from_json<service::dns::cloudflare_error_envelope>(bare_body, {.resource_ = &pool});
     auto bare = new_recorder();
     const auto bare_error = service::dns::detail::cloudflare_reply_error(bare, bare_parsed,
-        service::dns::cloudflare_error_code::dns_failed, "Cloudflare DNS 记录保存失败");
-    require(bare_error.code() == service::dns::cloudflare_error_code::authorization_failed, "code 10000 is an authorization error");
+        service::dns::provider_error_code::dns_failed, "Cloudflare DNS 记录保存失败");
+    require(bare_error.code() == service::dns::provider_error_code::authorization_failed,
+        "code 10000 is an authorization error");
+    require(bare_error.permanent(), "authorization errors are permanent");
     test_support::attempt_trace::require_no_canary(bare_error.what(), canaries, "cloudflare error without credentials");
 }
 
@@ -204,7 +201,7 @@ void verify_credentials_beyond_observed_cap() {
     const auto observe = [&trace](std::string target) {
         test_support::attempt_trace::perform(trace,
             {.call_ = {.origin_alias_ = service::config::aliyun_dns_origin_alias,
-                 .operation_ = service::attempt_trace::outbound_operation::aliyun_describe_domains},
+                 .policy_ = &service::dns::aliyun_trace::describe_domains},
                 .target_ = std::move(target),
                 .response_headers_ = {{"content-type", "application/json"}},
                 .response_body_ = "{}"});
@@ -258,8 +255,8 @@ void verify_record_name_conflicts() {
         const auto parsed = ruvia::from_json<service::dns::cloudflare_error_envelope>(body, {.resource_ = &pool});
         auto trace = new_recorder();
         const auto error = service::dns::detail::cloudflare_reply_error(trace, parsed,
-            service::dns::cloudflare_error_code::dns_failed, "Cloudflare DNS 记录保存失败");
-        require(error.code() == service::dns::cloudflare_error_code::record_name_conflict,
+            service::dns::provider_error_code::dns_failed, "Cloudflare DNS 记录保存失败");
+        require(error.code() == service::dns::provider_error_code::record_name_conflict && !error.permanent(),
             "cloudflare name conflict code " + std::to_string(code));
         require(std::string_view(error.what()).starts_with("Cloudflare 拒绝该记录：同名主机记录已有") &&
                     contains(error.what(), "（" + std::to_string(code) + "）"),
@@ -269,22 +266,49 @@ void verify_record_name_conflicts() {
         R"({"success":false,"errors":[{"code":81057,"message":"Record already exists."}]})", {.resource_ = &pool});
     auto duplicate_trace = new_recorder();
     require(service::dns::detail::cloudflare_reply_error(duplicate_trace, duplicate,
-                service::dns::cloudflare_error_code::dns_failed, "Cloudflare DNS 记录保存失败")
-                    .code() == service::dns::cloudflare_error_code::record_conflict,
+                service::dns::provider_error_code::dns_failed, "Cloudflare DNS 记录保存失败")
+                    .code() == service::dns::provider_error_code::record_conflict,
         "81057 stays a duplicate");
 
     auto trace = new_recorder();
     const auto error = service::dns::detail::aliyun_reply_error(trace,
         R"({"RequestId":"7A1F-REQ","Code":"DomainRecordConflict","Message":"The DNS record conflicts with other records."})",
-        service::dns::aliyun_error_code::dns_failed, "阿里云 DNS 记录创建失败", &pool);
-    require(error.code() == service::dns::aliyun_error_code::record_name_conflict, "aliyun name conflict code");
+        service::dns::provider_error_code::dns_failed, "阿里云 DNS 记录创建失败", &pool);
+    require(error.code() == service::dns::provider_error_code::record_name_conflict, "aliyun name conflict code");
     require(std::string_view(error.what()) ==
                 "阿里云 DNS 拒绝该记录：同名主机记录已有冲突的解析记录（DomainRecordConflict）",
         "aliyun name conflict message: " + std::string(error.what()));
     const auto duplicate_error = service::dns::detail::aliyun_reply_error(trace,
         R"({"Code":"DomainRecordDuplicate","Message":"The DNS record already exists."})",
-        service::dns::aliyun_error_code::dns_failed, "阿里云 DNS 记录创建失败", &pool);
-    require(duplicate_error.code() == service::dns::aliyun_error_code::record_conflict, "aliyun duplicate stays a duplicate");
+        service::dns::provider_error_code::dns_failed, "阿里云 DNS 记录创建失败", &pool);
+    require(duplicate_error.code() == service::dns::provider_error_code::record_conflict,
+        "aliyun duplicate stays a duplicate");
+}
+
+// A transport failure names the remote service once, for every provider, and
+// is retried.
+void verify_transport_errors() {
+    using code = ruvia::http_client_error::code_type;
+    using service::outbound_http::transport_error_message;
+    require(transport_error_message({.label_ = "Cloudflare API", .timeout_ = std::chrono::seconds(10)},
+                code::timeout) == "Cloudflare API 请求超时（10 秒）",
+        "timeout message");
+    require(transport_error_message({.label_ = "阿里云 DNS API", .timeout_ = std::chrono::seconds(10)},
+                code::io_error) == "阿里云 DNS API 网络读写失败",
+        "io error message");
+    require(transport_error_message({.label_ = "证书供应商", .timeout_ = std::chrono::seconds(15)},
+                code::tls_failed) == "证书供应商 TLS 连接失败",
+        "tls message");
+    require(transport_error_message({.label_ = "证书供应商", .timeout_ = std::chrono::seconds(15)},
+                code::connect_failed) == "证书供应商连接失败",
+        "connect message");
+    const auto failure = service::outbound_http::classify_attempt_failure(
+        std::make_exception_ptr(service::outbound_http::transport_error("ACME 请求超时（30 秒）")), "");
+    require(!failure.permanent_ && failure.message_ == "ACME 请求超时（30 秒）", "transport errors are retried");
+    require(service::outbound_http::classify_attempt_failure(
+                std::make_exception_ptr(std::invalid_argument("invalid provider config")), "")
+                .permanent_,
+        "invalid stored input is permanent");
 }
 
 }  // namespace
@@ -317,6 +341,7 @@ int main() {
         verify_incomplete_credentials_fall_back();
         verify_worker_error_patterns();
         verify_record_name_conflicts();
+        verify_transport_errors();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

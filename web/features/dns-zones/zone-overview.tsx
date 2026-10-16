@@ -3,6 +3,7 @@ import type { DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Alert, Button } from '@heroui/react'
 import { formatDate } from '@/lib/format'
+import { describeStatus } from '@/lib/status'
 import { cn } from '@/lib/utils'
 import { DataTable } from '@/components/data-table'
 import { Mono } from '@/components/mono'
@@ -11,7 +12,11 @@ import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { providerLabel } from '@/features/providers/provider-display'
 import { dnsLinePath } from './dns-lines'
-import { displaySyncStatus, zoneSyncStatusLabels } from './dns-zone-display'
+import {
+  displaySyncStatus,
+  zoneSyncStatuses,
+  zoneSyncStatusReserve,
+} from './dns-zone-display'
 import type { DnsZone } from './types'
 import { useZoneDetail } from './use-zone-detail'
 import type { useZoneCommands } from './zone-commands'
@@ -170,8 +175,8 @@ export function ZoneOverview({
               label: '同步状态',
               value: (
                 <StatusChip
-                  status={displaySyncStatus(zone)}
-                  reserve={zoneSyncStatusLabels}
+                  {...describeStatus(zoneSyncStatuses, displaySyncStatus(zone))}
+                  reserve={zoneSyncStatusReserve}
                 />
               ),
             },

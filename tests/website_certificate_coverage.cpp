@@ -41,7 +41,7 @@ int main() try {
     require(!certificate_covers_hostname("a-z.xin", "*.a-z.xin"));
     require(!certificate_covers_hostname("", "a-z.xin"));
 
-    using service::website::certificate_reference;
+    using service::certificate::certificate_reference;
     using service::website::find_unmatched_certificate;
     const std::array domains{domain("a-z.xin"), domain("t.a-z.xin")};
     const std::vector<certificate_reference> partial{

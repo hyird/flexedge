@@ -5,21 +5,22 @@
 #include <string>
 #include <string_view>
 
-#include "service/features/dns/registry.h"
-
 namespace service::dns {
 
+// How a provider names records: fully qualified ("www.example.com") or
+// relative to the zone ("www", "@" for the apex). Each client declares its own.
 class record_name_policy final {
 public:
-    explicit record_name_policy(dns_provider_kind kind)
-        : kind_(kind) {}
+    explicit constexpr record_name_policy(bool fully_qualified)
+        : fully_qualified_(fully_qualified) {}
+
     [[nodiscard]] std::string remote_record_name(std::string_view name,
         std::string_view domain) const {
         std::string result(name);
         if (result.ends_with('.')) {
             result.pop_back();
         }
-        if (kind_ == dns_provider_kind::cloudflare) {
+        if (fully_qualified_) {
             if (result == "@") {
                 return std::string(domain);
             }
@@ -39,7 +40,7 @@ public:
 
     [[nodiscard]] std::string local_record_name(std::string_view name,
         std::string_view domain) const {
-        if (kind_ == dns_provider_kind::aliyun) {
+        if (!fully_qualified_) {
             return name.empty() ? "@" : std::string(name);
         }
         std::string result(name);
@@ -69,7 +70,7 @@ public:
     }
 
 private:
-    dns_provider_kind kind_;
+    bool fully_qualified_;
 };
 
 }  // namespace service::dns

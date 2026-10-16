@@ -18,7 +18,7 @@ template <typename runtime_type>
 ruvia::task<acme_account>
 ensure_acme_account(runtime_type& context, std::string_view tenant_id, std::string_view provider_id,
     std::int64_t expected_revision, std::optional<std::string_view> account_email,
-    const acme_client& client, const std::optional<eab_credentials>& eab) {
+    acme_client& client, const std::optional<eab_credentials>& eab) {
     const auto rows = co_await context.db().query(
         "SELECT revision, runtime::text FROM sys_provider WHERE tenant_id = $1 AND id = $2 AND "
         "kind = 'certificate' AND deleted_at IS NULL LIMIT 1",

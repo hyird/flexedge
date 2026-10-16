@@ -26,6 +26,7 @@ public:
 
 struct persistent_state final {
     v2::ActiveState active_;
+    state_contents contents_;
     std::vector<v2::DeliveryObject> objects_;
 };
 
@@ -47,13 +48,17 @@ public:
         if (!state.active_.has_node_spec() || !state.active_.has_release()) {
             throw stored_state_unusable("stored active state is incomplete");
         }
-        if (state.active_.node_spec().content().schema_version() != node_spec_schema_version ||
-            !supported_cluster_release_schema(state.active_.release().content().schema_version())) {
+        auto contents = open_state(state.active_);
+        if (!contents) {
+            throw stored_state_unusable("stored active state failed content verification");
+        }
+        if (contents->node_spec_.schema_version() != node_spec_schema_version ||
+            !supported_cluster_release_schema(contents->release_.schema_version())) {
             return {};
         }
-        state.objects_.reserve(
-            static_cast<std::size_t>(state.active_.release().content().objects_size()));
-        for (const auto& reference : state.active_.release().content().objects()) {
+        state.contents_ = std::move(*contents);
+        state.objects_.reserve(static_cast<std::size_t>(state.contents_.release_.objects_size()));
+        for (const auto& reference : state.contents_.release_.objects()) {
             if (!safe_digest(reference.digest_sha256())) {
                 throw stored_state_unusable("stored active release references an invalid digest");
             }
@@ -77,7 +82,7 @@ public:
         }
         v2::DeliveryObject object;
         if (!object.ParseFromString(*bytes) || object.digest_sha256() != digest ||
-            !object.has_content() || artifact_digest(object.content()) != digest) {
+            !artifact_matches(digest, object.content())) {
             throw stored_state_unusable(
                 "stored release object " + std::string(digest) + " failed content verification");
         }
@@ -108,8 +113,8 @@ public:
             throw std::invalid_argument("cannot stage an incomplete node state");
         }
         for (const auto& object : objects) {
-            if (!safe_digest(object.digest_sha256()) || !object.has_content() ||
-                artifact_digest(object.content()) != object.digest_sha256()) {
+            if (!safe_digest(object.digest_sha256()) ||
+                !artifact_matches(object.digest_sha256(), object.content())) {
                 throw std::runtime_error("cannot stage an invalid release object");
             }
             write_encrypted(object_path(object.digest_sha256()), serialize_artifact(object));

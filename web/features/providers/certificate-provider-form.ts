@@ -1,13 +1,17 @@
 import { z } from 'zod'
-import type { CertificateProvider } from './types'
+import {
+  certificateAuthoritySchema,
+  credentialModeSchema,
+  type CertificateProvider,
+} from './types'
 
 export function certificateProviderFormSchema(
   current?: Pick<CertificateProvider, 'credential_mode'>
 ) {
   return z
     .object({
-      provider: z.enum(['letsencrypt', 'zerossl']),
-      credential_mode: z.enum(['email', 'access_key']),
+      provider: certificateAuthoritySchema,
+      credential_mode: credentialModeSchema,
       account_email: z.string().max(254),
       access_key: z.string().max(255),
     })

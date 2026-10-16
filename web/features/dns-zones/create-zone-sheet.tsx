@@ -3,14 +3,17 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowRotateLeft } from '@gravity-ui/icons'
 import { Button } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
-import { queryKeys } from '@/lib/query-keys'
 import { FormSheet } from '@/components/form-sheet'
 import { Choice, Notice } from '@/components/forms'
 import { QueryNotice } from '@/components/page'
 import { dnsProviderOptionsQuery } from '@/features/providers/data'
 import { providerLabel } from '@/features/providers/provider-display'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
-import { availableDnsZonesQuery, createDnsZone } from './data'
+import {
+  afterDnsZoneWrite,
+  availableDnsZonesQuery,
+  createDnsZone,
+} from './data'
 
 /** "添加域名": pick a DNS account, then one of its not-yet-managed zones. */
 export function CreateZoneSheet({
@@ -45,14 +48,8 @@ export function CreateZoneSheet({
     meta: { inlineError: true },
     mutationFn: createDnsZone,
     onSuccess: (response) => {
-      toastWriteSuccess(
-        response.message || '域名已添加，正在同步',
-        response.data
-      )
-      void client.invalidateQueries({
-        queryKey: queryKeys.dnsZones,
-        refetchType: 'none',
-      })
+      toastWriteSuccess(response.message || '域名已添加，正在同步')
+      void afterDnsZoneWrite(client)
       onClose()
     },
   })

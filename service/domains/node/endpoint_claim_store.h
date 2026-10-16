@@ -1,12 +1,11 @@
 #pragma once
 
 #include <ruvia/core/task.h>
+#include <ruvia/web/db/db_query.h>
 #include <ruvia/web/db/db_transaction.h>
 
 #include <span>
 #include <string>
-#include <utility>
-#include <vector>
 
 #include "service/features/node_config/model.h"
 
@@ -26,30 +25,13 @@ inline ruvia::task<void> replace_endpoint_claims(ruvia::db_transaction& transact
     if (endpoints.empty()) {
         co_return;
     }
-    std::vector<ruvia::db_value> endpoint_insert_params;
-    endpoint_insert_params.reserve(endpoints.size() * 4);
-    std::string endpoint_insert_sql =
-        "INSERT INTO sys_node_endpoint_claim (tenant_id, node_id, endpoint_id, "
-        "ip_address) VALUES ";
-    const auto append_param = [&](ruvia::db_value value) {
-        endpoint_insert_sql += "$" + std::to_string(endpoint_insert_params.size() + 1);
-        endpoint_insert_params.push_back(std::move(value));
-    };
+    ruvia::db_query insert;
+    insert.insert_into("sys_node_endpoint_claim", {"tenant_id", "node_id", "endpoint_id", "ip_address"});
     for (const auto& endpoint : endpoints) {
-        if (!endpoint_insert_params.empty()) {
-            endpoint_insert_sql += ", ";
-        }
-        endpoint_insert_sql += "(";
-        append_param(ruvia::db_value{tenant_id});
-        endpoint_insert_sql += ", ";
-        append_param(ruvia::db_value{node_id});
-        endpoint_insert_sql += ", ";
-        append_param(ruvia::db_value{endpoint.id_});
-        endpoint_insert_sql += ", ";
-        append_param(ruvia::db_value{endpoint.ip_address_});
-        endpoint_insert_sql += "::inet)";
+        insert.values({insert.value(tenant_id), insert.value(node_id), insert.value(endpoint.id_),
+            insert.sql({"", "::inet"}, {insert.value(endpoint.ip_address_)})});
     }
-    (void)co_await transaction.execute(endpoint_insert_sql, endpoint_insert_params);
+    (void)co_await transaction.execute(insert);
     co_return;
 }
 

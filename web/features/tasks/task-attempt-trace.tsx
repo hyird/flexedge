@@ -1,4 +1,4 @@
-import { Fragment, use, useCallback, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { EyeSlash, ListCheck } from '@gravity-ui/icons'
 import { Timeline } from '@heroui-pro/react'
@@ -7,7 +7,7 @@ import { ApiBusinessError } from '@/lib/api-response'
 import { cn } from '@/lib/utils'
 import { CopyButton } from '@/components/copy-button'
 import { taskAttemptTraceQuery } from './data'
-import { SubtaskLinkContext } from './subtask-link-context'
+import { taskHref } from './task-display'
 import {
   callOutcomes,
   formatTraceClock,
@@ -32,6 +32,7 @@ import {
   type TraceCall,
   type TraceLog,
   type TraceStep,
+  type TaskRef,
 } from './types'
 
 const toneText = {
@@ -61,11 +62,11 @@ function useFirstSight() {
  * once the timeline is on screen and fills in under each step. Attempts
  * without a trace render nothing. */
 export function AttemptTimeline({
-  operationId,
+  task,
   trace,
   icon = <ListCheck aria-hidden />,
 }: {
-  operationId: string
+  task: TaskRef
   trace: TaskAttemptTraceSummary
   icon?: ReactNode
 }) {
@@ -74,21 +75,21 @@ export function AttemptTimeline({
     return <p className='m-0 text-xs text-muted'>执行详情无法识别</p>
   if (trace.state !== 'available' || !trace.attempt_id || !trace.step_count)
     return null
-  return <TraceTimeline operationId={operationId} summary={trace} icon={icon} />
+  return <TraceTimeline task={task} summary={trace} icon={icon} />
 }
 
 function TraceTimeline({
-  operationId,
+  task,
   summary,
   icon,
 }: {
-  operationId: string
+  task: TaskRef
   summary: Summary
   icon: ReactNode
 }) {
   const [ref, seen] = useFirstSight()
   const query = useQuery({
-    ...taskAttemptTraceQuery(operationId, summary.attempt_id, seen),
+    ...taskAttemptTraceQuery(task, summary.attempt_id, seen),
     meta: { inlineError: true },
   })
   const full =
@@ -266,9 +267,10 @@ function FullSteps({
   )
 }
 
+/** A step of another task (a certificate waiting for its zone's DNS sync)
+ * links to that task's detail sheet. */
 function StepBody({ step }: { step: TraceStep }) {
-  const subtasks = use(SubtaskLinkContext)
-  const related = step.related_task?.subtask_id
+  const related = step.related_task
   return (
     <>
       {step.error && (
@@ -276,9 +278,15 @@ function StepBody({ step }: { step: TraceStep }) {
           <RedactedText value={step.error} />
         </p>
       )}
-      {related && subtasks?.has(related) && (
-        <Link className='w-fit text-xs' onPress={() => subtasks.open(related)}>
-          关联：{step.related_task?.label || '子任务'}
+      {related?.resource_type && related.resource_id && (
+        <Link
+          className='w-fit text-xs'
+          href={taskHref({
+            resourceType: related.resource_type,
+            resourceId: related.resource_id,
+          })}
+        >
+          关联任务：{related.label || '查看任务'}
         </Link>
       )}
       {step.calls.length > 0 && (

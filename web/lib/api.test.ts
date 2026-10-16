@@ -15,12 +15,12 @@ afterEach(() => {
 })
 
 describe('HTTP response contracts', () => {
-  function respond(data: unknown) {
+  function respond(data: unknown, headers: Record<string, string> = {}) {
     api.defaults.adapter = async (config) => ({
       config,
       status: 200,
       statusText: 'OK',
-      headers: {},
+      headers,
       data,
     })
   }
@@ -33,6 +33,14 @@ describe('HTTP response contracts', () => {
     await expect(getData('/resource')).rejects.toBeInstanceOf(ApiProtocolError)
     respond({ code: 0, message: '', data: null })
     expect(await getData('/resource')).toBeNull()
+  })
+  it('returns the revision a write produced from its ETag', async () => {
+    respond({ code: 0, message: 'saved' }, { etag: '"8"' })
+    expect(await sendData('put', '/resource', {}, 7)).toEqual({
+      code: 0,
+      message: 'saved',
+      revision: 8,
+    })
   })
   it('rejects business failures even when HTTP status is successful', async () => {
     respond({ code: 10001, message: 'invalid resource' })

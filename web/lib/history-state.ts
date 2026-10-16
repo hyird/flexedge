@@ -13,15 +13,8 @@ declare module '@tanstack/history' {
       /** Settings group (`websiteSectionIds`). */
       section?: string
     }
-    /** `/providers`; `q` filters the opened tab's list. */
-    providers?: { tab?: 'dns' | 'certificate'; q?: string }
-    /** `/tasks?task=`: the subtask the detail sheet opens expanded. */
-    tasks?: { subtask?: string }
   }
 }
-
-/** An in-app link: the URL plus the arrival request for the page it opens. */
-export type NavigationTarget = { href: string; state?: HistoryState }
 
 /** Local state seeded from the navigation that opened the page. Each new
  * navigation to the page (a new history entry, even with the same URL)

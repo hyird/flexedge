@@ -1,5 +1,7 @@
 import { z } from 'zod'
+import { statusIds } from '@/lib/status'
 import type { NodeInput } from './data'
+import { nodeStatuses } from './node-display'
 import type { Node } from './types'
 
 const ipv4 = z.ipv4(),
@@ -26,7 +28,7 @@ const endpointSchema = z.object({
 export const nodeFormSchema = z.object({
   cluster_id: z.string().uuid('请选择所属集群'),
   name: z.string().trim().min(1, '请输入节点名称').max(100),
-  status: z.enum(['enabled', 'disabled']),
+  status: z.enum(statusIds(nodeStatuses)),
   endpoints: z
     .array(endpointSchema)
     .min(1, '至少配置一个 IP')
@@ -64,7 +66,7 @@ export function nodeFormValues(
   return {
     cluster_id: node?.cluster_id ?? clusterId,
     name: node?.name ?? '',
-    status: node?.status === 'disabled' ? 'disabled' : 'enabled',
+    status: node?.status ?? 'enabled',
     endpoints: node
       ? node.config.endpoints.map((endpoint) => ({ ...endpoint }))
       : [{ id: crypto.randomUUID(), ip_address: '', line_code: 'default' }],

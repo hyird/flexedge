@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <cctype>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -14,6 +13,7 @@
 #include <asio/ssl/context_base.hpp>
 #include <openssl/ssl.h>
 
+#include "common/route_policy.h"
 #include "node/runtime/compiled_config.h"
 
 namespace flexedge::node {
@@ -39,7 +39,7 @@ public:
                 auto context = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_server);
                 configure(*context, *certificate, website->minimum_tls_version());
                 auto* native = context->native_handle();
-                const auto hostname = normalize_hostname(domain.hostname());
+                const auto hostname = flexedge::route_policy::hostname(domain.hostname());
                 if (!sni_.emplace(hostname, native).second) {
                     throw std::runtime_error("duplicate TLS SNI hostname");
                 }
@@ -106,11 +106,7 @@ private:
         if (raw == nullptr) {
             return set->sni_.size() == 1 ? SSL_TLSEXT_ERR_OK : SSL_TLSEXT_ERR_ALERT_FATAL;
         }
-        std::string hostname(raw);
-        for (auto& ch : hostname) {
-            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        }
-        const auto found = set->sni_.find(hostname);
+        const auto found = set->sni_.find(flexedge::route_policy::hostname(raw));
         if (found == set->sni_.end()) {
             return SSL_TLSEXT_ERR_ALERT_FATAL;
         }

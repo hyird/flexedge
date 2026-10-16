@@ -1,10 +1,15 @@
 #pragma once
 
 #include <ruvia/core/task.h>
+#include <ruvia/web/db/db_query.h>
 #include <ruvia/web/db/db_transaction.h>
+#include <ruvia/web/model_json.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -14,6 +19,7 @@
 
 #include "service/common/database.h"
 #include "service/common/domain_name.h"
+#include "service/features/background/queued_work.h"
 #include "service/features/dns_sync/mapper.h"
 #include "service/features/node_config/mapper.h"
 #include "service/features/sync_runtime/state.h"
@@ -156,50 +162,114 @@ load_projected_records(db_type& db, const std::string& tenant_id, const std::str
     co_return std::move(records.at(zone_id));
 }
 
+// Queues the sync task of a zone revision that is already stored: a new
+// zone, or a current revision whose task was lost.
 inline ruvia::task<std::string>
-enqueue_zone_revision(ruvia::db_transaction& transaction, const std::string& tenant_id,
-    const std::string& zone_id, std::int64_t revision, service::operation::work_origin& origin,
-    service::sync_runtime::marker_operation operation =
-        service::sync_runtime::marker_operation::sync) {
-    const auto operation_value = service::sync_runtime::marker_operation_name(operation);
+enqueue_zone_revision(ruvia::db_transaction& transaction, std::string_view tenant_id, std::string_view zone_id,
+    std::int64_t revision, service::background::queued_work& work) {
     const auto rows = co_await transaction.query(
-        "SELECT id FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 AND "
-        "(deleted_at IS NULL OR $3::text = 'delete') LIMIT 1",
-        tenant_id, zone_id, operation_value);
+        "SELECT id FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL LIMIT 1", tenant_id,
+        zone_id);
     if (rows.empty()) {
         throw std::runtime_error("DNS 聚合根不存在");
     }
-    co_return co_await service::sync_runtime::upsert_marker(
-        transaction, tenant_id, service::sync_runtime::marker_resource_type::dns_zone, zone_id,
-        operation, revision, origin);
+    co_return co_await service::sync_runtime::upsert_marker(transaction, tenant_id,
+        service::sync_runtime::marker_resource_type::dns_zone, zone_id, service::sync_runtime::marker_operation::sync,
+        revision, work);
 }
 
-inline ruvia::task<std::string> enqueue_zone_deletion(ruvia::db_transaction& transaction,
-    const std::string& tenant_id,
-    const std::string& zone_id,
-    std::int64_t revision, service::operation::work_origin& origin) {
-    co_return co_await enqueue_zone_revision(transaction, tenant_id, zone_id, revision, origin,
-        service::sync_runtime::marker_operation::remove);
+// What one zone revision changes besides its desired revision.
+struct zone_revision_change final {
+    // Replaces the records configuration and advances the configuration revision.
+    std::optional<std::string_view> config_json_{};
+    // Replaces the runtime (lines, record states, conflicts, challenge records).
+    std::optional<std::string_view> runtime_json_{};
+    // Fences: the change applies only while the zone is at these revisions.
+    std::optional<std::int64_t> expected_revision_{};
+    std::optional<std::int64_t> expected_desired_revision_{};
+    // The sync task's operation; `remove` also deletes the zone and advances
+    // its configuration revision.
+    service::sync_runtime::marker_operation operation_{service::sync_runtime::marker_operation::sync};
+};
+
+struct zone_revision final {
+    std::int64_t revision_{};
+    std::int64_t desired_revision_{};
+    // The zone's sync task, queued at desired_revision_.
+    std::string task_id_{};
+};
+
+// The one writer of a zone's desired revision: applies `change`, advances the
+// desired revision, marks the zone pending and queues its sync task at the new
+// revision. nullopt when the zone is deleted or a fence no longer matches.
+inline ruvia::task<std::optional<zone_revision>> advance_zone_revision(ruvia::db_transaction& transaction,
+    std::string_view tenant_id, std::string_view zone_id, const zone_revision_change& change,
+    service::background::queued_work& work) {
+    const bool removal = change.operation_ == service::sync_runtime::marker_operation::remove;
+    ruvia::db_query update;
+    const auto increment = [&](std::string_view column) {
+        return update.binary(update.column(column), ruvia::db_binary_operator::add, update.value(std::int64_t{1}));
+    };
+    const auto equals = [&](std::string_view column, ruvia::db_expression value) {
+        return update.binary(update.column(column), ruvia::db_binary_operator::equal, value);
+    };
+    update.update("sys_dns_zone")
+        .set("desired_revision", increment("desired_revision"))
+        .set("sync_status", update.value(std::string_view{"pending"}))
+        .set("last_error", update.null_value())
+        .set("updated_at", update.call("now"));
+    if (change.config_json_ || removal) {
+        update.set("revision", increment("revision"));
+    }
+    if (change.config_json_) {
+        update.set("config", update.cast(update.value(*change.config_json_), ruvia::db_data_type::jsonb));
+    }
+    if (change.runtime_json_) {
+        update.set("runtime", update.cast(update.value(*change.runtime_json_), ruvia::db_data_type::jsonb));
+    }
+    if (removal) {
+        update.set("deleted_at", update.call("now"));
+    }
+    update.where(equals("tenant_id", update.value(tenant_id)))
+        .and_where(equals("id", update.value(zone_id)))
+        .and_where(update.unary(ruvia::db_unary_operator::is_null, update.column("deleted_at")));
+    if (change.expected_revision_) {
+        update.and_where(equals("revision", update.value(*change.expected_revision_)));
+    }
+    if (change.expected_desired_revision_) {
+        update.and_where(equals("desired_revision", update.value(*change.expected_desired_revision_)));
+    }
+    update.returning({update.column("revision"), update.column("desired_revision")});
+    const auto rows = co_await transaction.query(update);
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    zone_revision result{.revision_ = rows.front()[0].as<std::int64_t>().value_or(1),
+        .desired_revision_ = rows.front()[1].as<std::int64_t>().value_or(1)};
+    result.task_id_ = co_await service::sync_runtime::upsert_marker(transaction, tenant_id,
+        service::sync_runtime::marker_resource_type::dns_zone, zone_id, change.operation_, result.desired_revision_,
+        work);
+    co_return result;
 }
 
-inline ruvia::task<std::optional<std::string>>
-prune_cluster_managed_records(ruvia::db_transaction& transaction, const std::string& tenant_id,
-    const std::string& zone_id, service::operation::work_origin& origin,
-    service::sync_runtime::marker_operation operation =
-        service::sync_runtime::marker_operation::sync) {
+// Drops configured records that collide with the A/AAAA/CNAME records the
+// zone's clusters project. True when the configuration changed (and a new
+// revision was queued).
+inline ruvia::task<bool> prune_cluster_managed_records(ruvia::db_transaction& transaction,
+    std::string_view tenant_id, std::string_view zone_id, service::background::queued_work& work) {
     const auto zone_rows = co_await transaction.query(
-        "SELECT revision FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 AND "
+        "SELECT revision, config::text FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 AND "
         "deleted_at IS NULL LIMIT 1 FOR UPDATE",
         tenant_id, zone_id);
     if (zone_rows.empty()) {
-        co_return std::nullopt;
+        co_return false;
     }
     const auto cluster_rows = co_await transaction.query(
         "SELECT hostname_prefix FROM sys_cluster WHERE tenant_id = $1 AND dns_zone_id = $2 AND "
         "status = 'enabled' AND deleted_at IS NULL",
         tenant_id, zone_id);
     if (cluster_rows.empty()) {
-        co_return std::nullopt;
+        co_return false;
     }
 
     std::unordered_set<std::string> hostnames;
@@ -208,11 +278,7 @@ prune_cluster_managed_records(ruvia::db_transaction& transaction, const std::str
         hostnames.emplace(row[0].value().value_or(""));
     }
 
-    const auto config_rows = co_await transaction.query(
-        "SELECT config::text FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 LIMIT 1", tenant_id,
-        zone_id);
-    const std::optional<zone_config_data> config =
-        parse_stored(config_rows.front()[0].value().value_or("{}"));
+    const std::optional<zone_config_data> config = parse_stored(zone_rows.front()[1].value().value_or("{}"));
     if (!config) {
         throw std::runtime_error("DNS 聚合配置损坏");
     }
@@ -238,60 +304,100 @@ prune_cluster_managed_records(ruvia::db_transaction& transaction, const std::str
         }
     }
     if (!changed) {
-        co_return std::nullopt;
+        co_return false;
     }
 
     const auto config_json = ruvia::to_json(filtered);
-    const auto updated = co_await transaction.query(
-        "UPDATE sys_dns_zone SET config = $1::jsonb, revision = revision + 1, "
-        "desired_revision = desired_revision + 1, sync_status = 'pending', last_error = NULL, "
-        "updated_at = NOW() WHERE tenant_id = $2 AND id = $3 AND revision = $4 AND "
-        "deleted_at IS NULL RETURNING desired_revision",
-        std::string_view(config_json), tenant_id, zone_id,
-        zone_rows.front()[0].as<std::int64_t>().value_or(0));
-    if (updated.empty()) {
-        co_return std::nullopt;
-    }
-    co_return co_await enqueue_zone_revision(transaction, tenant_id, zone_id,
-        updated.front()[0].as<std::int64_t>().value_or(1), origin,
-        operation);
+    co_return (co_await advance_zone_revision(transaction, tenant_id, zone_id,
+                   {.config_json_ = std::string_view(config_json),
+                       .expected_revision_ = zone_rows.front()[0].as<std::int64_t>().value_or(0)},
+                   work))
+        .has_value();
 }
 
-inline ruvia::task<std::string> mark_zone_dirty(ruvia::db_transaction& transaction,
-    const std::string& tenant_id,
-    const std::string& zone_id, service::operation::work_origin& origin,
-    service::sync_runtime::marker_operation operation =
-        service::sync_runtime::marker_operation::sync) {
-    if (const auto pruned =
-            co_await prune_cluster_managed_records(transaction, tenant_id, zone_id, origin, operation)) {
-        co_return *pruned;
+// The records a zone projects changed (a cluster's nodes, a website's
+// domains): queues a new revision.
+inline ruvia::task<void> mark_zone_dirty(ruvia::db_transaction& transaction, std::string_view tenant_id,
+    std::string_view zone_id, service::background::queued_work& work) {
+    if (co_await prune_cluster_managed_records(transaction, tenant_id, zone_id, work)) {
+        co_return;
     }
-    const auto rows = co_await transaction.query(
-        "UPDATE sys_dns_zone SET desired_revision = desired_revision + 1, sync_status = "
-        "'pending', last_error = NULL, updated_at = NOW() WHERE tenant_id = $1 AND id = $2 AND "
-        "deleted_at IS NULL RETURNING desired_revision",
-        tenant_id, zone_id);
-    if (rows.empty()) {
+    if (!co_await advance_zone_revision(transaction, tenant_id, zone_id, {}, work)) {
         throw std::runtime_error("DNS 聚合根不存在");
     }
-    co_return co_await enqueue_zone_revision(
-        transaction, tenant_id, zone_id, rows.front()[0].as<std::int64_t>().value_or(1), origin, operation);
 }
 
-inline ruvia::task<void> mark_provider_zones_dirty(ruvia::db_transaction& transaction,
-    const std::string& tenant_id,
-    const std::string& provider_id, service::operation::work_origin& origin) {
+// The A/AAAA records a cluster projects into its access zone changed.
+inline ruvia::task<void> mark_cluster_zone_dirty(ruvia::db_transaction& transaction, std::string_view tenant_id,
+    std::string_view cluster_id, service::background::queued_work& work) {
     const auto rows = co_await transaction.query(
-        "UPDATE sys_dns_zone SET desired_revision = desired_revision + 1, sync_status = "
-        "'pending', last_error = NULL, updated_at = NOW() WHERE tenant_id = $1 AND "
-        "provider_id = $2 AND deleted_at IS NULL RETURNING id, desired_revision",
+        "SELECT dns_zone_id FROM sys_cluster WHERE tenant_id = $1 AND id = $2 LIMIT 1", tenant_id, cluster_id);
+    if (!rows.empty()) {
+        co_await mark_zone_dirty(transaction, tenant_id, rows.front()[0].value().value_or(""), work);
+    }
+}
+
+// The credentials of a DNS provider changed: every zone it hosts resyncs.
+inline ruvia::task<void> mark_provider_zones_dirty(ruvia::db_transaction& transaction, std::string_view tenant_id,
+    std::string_view provider_id, service::background::queued_work& work) {
+    const auto rows = co_await transaction.query(
+        "SELECT id FROM sys_dns_zone WHERE tenant_id = $1 AND provider_id = $2 AND deleted_at IS NULL ORDER BY "
+        "id FOR UPDATE",
         tenant_id, provider_id);
     for (const auto& row : rows) {
-        co_await enqueue_zone_revision(transaction, tenant_id,
-            std::string(row[0].value().value_or("")),
-            row[1].as<std::int64_t>().value_or(1), origin);
+        (void)co_await advance_zone_revision(transaction, tenant_id, row[0].value().value_or(""), {}, work);
     }
-    co_return;
+}
+
+// One DNS-01 TXT record a certificate keeps in a zone.
+struct challenge_record_spec final {
+    std::string name_;
+    std::string content_;
+};
+
+// Replaces the challenge records `certificate_id` keeps in the zone; no
+// records retires them. nullopt when the zone is deleted or nothing changed.
+inline ruvia::task<std::optional<zone_revision>> replace_challenge_records(ruvia::db_transaction& transaction,
+    std::string_view tenant_id, std::string_view zone_id, std::string_view certificate_id,
+    std::span<const challenge_record_spec> records, std::int64_t ttl, service::background::queued_work& work) {
+    const auto rows = co_await transaction.query(
+        "SELECT runtime::text, desired_revision FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 AND "
+        "deleted_at IS NULL LIMIT 1 FOR UPDATE",
+        tenant_id, zone_id);
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    auto runtime = parse_stored_runtime(rows.front()[0].value().value_or("{}"));
+    if (!runtime) {
+        throw std::runtime_error("DNS runtime 损坏");
+    }
+    const auto removed = std::erase_if(runtime->challenge_records_,
+        [&](const auto& challenge) { return challenge.certificate_id_ == certificate_id; });
+    if (removed == 0 && records.empty()) {
+        co_return std::nullopt;
+    }
+    if (!records.empty()) {
+        const auto ids = co_await transaction.query(
+            "SELECT gen_random_uuid()::TEXT FROM generate_series(1, $1::BIGINT)",
+            static_cast<std::int64_t>(records.size()));
+        if (ids.size() != records.size()) {
+            throw std::runtime_error("DNS-01 Challenge ID 生成失败");
+        }
+        for (std::size_t index = 0; index < records.size(); ++index) {
+            runtime->challenge_records_.push_back({
+                .id_ = std::string(ids[index][0].value().value_or("")),
+                .name_ = records[index].name_,
+                .content_ = records[index].content_,
+                .ttl_ = ttl,
+                .certificate_id_ = std::string(certificate_id),
+            });
+        }
+    }
+    const auto runtime_json = ruvia::to_json(to_output(*runtime));
+    co_return co_await advance_zone_revision(transaction, tenant_id, zone_id,
+        {.runtime_json_ = std::string_view(runtime_json),
+            .expected_desired_revision_ = rows.front()[1].as<std::int64_t>().value_or(0)},
+        work);
 }
 
 }  // namespace service::dns_sync

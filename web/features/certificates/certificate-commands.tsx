@@ -1,11 +1,10 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { queryKeys } from '@/lib/query-keys'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Mono } from '@/components/mono'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
-import { websitesSnapshotKey } from '@/features/websites/data'
 import {
+  afterCertificateWrite,
   downloadCertificate,
   removeCertificate,
   renewCertificate,
@@ -13,39 +12,32 @@ import {
 import type { Certificate } from './types'
 
 /** Renew, download and delete for the certificate detail page.
- * Render `dialogs` once. Live streams push resulting state; option snapshots
- * (e.g. the website editor's usable certificates) are only marked stale, and
- * the detail page's referencing-websites snapshot re-reads once. */
+ * Render `dialogs` once. */
 export function useCertificateCommands({
   onRemoved,
 }: { onRemoved?: () => void } = {}) {
   const client = useQueryClient()
   const [renewing, setRenewing] = useState<Certificate>()
   const [removing, setRemoving] = useState<Certificate>()
-  const markStale = () =>
-    Promise.all([
-      client.invalidateQueries({
-        queryKey: queryKeys.certificates,
-        refetchType: 'none',
-      }),
-      client.invalidateQueries({ queryKey: websitesSnapshotKey }),
-    ])
   const renew = useMutation({
     // Renew and delete run inside ConfirmDialog, which shows errors inline;
     // download failures fall back to the global toast.
     meta: { inlineError: true },
     mutationFn: renewCertificate,
-    onSuccess: (response) => {
-      toastWriteSuccess(response.message || '续期任务已提交', response.data)
-      void markStale()
+    onSuccess: (response, target) => {
+      toastWriteSuccess(response.message || '续期任务已提交', {
+        resourceType: 'certificate',
+        resourceId: target.id,
+      })
+      void afterCertificateWrite(client)
     },
   })
   const remove = useMutation({
     meta: { inlineError: true },
     mutationFn: removeCertificate,
     onSuccess: (response) => {
-      toastWriteSuccess(response.message || '证书已删除', response.data)
-      void markStale()
+      toastWriteSuccess(response.message || '证书已删除')
+      void afterCertificateWrite(client)
       onRemoved?.()
     },
   })

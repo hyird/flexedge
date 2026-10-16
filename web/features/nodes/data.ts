@@ -1,10 +1,25 @@
 import { z } from 'zod'
 import { queryOptions, type QueryClient } from '@tanstack/react-query'
-import { sendData, streamPath, type PageData } from '@/lib/api'
-import { ApiProtocolError } from '@/lib/api-response'
-import { readLiveQuery, snapshotQueryOptions } from '@/lib/live-query'
+import {
+  getData,
+  pageDataSchema,
+  sendData,
+  streamPath,
+  type PageData,
+} from '@/lib/api'
+import { parseResponseData } from '@/lib/api-response'
+import { readLiveQuery } from '@/lib/live-query'
 import { queryKeys } from '@/lib/query-keys'
-import type { Node, NodeEndpoint } from './types'
+import { resourceListSearchQuery } from '@/lib/resource'
+import { clusterSnapshotKey } from '@/features/clusters/data'
+import { liveLogsQuery } from '@/features/logs/data'
+import { parseNodeLogs } from './node-log-schema'
+import {
+  nodeRuntimePatchSchema,
+  nodeSchema,
+  type Node,
+  type NodeEndpoint,
+} from './types'
 
 // service/domains/node/node_types.h NodeCredentialsDto. `node_id` is the agent
 // id (32 lowercase hex, not the node UUID) and the secret is printable ASCII,
@@ -17,8 +32,6 @@ const credentialsSchema = z.object({
     .max(128)
     .regex(/^[!-~]+$/),
   revision: z.number().int().positive(),
-  // Creation and reset start a task (operation-tasks contract §6).
-  operation_id: z.string().optional(),
 })
 
 export type NodeCredentials = z.infer<typeof credentialsSchema>
@@ -30,30 +43,30 @@ export type CreatedNode = z.infer<typeof createdNodeSchema>
 export type NodeInput = {
   cluster_id: string
   name: string
-  status: 'enabled' | 'disabled'
+  status: Node['status']
   config: { endpoints: NodeEndpoint[] }
 }
-type NodeConnectionStatus = 'unregistered' | 'online' | 'offline'
 type NodesQueryParams = {
   page: number
   page_size: number
   keyword?: string
   cluster_id?: string
-  status?: string
-  connection_status?: NodeConnectionStatus
+  status?: Node['status']
+  connection_status?: Node['runtime']['connection_status']
 }
+
+const nodePageSchema = pageDataSchema(nodeSchema)
 
 export async function createNode(input: NodeInput) {
   const response = await sendData<unknown>('post', '/nodes/', input)
-  const result = createdNodeSchema.safeParse(response.data)
-  if (!result.success) throw new ApiProtocolError()
-  return { ...response, data: result.data }
+  return {
+    ...response,
+    data: parseResponseData(createdNodeSchema, response.data),
+  }
 }
 
 function parseCredentials(value: unknown): NodeCredentials {
-  const result = credentialsSchema.safeParse(value)
-  if (!result.success) throw new ApiProtocolError()
-  return result.data
+  return parseResponseData(credentialsSchema, value)
 }
 
 export async function getNodeCredentials(id: string) {
@@ -78,53 +91,33 @@ export async function resetNodeCredentials(
   return { message: response.message, data: parseCredentials(response.data) }
 }
 
-const updatedNodeSchema = z.object({ operation_id: z.string() })
-
-/** Only the started task (`operation_id`) of the update response is kept;
- * anything else in `data` is never exposed. */
+/** Update acknowledgement and the revision it produced; anything in `data`
+ * is never exposed. */
 export async function updateNode(
   node: Pick<Node, 'id' | 'revision'>,
   input: NodeInput
 ) {
-  const { code, message, data } = await sendData(
+  const { code, message, revision } = await sendData(
     'put',
     `/nodes/${node.id}`,
     input,
     node.revision
   )
-  const operation = updatedNodeSchema.safeParse(data)
-  return {
-    code,
-    message,
-    data: operation.success
-      ? { operation_id: operation.data.operation_id }
-      : undefined,
-  }
+  return { code, message, revision }
 }
 
 export function removeNode(node: Pick<Node, 'id' | 'revision'>) {
   return sendData('delete', '/nodes/' + node.id, undefined, node.revision)
 }
 
-/** Applies a `node-runtime` event to one node. Only the node's current
+type NodeRuntimePatch = z.infer<typeof nodeRuntimePatchSchema>
+
+/** Applies a parsed `node-runtime` event to one node. Only the node's current
  * revision is patched, heartbeats never move backwards and registration and
  * connection states stay owned by snapshots. Returns `node` unchanged when the
  * event does not apply. */
-function applyNodeRuntimePatch(node: Node, value: unknown): Node {
-  if (!value || typeof value !== 'object') return node
-  const patch = value as {
-    id?: string
-    node_revision?: number
-    runtime?: Node['runtime']
-  }
-  if (
-    !patch.id ||
-    patch.node_revision === undefined ||
-    !patch.runtime ||
-    node.id !== patch.id ||
-    node.revision !== patch.node_revision
-  )
-    return node
+function applyNodeRuntimePatch(node: Node, patch: NodeRuntimePatch): Node {
+  if (node.id !== patch.id || node.revision !== patch.node_revision) return node
   const current = node.runtime.last_heartbeat_at,
     next = patch.runtime.last_heartbeat_at
   if (current && next && Date.parse(current) > Date.parse(next)) return node
@@ -146,9 +139,10 @@ export function applyNodeRuntimePagePatch(
   value: unknown
 ): PageData<Node> | undefined {
   if (!current) return current
+  const patch = parseResponseData(nodeRuntimePatchSchema, value)
   let changed = false
   const list = current.list.map((node) => {
-    const next = applyNodeRuntimePatch(node, value)
+    const next = applyNodeRuntimePatch(node, patch)
     if (next !== node) changed = true
     return next
   })
@@ -161,14 +155,25 @@ export function nodesQuery(params: NodesQueryParams) {
     retry: false,
     queryKey: [...queryKeys.nodes, 'list', params],
     queryFn: ({ queryKey, signal }) =>
-      readLiveQuery<PageData<Node>>(
+      readLiveQuery(
         streamPath('/nodes', params),
         queryKey,
         signal,
-        undefined,
+        (value) => parseResponseData(nodePageSchema, value),
         applyNodeRuntimePagePatch
       ),
   })
+}
+
+/** Command palette search of nodes. */
+export function nodeSearchQuery(keyword: string) {
+  return resourceListSearchQuery(
+    '/nodes',
+    queryKeys.nodes,
+    keyword,
+    nodeSchema.pick({ id: true, name: true }),
+    (node) => ({ id: node.id, label: node.name })
+  )
 }
 
 /** Which nodes a list snapshot shows and their online state. Runtime patches
@@ -239,31 +244,70 @@ export function nodeQuery(id: string) {
     meta: { inlineError: true },
     queryKey: [...queryKeys.nodes, 'detail', id],
     queryFn: ({ queryKey, signal }) =>
-      readLiveQuery<Node>(
+      readLiveQuery(
         streamPath('/nodes/' + id),
         queryKey,
         signal,
-        undefined,
+        (value) => parseResponseData(nodeSchema, value),
         (current, value) =>
-          current ? applyNodeRuntimePatch(current, value) : current
+          current
+            ? applyNodeRuntimePatch(
+                current,
+                parseResponseData(nodeRuntimePatchSchema, value)
+              )
+            : current
       ),
   })
 }
 
 export const nodeSnapshotKey = [...queryKeys.nodes, 'snapshot'] as const
 
-/** One read of the node detail stream, closed after the first frame. Used by
- * the detail header while the logs tab owns the page's only live stream;
- * writes on the page re-read it by invalidating `nodeSnapshotKey`. The
- * layout keeps a disabled observer on other tabs, so the cached read is
- * stale at once and every logs visit reads again. */
+/** One read of `GET /api/nodes/:id`. Used by the detail header while the
+ * logs tab owns the page's live stream; writes on the page re-read it by
+ * `afterNodeWrite`. The layout keeps a disabled observer on
+ * other tabs, so the cached read is stale at once and every logs visit
+ * reads again. */
 export function nodeSnapshotQuery(id: string) {
-  return {
-    ...snapshotQueryOptions<Node>(streamPath('/nodes/' + id), [
-      ...nodeSnapshotKey,
-      id,
-    ]),
+  return queryOptions({
+    retry: false,
+    gcTime: 0,
     staleTime: 0,
     meta: { inlineError: true },
-  }
+    queryKey: [...nodeSnapshotKey, id],
+    queryFn: async ({ signal }) =>
+      parseResponseData(
+        nodeSchema,
+        await getData<unknown>('/nodes/' + id, undefined, signal)
+      ),
+  })
+}
+
+/** After a node write that keeps the node (credentials reset, config save):
+ * header snapshots (logs tab) re-read, and the cluster detail header, which
+ * counts nodes and their online state. Live node streams push the change. */
+export function afterNodeWrite(client: QueryClient) {
+  void client.invalidateQueries({ queryKey: nodeSnapshotKey })
+  void client.invalidateQueries({ queryKey: clusterSnapshotKey })
+}
+
+/** After creating a node: the cluster detail header counts nodes. */
+export function afterNodeCreate(client: QueryClient) {
+  void client.invalidateQueries({ queryKey: clusterSnapshotKey })
+}
+
+/** After deleting a node: its detail reads are dropped and the cluster
+ * detail header re-reads its counts. */
+export function afterNodeRemove(client: QueryClient, id: string) {
+  client.removeQueries({ queryKey: nodeQuery(id).queryKey })
+  client.removeQueries({ queryKey: nodeSnapshotQuery(id).queryKey })
+  void client.invalidateQueries({ queryKey: clusterSnapshotKey })
+}
+
+/** Live node log tail: the 100 newest records, then each new batch. */
+export function nodeLogsQuery(id: string) {
+  return liveLogsQuery(
+    streamPath('/nodes/' + id + '/logs', { limit: 100 }),
+    [...queryKeys.nodes, 'logs', id],
+    parseNodeLogs
+  )
 }

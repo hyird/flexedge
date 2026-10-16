@@ -1,4 +1,6 @@
+#include <ruvia/core/event_loop.h>
 #include <ruvia/core/event_loop_pool.h>
+#include <ruvia/core/task.h>
 #include <ruvia/http/http_content_codec.h>
 #include <ruvia/http/http_header.h>
 #include <ruvia/http/http_status.h>
@@ -14,6 +16,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -36,18 +39,18 @@
 #include <openssl/x509.h>
 
 #include "common/file_digest.h"
-#include "node/data/chunked_body.h"
-#include "node/data/chunked_wire_tracker.h"
+#include "node/data/edge_listener.h"
 #include "node/data/health_supervisor.h"
-#include "node/data/http_listener.h"
-#include "node/data/https_listener.h"
 #include "node/data/origin_health.h"
+#include "node/data/origin_response_codec.h"
 #include "node/data/origin_selection.h"
+#include "node/data/worker_metrics.h"
 #include "node/proto/release_metadata.h"
 #include "node/proto/schema_version.h"
 #include "node/runtime/connected_clients.h"
 #include "node/runtime/http_redirect.h"
 #include "node/runtime/node_credentials.h"
+#include "node/runtime/runtime_metrics.h"
 #include "node/runtime/runtime_state.h"
 #include "node/runtime/self_updater.h"
 #include "node/runtime/state_cipher.h"
@@ -70,16 +73,13 @@ static_assert(!std::is_move_assignable_v<flexedge::node::compiled_config>);
 static_assert(!std::is_copy_constructible_v<flexedge::node::tls_context_set>);
 static_assert(!std::is_move_constructible_v<flexedge::node::tls_context_set>);
 static_assert(!std::is_move_assignable_v<flexedge::node::tls_context_set>);
-static_assert(std::is_base_of_v<std::runtime_error, flexedge::node::invalid_hostname>);
 
 using flexedge::testing::snapshot;
 using flexedge::testing::TestConfig;
 
 std::shared_ptr<const flexedge::node::compiled_config> compiled(TestConfig value) {
     value.finalize();
-    return std::make_shared<const flexedge::node::compiled_config>(
-        std::make_shared<const flexedge::node::v2::ActiveState>(std::move(value.active)),
-        std::move(value.objects));
+    return std::make_shared<const flexedge::node::compiled_config>(value.active, value.objects);
 }
 
 void apply(flexedge::node::runtime_state& runtime, TestConfig value) {
@@ -378,6 +378,27 @@ std::string web_socket_round_trip(std::uint16_t port) {
     return std::string(server_bytes.data(), server_bytes.size());
 }
 
+// Replaces the origins `health` tracks on its loop, as data_plane::activate does.
+void set_health_origins(ruvia::event_loop loop, flexedge::node::origin_health_supervisor& health,
+    flexedge::node::origin_health_key_set keys) {
+    loop.start([](flexedge::node::origin_health_supervisor& supervisor,
+                   flexedge::node::origin_health_key_set origins) -> ruvia::task<void> {
+            supervisor.activate(supervisor.prepare(origins));
+            co_return;
+        }(health, std::move(keys)))
+        .get();
+}
+
+// The published health once the outcomes already sent to the supervisor loop are applied: one
+// turn applies them, the next publishes the snapshot they scheduled.
+std::shared_ptr<const flexedge::node::origin_health_snapshot> settled_health(ruvia::event_loop loop,
+    const flexedge::node::origin_health_supervisor& health) {
+    for (int turn = 0; turn < 2; ++turn) {
+        loop.start([]() -> ruvia::task<void> { co_return; }()).get();
+    }
+    return health.snapshot();
+}
+
 }  // namespace
 
 // This integration test owns one shared runtime and network lifecycle so each assertion observes
@@ -459,7 +480,7 @@ int main(int argc, char* argv[]) {
             .tls_fingerprint_ = "ja3:0123456789abcdef0123456789abcdef",
             .response_headers_ = "Content-Type: text/plain\n",
             .query_string_ = "debug=1",
-            .cookies_ = flexedge::node::node_log_buffer::cookie_value("sid=abc"),
+            .cookies_ = "sid=abc",
         });
         delivery_buffer.node("warning", "control", "retry delivery");
         REQUIRE(delivery_buffer.pending());
@@ -483,12 +504,6 @@ int main(int argc, char* argv[]) {
         REQUIRE(retried_delivery->value().events(0).access_log().id() == access_log_id);
         REQUIRE(delivery_buffer.pending());
         delivery_buffer.acknowledge(std::move(*retried_delivery));
-        REQUIRE(flexedge::node::node_log_buffer::request_header_value("Authorization", "secret") ==
-                "secret");
-        REQUIRE(flexedge::node::node_log_buffer::request_body_value("{\"token\":\"secret\"}") ==
-                "{\"token\":\"secret\"}");
-        REQUIRE(flexedge::node::node_log_buffer::cookie_value("sid=abc; theme=dark") ==
-                "sid=abc; theme=dark");
 
         flexedge::node::v2::Website website_log_policy;
         REQUIRE(!website_log_policy.access_log_enabled());
@@ -581,13 +596,13 @@ int main(int argc, char* argv[]) {
         flexedge::node::node_log_buffer control_drain_buffer(1);
         const auto background_logs = control_drain_buffer.background_producer();
         REQUIRE(background_logs.node("info", "upgrade", "upgrade completed"));
-        REQUIRE(!control_drain_buffer.wait_for_control_drain(std::chrono::milliseconds(1)));
+        REQUIRE(control_drain_buffer.retained_events() == 1);
         auto control_delivery = control_drain_buffer.take("576369c6-946e-4dee-8434-9b8909d72dbd5");
         REQUIRE(control_delivery.has_value());
-        REQUIRE(!control_drain_buffer.wait_for_drain(std::chrono::milliseconds(1)));
+        REQUIRE(control_drain_buffer.retained_events() == 1);
         control_drain_buffer.acknowledge(std::move(*control_delivery));
-        REQUIRE(control_drain_buffer.wait_for_control_drain(std::chrono::milliseconds(1)));
-        REQUIRE(control_drain_buffer.wait_for_drain(std::chrono::milliseconds(1)));
+        REQUIRE(control_drain_buffer.retained_events() == 0);
+        REQUIRE(!control_drain_buffer.pending());
 
         flexedge::node::node_log_buffer priority_buffer(4);
         const auto first_priority_producer = priority_buffer.worker_producer(0);
@@ -712,11 +727,6 @@ int main(int argc, char* argv[]) {
         REQUIRE(bounded_body_delivery->value().ByteSizeLong() <= 1024 * 1024);
         bounded_body_buffer.acknowledge(std::move(*bounded_body_delivery));
 
-        const auto chunked = flexedge::node::decode_chunked_body(
-            "4\r\nWiki\r\n5;name=value\r\npedia\r\n0\r\nX-Test: value\r\n\r\n", 64);
-        REQUIRE(chunked && *chunked == "Wikipedia");
-        REQUIRE(!flexedge::node::decode_chunked_body("4\r\nWiki\r\n", 64));
-        REQUIRE(!flexedge::node::decode_chunked_body("5\r\nhello\r\n0\r\n\r\n", 4));
         REQUIRE(flexedge::node::accepts_event_stream("text/event-stream"));
         REQUIRE(flexedge::node::accepts_event_stream(
             "application/json, text/event-stream; charset=utf-8"));
@@ -738,33 +748,78 @@ int main(int argc, char* argv[]) {
                 std::string::npos);
         REQUIRE(streaming_origin_request->bytes_.find("Accept-Encoding: gzip\r\n") ==
                 std::string::npos);
-        flexedge::node::chunked_wire_tracker chunked_tracker;
-        REQUIRE(chunked_tracker.consume("4\r\nWi") ==
-                flexedge::node::chunked_wire_status::incomplete);
-        REQUIRE(chunked_tracker.consume("ki\r\n0\r\nX-Test: value\r\n") ==
-                flexedge::node::chunked_wire_status::incomplete);
-        REQUIRE(chunked_tracker.consume("\r\n") == flexedge::node::chunked_wire_status::complete);
-        REQUIRE(chunked_tracker.consume("extra") == flexedge::node::chunked_wire_status::invalid);
+        auto origin_exchange_state = [&] {
+            auto prepared = flexedge::node::prepare_origin_request(
+                {.method_ = "GET", .target_ = "/", .headers_ = {}, .body_ = {}, .has_body_ = false},
+                streaming_config.website(), "www.example.com", "198.51.100.1", true, false, false);
+            REQUIRE(prepared);
+            return std::move(prepared->response_exchange_);
+        };
+        // Streaming keeps the origin framing for the relayed body and only tracks its end.
+        flexedge::node::origin_response_codec streamed(origin_exchange_state(), true, nullptr);
+        REQUIRE(streamed.consume_head("HTTP/1.1 200 OK\r\n"
+                                      "Connection: keep-alive, X-Remove\r\n"
+                                      "X-Remove: secret\r\n"
+                                      "Keep-Alive: timeout=5\r\n"
+                                      "Transfer-Encoding: chunked\r\n"
+                                      "Strict-Transport-Security: max-age=1\r\n\r\n"
+                                      "4\r\nWi") == flexedge::node::origin_response_head_status::ready);
+        const auto streamed_head = streamed.take_output();
+        REQUIRE(streamed_head.starts_with("HTTP/1.1 200 OK\r\n"));
+        REQUIRE(streamed_head.find("Transfer-Encoding: chunked\r\n") != std::string::npos);
+        REQUIRE(streamed_head.find("X-Remove") == std::string::npos);
+        REQUIRE(streamed_head.find("Keep-Alive") == std::string::npos);
+        REQUIRE(streamed_head.find("max-age=1\r\n") == std::string::npos);
+        REQUIRE(streamed_head.find("Strict-Transport-Security: max-age=31536000\r\n") !=
+                std::string::npos);
+        REQUIRE(streamed_head.ends_with(
+            "Connection: close\r\n"
+            "Strict-Transport-Security: max-age=31536000\r\n\r\n4\r\nWi"));
+        REQUIRE(!streamed.complete());
+        REQUIRE(streamed.consume_body("ki\r\n0\r\nX-Test: value\r\n") ==
+                flexedge::node::origin_response_body_status::accepted);
+        REQUIRE(!streamed.complete());
+        REQUIRE(streamed.consume_body("\r\n") == flexedge::node::origin_response_body_status::accepted);
+        REQUIRE(streamed.complete());
+        REQUIRE(streamed.consume_body("extra") == flexedge::node::origin_response_body_status::failure);
 
-        const std::string buffered_response =
-            "HTTP/1.1 100 Continue\r\nX-Ignored: yes\r\n\r\n"
-            "HTTP/1.1 200 OK\r\n"
-            "Connection: keep-alive, X-Remove\r\n"
-            "X-Remove: secret\r\n"
-            "Transfer-Encoding: chunked\r\n"
-            "X-Test: value \r\n\r\n"
-            "4\r\nbody\r\n0\r\n\r\n";
-        const auto buffered_head =
-            flexedge::node::detail::parse_buffered_response_head(buffered_response);
-        REQUIRE(buffered_head);
-        REQUIRE(buffered_head->status_ == 200);
-        REQUIRE(buffered_head->chunked_);
-        REQUIRE(buffered_head->body_offset_ == buffered_response.find("4\r\nbody"));
-        REQUIRE(buffered_head->headers_.size() == 1);
-        REQUIRE(buffered_head->headers_.front().first == "X-Test");
-        REQUIRE(buffered_head->headers_.front().second == "value ");
-        REQUIRE(
-            !flexedge::node::detail::parse_buffered_response_head("HTTP/1.1 20x Bad Status\r\n\r\n"));
+        // Buffering decodes the body and re-frames it with Content-Length.
+        flexedge::node::buffered_bytes_budget codec_budget(1024 * 1024);
+        flexedge::node::origin_response_codec buffered(origin_exchange_state(), false, nullptr,
+            codec_budget.lease());
+        REQUIRE(buffered.consume_head("HTTP/1.1 100 Continue\r\nX-Ignored: yes\r\n\r\n"
+                                      "HTTP/1.1 200 OK\r\n"
+                                      "Connection: keep-alive, X-Remove\r\n"
+                                      "X-Remove: secret\r\n"
+                                      "Transfer-Encoding: chunked\r\n"
+                                      "Trailer: X-Checksum\r\n"
+                                      "X-Test: value\r\n\r\n"
+                                      "4\r\nbo") == flexedge::node::origin_response_head_status::ready);
+        REQUIRE(buffered.consume_body("dy\r\n0\r\n\r\n") ==
+                flexedge::node::origin_response_body_status::accepted);
+        REQUIRE(buffered.complete());
+        auto buffered_response = buffered.take_response();
+        REQUIRE(buffered_response.status_ == 200);
+        REQUIRE(buffered_response.headers_.size() == 1);
+        REQUIRE(buffered_response.headers_.front().first == "X-Test");
+        REQUIRE(buffered_response.body_ == "body");
+        REQUIRE(codec_budget.used_bytes() == 4);
+        std::string buffered_wire;
+        REQUIRE(buffered.frame(buffered_response, buffered_wire));
+        REQUIRE(buffered_wire ==
+                "HTTP/1.1 200 OK\r\nX-Test: value\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody");
+        REQUIRE(codec_budget.used_bytes() == buffered_wire.size());
+        buffered_response.reservation_ = {};
+        REQUIRE(codec_budget.used_bytes() == 0);
+
+        flexedge::node::origin_response_codec malformed(origin_exchange_state(), false, nullptr);
+        REQUIRE(malformed.consume_head("HTTP/1.1 20x Bad Status\r\n\r\n") ==
+                flexedge::node::origin_response_head_status::failure);
+        flexedge::node::buffered_bytes_budget tiny_codec_budget(8);
+        flexedge::node::origin_response_codec over_budget(origin_exchange_state(), false, nullptr,
+            tiny_codec_budget.lease());
+        REQUIRE(over_budget.consume_head("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") ==
+                flexedge::node::origin_response_head_status::exhausted);
 
         flexedge::node::buffered_bytes_budget budget(8192);
         auto first_reservation = budget.lease();
@@ -790,8 +845,7 @@ int main(int argc, char* argv[]) {
         REQUIRE(!rejected_request_bytes.try_grow(1));
         REQUIRE(request_budget.rejected_reservations() == 1);
 
-        flexedge::node::buffered_proxy_request compression_request;
-        compression_request.headers_.emplace_back("Accept-Encoding", "gzip;q=0.5, br, zstd;q=0.8");
+        constexpr std::string_view compression_accept = "gzip;q=0.5, br, zstd;q=0.8";
         flexedge::node::buffered_proxy_response compression_response;
         compression_response.status_ = 200;
         compression_response.headers_.emplace_back("Content-Type", "text/plain; charset=utf-8");
@@ -808,7 +862,7 @@ int main(int argc, char* argv[]) {
         compression_website.add_response_compression_mime_types("text/*");
         compression_website.add_response_compression_extensions(".txt");
         compression_website.add_response_compression_excluded_extensions(".apk");
-        flexedge::node::apply_response_compression(compression_request, compression_website,
+        flexedge::node::apply_response_compression(compression_website, "", compression_accept,
             compression_response);
         REQUIRE(flexedge::node::response_header(compression_response, "Content-Encoding") == "br");
         REQUIRE(flexedge::node::response_header(compression_response, "Vary") == "Accept-Encoding");
@@ -825,17 +879,15 @@ int main(int argc, char* argv[]) {
             response.body_.assign(4096, 'a');
             return response;
         };
-        auto excluded_compression_request = compression_request;
-        excluded_compression_request.target_ = "/download/package.APK?token=1";
         auto excluded_compression_response = plain_compression_response();
-        flexedge::node::apply_response_compression(excluded_compression_request, compression_website,
-            excluded_compression_response);
+        flexedge::node::apply_response_compression(compression_website,
+            "/download/package.APK?token=1", compression_accept, excluded_compression_response);
         REQUIRE(flexedge::node::response_header(excluded_compression_response, "Content-Encoding")
                 .empty());
 
         auto partial_compression_response = plain_compression_response();
         partial_compression_response.status_ = 206;
-        flexedge::node::apply_response_compression(compression_request, compression_website,
+        flexedge::node::apply_response_compression(compression_website, "", compression_accept,
             partial_compression_response);
         REQUIRE(
             flexedge::node::response_header(partial_compression_response, "Content-Encoding").empty());
@@ -843,8 +895,8 @@ int main(int argc, char* argv[]) {
         auto limited_compression_website = compression_website;
         limited_compression_website.set_response_compression_max_bytes(1024);
         auto limited_compression_response = plain_compression_response();
-        flexedge::node::apply_response_compression(compression_request, limited_compression_website,
-            limited_compression_response);
+        flexedge::node::apply_response_compression(limited_compression_website, "",
+            compression_accept, limited_compression_response);
         REQUIRE(
             flexedge::node::response_header(limited_compression_response, "Content-Encoding").empty());
 
@@ -854,7 +906,7 @@ int main(int argc, char* argv[]) {
         REQUIRE(held_compression_budget.try_grow(exhausted_compression_budget.maximum_bytes()));
         auto overloaded_compression_response = plain_compression_response();
         overloaded_compression_response.reservation_ = exhausted_compression_budget.lease();
-        flexedge::node::apply_response_compression(compression_request, compression_website,
+        flexedge::node::apply_response_compression(compression_website, "", compression_accept,
             overloaded_compression_response);
         REQUIRE(flexedge::node::response_header(overloaded_compression_response, "Content-Encoding")
                 .empty());
@@ -866,7 +918,7 @@ int main(int argc, char* argv[]) {
         recompressed_response.body_.assign(origin_encoded.encoded()->bytes());
         recompressed_response.headers_.emplace_back("Content-Encoding", "gzip");
         const auto original_encoded_body = recompressed_response.body_;
-        flexedge::node::apply_response_compression(compression_request, compression_website,
+        flexedge::node::apply_response_compression(compression_website, "", compression_accept,
             recompressed_response);
         REQUIRE(recompressed_response.body_ == original_encoded_body);
 
@@ -924,7 +976,7 @@ int main(int argc, char* argv[]) {
         REQUIRE(persisted.active_.SerializeAsString() == stored_snapshot.active.SerializeAsString());
         REQUIRE(persisted.objects_.size() == stored_snapshot.objects.size());
         auto stale_snapshot = snapshot();
-        stale_snapshot.active.mutable_node_spec()->mutable_content()->set_schema_version(1);
+        stale_snapshot.node_spec.set_schema_version(1);
         stale_snapshot.finalize();
         state_store.stage(stale_snapshot.active, stale_snapshot.objects);
         state_store.activate_staged();
@@ -932,7 +984,7 @@ int main(int argc, char* argv[]) {
         REQUIRE(!discarded.active_.has_node_spec());
         REQUIRE(discarded.objects_.empty());
         auto stale_release = snapshot();
-        stale_release.active.mutable_release()->mutable_content()->set_schema_version(1);
+        stale_release.release.set_schema_version(1);
         stale_release.finalize();
         state_store.stage(stale_release.active, stale_release.objects);
         state_store.activate_staged();
@@ -941,7 +993,7 @@ int main(int argc, char* argv[]) {
         REQUIRE(discarded_release.objects_.empty());
         for (const auto version : {2u, 3u, 4u}) {
             auto compatible = snapshot();
-            compatible.active.mutable_release()->mutable_content()->set_schema_version(version);
+            compatible.release.set_schema_version(version);
             compatible.finalize();
             state_store.stage(compatible.active, compatible.objects);
             state_store.activate_staged();
@@ -951,6 +1003,10 @@ int main(int argc, char* argv[]) {
         const auto config = compiled(snapshot());
         REQUIRE(config->website("www.example.com:80") != nullptr);
         REQUIRE(config->domain("WWW.EXAMPLE.COM") != nullptr);
+        // The port goes before the trailing root label dot: both spellings name the same site.
+        REQUIRE(flexedge::route_policy::hostname("WWW.Example.COM.:443") == "www.example.com");
+        REQUIRE(config->website("WWW.Example.COM.:443") == config->website("www.example.com"));
+        REQUIRE(config->domain("www.example.com.") != nullptr);
         const auto redirect =
             flexedge::node::http_to_https_redirect(*config, "WWW.Example.COM:80", "/a?q=1");
         REQUIRE(redirect);
@@ -961,20 +1017,14 @@ int main(int argc, char* argv[]) {
         const auto no_redirect = compiled(snapshot(false));
         REQUIRE(!flexedge::node::http_to_https_redirect(*no_redirect, "www.example.com", "/"));
 
-        // Release objects are content-addressed by SHA-256 over their deterministic
-        // serialization. Objects published before http2_enabled was retired carry field 14
-        // in number order; the control plane serves them and upgraded nodes reload them from
-        // disk by re-serializing, which must reproduce the published bytes exactly.
+        // Objects published before http2_enabled was retired carry field 14 in number order.
+        // Nodes hash the bytes they hold, so those objects verify as published; nodes that
+        // still re-serialize need the field known to reproduce the same bytes.
         {
             const auto legacy_website = with_legacy_http2_field(
                 flexedge::node::serialize_artifact(snapshot(false).website()));
             const auto legacy_content = length_delimited(10, legacy_website);
             const auto legacy_digest = flexedge::node::artifact_digest(std::string_view(legacy_content));
-            flexedge::node::v2::DeliveryObjectContent parsed_content;
-            REQUIRE(flexedge::node::parse_artifact(legacy_content, parsed_content));
-            REQUIRE(parsed_content.has_website());
-            REQUIRE(flexedge::node::serialize_artifact(parsed_content) == legacy_content);
-            REQUIRE(flexedge::node::artifact_digest(parsed_content) == legacy_digest);
 
             // The object file exactly as the previous node binary persisted it.
             constexpr std::string_view legacy_secret = "3df64f75-2df7-43b8-aa89-661920126564";
@@ -985,11 +1035,15 @@ int main(int argc, char* argv[]) {
                     .seal(length_delimited(1, legacy_digest) + length_delimited(2, legacy_content)));
             const flexedge::node::state_store legacy_store(legacy_directory, legacy_secret);
             const auto legacy_object = legacy_store.load_object(legacy_digest);
-            REQUIRE(legacy_object && legacy_object->content().has_website());
-            REQUIRE(flexedge::node::serialize_artifact(legacy_object->content()) == legacy_content);
+            REQUIRE(legacy_object && legacy_object->content() == legacy_content);
+            const auto parsed_content =
+                flexedge::node::open_artifact<flexedge::node::v2::DeliveryObjectContent>(
+                    legacy_digest, legacy_object->content());
+            REQUIRE(parsed_content && parsed_content->has_website());
+            REQUIRE(flexedge::node::serialize_artifact(*parsed_content) == legacy_content);
 
             auto legacy_http2 = snapshot(false);
-            *legacy_http2.mutableWebsite() = legacy_object->content().website();
+            *legacy_http2.mutableWebsite() = parsed_content->website();
             const auto legacy_http2_config = compiled(std::move(legacy_http2));
             REQUIRE(legacy_http2_config->website("www.example.com") != nullptr);
         }
@@ -1009,7 +1063,7 @@ int main(int argc, char* argv[]) {
         apply(runtime, snapshot());
         const auto previous = runtime.config();
         REQUIRE(previous != nullptr);
-        REQUIRE(previous->node_spec().content().revision() == 3);
+        REQUIRE(previous->node_spec().revision() == 3);
 
         auto duplicate = snapshot();
         duplicate.setGeneration(4);
@@ -1032,18 +1086,21 @@ int main(int argc, char* argv[]) {
         REQUIRE(previous->website("www.example.com") != nullptr);
         std::int64_t next_generation{5};
 
-        // Declared before the loops so sessions retiring on them never outlive their registry.
+        // Declared before the loops so sessions retiring on them never outlive their counters.
         flexedge::node::connected_clients first_clients;
         flexedge::node::connected_clients second_clients;
+        flexedge::node::worker_metrics first_metrics;
+        flexedge::node::worker_metrics second_metrics;
         ruvia::event_loop_pool loops({.loop_count_ = 2});
-        flexedge::node::origin_health_registry listener_health;
+        ruvia::event_loop_pool control_loops({.loop_count_ = 1});
         flexedge::node::origin_tls_context first_origin_tls;
         flexedge::node::origin_tls_context second_origin_tls;
+        auto listener_health =
+            flexedge::node::origin_health_supervisor::create(loops.loop(0), runtime, first_origin_tls);
         flexedge::node::origin_connection_pool first_origin_connections(loops.loop(0).executor(),
             first_origin_tls);
         flexedge::node::origin_connection_pool second_origin_connections(loops.loop(1).executor(),
             second_origin_tls);
-        flexedge::node::runtime_metrics runtime_metrics;
         flexedge::node::buffered_bytes_budget request_buffers(
             flexedge::node::maximum_request_buffer_bytes);
         flexedge::node::buffered_bytes_budget response_buffers(
@@ -1051,46 +1108,97 @@ int main(int argc, char* argv[]) {
         flexedge::node::node_log_buffer log_buffer(2);
         auto first_worker_logs = log_buffer.worker_producer(0);
         auto second_worker_logs = log_buffer.worker_producer(1);
-        (void)runtime_metrics.sample();
-        auto first_listener = flexedge::node::http_listener::create(
-            loops.loop(0), runtime, listener_health, runtime_metrics, first_clients, first_worker_logs,
-            first_origin_connections, request_buffers, response_buffers,
-            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        flexedge::node::runtime_metrics_sampler metrics_sampler;
+        (void)metrics_sampler.sample(std::uint64_t{0});
+        const auto session_context = [&](flexedge::node::origin_health_supervisor& health,
+                                         flexedge::node::worker_metrics& metrics,
+                                         flexedge::node::connected_clients& clients,
+                                         flexedge::node::node_log_buffer::producer& logs,
+                                         flexedge::node::origin_connection_pool& origin_connections,
+                                         flexedge::node::buffered_bytes_budget& requests) {
+            return flexedge::node::http_session_context{
+                .runtime_ = runtime,
+                .health_ = health,
+                .metrics_ = metrics,
+                .clients_ = clients,
+                .logs_ = logs,
+                .origin_connections_ = origin_connections,
+                .request_buffers_ = requests,
+                .response_buffers_ = response_buffers,
+            };
+        };
+        const auto first_context = session_context(*listener_health, first_metrics, first_clients,
+            first_worker_logs, first_origin_connections, request_buffers);
+        const auto second_context = session_context(*listener_health, second_metrics,
+            second_clients, second_worker_logs, second_origin_connections, request_buffers);
+        // As data_plane does once the configuration that added a listener is active.
+        const auto start = [](const std::shared_ptr<flexedge::node::edge_listener>& listener) {
+            listener->request_start();
+            listener->activate();
+        };
+        auto first_listener = flexedge::node::edge_listener::create(loops.loop(0), first_context,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0), nullptr);
         const auto port = first_listener->local_endpoint().port();
-        auto second_listener = flexedge::node::http_listener::create(
-            loops.loop(1), runtime, listener_health, runtime_metrics, second_clients, second_worker_logs,
-            second_origin_connections, request_buffers, response_buffers,
-            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), port));
+        auto second_listener = flexedge::node::edge_listener::create(loops.loop(1), second_context,
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), port), nullptr);
         flexedge::node::buffered_bytes_budget constrained_request_buffers(32);
-        auto constrained_listener = flexedge::node::http_listener::create(
-            loops.loop(0), runtime, listener_health, runtime_metrics, first_clients, first_worker_logs,
-            first_origin_connections, constrained_request_buffers, response_buffers,
-            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        auto constrained_listener = flexedge::node::edge_listener::create(loops.loop(0),
+            session_context(*listener_health, first_metrics, first_clients, first_worker_logs,
+                first_origin_connections, constrained_request_buffers),
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0), nullptr);
         const auto constrained_port = constrained_listener->local_endpoint().port();
-        first_listener->request_start();
-        second_listener->request_start();
-        constrained_listener->request_start();
+        start(first_listener);
+        start(second_listener);
+        start(constrained_listener);
         loops.start();
-        // A listener stopped while waiting for activation must release its
-        // timer/self references even if another start request was queued.
+        control_loops.start();
+        // Each worker owns its counters; a separate control loop collects their immutable
+        // copies, as the heartbeat does.
+        const std::array connected_workers{
+            flexedge::node::worker_counters{
+                .loop_ = loops.loop(0), .metrics_ = &first_metrics, .clients_ = &first_clients},
+            flexedge::node::worker_counters{
+                .loop_ = loops.loop(1), .metrics_ = &second_metrics, .clients_ = &second_clients},
+        };
+        const auto load_of = [&](std::span<const flexedge::node::worker_counters> workers) {
+            const auto owner = control_loops.loop(0);
+            return owner.start(flexedge::node::collect_worker_load(owner.handle(), workers, {})).get();
+        };
+        const auto count_ips =
+            [&](std::span<const flexedge::node::worker_counters> workers) -> std::optional<std::int64_t> {
+            if (const auto load = load_of(workers)) {
+                return load->connected_ip_count_;
+            }
+            return std::nullopt;
+        };
+        const auto connected_ips_reach = [&](std::int64_t expected) {
+            return waitUntil([&] { return count_ips(connected_workers) == expected; },
+                std::chrono::seconds(2));
+        };
+        const auto connections_reach = [&](std::int64_t expected) {
+            return waitUntil(
+                [&] {
+                    const auto load = load_of(connected_workers);
+                    return load && load->connection_count_ == expected;
+                },
+                std::chrono::seconds(2));
+        };
+        // A listener stopped before its configuration activates must release its
+        // self references even if another start request was queued.
         auto verify_stopped_before_activation = [&](auto listener) {
             const std::weak_ptr weak(listener);
-            const auto gate = std::make_shared<flexedge::node::listener_activation_gate>();
-            listener->request_start(gate);
-            listener->request_start(gate);
+            listener->request_start();
+            listener->request_start();
             listener->request_stop();
             listener.reset();
             REQUIRE(waitUntil([&] { return weak.expired(); }, std::chrono::seconds(2)));
         };
-        verify_stopped_before_activation(flexedge::node::http_listener::create(
-            loops.loop(0), runtime, listener_health, runtime_metrics, first_clients, first_worker_logs,
-            first_origin_connections, request_buffers, response_buffers,
-            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0)));
+        verify_stopped_before_activation(flexedge::node::edge_listener::create(loops.loop(0),
+            first_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0), nullptr));
         flexedge::node::tls_context_registry inactive_tls_contexts;
-        verify_stopped_before_activation(flexedge::node::https_listener::create(
-            loops.loop(0), runtime, listener_health, inactive_tls_contexts, runtime_metrics,
-            first_clients, first_worker_logs, first_origin_connections, request_buffers,
-            response_buffers, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0)));
+        verify_stopped_before_activation(flexedge::node::edge_listener::create(loops.loop(0),
+            first_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0),
+            &inactive_tls_contexts));
         const auto constrained_response = request(constrained_port);
         REQUIRE(constrained_response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
         REQUIRE(waitUntil([&] { return constrained_request_buffers.used_bytes() == 0; },
@@ -1110,9 +1218,9 @@ int main(int argc, char* argv[]) {
             origin->set_host("127.0.0.1");
             origin->set_port(origin_acceptor.local_endpoint().port());
             apply(runtime, std::move(pending_config));
-            const flexedge::node::origin_health_registry::key_set keys{
-                flexedge::node::origin_health_registry::get_key("website-1", "origin-1")};
-            listener_health.publish(listener_health.prepare(keys));
+            const flexedge::node::origin_health_key_set keys{
+                {.website_id_ = "website-1", .origin_id_ = "origin-1"}};
+            set_health_origins(loops.loop(0), *listener_health, keys);
             std::atomic<bool> replaced_health{false};
             std::jthread upstream([&](std::stop_token stop) {
                 asio::ip::tcp::socket socket(origin_context);
@@ -1124,8 +1232,8 @@ int main(int argc, char* argv[]) {
                 if (socket.read_some(asio::buffer(bytes), error) == 0 || error) {
                     return;
                 }
-                listener_health.publish(listener_health.prepare({}));
-                listener_health.publish(listener_health.prepare(keys));
+                set_health_origins(loops.loop(0), *listener_health, {});
+                set_health_origins(loops.loop(0), *listener_health, keys);
                 replaced_health.store(true);
                 // Closing without a response drives the real failure callback.
             });
@@ -1134,18 +1242,16 @@ int main(int argc, char* argv[]) {
             upstream.join();
             REQUIRE(replaced_health.load());
             REQUIRE(failed_response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
-            REQUIRE(listener_health.healthy("website-1", "origin-1"));
+            REQUIRE(settled_health(loops.loop(0), *listener_health)->healthy("website-1", "origin-1"));
         }
         const auto no_route_response = request(port, "unknown.example.com");
         REQUIRE(no_route_response.starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
-        REQUIRE(waitUntil([&] { return runtime_metrics.connection_count() == 0; },
-            std::chrono::seconds(1)));
+        REQUIRE(connections_reach(0));
         (void)drain_node_logs(log_buffer);
         // Invalid incoming Host values are request errors, not broken node configuration.
         for (const auto& host : {std::string("."), std::string(254, 'a')}) {
             REQUIRE(request(port, host).starts_with("HTTP/1.1 400 Bad Request\r\n"));
-            REQUIRE(waitUntil([&] { return runtime_metrics.connection_count() == 0; },
-                std::chrono::seconds(1)));
+            REQUIRE(connections_reach(0));
             const auto entries = drain_node_logs(log_buffer);
             REQUIRE(entries.size() == 1);
             REQUIRE(entries.front().level() == "warning");
@@ -1197,8 +1303,7 @@ int main(int argc, char* argv[]) {
             client.close();
             client_reset = true;
             reset_origin.join();
-            REQUIRE(waitUntil([&] { return runtime_metrics.connection_count() == 0; },
-                std::chrono::seconds(2)));
+            REQUIRE(connections_reach(0));
             const auto entries = drain_node_logs(log_buffer);
             REQUIRE(entries.size() == 1);
             REQUIRE(entries.front().level() == "info");
@@ -1232,21 +1337,23 @@ int main(int argc, char* argv[]) {
             });
             REQUIRE(request(port).starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
             reset_origin.join();
-            REQUIRE(waitUntil([&] { return runtime_metrics.connection_count() == 0; },
-                std::chrono::seconds(2)));
+            REQUIRE(connections_reach(0));
             const auto entries = drain_node_logs(log_buffer);
             REQUIRE(entries.size() == 1);
             REQUIRE(entries.front().level() == "error");
             REQUIRE(entries.front().message().starts_with("origin response head read failed:"));
         }
-        const auto observed_metrics = runtime_metrics.sample();
+        const auto observed_load = load_of(connected_workers);
+        REQUIRE(observed_load && observed_load->connection_count_ == 0 &&
+                observed_load->traffic_out_bytes_ > 0);
+        const auto observed_metrics = metrics_sampler.sample(observed_load->traffic_out_bytes_);
         REQUIRE(observed_metrics.traffic_out_bps_ > 0);
-        REQUIRE(observed_metrics.connection_count_ == 0);
         REQUIRE(observed_metrics.cpu_usage_ >= 0 && observed_metrics.cpu_usage_ <= 1);
         REQUIRE(observed_metrics.memory_usage_ >= 0 && observed_metrics.memory_usage_ <= 1);
+        // Without a collected load no traffic rate is reported.
+        REQUIRE(metrics_sampler.sample(std::nullopt).traffic_out_bps_ == 0);
 
-        // Per-IP accounting over real sockets. Each worker owns its registry; a separate control
-        // loop counts the union of their immutable copies, as the heartbeat does.
+        // Per-IP accounting over real sockets, collected through connected_workers.
         using flexedge::node::connected_clients;
         REQUIRE(connected_clients::get_key(asio::ip::make_address("127.0.0.1")) ==
                 connected_clients::get_key(asio::ip::make_address("::ffff:127.0.0.1")));
@@ -1264,39 +1371,17 @@ int main(int argc, char* argv[]) {
             registry.closed(client);
             REQUIRE(registry.snapshot().empty());
         }
-        ruvia::event_loop_pool control_loops({.loop_count_ = 1});
-        control_loops.start();
-        const std::array connected_workers{
-            flexedge::node::worker_connected_clients{.loop_ = loops.loop(0), .clients_ = &first_clients},
-            flexedge::node::worker_connected_clients{.loop_ = loops.loop(1), .clients_ = &second_clients},
-        };
-        const auto count_ips = [&](std::span<const flexedge::node::worker_connected_clients> workers) {
-            const auto owner = control_loops.loop(0);
-            return owner.start(flexedge::node::count_connected_ips(owner.handle(), workers, {})).get();
-        };
-        const auto connected_ips_reach = [&](std::int64_t expected) {
-            return waitUntil([&] { return count_ips(connected_workers) == expected; },
-                std::chrono::seconds(2));
-        };
-        const auto connections_reach = [&](std::int64_t expected) {
-            return waitUntil([&] { return runtime_metrics.connection_count() == expected; },
-                std::chrono::seconds(2));
-        };
         REQUIRE(count_ips({}) == 0);
         REQUIRE(count_ips(connected_workers) == 0);
         asio::io_context client_context;
         {
             // One client connected to both workers is one IP: per worker 1 and 2, together 2.
-            auto first_only = flexedge::node::http_listener::create(loops.loop(0), runtime,
-                listener_health, runtime_metrics, first_clients, first_worker_logs,
-                first_origin_connections, request_buffers, response_buffers,
-                asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
-            auto second_only = flexedge::node::http_listener::create(loops.loop(1), runtime,
-                listener_health, runtime_metrics, second_clients, second_worker_logs,
-                second_origin_connections, request_buffers, response_buffers,
-                asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
-            first_only->request_start();
-            second_only->request_start();
+            auto first_only = flexedge::node::edge_listener::create(loops.loop(0), first_context,
+                asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0), nullptr);
+            auto second_only = flexedge::node::edge_listener::create(loops.loop(1), second_context,
+                asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0), nullptr);
+            start(first_only);
+            start(second_only);
             const auto first_port = first_only->local_endpoint().port();
             const auto second_port = second_only->local_endpoint().port();
             auto on_first = connect_from(client_context, "127.0.0.1", "127.0.0.1", first_port);
@@ -1349,22 +1434,18 @@ int main(int argc, char* argv[]) {
         {
             // IPv6 clients are distinct addresses. An IPv4 client reaching an IPv6 socket appears
             // as ::ffff:127.0.0.1 and is the same client as on an IPv4 listener.
-            auto ipv6_listener = flexedge::node::http_listener::create(loops.loop(1), runtime,
-                listener_health, runtime_metrics, second_clients, second_worker_logs,
-                second_origin_connections, request_buffers, response_buffers,
-                asio::ip::tcp::endpoint(asio::ip::address_v6::loopback(), 0));
-            ipv6_listener->request_start();
+            auto ipv6_listener = flexedge::node::edge_listener::create(loops.loop(1), second_context,
+                asio::ip::tcp::endpoint(asio::ip::address_v6::loopback(), 0), nullptr);
+            start(ipv6_listener);
             auto ipv4 = connect_from(client_context, "127.0.0.1", "127.0.0.1", port);
             auto ipv6 = connect_from(client_context, "::1", "::1", ipv6_listener->local_endpoint().port());
             REQUIRE(connections_reach(2));
             REQUIRE(count_ips(connected_workers) == 2);
 #if !defined(_WIN32)
             // Windows IPv6 sockets are IPv6-only by default and cannot accept IPv4 clients.
-            auto mapped_listener = flexedge::node::http_listener::create(loops.loop(0), runtime,
-                listener_health, runtime_metrics, first_clients, first_worker_logs,
-                first_origin_connections, request_buffers, response_buffers,
-                asio::ip::tcp::endpoint(asio::ip::make_address("::ffff:127.0.0.1"), 0));
-            mapped_listener->request_start();
+            auto mapped_listener = flexedge::node::edge_listener::create(loops.loop(0), first_context,
+                asio::ip::tcp::endpoint(asio::ip::make_address("::ffff:127.0.0.1"), 0), nullptr);
+            start(mapped_listener);
             auto mapped = connect_from(client_context, "127.0.0.1", "127.0.0.1",
                 mapped_listener->local_endpoint().port());
             REQUIRE(connections_reach(3));
@@ -1443,7 +1524,10 @@ int main(int argc, char* argv[]) {
             fallback->set_redirect_url("/fallback");
             apply(runtime, std::move(advanced));
             const auto answer = request(port, "www.example.com", "x-channel: beta\r\n", "/old/a%2Fb?q=a+b", "POST", "payload");
-            REQUIRE(answer.starts_with("HTTP/1.1 " + std::string(flexedge::route_policy::redirect_status_line(status)) + "\r\n"));
+            REQUIRE(answer.starts_with("HTTP/1.1 " + std::to_string(status) + ' ' +
+                                       std::string(ruvia::http_reason_phrase(ruvia::http_status_code::from_value(
+                                           static_cast<std::uint16_t>(status)))) +
+                                       "\r\n"));
             REQUIRE(answer.find("Location: /new/a%2Fb?q=a+b#end\r\n") != std::string::npos);
             REQUIRE(request(port, "www.example.com", "X-Channel: stable\r\n", "/old/a?q=a+b", "POST", "payload").starts_with("HTTP/1.1 302 Found"));
             REQUIRE(request(port, "www.example.com", "X-Channel: beta\r\n", "/old/a?q=other", "POST", "payload").starts_with("HTTP/1.1 302 Found"));
@@ -1725,20 +1809,23 @@ int main(int argc, char* argv[]) {
         health_website->mutable_origins(0)->set_host("127.0.0.1");
         health_website->mutable_origins(0)->set_port(health_port);
         apply(runtime, std::move(health_snapshot));
-        flexedge::node::origin_health_registry node_health;
-        node_health.publish(node_health.prepare({flexedge::node::origin_health_registry::get_key("website-1", "origin-1")}));
-        node_health.get_target("website-1", "origin-1").failure(1);
-        auto node_supervisor = flexedge::node::origin_health_supervisor::create(loops.loop(0), runtime, node_health,
-            first_origin_tls);
-        node_supervisor->request_start();
+        auto node_health =
+            flexedge::node::origin_health_supervisor::create(loops.loop(0), runtime, first_origin_tls);
+        const flexedge::node::origin_health_key_set health_keys{
+            {.website_id_ = "website-1", .origin_id_ = "origin-1"}};
+        set_health_origins(loops.loop(0), *node_health, health_keys);
+        node_health->target("website-1", "origin-1").failure(1);
+        REQUIRE(!settled_health(loops.loop(0), *node_health)->healthy("website-1", "origin-1"));
+        node_health->request_start();
         const auto node_healthy = waitUntil(
-            [&] { return node_health.healthy("website-1", "origin-1"); }, std::chrono::seconds(3));
+            [&] { return node_health->snapshot()->healthy("website-1", "origin-1"); },
+            std::chrono::seconds(3));
         if (!node_healthy) {
             std::cerr << "health requests=" << health_requests.load() << '\n';
         }
         REQUIRE(node_healthy);
         REQUIRE(health_requests.load() == 1);
-        node_supervisor->request_stop();
+        node_health->request_stop();
 
         const auto www_identity = make_identity("www.example.com", 1);
         const auto api_identity = make_identity("api.example.com", 2);
@@ -1776,18 +1863,18 @@ int main(int argc, char* argv[]) {
         auto* api_domain = tls_snapshot.mutableWebsite()->add_domains();
         api_domain->set_hostname("api.example.com");
         api_domain->set_https_enabled(true);
-        api_domain->set_certificate_digest(
-            flexedge::node::artifact_digest(tls_snapshot.objects.back().content()));
+        api_domain->set_certificate_digest(flexedge::node::artifact_digest(
+            flexedge::node::serialize_artifact(tls_snapshot.contents.back())));
         apply(runtime, std::move(tls_snapshot));
         flexedge::node::tls_context_registry tls_contexts;
         tls_contexts.publish(
             std::make_shared<const flexedge::node::tls_context_set>(*runtime.config()));
-        auto https_listener = flexedge::node::https_listener::create(
-            loops.loop(0), runtime, node_health, tls_contexts, runtime_metrics, first_clients,
-            first_worker_logs, first_origin_connections, request_buffers, response_buffers,
-            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        auto https_listener = flexedge::node::edge_listener::create(loops.loop(0),
+            session_context(*node_health, first_metrics, first_clients, first_worker_logs,
+                first_origin_connections, request_buffers),
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0), &tls_contexts);
         const auto https_port = https_listener->local_endpoint().port();
-        https_listener->request_start();
+        start(https_listener);
         // Only HTTP/1.1 is offered downstream, even to clients that also offer h2.
         REQUIRE(tls_alpn(https_port, "www.example.com", true) == "http/1.1");
         REQUIRE(tls_alpn(https_port, "www.example.com", false) == "http/1.1");
@@ -1887,25 +1974,27 @@ int main(int argc, char* argv[]) {
         flexedge::node::origin_tls_context trusted_origin_tls(localhost_identity.certificate_);
         flexedge::node::origin_connection_pool trusted_origin_connections(loops.loop(0).executor(),
             trusted_origin_tls);
-        flexedge::node::origin_health_registry secure_origin_health;
-        secure_origin_health.publish(secure_origin_health.prepare({flexedge::node::origin_health_registry::get_key("website-1", "origin-1")}));
-        auto secure_origin_listener = flexedge::node::http_listener::create(
-            loops.loop(0), runtime, secure_origin_health, runtime_metrics, first_clients,
-            first_worker_logs, trusted_origin_connections, request_buffers, response_buffers,
-            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        auto secure_origin_health =
+            flexedge::node::origin_health_supervisor::create(loops.loop(0), runtime, trusted_origin_tls);
+        set_health_origins(loops.loop(0), *secure_origin_health, health_keys);
+        const auto secure_origin_context = session_context(*secure_origin_health, first_metrics,
+            first_clients, first_worker_logs, trusted_origin_connections, request_buffers);
+        auto secure_origin_listener = flexedge::node::edge_listener::create(loops.loop(0),
+            secure_origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0),
+            nullptr);
         const auto secure_edge_port = secure_origin_listener->local_endpoint().port();
-        secure_origin_listener->request_start();
+        start(secure_origin_listener);
         const auto secure_origin_response = request(secure_edge_port);
         REQUIRE(secure_origin_response.starts_with("HTTP/1.1 200 OK\r\n"));
         REQUIRE(secure_origin_response.ends_with("\r\n\r\nSECURE"));
 
-        secure_origin_health.get_target("website-1", "origin-1").failure(1);
-        auto secure_origin_supervisor = flexedge::node::origin_health_supervisor::create(
-            loops.loop(0), runtime, secure_origin_health, trusted_origin_tls);
-        secure_origin_supervisor->request_start();
-        REQUIRE(waitUntil([&] { return secure_origin_health.healthy("website-1", "origin-1"); },
+        secure_origin_health->target("website-1", "origin-1").failure(1);
+        REQUIRE(!settled_health(loops.loop(0), *secure_origin_health)->healthy("website-1", "origin-1"));
+        secure_origin_health->request_start();
+        REQUIRE(waitUntil(
+            [&] { return secure_origin_health->snapshot()->healthy("website-1", "origin-1"); },
             std::chrono::seconds(3)));
-        secure_origin_supervisor->request_stop();
+        secure_origin_health->request_stop();
         secure_origin_listener->request_stop();
 
         asio::ssl::context buffered_origin_server_context(asio::ssl::context::tls_server);
@@ -1962,12 +2051,11 @@ int main(int argc, char* argv[]) {
         buffered_origin_website->mutable_origins(0)->set_host("localhost");
         buffered_origin_website->mutable_origins(0)->set_port(buffered_origin_port);
         apply(runtime, std::move(buffered_origin_snapshot));
-        auto buffered_origin_listener = flexedge::node::http_listener::create(
-            loops.loop(0), runtime, secure_origin_health, runtime_metrics, first_clients,
-            first_worker_logs, trusted_origin_connections, request_buffers, response_buffers,
-            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        auto buffered_origin_listener = flexedge::node::edge_listener::create(loops.loop(0),
+            secure_origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0),
+            nullptr);
         const auto buffered_origin_edge_port = buffered_origin_listener->local_endpoint().port();
-        buffered_origin_listener->request_start();
+        start(buffered_origin_listener);
         const auto first_buffered_origin_response =
             request(buffered_origin_edge_port, "WWW.Example.COM:80", "Accept-Encoding: gzip\r\n");
         const auto second_buffered_origin_response =
@@ -2075,13 +2163,14 @@ int main(int argc, char* argv[]) {
         reusable_website->mutable_origins(0)->set_host("127.0.0.1");
         reusable_website->mutable_origins(0)->set_port(reusable_origin_port);
         apply(runtime, std::move(reusable_origin_snapshot));
-        flexedge::node::origin_health_registry reusable_origin_health;
-        auto reusable_edge_listener = flexedge::node::http_listener::create(
-            loops.loop(0), runtime, reusable_origin_health, runtime_metrics, first_clients,
-            first_worker_logs, first_origin_connections, request_buffers, response_buffers,
-            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        auto reusable_origin_health =
+            flexedge::node::origin_health_supervisor::create(loops.loop(0), runtime, first_origin_tls);
+        auto reusable_edge_listener = flexedge::node::edge_listener::create(loops.loop(0),
+            session_context(*reusable_origin_health, first_metrics, first_clients,
+                first_worker_logs, first_origin_connections, request_buffers),
+            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0), nullptr);
         const auto reusable_edge_port = reusable_edge_listener->local_endpoint().port();
-        reusable_edge_listener->request_start();
+        start(reusable_edge_listener);
         const auto first_reused_response = request(reusable_edge_port);
         const auto second_reused_response = request(reusable_edge_port);
         REQUIRE(first_reused_response.ends_with("\r\n\r\nREUSE"));
@@ -2093,10 +2182,8 @@ int main(int argc, char* argv[]) {
         second_listener->request_stop();
         // Posting cleanup after shutdown must not keep an otherwise unused
         // listener (and its event loop handle) alive indefinitely.
-        auto stopped_loop_listener = flexedge::node::http_listener::create(
-            loops.loop(0), runtime, listener_health, runtime_metrics, first_clients, first_worker_logs,
-            first_origin_connections, request_buffers, response_buffers,
-            asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        auto stopped_loop_listener = flexedge::node::edge_listener::create(loops.loop(0),
+            first_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0), nullptr);
         const std::weak_ptr stopped_loop_weak(stopped_loop_listener);
         control_loops.stop();
         control_loops.join();

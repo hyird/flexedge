@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { accessLogStatusTone, filterAccessLogs } from './access-log-filter'
+import { accessLogStatus, filterAccessLogs } from './access-log-filter'
 import type { AccessLog } from './access-log-schema'
 
 function log(overrides: Partial<AccessLog>): AccessLog {
@@ -52,11 +52,11 @@ describe('filterAccessLogs', () => {
   })
 })
 
-describe('accessLogStatusTone', () => {
-  it('maps response classes to tones', () => {
-    expect(accessLogStatusTone(204)).toBe('success')
-    expect(accessLogStatusTone(301)).toBe('accent')
-    expect(accessLogStatusTone(429)).toBe('warning')
-    expect(accessLogStatusTone(503)).toBe('danger')
+describe('accessLogStatus', () => {
+  it('labels the code and tones it by response class', () => {
+    expect(accessLogStatus(204)).toEqual({ label: '204', tone: 'success' })
+    expect(accessLogStatus(301).tone).toBe('accent')
+    expect(accessLogStatus(429).tone).toBe('warning')
+    expect(accessLogStatus(503).tone).toBe('danger')
   })
 })

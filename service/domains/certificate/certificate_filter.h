@@ -6,7 +6,6 @@
 #include <string>
 #include <string_view>
 
-#include "service/common/database.h"
 #include "service/common/http.h"
 
 namespace service::certificate {
@@ -55,20 +54,6 @@ inline ruvia::db_expression certificate_abnormal_predicate(ruvia::db_query& quer
             ruvia::db_binary_operator::and_value,
             query.unary(ruvia::db_unary_operator::is_not_null,
                 query.column("last_error", table))));
-}
-
-// SQL text of the predicates over alias `cert`, for raw queries this round
-// does not rewrite. Rendered once from the structured expressions above.
-inline const std::string& certificate_expiring_sql() {
-    static const std::string sql = service::common::render_constant_predicate(
-        [](ruvia::db_query& query) { return certificate_expiring_predicate(query, "cert"); });
-    return sql;
-}
-
-inline const std::string& certificate_abnormal_sql() {
-    static const std::string sql = service::common::render_constant_predicate(
-        [](ruvia::db_query& query) { return certificate_abnormal_predicate(query, "cert"); });
-    return sql;
 }
 
 }  // namespace service::certificate

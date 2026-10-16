@@ -1,31 +1,46 @@
 #pragma once
 
+#include <ruvia/core/task.h>
 #include <ruvia/core/timer.h>
 #include <ruvia/web/db/db_query.h>
 #include <ruvia/web/db/db_repository.h>
 #include <ruvia/web/db/db_transaction.h>
 
+#include <array>
 #include <charconv>
 #include <chrono>
-#include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
+#include "service/features/background/reliable_stream.h"
 #include "service/features/background/work_available.h"
-#include "service/features/live_resource/node_presence.h"
 #include "service/features/live_resource/notifications.h"
 #include "service/features/live_resource/outbox_entity.h"
 #include "service/features/live_resource/redis_snapshot_cache.h"
-#include "service/features/log_ingest/notifications.h"
 #include "service/features/logging/logger.h"
-#include "service/features/node_channel/projection.h"
 #include "service/utils/token.h"
 
+// The transactional outbox: a business transaction inserts one row with its
+// committed notification; a claim loop relays each row to its Redis stream
+// and deletes it. Its participants are a compile-time list of types, each
+// optionally providing
+//   static constexpr std::string_view kind;
+//   static ruvia::task<void> publish(ruvia::redis_handle, std::string_view id, std::string_view payload);
+//       atomically publishes one row of `kind`, including owned business effects;
+//   template <typename context_type, typename rows_type>
+//   static ruvia::task<std::set<std::string>> prepare(ruvia::db_transaction&, context_type&, const rows_type&);
+//       work inside the claim transaction before any row of the batch is
+//       published; returns the ids of rows that stay durable for a retry.
 namespace service::live_resource {
 
 namespace outbox {
+
+inline constexpr std::string_view work_type{"outbox"};
+inline constexpr std::string_view resource_kind{"resource"};
 
 inline std::string pack(std::span<const std::pair<std::string, std::string>> fields) {
     std::string payload;
@@ -83,6 +98,15 @@ ruvia::task<void> erase(database_type& database, std::string_view id) {
     (void)co_await database.execute(query);
 }
 
+// One committed row as its relay publishes it.
+struct publication final {
+    std::string_view stream_;
+    std::int64_t max_entries_{};
+    std::vector<std::pair<std::string, std::string>> fields_{};
+    // Snapshot cache scopes invalidated atomically with the append.
+    std::vector<std::string> invalidations_{};
+};
+
 // Atomically deduplicates a committed event and publishes it. The same event
 // may be retried after the sender dies between Redis and the database commit.
 inline constexpr std::string_view publish_script{R"lua(
@@ -93,107 +117,27 @@ if stream_type ~= 'none' and stream_type ~= 'stream' then
     return redis.error_reply('notification target must be a stream')
 end
 snapshot_validate_generations(KEYS[3], KEYS[4], KEYS[5])
-local has_presence = ARGV[#ARGV-2] ~= ''
-if has_presence then
-    presence_validate(KEYS[6])
-    local tenant, node, seen = ARGV[#ARGV-3], ARGV[#ARGV-2], tonumber(ARGV[#ARGV-1])
-    if tenant == '' or string.find(tenant, '|', 1, true) or string.find(node, '|', 1, true) or not seen or seen <= 0 then
-        return redis.error_reply('invalid presence metadata')
-    end
-end
 local scopes = {}
 for i=1,tonumber(ARGV[2]) do scopes[i] = ARGV[2+i] end
-local entry = redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[1], '*', unpack(ARGV, 3+#scopes, #ARGV-4))
+local entry = redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[1], '*', unpack(ARGV, 3+#scopes, #ARGV-1))
 snapshot_invalidate(KEYS[3], KEYS[4], KEYS[5], scopes, ARGV[#ARGV])
-if has_presence then presence_record(KEYS[6], ARGV[#ARGV-3], ARGV[#ARGV-2], tonumber(ARGV[#ARGV-1])) end
 redis.call('SET', KEYS[1], entry, 'EX', 604800)
 return entry
 )lua"};
 
-inline ruvia::task<void> publish(ruvia::redis_handle redis, std::string_view id, std::string_view kind,
-    std::string_view payload) {
-    std::string stream;
-    std::vector<std::pair<std::string, std::string>> fields;
-    std::vector<std::string> invalidations;
-    std::string presence_tenant, presence_node;
-    std::int64_t presence_seen{};
-    if (kind == "resource") {
-        stream = notifications::stream_key;
-        fields = unpack(payload);
-        auto notification = notifications::decode(fields);
-        if (!notification) {
-            throw std::runtime_error("invalid resource outbox notification");
-        }
-        presence_tenant = notification->tenant_id_;
-        presence_node = notification->node_id_;
-        presence_seen = notification->node_seen_unix_ms_;
-        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch())
-                             .count();
-        if (!presence_node.empty() && presence_seen > 0 && now - presence_seen > 15000) {
-            // A delayed patch must not replace newer runtime. Preserve its
-            // original presence timestamp and request one recovery snapshot.
-            notification->node_runtime_.clear();
-            notification->origin_runtime_.clear();
-            notification->missed_until_ = now;
-        }
-        if (notification->missed_until_) {
-            notification->missed_until_ = now;
-            fields = notifications::encode(*notification);
-        }
-        for (const auto& change : notification->changes_) {
-            const auto scopes = redis_snapshot_cache::invalidation_scopes(notification->tenant_id_, change.resource_, change.id_);
-            invalidations.insert(invalidations.end(), scopes.begin(), scopes.end());
-        }
-        if (notification->missed_until_) {
-            invalidations.push_back(notification->tenant_id_ == notifications::all_tenants ? "*" : redis_snapshot_cache::tenant_scope(notification->tenant_id_));
-        }
-    } else if (kind == "log") {
-        stream = service::log_ingest::notifications::stream_key;
-        fields = unpack(payload);
-        std::string_view tenant, type, resource_id;
-        for (const auto& [name, value] : fields) {
-            if (name == "tenant_id") {
-                tenant = value;
-            }
-            if (name == "resource_type") {
-                type = value;
-            }
-            if (name == "resource_id") {
-                resource_id = value;
-            }
-        }
-        if (tenant.empty() || resource_id.empty() || (type != "access" && type != "node")) {
-            throw std::runtime_error("invalid log outbox notification");
-        }
-        if (type == "access") {
-            invalidations = redis_snapshot_cache::invalidation_scopes(tenant, resource::access_history, resource_id);
-            invalidations.push_back(redis_snapshot_cache::resource_scope(tenant, resource::overview_traffic));
-        }
-    } else if (kind == "task") {
-        if (payload != "provider-verification" && payload != "dns-sync" && payload != "certificate" && payload != "website-dispatch") {
-            throw std::invalid_argument("unsupported task wakeup type");
-        }
-        stream = service::background::work_available::stream_key;
-        fields.emplace_back("type", payload);
-    } else {
-        throw std::runtime_error("invalid outbox event kind");
-    }
-    fields.emplace_back("event_id", id);
-    std::vector<std::string> keys{"flexedge:notification-published:v1:" + std::string(id), stream};
+inline ruvia::task<void> publish(ruvia::redis_handle redis, std::string_view id, publication value) {
+    value.fields_.emplace_back("event_id", id);
+    std::vector<std::string> keys{"flexedge:notification-published:v1:" + std::string(id), std::string(value.stream_)};
     for (const auto key : redis_snapshot_cache::generation_keys) {
         keys.emplace_back(key);
     }
-    keys.emplace_back(node_presence::deadlines_key);
-    std::vector<std::string> arguments{std::to_string(kind == "resource" ? notifications::max_entries : kind == "task" ? 1024
-                                                                                                                       : service::log_ingest::notifications::max_entries),
-        std::to_string(invalidations.size())};
-    arguments.insert(arguments.end(), invalidations.begin(), invalidations.end());
-    for (const auto& [name, value] : fields) {
+    std::vector<std::string> arguments{std::to_string(value.max_entries_), std::to_string(value.invalidations_.size())};
+    arguments.insert(arguments.end(), value.invalidations_.begin(), value.invalidations_.end());
+    for (const auto& [name, field] : value.fields_) {
         arguments.push_back(name);
-        arguments.push_back(value);
+        arguments.push_back(field);
     }
-    arguments.insert(arguments.end(), {presence_tenant, presence_node, std::to_string(presence_seen), std::string(id)});
+    arguments.emplace_back(id);
     std::vector<std::string_view> key_views, argument_views;
     for (const auto& key : keys) {
         key_views.push_back(key);
@@ -201,7 +145,7 @@ inline ruvia::task<void> publish(ruvia::redis_handle redis, std::string_view id,
     for (const auto& argument : arguments) {
         argument_views.push_back(argument);
     }
-    const auto script = std::string(redis_snapshot_cache::invalidation_lua) + std::string(node_presence::record_lua) + std::string(publish_script);
+    const auto script = std::string(redis_snapshot_cache::invalidation_lua) + std::string(publish_script);
     const auto result = co_await redis.eval(script, key_views, argument_views);
     service::utils::require_redis_success(result, "could not publish committed notification");
     if (result.kind() != ruvia::redis_value::kind_type::string) {
@@ -209,7 +153,33 @@ inline ruvia::task<void> publish(ruvia::redis_handle redis, std::string_view id,
     }
 }
 
-template <typename context_type>
+// Dispatches to the owner of the durable event kind. The owner publishes its
+// Redis effects as one atomic operation; the outbox only claims and retries.
+template <typename... participants>
+ruvia::task<void> publish_event(ruvia::redis_handle redis, std::string_view id,
+    std::string_view kind, std::string_view payload) {
+    bool published{};
+    const auto publish_with = [&]<typename participant>() -> ruvia::task<void> {
+        if constexpr (requires { participant::publish(redis, id, payload); }) {
+            if (!published && participant::kind == kind) {
+                co_await participant::publish(redis, id, payload);
+                published = true;
+            }
+        }
+    };
+    (co_await publish_with.template operator()<participants>(), ...);
+    if (!published) {
+        throw std::runtime_error("invalid outbox event kind");
+    }
+}
+
+// Delay before durable retry `attempts` of an undeliverable row.
+[[nodiscard]] constexpr std::chrono::seconds retry_delay(std::int32_t attempts) noexcept {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        service::background::reliable_stream::backoff(attempts, std::chrono::seconds(2), std::chrono::seconds(64)));
+}
+
+template <typename... participants, typename context_type>
 ruvia::task<bool> deliver_batch(context_type& context) {
     auto transaction = co_await context.db().begin_transaction();
     ruvia::db_query expressions;
@@ -221,55 +191,43 @@ ruvia::task<bool> deliver_batch(context_type& context) {
         .take(32)
         .set_lock({.mode_ = ruvia::db_row_lock::update, .skip_locked_ = true});
     const auto events = co_await pending.get_many();
-    // The alias owns one DB connection. Reuse the claim transaction, and
-    // acquire node locks in a stable tenant/node order across all claimants.
-    std::set<std::string> projection_tenants;
-    std::set<std::string> failed_projections;
+    // The alias owns one DB connection: participants reuse this claim
+    // transaction, including its row locks, instead of a second lease.
+    std::vector<ruvia::task<std::set<std::string>>> preparations;
+    const auto prepare_with = [&]<typename participant>() {
+        if constexpr (requires { participant::prepare(transaction, context, events); }) {
+            preparations.push_back(participant::prepare(transaction, context, events));
+        }
+    };
+    (prepare_with.template operator()<participants>(), ...);
+    std::set<std::string> deferred;
+    for (auto& preparation : preparations) {
+        deferred.merge(co_await std::move(preparation));
+    }
     std::vector<std::string> completed_keys;
     for (const auto& event : events) {
-        if (event.template get<"kind">() == "resource") {
-            const auto notification = notifications::decode(unpack(event.template get<"payload">()));
-            if (notification && notification->node_config_) {
-                projection_tenants.insert(notification->tenant_id_);
-            }
-        }
-    }
-    for (const auto& tenant : projection_tenants) {
-        try {
-            co_await service::node_channel::refresh(transaction, context.redis(), tenant);
-        } catch (const ruvia::db_error&) {
-            throw;
-        } catch (const std::exception&) {
-            failed_projections.insert(tenant);
-        }
-    }
-    for (const auto& event : events) {
+        const std::string_view id{event.template get<"id">()};
         bool failed{};
         try {
-            if (event.template get<"kind">() == "resource") {
-                const auto notification = notifications::decode(unpack(event.template get<"payload">()));
-                if (notification && notification->node_config_ && failed_projections.contains(notification->tenant_id_)) {
-                    throw std::runtime_error("node channel projection is not ready");
-                }
+            if (deferred.contains(std::string(id))) {
+                throw std::runtime_error("outbox event is not ready for publication");
             }
-            co_await publish(context.redis().with_options({.timeout_ = notifications::send_timeout,
-                                 .stop_token_ = context.get_stop_token()}),
-                event.template get<"id">(),
-                event.template get<"kind">(), event.template get<"payload">());
+            co_await publish_event<participants...>(context.redis().with_options({.timeout_ = notifications::send_timeout,
+                                                        .stop_token_ = context.get_stop_token()}),
+                id, event.template get<"kind">(), event.template get<"payload">());
         } catch (const std::exception&) {
             failed = true;
         }
         if (failed) {
             ruvia::db_query retry;
             const auto attempts = std::min<std::int32_t>(event.template get<"attempts">() + 1, 1000000);
-            const auto seconds = std::int64_t{1} << std::min(attempts, 6);
-            const std::vector<ruvia::db_named_argument> interval{{"secs", retry.value(seconds)}};
-            retry.update(outbox_entity::table_name()).set("attempts", retry.value(attempts)).set("available_at", retry.binary(retry.call("now"), ruvia::db_binary_operator::add, retry.call("make_interval", {}, interval))).where(retry.binary(retry.column("id"), ruvia::db_binary_operator::equal, retry.value(std::string_view{event.template get<"id">()})));
+            const std::vector<ruvia::db_named_argument> interval{{"secs", retry.value(retry_delay(attempts).count())}};
+            retry.update(outbox_entity::table_name()).set("attempts", retry.value(attempts)).set("available_at", retry.binary(retry.call("now"), ruvia::db_binary_operator::add, retry.call("make_interval", {}, interval))).where(retry.binary(retry.column("id"), ruvia::db_binary_operator::equal, retry.value(id)));
             (void)co_await transaction.execute(retry);
             service::logging::error("Notification outbox delivery deferred; event remains durable");
         } else {
-            co_await erase(transaction, event.template get<"id">());
-            completed_keys.push_back("flexedge:notification-published:v1:" + std::string(event.template get<"id">()));
+            co_await erase(transaction, id);
+            completed_keys.push_back("flexedge:notification-published:v1:" + std::string(id));
         }
         if (context.get_stop_token().stop_requested()) {
             break;
@@ -293,25 +251,23 @@ ruvia::task<bool> deliver_batch(context_type& context) {
 
 inline constexpr auto maximum_wait = std::chrono::seconds(15);
 
-inline ruvia::task<void> wake(ruvia::redis_handle redis) {
-    co_await service::background::work_available::publish(redis, "outbox");
-}
-
-template <typename context_type>
+// Each Worker claims committed rows. Its own commits wake it at once; rows of
+// a busy or exited committer are found at the next bounded scan.
+template <typename... participants, typename context_type>
 ruvia::task<void> run_worker(context_type& context) {
-    // Bind before catchup so a hint arriving while the durable batch drains
-    // remains queued until this task starts waiting.
-    auto& signal = service::background::work_available::get_signals(context).for_type("outbox");
+    // Subscribe before the first claim so a commit of this worker during the
+    // drain remains queued until this task starts waiting.
+    const auto own = service::background::work_available::subscribe(context, work_type);
     while (!context.get_stop_token().stop_requested()) {
         bool retry{};
         try {
-            if (co_await deliver_batch(context)) {
+            if (co_await deliver_batch<participants...>(context)) {
                 continue;
             }
 
             // A wakeup is a latency hint. The database remains authoritative:
-            // scan at the next durable deadline and at most 15 seconds after a
-            // missed hint, stream reset or Redis recovery, including empty scans.
+            // scan at the next durable deadline and at most 15 seconds after
+            // another worker committed or Redis recovered, including empty scans.
             ruvia::db_query available;
             const auto delay_ms = available.binary(
                 available.extract(ruvia::db_date_part::epoch,
@@ -327,7 +283,7 @@ ruvia::task<void> run_worker(context_type& context) {
                     wait = std::min(wait, std::chrono::milliseconds(std::max<std::int64_t>(100, *delay)));
                 }
             }
-            co_await signal.wait(wait, context.get_stop_token());
+            (void)co_await own.receive_for(wait, context.get_stop_token());
         } catch (const std::exception&) {
             if (context.get_stop_token().stop_requested()) {
                 break;
@@ -346,6 +302,13 @@ ruvia::task<void> run_worker(context_type& context) {
 
 }  // namespace outbox
 
+// Wakes the calling worker's own outbox claim loop for rows it committed.
+template <typename context_type>
+void wake_own_outbox(context_type& context) {
+    static constexpr std::array work{outbox::work_type};
+    service::background::work_available::wake_own_claims(context, work);
+}
+
 template <typename transaction_type>
 ruvia::task<std::string> enqueue_notification(transaction_type& transaction,
     const notifications::resource_notification& value, std::chrono::seconds delay = {}) {
@@ -354,7 +317,7 @@ ruvia::task<std::string> enqueue_notification(transaction_type& transaction,
     }
     const auto durable = notifications::bounded(value);
     const auto fields = notifications::encode(durable);
-    const auto id = co_await outbox::insert(transaction, "resource", outbox::pack(fields));
+    const auto id = co_await outbox::insert(transaction, outbox::resource_kind, outbox::pack(fields));
     if (delay > std::chrono::seconds::zero()) {
         ruvia::db_query defer;
         const std::vector<ruvia::db_named_argument> interval{{"secs", defer.value(delay.count())}};
@@ -364,24 +327,8 @@ ruvia::task<std::string> enqueue_notification(transaction_type& transaction,
     co_return id;
 }
 
-template <typename transaction_type>
-ruvia::task<void> enqueue_log(transaction_type& transaction, std::string_view type,
-    std::string_view tenant_id, std::string_view resource_id) {
-    if (type != "access" && type != "node") {
-        throw std::invalid_argument("unsupported outbox log resource");
-    }
-    const std::vector<std::pair<std::string, std::string>> fields{
-        {"tenant_id", std::string(tenant_id)}, {"resource_type", std::string(type)}, {"resource_id", std::string(resource_id)}};
-    (void)co_await outbox::insert(transaction, "log", outbox::pack(fields));
-}
-
-template <typename transaction_type>
-ruvia::task<void> enqueue_worker_wakeup(transaction_type& transaction, std::string_view type) {
-    (void)co_await outbox::insert(transaction, "task", type);
-}
-
-// Only the durable claim loop publishes. Producers send an availability hint
-// after commit; a lost hint is covered by the bounded recovery deadline.
+// Only the durable claim loop publishes. The committing worker wakes its own
+// loop after commit; other workers' bounded scans cover a busy committer.
 template <typename context_type>
 ruvia::task<void> wake_committed_notification(context_type& context, std::string_view id,
     const notifications::resource_notification& value) {
@@ -391,12 +338,7 @@ ruvia::task<void> wake_committed_notification(context_type& context, std::string
     if constexpr (requires { context.record_committed_notification(value); }) {
         co_await context.record_committed_notification(value);
     } else {
-        try {
-            co_await outbox::wake(context.redis().with_options({.timeout_ = notifications::send_timeout,
-                .stop_token_ = context.get_stop_token()}));
-        } catch (const std::exception&) {
-            // The outbox has a bounded durable-work recovery deadline.
-        }
+        wake_own_outbox(context);
     }
 }
 

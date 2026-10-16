@@ -3,6 +3,8 @@
 #include <array>
 #include <charconv>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
@@ -130,6 +132,12 @@ void verify_missing_xdb() {
 int main(int argc, char** argv) {
     try {
         const std::string_view mode = argc > 1 ? argv[1] : "";
+        const auto path = [](const char* name) {
+            const auto* value = std::getenv(name);
+            return std::filesystem::path(value ? value : "");
+        };
+        service::geoip::configure_xdb_database({.ipv4_path_ = path("FLEXEDGE_XDB_V4_PATH"),
+            .ipv6_path_ = path("FLEXEDGE_XDB_V6_PATH")});
         if (mode == "with-xdb") {
             verify_with_xdb();
         } else if (mode == "missing-xdb") {

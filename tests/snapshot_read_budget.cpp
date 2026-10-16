@@ -15,6 +15,7 @@
 #include <string_view>
 
 #include "service/features/live_resource/read_snapshot.h"
+#include "support/postgres_test.h"
 
 namespace {
 
@@ -261,13 +262,6 @@ private:
     }
 };
 
-std::string required_environment(const char* key) {
-    const char* value = std::getenv(key);
-    if (value == nullptr || *value == '\0') {
-        throw std::runtime_error(std::string("missing ") + key);
-    }
-    return value;
-}
 
 }  // namespace
 
@@ -276,30 +270,17 @@ int main(int argc, char** argv) {
         if (argc != 2) {
             throw std::runtime_error("expected loopback HTTP port");
         }
-        const auto host = required_environment("PGHOST");
-        const auto database = required_environment("PGDATABASE");
-        if (host != "127.0.0.1" || !database.ends_with("_auth_qa")) {
-            throw std::runtime_error("refusing PostgreSQL target outside isolated loopback *_auth_qa");
+        const auto base = test_support::isolated_postgres_config();
+        if (!base) {
+            return 77;
         }
-        const auto port_text = required_environment("PGPORT");
-        const auto port = static_cast<std::uint16_t>(std::stoul(port_text));
-        const auto username = required_environment("PGUSER");
-        const auto password = required_environment("PGPASSWORD");
-
-        ruvia::db_config db;
-        db.driver_ = ruvia::db_driver::postgresql;
-        db.host_ = host;
-        db.port_ = port;
-        db.username_ = username;
-        db.password_ = password;
-        db.tls_.mode_ = ruvia::client_tls_mode::disabled;
-        db.database_ = database;
+        const test_support::postgres_test_database temporary_database(*base);
         auto& app = ruvia::app();
         // Mirrors service/server.cpp: stop() closes in-flight requests at once.
         app.server({.worker_count_ = 2,
                        .process_signal_handlers_ = ruvia::process_signal_handler_policy::install,
                        .drain_timeout_ = std::chrono::milliseconds::zero()})
-            .database({.alias_ = "default", .config_ = std::move(db)})
+            .database({.alias_ = "default", .config_ = temporary_database.config()})
             .listen({.address_ = "127.0.0.1", .http_ = static_cast<std::uint16_t>(std::stoul(argv[1]))});
         app.run();
         return 0;

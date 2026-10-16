@@ -1,5 +1,5 @@
 import { Chip } from '@heroui/react'
-import { describeStatus, type StatusTone } from '@/lib/status'
+import type { StatusDescriptor, StatusTone } from '@/lib/status'
 import { cn } from '@/lib/utils'
 
 function ToneChip({ tone, label }: { tone: StatusTone; label: string }) {
@@ -26,26 +26,18 @@ function ToneChip({ tone, label }: { tone: StatusTone; label: string }) {
   )
 }
 
-/** Dot + text status on one line that never wraps or shrinks. `label`/`tone`
- * override the shared mapping when a domain needs its own wording (e.g. task
- * states). `reserve` lists every label this slot can show (`statusLabels`):
- * the slot keeps the widest one's width, so switching states never moves
- * neighbouring text or changes the column width. */
+/** Dot + text status on one line that never wraps or shrinks. Pass the
+ * descriptor from the owning domain's dictionary (`*-display.ts`), e.g.
+ * `<StatusChip {...describeStatus(certificateStatuses, status)} />`.
+ * `reserve` lists every label this slot can show (`statusReserve`): the slot
+ * keeps the widest one's width, so switching states never moves neighbouring
+ * text or changes the column width. */
 export function StatusChip({
-  status,
   label,
   tone,
   reserve,
-}: {
-  status?: string
-  label?: string
-  tone?: StatusTone
-  reserve?: readonly string[]
-}) {
-  const described = describeStatus(status)
-  const chip = (
-    <ToneChip tone={tone ?? described.tone} label={label ?? described.label} />
-  )
+}: StatusDescriptor & { reserve?: readonly string[] }) {
+  const chip = <ToneChip tone={tone} label={label} />
   if (!reserve?.length) return chip
   return (
     <span className='inline-grid shrink-0 justify-items-start align-middle'>

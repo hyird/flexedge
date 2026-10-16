@@ -8,6 +8,7 @@
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -122,21 +123,17 @@ private:
 
 struct observations final {
     std::atomic_uint started_{};
-    std::array<std::atomic_uint, available::types.size()> awakened_{};
-    std::array<std::atomic_uint, available::types.size()> recovered_{};
+    // Wakeups each task type received on each of the two workers.
+    std::array<std::array<std::atomic_uint, available::types.size()>, 2> awakened_{};
     std::atomic_uint log_claims_{};
     std::atomic_uint joined_{};
 };
 
-ruvia::task<void> receive_hints(task_context& context, std::size_t index, observations& observed) {
-    auto& signal = available::get_signals(context).for_type(available::types[index]);
-    co_await signal.wait(10s, context.get_stop_token());
-    if (context.get_stop_token().stop_requested()) {
-        co_return;
-    }
+ruvia::task<void> receive_hints(task_context& context, std::size_t worker, std::size_t index, observations& observed) {
+    const auto own = available::subscribe(context, available::types[index]);
     observed.started_.fetch_add(1, std::memory_order_release);
-    co_await signal.wait(10s, context.get_stop_token());
-    if (context.get_stop_token().stop_requested()) {
+    const auto woken = co_await own.receive_for(30s, context.get_stop_token());
+    if (context.get_stop_token().stop_requested() || !woken.has_value()) {
         co_return;
     }
     if (available::types[index] == "log-ingest") {
@@ -147,24 +144,31 @@ ruvia::task<void> receive_hints(task_context& context, std::size_t index, observ
             observed.log_claims_.fetch_add(1, std::memory_order_release);
         }
     }
-    observed.awakened_[index].fetch_add(1, std::memory_order_release);
-    co_await signal.wait(10s, context.get_stop_token());
-    if (!context.get_stop_token().stop_requested()) {
-        observed.recovered_[index].fetch_add(1, std::memory_order_release);
-    }
+    observed.awakened_[worker][index].fetch_add(1, std::memory_order_release);
+    (void)co_await own.receive_for(30s, context.get_stop_token());
 }
 
-ruvia::task<void> run_suite(ruvia::web_worker_context& web, observations& observed) {
+ruvia::task<void> run_suite(ruvia::web_worker_context& web, std::size_t worker, observations& observed) {
     task_context context(web);
-    (void)available::get_signals(context);
     co_await logs::queue::initialize(context.redis());
     ruvia::task_scope tasks(web.worker(), {.resource_ = web.pool()});
-    tasks.spawn(live::read_notifications(context));
+    tasks.spawn(live::run_notification_reader<live::resource_subscriptions>(context));
     for (std::size_t index = 0; index < available::types.size(); ++index) {
-        tasks.spawn(receive_hints(context, index, observed));
+        tasks.spawn(receive_hints(context, worker, index, observed));
     }
     co_await tasks.join();
     observed.joined_.fetch_add(1, std::memory_order_release);
+}
+
+// One worker commits work of `type` (a log delivery is really enqueued) and
+// wakes only its own claim loop for it.
+ruvia::task<void> commit_own_work(ruvia::web_worker_context& web, std::string_view type) {
+    task_context context(web);
+    if (type == "log-ingest") {
+        require(co_await logs::queue::push(context.redis(), "isolated-log-delivery"), "the log queue accepts the delivery");
+    }
+    const std::array work{type};
+    available::wake_own_claims(context, work);
 }
 
 template <typename predicate_type>
@@ -182,6 +186,9 @@ std::uint16_t available_port() {
     return acceptor.local_endpoint().port();
 }
 
+// The former shared broadcast stream; no producer may write it any more.
+constexpr std::string_view retired_broadcast_key{"flexedge:work-available:v1"};
+
 }  // namespace
 
 int main() {
@@ -192,57 +199,25 @@ int main() {
         }
         config->blocking_pool_size_per_worker_ = 1;
         redis_inspector inspector(*config);
-        (void)inspector.request({"DEL", available::stream_key, available::generation_key, logs::queue::stream_key,
+        (void)inspector.request({"DEL", retired_broadcast_key, available::generation_key, logs::queue::stream_key,
             logs::queue::retained_bytes_key, logs::queue::retry_schedule_key, logs::queue::retry_attempts_key,
-            logs::queue::statistics_key, live::notifications::stream_key, logs::notifications::stream_key,
-            service::node_channel::completion_stream_key});
-        // A malformed shared hint key must fail before enqueue or ACK; Redis
-        // Lua errors cannot undo mutations that preceded the error.
-        (void)inspector.request({"SET", available::stream_key, "invalid-type"});
-        bool rejected{};
-        try {
-            (void)inspector.request({"EVAL", logs::queue::push_script, "3", logs::queue::stream_key,
-                logs::queue::retained_bytes_key, available::stream_key, "fixture", "100", "1000"});
-        } catch (const std::exception&) {
-            rejected = true;
-        }
-        require(rejected && inspector.request({"XLEN", logs::queue::stream_key})->integer == 0,
-            "failed hint validation must not leave an unannounced log payload");
-        (void)inspector.request({"XGROUP", "CREATE", logs::queue::stream_key, logs::queue::consumer_group, "0", "MKSTREAM"});
-        const auto fixture = inspector.request({"XADD", logs::queue::stream_key, "*", "payload", "fixture"});
-        const std::string fixture_id(fixture->str, fixture->len);
-        (void)inspector.request({"SET", logs::queue::retained_bytes_key, "7"});
-        (void)inspector.request({"XREADGROUP", "GROUP", logs::queue::consumer_group, "fixture-owner", "STREAMS", logs::queue::stream_key, ">"});
-        rejected = false;
-        try {
-            (void)inspector.request({"EVAL", logs::queue::finish_script, "6", logs::queue::stream_key,
-                logs::queue::retained_bytes_key, logs::queue::retry_schedule_key, logs::queue::retry_attempts_key,
-                logs::queue::statistics_key, available::stream_key, logs::queue::consumer_group, fixture_id, "fixture-owner"});
-        } catch (const std::exception&) {
-            rejected = true;
-        }
-        const auto pending = inspector.request({"XPENDING", logs::queue::stream_key, logs::queue::consumer_group});
-        require(rejected && pending->type == REDIS_REPLY_ARRAY && pending->element[0]->integer == 1 &&
-                    inspector.request({"XLEN", logs::queue::stream_key})->integer == 1,
-            "failed completion hint validation must retain the owned pending payload");
-        (void)inspector.request({"DEL", available::stream_key, logs::queue::stream_key, logs::queue::retained_bytes_key});
+            logs::queue::statistics_key, live::notifications::stream_key});
         auto& app = ruvia::app();
         app.redis({.config_ = *config});
         app.server({.worker_count_ = 2, .drain_timeout_ = 0ms});
         app.listen({.address_ = "127.0.0.1", .http_ = available_port()});
-        app.use_worker_state<available::signals>();
+        app.use_worker_state<available::claim_signals>();
         app.use_worker_state<live::hub>();
-        app.use_worker_state<logs::fanout::hub>();
-        app.use_worker_state<service::node_dispatch::fanout::hub>();
-        app.use_worker_state<service::node_channel::report_waits>();
         observations observed;
+        std::optional<decltype(app.workers())> workers;
         app.on_start([&] {
-            const auto workers = app.workers();
-            require(workers.size() == 2, "test requires two identical Web Workers");
-            for (const auto& worker : workers) {
-                require(worker.post([&](ruvia::web_worker_context& context) -> ruvia::task<void> {
-                                  co_await run_suite(context, observed);
-                              })
+            workers.emplace(app.workers());
+            require(workers->size() == 2, "test requires two identical Web Workers");
+            for (std::size_t index = 0; index < workers->size(); ++index) {
+                require((*workers)[index]
+                            .post([&observed, index](ruvia::web_worker_context& context) {
+                                return run_suite(context, index, observed);
+                            })
                             .accepted(),
                     "Web Worker suite was rejected");
             }
@@ -251,7 +226,7 @@ int main() {
         std::jthread producer([&](std::stop_token stop) {
             try {
                 await_condition([&] { return stop.stop_requested() || observed.started_.load(std::memory_order_acquire) == 14; },
-                    "all seven task types must register and receive startup catchup on both workers");
+                    "all seven task types must subscribe on both workers");
                 if (stop.stop_requested()) {
                     return;
                 }
@@ -259,38 +234,29 @@ int main() {
                     "two Web Workers must use exactly two blocking connections");
                 for (std::size_t index = 0; index < available::types.size(); ++index) {
                     const auto type = available::types[index];
-                    if (type == "log-ingest") {
-                        const auto maximum_entries = std::to_string(logs::queue::max_entries);
-                        const auto maximum_bytes = std::to_string(logs::queue::max_retained_bytes);
-                        const auto pushed = inspector.request({"EVAL", logs::queue::push_script, "3", logs::queue::stream_key,
-                            logs::queue::retained_bytes_key, available::stream_key, "isolated-log-delivery", maximum_entries, maximum_bytes});
-                        require(pushed->type == REDIS_REPLY_STRING, "production log enqueue Lua must append payload and hint atomically");
-                    } else if (type != "outbox") {
-                        (void)inspector.request({"XADD", available::stream_key, "*", "type", type});
-                    }
-                    await_condition([&] { return observed.awakened_[index].load(std::memory_order_acquire) == 2; },
-                        "each broadcast hint must wake that type on both independent workers");
+                    require((*workers)[0]
+                                .post([type](ruvia::web_worker_context& context) { return commit_own_work(context, type); })
+                                .accepted(),
+                        "the committing worker accepts its job");
+                    await_condition([&] { return observed.awakened_[0][index].load(std::memory_order_acquire) == 1; },
+                        "the committing worker wakes its own claim loop of that type");
                     for (std::size_t other = index + 1; other < available::types.size(); ++other) {
-                        if (type == "log-ingest" && available::types[other] == "outbox") {
-                            continue;
-                        }
-                        require(observed.awakened_[other].load(std::memory_order_acquire) == 0,
-                            "a hint must not wake unrelated task types");
+                        require(observed.awakened_[0][other].load(std::memory_order_acquire) == 0,
+                            "a wakeup must not wake unrelated task types");
                     }
                 }
+                std::this_thread::sleep_for(200ms);
+                for (std::size_t index = 0; index < available::types.size(); ++index) {
+                    require(observed.awakened_[1][index].load(std::memory_order_acquire) == 0,
+                        "committing work never wakes another worker; its bounded scan finds the work instead");
+                }
                 require(observed.log_claims_.load(std::memory_order_acquire) == 1,
-                    "both workers wake but the real log consumer group claims the payload once");
-                const auto retained = inspector.request({"XLEN", available::stream_key});
-                require(retained->integer == 7, "broadcast readers must not delete hints needed by another worker");
-                const auto groups = inspector.request({"XINFO", "GROUPS", available::stream_key});
-                require(groups->type == REDIS_REPLY_ARRAY && groups->elements == 0, "broadcast hints have no consumer group or pending metadata");
+                    "the committing worker's log consumer claims the payload");
+                require(inspector.request({"EXISTS", retired_broadcast_key})->integer == 0,
+                    "no producer appends a broadcast wakeup hint");
                 await_condition([&] { return inspector.blocked_readers().size() == 2; }, "combined readers must return to BLOCK");
                 for (const auto& id : inspector.blocked_readers()) {
                     (void)inspector.request({"CLIENT", "KILL", "ID", id});
-                }
-                for (std::size_t index = 0; index < available::types.size(); ++index) {
-                    await_condition([&] { return observed.recovered_[index].load(std::memory_order_acquire) == 2; },
-                        "connection recovery must wake every local task without another producer event");
                 }
                 await_condition([&] { return inspector.blocked_readers().size() == 2; }, "recovered readers must still use one connection each");
                 std::cout << "Redis CLIENT LIST: two real Web Workers, seven waiting task types each, exactly two blocked XREAD connections\n";
@@ -315,7 +281,7 @@ int main() {
         }
         require(observed.joined_.load(std::memory_order_acquire) == 2, "shutdown must join both readers and all local task waits");
         require(inspector.blocked_readers().empty(), "shutdown must leave no blocked reader connection");
-        std::cout << "Task wakeups: type isolation, broadcast, independent log claims, reconnect catchup and shutdown passed\n";
+        std::cout << "Task wakeups: committer-only wakeups, type isolation, single log claim, reader recovery and shutdown passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

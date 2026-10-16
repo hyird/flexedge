@@ -2,70 +2,47 @@
 
 #include <ruvia/core/task.h>
 #include <ruvia/web/db/db_transaction.h>
-#include <ruvia/web/model_json.h>
 
-#include <optional>
 #include <set>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 
-#include "service/common/domain_name.h"
+#include "service/features/background/queued_work.h"
 #include "service/features/dns_sync/queue.h"
-#include "service/features/website_config/mapper.h"
 
 namespace service::website_dns {
 
+// The zones the website's persisted managed domain claims belong to.
 template <typename db_type>
-inline ruvia::task<std::set<std::string>> managed_zone_ids(db_type& db, const std::string& tenant_id,
-    std::string_view config_json) {
-    const auto config = service::website_config::parse_stored(config_json);
-    if (!config) {
-        throw std::runtime_error("网站聚合配置损坏");
-    }
-
+inline ruvia::task<std::set<std::string>> managed_zone_ids(db_type& db, std::string_view tenant_id,
+    std::string_view website_id) {
     const auto rows = co_await db.query(
-        "SELECT id, domain FROM sys_dns_zone WHERE tenant_id = $1 AND deleted_at IS NULL ORDER "
-        "BY length(domain) DESC, sort ASC",
-        tenant_id);
+        "SELECT DISTINCT dns_zone_id FROM sys_website_domain_claim WHERE tenant_id = $1 AND website_id = $2 AND "
+        "dns_mode = 'managed' AND dns_zone_id IS NOT NULL",
+        tenant_id, website_id);
     std::set<std::string> result;
-    for (const auto& domain : config->domains_) {
-        if (domain.dns_mode_ != "managed") {
-            continue;
-        }
-        const auto owner = std::ranges::find_if(rows, [&](const auto& row) {
-            return service::common::domain_belongs_to_zone(domain.hostname_,
-                row[1].value().value_or(""));
-        });
-        if (owner != rows.end()) {
-            result.emplace((*owner)[0].value().value_or(""));
-        }
+    for (const auto& row : rows) {
+        result.emplace(row[0].value().value_or(""));
     }
     co_return result;
 }
 
-inline ruvia::task<void> reconcile_config_change(ruvia::db_transaction& transaction,
-    const std::string& tenant_id,
-    std::optional<std::string_view> previous_config,
-    std::optional<std::string_view> next_config, service::operation::work_origin& origin) {
-    std::set<std::string> zone_ids;
-    if (previous_config) {
-        auto previous = co_await managed_zone_ids(transaction, tenant_id, *previous_config);
-        zone_ids.insert(previous.begin(), previous.end());
-    }
-    if (next_config) {
-        auto next = co_await managed_zone_ids(transaction, tenant_id, *next_config);
-        zone_ids.insert(next.begin(), next.end());
-    }
+// The website's domain claims were written: the zones of its previous and
+// current managed claims re-project their CNAME records.
+inline ruvia::task<void> reconcile_claim_change(ruvia::db_transaction& transaction, std::string_view tenant_id,
+    std::string_view website_id, const std::set<std::string>& previous_zone_ids,
+    service::background::queued_work& work) {
+    auto zone_ids = co_await managed_zone_ids(transaction, tenant_id, website_id);
+    zone_ids.insert(previous_zone_ids.begin(), previous_zone_ids.end());
     for (const auto& zone_id : zone_ids) {
-        (void)co_await service::dns_sync::mark_zone_dirty(transaction, tenant_id, zone_id, origin);
+        co_await service::dns_sync::mark_zone_dirty(transaction, tenant_id, zone_id, work);
     }
-    co_return;
 }
 
-inline ruvia::task<void> reconcile_cluster_consumers(ruvia::db_transaction& transaction,
-    const std::string& tenant_id,
-    const std::string& cluster_id, service::operation::work_origin& origin) {
+// The cluster's access hostname or state changed: every zone its enabled
+// websites' managed claims belong to re-projects its CNAME records.
+inline ruvia::task<void> reconcile_cluster_consumers(ruvia::db_transaction& transaction, std::string_view tenant_id,
+    std::string_view cluster_id, service::background::queued_work& work) {
     const auto rows = co_await transaction.query(
         "SELECT DISTINCT claim.dns_zone_id FROM sys_website_domain_claim claim INNER JOIN "
         "sys_website website ON website.tenant_id = claim.tenant_id AND website.id = "
@@ -74,10 +51,8 @@ inline ruvia::task<void> reconcile_cluster_consumers(ruvia::db_transaction& tran
         "'managed' AND claim.dns_zone_id IS NOT NULL ORDER BY claim.dns_zone_id",
         tenant_id, cluster_id);
     for (const auto& row : rows) {
-        (void)co_await service::dns_sync::mark_zone_dirty(transaction, tenant_id,
-            std::string(row[0].value().value_or("")), origin);
+        co_await service::dns_sync::mark_zone_dirty(transaction, tenant_id, row[0].value().value_or(""), work);
     }
-    co_return;
 }
 
 }  // namespace service::website_dns

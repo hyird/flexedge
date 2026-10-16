@@ -15,23 +15,20 @@
 #include <functional>
 #include <iostream>
 #include <memory>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 #include <asio/buffer.hpp>
-#include <asio/connect.hpp>
-#include <asio/ip/tcp.hpp>
+#include <asio/error.hpp>
 #include <asio/post.hpp>
 #include <asio/ssl/error.hpp>
 #include <asio/steady_timer.hpp>
-#include <asio/write.hpp>
 
 #include "node/data/origin_health.h"
 #include "node/data/origin_tls.h"
+#include "node/data/origin_transport.h"
 
 namespace flexedge::node {
 
@@ -46,18 +43,18 @@ struct origin_probe_config final {
     std::uint32_t unhealthy_threshold_{3};
 };
 
+// Sends one HEAD request to an origin over its own origin_transport and records whether the
+// final status matched. Retires once completed and every started operation has finished.
 class origin_health_probe final : public std::enable_shared_from_this<origin_health_probe> {
 public:
-    origin_health_probe(ruvia::event_loop loop, origin_health_registry::target target,
+    origin_health_probe(ruvia::event_loop loop, origin_probe_target target,
         origin_tls_context& tls_context, origin_probe_config config,
         std::function<void()> on_retired = {})
         : loop_(std::move(loop)),
           target_(std::move(target)),
-          tls_context_(tls_context),
           config_(std::move(config)),
           on_retired_(std::move(on_retired)),
-          resolver_(loop_.io_context()),
-          socket_(loop_.io_context()),
+          transport_(loop_.executor(), tls_context),
           timer_(loop_.io_context()) {}
 
     void set_on_retired(std::function<void()> callback) {
@@ -68,11 +65,7 @@ public:
         completed_ = true;
         std::error_code ignored;
         timer_.cancel(ignored);
-        resolver_.cancel();
-        if (tls_stream_) {
-            ignored = tls_stream_->lowest_layer().close(ignored);
-        }
-        ignored = socket_.close(ignored);
+        transport_.close();
         notify_retired_if_ready();
     }
 
@@ -91,37 +84,35 @@ public:
         const auto self = shared_from_this();
         try {
             timer_.expires_after(config_.timeout_);
-            operation_started();
-            try {
-                timer_.async_wait([self](const std::error_code& error) {
-                    completion completion{self};
-                    if (!error) {
-                        self->complete(false, "timeout");
-                    }
-                });
-            } catch (...) {
-                operation_completed();
-                throw;
-            }
-            operation_started();
-            try {
-                resolver_.async_resolve(config_.host_, std::to_string(config_.port_),
-                    [self](const std::error_code& error,
-                        const asio::ip::tcp::resolver::results_type& endpoints) {
+            initiate_operation(
+                [&] {
+                    timer_.async_wait([self](const std::error_code& error) {
                         completion completion{self};
-                        if (self->completed_) {
-                            return;
+                        if (!error) {
+                            self->complete(false, "timeout");
                         }
-                        if (error) {
-                            self->complete(false, "dns lookup failed");
-                            return;
-                        }
-                        self->connect(endpoints);
                     });
-            } catch (...) {
-                operation_completed();
-                throw;
+                },
+                "async probe startup failed");
+            if (completed_) {
+                return;
             }
+            initiate_operation(
+                [&] {
+                    transport_.connect(config_.host_, config_.port_, config_.protocol_ == "https",
+                        [self](const std::error_code& error) {
+                            completion completion{self};
+                            if (self->completed_) {
+                                return;
+                            }
+                            if (error) {
+                                self->complete(false, connect_failure(error));
+                                return;
+                            }
+                            self->write();
+                        });
+                },
+                "async probe startup failed");
         } catch (const std::exception& error) {
             log("async probe startup failed", error);
             complete(false, "async probe startup failed");
@@ -145,13 +136,21 @@ private:
         }
     };
 
-    void operation_started() noexcept {
-        ++pending_operations_;
+    static std::string_view connect_failure(const std::error_code& error) noexcept {
+        if (error.category() == asio::error::get_netdb_category() ||
+            error.category() == asio::error::get_addrinfo_category()) {
+            return "dns lookup failed";
+        }
+        if (error.category() == asio::error::get_ssl_category() ||
+            error.category() == asio::ssl::error::get_stream_category()) {
+            return "TLS handshake failed";
+        }
+        return "connection failed";
     }
 
     template <typename initiation_type>
     void initiate_operation(initiation_type&& initiation, std::string_view failure) noexcept {
-        operation_started();
+        ++pending_operations_;
         try {
             std::forward<initiation_type>(initiation)();
         } catch (const std::exception& error) {
@@ -202,84 +201,22 @@ private:
             prepared.prepared()->exchange_state());
     }
 
-    void connect(const asio::ip::tcp::resolver::results_type& endpoints) {
-        const auto self = shared_from_this();
-        initiate_operation(
-            [&] {
-                asio::async_connect(socket_, endpoints,
-                    [self](const std::error_code& error,
-                        const asio::ip::tcp::endpoint&) {
-                        completion completion{self};
-                        if (self->completed_) {
-                            return;
-                        }
-                        if (error) {
-                            self->complete(false, "connection failed");
-                            return;
-                        }
-                        if (self->config_.protocol_ == "https") {
-                            self->handshake();
-                        } else {
-                            self->write();
-                        }
-                    });
-            },
-            "connection initiation failed");
-    }
-
-    void handshake() {
-        try {
-            tls_stream_.emplace(tls_context_.get_stream(std::move(socket_), config_.host_));
-        } catch (const std::exception& error) {
-            log("TLS stream preparation failed", error);
-            complete(false, "TLS setup failed");
-            return;
-        } catch (...) {
-            log("TLS stream preparation failed with unknown exception");
-            complete(false, "TLS setup failed");
-            return;
-        }
-        const auto self = shared_from_this();
-        initiate_operation(
-            [&] {
-                tls_stream_->async_handshake(asio::ssl::stream_base::client,
-                    [self](const std::error_code& error) {
-                        completion completion{self};
-                        if (self->completed_) {
-                            return;
-                        }
-                        if (error) {
-                            self->complete(false, "TLS handshake failed");
-                            return;
-                        }
-                        self->write();
-                    });
-            },
-            "TLS handshake initiation failed");
-    }
-
     void write() {
         const auto self = shared_from_this();
         initiate_operation(
             [&] {
-                auto completion_value = [self](const std::error_code& error, std::size_t) {
-                    completion operation{self};
-                    if (self->completed_) {
-                        return;
-                    }
-                    if (error) {
-                        self->complete(false, "request write failed");
-                        return;
-                    }
-                    self->read();
-                };
-                if (tls_stream_) {
-                    asio::async_write(*tls_stream_, asio::buffer(request_bytes_),
-                        std::move(completion_value));
-                } else {
-                    asio::async_write(socket_, asio::buffer(request_bytes_),
-                        std::move(completion_value));
-                }
+                transport_.write(asio::buffer(request_bytes_),
+                    [self](const std::error_code& error, std::size_t) {
+                        completion operation{self};
+                        if (self->completed_) {
+                            return;
+                        }
+                        if (error) {
+                            self->complete(false, "request write failed");
+                            return;
+                        }
+                        self->read();
+                    });
             },
             "request write initiation failed");
     }
@@ -288,23 +225,19 @@ private:
         const auto self = shared_from_this();
         initiate_operation(
             [&] {
-                auto completion_value = [self](const std::error_code& error, std::size_t size) {
-                    completion operation{self};
-                    if (self->completed_) {
-                        return;
-                    }
-                    if (error) {
-                        self->complete(false, "response read failed");
-                        return;
-                    }
-                    self->response_bytes_.append(self->buffer_.data(), size);
-                    self->parse();
-                };
-                if (tls_stream_) {
-                    tls_stream_->async_read_some(asio::buffer(buffer_), std::move(completion_value));
-                } else {
-                    socket_.async_read_some(asio::buffer(buffer_), std::move(completion_value));
-                }
+                transport_.read(asio::buffer(buffer_),
+                    [self](const std::error_code& error, std::size_t size) {
+                        completion operation{self};
+                        if (self->completed_) {
+                            return;
+                        }
+                        if (error) {
+                            self->complete(false, "response read failed");
+                            return;
+                        }
+                        self->response_bytes_.append(self->buffer_.data(), size);
+                        self->parse();
+                    });
             },
             "response read initiation failed");
     }
@@ -346,17 +279,15 @@ private:
         completed_ = true;
         std::error_code ignored;
         timer_.cancel(ignored);
-        resolver_.cancel();
-        if (tls_stream_) {
-            ignored = tls_stream_->lowest_layer().close(ignored);
-        }
-        ignored = socket_.close(ignored);
+        transport_.close();
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started_at_);
-        target_.record_probe(
-            healthy,
-            healthy ? config_.healthy_threshold_ : config_.unhealthy_threshold_,
-            static_cast<std::uint32_t>((std::min)(elapsed.count(), std::int64_t{600000})), error);
+        try {
+            target_.record_probe(healthy,
+                healthy ? config_.healthy_threshold_ : config_.unhealthy_threshold_,
+                static_cast<std::uint32_t>((std::min)(elapsed.count(), std::int64_t{600000})), error);
+        } catch (...) {
+        }
         notify_retired_if_ready();
     }
 
@@ -377,13 +308,10 @@ private:
     }
 
     ruvia::event_loop loop_;
-    origin_health_registry::target target_;
-    origin_tls_context& tls_context_;
+    origin_probe_target target_;
     origin_probe_config config_;
     std::function<void()> on_retired_;
-    asio::ip::tcp::resolver resolver_;
-    asio::ip::tcp::socket socket_;
-    std::optional<origin_tls_context::stream> tls_stream_;
+    origin_transport transport_;
     asio::steady_timer timer_;
     std::string request_bytes_;
     std::unique_ptr<ruvia::http1_client_response_parser> response_parser_;

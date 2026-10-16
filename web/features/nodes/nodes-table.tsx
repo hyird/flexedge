@@ -5,6 +5,7 @@ import type { DataGridColumn } from '@heroui-pro/react'
 import { Button } from '@heroui/react'
 import { formatBitsPerSecond, formatNumber } from '@/lib/format'
 import { hasListFilters, type ListSearchState } from '@/lib/list-search'
+import { describeStatus, statusOptions } from '@/lib/status'
 import { DataTable } from '@/components/data-table'
 import { LinkButton } from '@/components/link-button'
 import { FilterSelect, ListToolbar } from '@/components/list-toolbar'
@@ -16,19 +17,17 @@ import { clusterOptionsQuery } from '@/features/clusters/data'
 import { nodesQuery } from './data'
 import { NodeConnectionChip } from './node-connection-chip'
 import { NodeCreateSheet } from './node-create-sheet'
+import {
+  connectionStatuses,
+  liveMetrics,
+  nodeStatusReserve,
+  nodeStatuses,
+} from './node-display'
 import { nodeFilterKeys, type NodeListSearch } from './node-search'
-import { liveMetrics, nodeStatusLabels } from './node-status'
 import type { Node } from './types'
 
-const connectionOptions = [
-  { id: 'online', label: '在线' },
-  { id: 'offline', label: '离线' },
-  { id: 'unregistered', label: '未接入' },
-]
-const statusOptions = [
-  { id: 'enabled', label: '已启用' },
-  { id: 'disabled', label: '已停用' },
-]
+const connectionOptions = statusOptions(connectionStatuses)
+const nodeStatusOptions = statusOptions(nodeStatuses)
 
 /** Node list with toolbar, pagination and the add-node sheet, whose open
  * state belongs to the page (`/nodes?create=1`, or component state on the
@@ -181,7 +180,10 @@ export function NodesTable({
       header: '状态',
       minWidth: 90,
       cell: (node) => (
-        <StatusChip status={node.status} reserve={nodeStatusLabels} />
+        <StatusChip
+          {...describeStatus(nodeStatuses, node.status)}
+          reserve={nodeStatusReserve}
+        />
       ),
     },
     {
@@ -241,7 +243,7 @@ export function NodesTable({
                   status: (value || undefined) as NodeListSearch['status'],
                 })
               }
-              options={statusOptions}
+              options={nodeStatusOptions}
             />
           </>
         }

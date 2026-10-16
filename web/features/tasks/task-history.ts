@@ -1,40 +1,27 @@
 import { formatRelative } from '@/lib/format'
-import { subtaskAttemptEventSchema, type TaskAttempt } from './types'
+import { taskAttemptEventSchema, type TaskAttempt } from './types'
 
-/** Execution records kept on screen per subtask (contract §3.5). */
+/** Execution records kept on screen (the `history` event carries 50). */
 export const historyRecordLimit = 100
 
-/** `trace.attempt_id` of a wire attempt; '' when it has none. */
-function attemptIdOf(item: { trace?: unknown }) {
-  const trace = item.trace
-  if (typeof trace !== 'object' || trace === null || !('attempt_id' in trace))
-    return ''
-  return typeof trace.attempt_id === 'string' ? trace.attempt_id : ''
-}
-
-/** Merges an `attempt` event into the expanded subtask's records (contract
- * §3.2): the new record goes on top, an older copy of the same attempt
- * (`trace.attempt_id`) is dropped, the summary is replaced and the list keeps
- * the newest `historyRecordLimit`. Works on wire frames; returns `undefined`
- * (no change) for records of another subtask or a malformed event. */
+/** Merges an `attempt` event into the task's records: the new record goes on
+ * top, an older copy of the same attempt (`id`, e.g. replayed after a
+ * reconnect) is dropped, the summary is replaced and the list keeps the
+ * newest `historyRecordLimit`. Works on wire frames; returns `undefined` (no
+ * change) for a malformed event or before the first `history` frame. */
 export function mergeAttemptEvent<
-  H extends {
-    subtask_id: string
-    list: readonly { trace?: unknown }[]
-    summary: unknown
-  },
+  H extends { list: readonly { id: string }[]; summary: unknown },
 >(history: H | undefined, value: unknown): H | undefined {
-  const event = subtaskAttemptEventSchema.safeParse(value)
+  const event = taskAttemptEventSchema.safeParse(value)
   if (!history || !event.success) return undefined
-  if (event.data.subtask_id !== history.subtask_id) return undefined
-  const id = attemptIdOf(event.data.item)
+  const { item, summary } = event.data
   return {
     ...history,
     list: [
-      event.data.item,
-      ...history.list.filter((item) => !id || attemptIdOf(item) !== id),
+      item,
+      ...history.list.filter((record) => record.id !== item.id),
     ].slice(0, historyRecordLimit),
-    summary: event.data.summary,
+    summary,
   } as H
 }
 
@@ -46,17 +33,18 @@ export type AttemptGroup = {
   attempts: TaskAttempt[]
 }
 
-/** Collapses consecutive failures with the same error into one entry; a
- * success between two failures always breaks the run. */
+/** Collapses consecutive failures of the same operation with the same error
+ * into one entry; a success between two failures always breaks the run. */
 export function groupAttempts(list: readonly TaskAttempt[]): AttemptGroup[] {
   const groups: AttemptGroup[] = []
   for (const attempt of list) {
     const group = groups.at(-1)
     const run = group?.attempts[0]
-    const key = `${attempt.attempt}:${attempt.emitted_at}`
+    const key = attempt.id
     const repeatsFailure =
       run?.outcome === 'failed' &&
       attempt.outcome === 'failed' &&
+      attempt.operation === run.operation &&
       attempt.error !== '' &&
       attempt.error === run.error
     if (group && repeatsFailure) {

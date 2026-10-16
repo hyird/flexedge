@@ -12,9 +12,12 @@
 #include "node/proto/artifact.h"
 #include "node/proto/edge_control.pb.h"
 #include "node/proto/schema_version.h"
+#include "node/proto/website_validation.h"
 #include "service/common/domain_name.h"
+#include "service/common/http.h"
 #include "service/features/node_config/mapper.h"
 #include "service/features/node_dispatch/deployment_source.h"
+#include "service/features/node_dispatch/dispatch_error.h"
 #include "service/features/website_config/mapper.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
@@ -34,15 +37,14 @@ inline flexedge::node::v2::NodeSpec build_node_spec(std::string_view node_id, st
     if (!config) {
         throw std::runtime_error("node spec source is invalid");
     }
-    flexedge::node::v2::NodeSpec result;
-    auto* content = result.mutable_content();
-    content->set_node_id(node_id);
-    content->set_schema_version(flexedge::node::node_spec_schema_version);
-    content->set_revision(revision);
-    content->set_name(name);
-    content->set_enabled(enabled);
+    flexedge::node::v2::NodeSpecContent content;
+    content.set_node_id(node_id);
+    content.set_schema_version(flexedge::node::node_spec_schema_version);
+    content.set_revision(revision);
+    content.set_name(name);
+    content.set_enabled(enabled);
     for (const auto& input : config->endpoints_) {
-        auto* endpoint = content->add_endpoints();
+        auto* endpoint = content.add_endpoints();
         endpoint->set_id(input.id_);
         endpoint->set_ip_address(input.ip_address_);
         endpoint->set_line_code(input.line_code_);
@@ -50,16 +52,12 @@ inline flexedge::node::v2::NodeSpec build_node_spec(std::string_view node_id, st
         endpoint->set_http_port(80);
         endpoint->set_https_port(443);
     }
-    result.set_digest_sha256(flexedge::node::artifact_digest(*content));
-    return result;
+    return flexedge::node::pack_artifact<flexedge::node::v2::NodeSpec>(content);
 }
 
 inline flexedge::node::v2::DeliveryObject
 delivery_object(flexedge::node::v2::DeliveryObjectContent content) {
-    flexedge::node::v2::DeliveryObject result;
-    result.set_digest_sha256(flexedge::node::artifact_digest(content));
-    *result.mutable_content() = std::move(content);
-    return result;
+    return flexedge::node::pack_artifact<flexedge::node::v2::DeliveryObject>(content);
 }
 
 template <typename input_type, typename output_type>
@@ -240,6 +238,13 @@ build_website_object(const deployment_website_source& source, const cluster_depl
     website->set_force_https(effective_https && config->force_https_);
     website->set_hsts_enabled(effective_https && config->hsts_enabled_);
     append_website_origins(*config, *website);
+    // Checked before the object is addressed: nodes reject a release that carries a website
+    // breaking these rules.
+    try {
+        flexedge::node::validate_website(*website);
+    } catch (const flexedge::node::invalid_website&) {
+        service::common::throw_app_error(dispatch_error::website_protocol_invalid);
+    }
     return delivery_object(std::move(object_content));
 }
 
@@ -247,23 +252,23 @@ inline cluster_release_artifact build_cluster_release(std::string_view release_i
     std::int64_t generation,
     const cluster_deployment_source& deployment) {
     cluster_release_artifact result;
-    auto* manifest = result.manifest_.mutable_content();
-    manifest->set_cluster_id(deployment.cluster_id_);
-    manifest->set_release_id(release_id);
-    manifest->set_generation(generation);
-    manifest->set_access_domain(deployment.access_domain_);
-    manifest->set_enabled(deployment.enabled_);
-    manifest->set_schema_version(flexedge::node::cluster_release_schema_version);
+    flexedge::node::v2::ClusterReleaseContent manifest;
+    manifest.set_cluster_id(deployment.cluster_id_);
+    manifest.set_release_id(release_id);
+    manifest.set_generation(generation);
+    manifest.set_access_domain(deployment.access_domain_);
+    manifest.set_enabled(deployment.enabled_);
+    manifest.set_schema_version(flexedge::node::cluster_release_schema_version);
 
     std::unordered_map<std::string, std::string> certificate_digests;
     for (const auto& source : deployment.websites_) {
-        auto object = build_website_object(source, deployment, certificate_digests, *manifest, result);
-        auto* reference = manifest->add_objects();
+        auto object = build_website_object(source, deployment, certificate_digests, manifest, result);
+        auto* reference = manifest.add_objects();
         reference->set_kind(flexedge::node::v2::OBJECT_KIND_WEBSITE);
         reference->set_digest_sha256(object.digest_sha256());
         result.objects_.push_back(std::move(object));
     }
-    result.manifest_.set_digest_sha256(flexedge::node::artifact_digest(*manifest));
+    result.manifest_ = flexedge::node::pack_artifact<flexedge::node::v2::ClusterReleaseManifest>(manifest);
     return result;
 }
 

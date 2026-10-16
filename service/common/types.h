@@ -6,12 +6,8 @@
 
 namespace service::common {
 
-// The task (operation) a resource write started, including writes that need
-// no background subtasks.
-RUVIA_MODEL(operation_reference_dto, RUVIA_REQUIRED_FIELD_NAME("operation_id", operation_id, ruvia::string));
-
 RUVIA_MODEL(operation_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),
-    RUVIA_REQUIRED_FIELD(message, ruvia::string), RUVIA_OPTIONAL_FIELD(data, operation_reference_dto));
+    RUVIA_REQUIRED_FIELD(message, ruvia::string));
 
 RUVIA_MODEL(health_data, RUVIA_REQUIRED_FIELD(status, ruvia::string));
 

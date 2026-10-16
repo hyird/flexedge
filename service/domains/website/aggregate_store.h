@@ -15,17 +15,6 @@ struct website_snapshot {
     std::int64_t revision_;
 };
 
-inline ruvia::task<std::optional<std::int64_t>> find_website_revision(
-    ruvia::db_transaction& transaction, const std::string& tenant_id, const std::string& id) {
-    const auto rows = co_await transaction.query(
-        "SELECT revision FROM sys_website WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
-        id, tenant_id);
-    if (rows.empty()) {
-        co_return std::nullopt;
-    }
-    co_return rows.front()[0].as<std::int64_t>().value();
-}
-
 inline ruvia::task<std::optional<std::int64_t>> lock_website_revision(
     ruvia::db_transaction& transaction, const std::string& tenant_id, const std::string& id) {
     const auto rows = co_await transaction.query(

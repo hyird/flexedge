@@ -1,5 +1,6 @@
 import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { afterEach, describe, expect, test } from 'vitest'
+import { ApiProtocolError } from '@/lib/api-response'
 import { setLiveQueryQueryClient } from '@/lib/live-query'
 import type { Node } from '@/features/nodes/types'
 import {
@@ -283,7 +284,7 @@ describe('attention items', () => {
     ).toEqual([
       ['/dns-zones?sync_status=issue', 2],
       ['/certificates?abnormal=1', 1],
-      ['/tasks?status=attention', 4],
+      ['/tasks?status=failed', 4],
       ['/nodes?connection_status=offline', 2],
     ])
   })
@@ -367,7 +368,13 @@ describe('combined overview stream', () => {
       },
     }
     const online = node('n1', 'online', { cpu_usage: 0.2 })
-    const page = { list: [online], total: 1, page: 1, page_size: 100 }
+    const page = {
+      list: [online],
+      total: 1,
+      page: 1,
+      page_size: 100,
+      total_pages: 1,
+    }
     const ok = (data: unknown) => ({ code: 0, message: 'ok', data })
     sources[0].frame('snapshot', ok(summary))
     sources[0].frame('traffic', ok(traffic))
@@ -392,6 +399,17 @@ describe('combined overview stream', () => {
         .cpu_usage
     ).toBe(0.7)
     expect(client.getQueryData(overviewTrafficQuery.queryKey)).toEqual(traffic)
+    // The `nodes` frame is parsed with the node schema.
+    sources[0].frame('nodes', ok({ ...page, list: [{ id: 'broken' }] }))
+    await flushMicrotasks()
+    const nodes = client
+      .getQueryCache()
+      .find({ queryKey: overviewNodesQuery.queryKey })?.state
+    expect(nodes?.error).toBeInstanceOf(ApiProtocolError)
+    expect(
+      client.getQueryData(overviewNodesQuery.queryKey)?.list[0]?.runtime
+        .cpu_usage
+    ).toBe(0.7)
     observers.forEach((item) => item.unsubscribe())
     await flushMicrotasks()
     expect(sources).toHaveLength(1)

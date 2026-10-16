@@ -24,6 +24,7 @@ import {
   formatNumber,
   ratioOf,
 } from '@/lib/format'
+import { describeStatus } from '@/lib/status'
 import { DataTable } from '@/components/data-table'
 import { KpiQuantity } from '@/components/kpi-quantity'
 import { MetricMeter } from '@/components/metric-meter'
@@ -32,15 +33,16 @@ import { RelativeTime } from '@/components/relative-time'
 import { StatusChip } from '@/components/status-chip'
 import { NodeConnectionChip } from '@/features/nodes/node-connection-chip'
 import type { Node } from '@/features/nodes/types'
-import { recentOperationsQuery } from '@/features/tasks/data'
+import { recentTasksQuery } from '@/features/tasks/data'
 import {
-  actorLabel,
-  describeOperationStatus,
-  operationHref,
-  operationStatusLabels,
-  operationTitle,
+  recentTaskOrder,
+  taskHref,
+  taskKey,
+  taskStatuses,
+  taskStatusReserve,
+  taskTitle,
 } from '@/features/tasks/task-display'
-import type { Operation } from '@/features/tasks/types'
+import { taskRefOf, type Task } from '@/features/tasks/types'
 import {
   appendBandwidthPoint,
   attentionItems,
@@ -61,15 +63,15 @@ import {
 
 /** Overview dashboard. Holds one live stream while mounted, the combined
  * `/api/overview/stream` (events `snapshot`, `traffic`, `nodes`,
- * `node-runtime`); it is released when the page unmounts. Recent tasks are a
- * one-shot read of the six newest (`/api/operations/stream`, closed after
- * its first frame). */
+ * `node-runtime`); it is released when the page unmounts. Recent tasks are
+ * the six most recently updated, read over GET (`/api/tasks`), active ones
+ * first. */
 export function OverviewPage() {
   const overview = useQuery(overviewQuery)
   const traffic = useQuery(overviewTrafficQuery)
   const nodes = useQuery(overviewNodesQuery)
   const tasks = useQuery({
-    ...recentOperationsQuery(6),
+    ...recentTasksQuery(6),
     meta: { inlineError: true },
   })
   const health = nodes.data ? nodeHealth(nodes.data.list) : undefined
@@ -149,9 +151,7 @@ export function OverviewPage() {
         <BandwidthPanel query={traffic} />
         <AttentionPanel
           overview={overview.data}
-          attentionTasks={
-            tasks.isPending ? undefined : (tasks.data?.attention ?? 0)
-          }
+          failedTasks={tasks.isPending ? undefined : (tasks.data?.failed ?? 0)}
           isLoading={overview.isPending || tasks.isPending}
         />
       </div>
@@ -439,16 +439,16 @@ function OverviewKpis({
 
 function AttentionPanel({
   overview,
-  attentionTasks,
+  failedTasks,
   isLoading,
 }: {
   overview?: Overview
-  attentionTasks: number | undefined
+  failedTasks: number | undefined
   isLoading: boolean
 }) {
   const items =
-    overview && attentionTasks !== undefined
-      ? attentionItems(overview, attentionTasks)
+    overview && failedTasks !== undefined
+      ? attentionItems(overview, failedTasks)
       : undefined
   return (
     <Widget className='min-w-0 lg:col-span-4'>
@@ -613,50 +613,38 @@ function NodeHealthPanel({
   )
 }
 
-const taskColumns: DataGridColumn<Operation>[] = [
+const taskColumns: DataGridColumn<Task>[] = [
   {
-    id: 'operation',
+    id: 'task',
     header: '任务',
     isRowHeader: true,
-    minWidth: 240,
-    cell: (operation) => (
+    minWidth: 280,
+    cell: (task) => (
       <Link
-        href={operationHref(operation.id)}
+        href={taskHref(taskRefOf(task))}
         className='block truncate font-medium'
       >
-        {operationTitle(operation)}
+        {taskTitle(task)}
       </Link>
-    ),
-  },
-  {
-    id: 'actor',
-    header: '发起人',
-    minWidth: 100,
-    cell: (operation) => (
-      <span className='block truncate'>{actorLabel(operation) || '—'}</span>
     ),
   },
   {
     id: 'status',
     header: '状态',
     minWidth: 100,
-    cell: (operation) => {
-      const status = describeOperationStatus(operation.status)
-      return (
-        <StatusChip
-          label={status.label}
-          tone={status.tone}
-          reserve={operationStatusLabels}
-        />
-      )
-    },
+    cell: (task) => (
+      <StatusChip
+        {...describeStatus(taskStatuses, task.status)}
+        reserve={taskStatusReserve}
+      />
+    ),
   },
   {
-    id: 'created_at',
-    header: '时间',
+    id: 'updated_at',
+    header: '最近执行',
     minWidth: 100,
-    cell: (operation) => (
-      <RelativeTime value={operation.created_at} className='text-muted' />
+    cell: (task) => (
+      <RelativeTime value={task.updated_at} className='text-muted' />
     ),
   },
 ]
@@ -665,7 +653,7 @@ function RecentTasksPanel({
   query,
 }: {
   query: {
-    data?: { list: Operation[] }
+    data?: { list: Task[] }
     isPending: boolean
     isError: boolean
     error: unknown
@@ -682,7 +670,8 @@ function RecentTasksPanel({
           label='最近任务'
           variant='secondary'
           columns={taskColumns}
-          data={query.data?.list}
+          data={query.data && recentTaskOrder(query.data.list)}
+          getRowId={(task) => taskKey(taskRefOf(task))}
           isLoading={query.isPending}
           error={query.isError ? query.error : undefined}
           onRetry={query.refetch}

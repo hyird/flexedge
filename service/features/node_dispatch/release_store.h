@@ -2,16 +2,14 @@
 #include <ruvia/core/task.h>
 #include <ruvia/web/db/db_transaction.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
-#include "service/features/operation/work_origin.h"
+#include "service/features/background/queued_work.h"
 
 namespace service::node_dispatch {
 struct release_allocation {
@@ -56,14 +54,12 @@ inline ruvia::task<void> link_release_object(ruvia::db_transaction& transaction,
     co_return;
 }
 
-// Activates a built release: one target per eligible node, each owned by a
-// node publish subtask of `origin` (none for unowned work). Pending or failed
-// targets of earlier releases are superseded: their subtasks merge into the
-// new subtask of the same node, or are cancelled when the node is no longer
-// a target.
+// Activates a built release: one pending target per eligible node. The node
+// task of every new target and of every node whose pending or failed target
+// of an earlier release is superseded changes.
 inline ruvia::task<void> activate_cluster_release(ruvia::db_transaction& transaction,
-    std::string_view tenant_id, std::string_view cluster_id, std::string_view release_id, std::int64_t generation,
-    std::string_view manifest_digest, std::string_view manifest_envelope, service::operation::work_origin& origin) {
+    std::string_view tenant_id, std::string_view cluster_id, std::string_view release_id,
+    std::string_view manifest_digest, std::string_view manifest_envelope, service::background::queued_work& work) {
     const auto targets = co_await transaction.query(
         "INSERT INTO sys_node_release_target (tenant_id, release_id, node_id, status, updated_at) "
         "SELECT node.tenant_id, $3, node.id, 'pending', NOW() FROM sys_node node WHERE "
@@ -73,40 +69,17 @@ inline ruvia::task<void> activate_cluster_release(ruvia::db_transaction& transac
         "node.deleted_at IS NULL RETURNING node_id::text",
         tenant_id, cluster_id, release_id);
     const auto target_count = static_cast<std::int64_t>(targets.size());
-    std::vector<std::pair<std::string, std::string>> owners;
-    owners.reserve(targets.size());
     for (const auto& row : targets) {
-        const auto node_id = std::string(row[0].value().value_or(""));
-        const auto subtask = co_await origin.require_subtask(transaction, tenant_id,
-            service::operation::subtask_kind::node_publish, "node", node_id, generation);
-        if (subtask) {
-            (void)co_await transaction.execute(
-                "UPDATE sys_node_release_target SET subtask_id = $4::uuid WHERE tenant_id = $1 AND "
-                "release_id = $2 AND node_id = $3",
-                tenant_id, release_id, std::string_view(node_id), std::string_view(*subtask));
-        }
-        owners.emplace_back(node_id, subtask.value_or(""));
+        work.changed(row[0].value().value_or(""));
     }
     const auto superseded = co_await transaction.query(
-        "SELECT target.subtask_id::text, target.node_id::text FROM sys_node_release_target target "
-        "INNER JOIN sys_cluster_release release ON release.tenant_id = target.tenant_id AND release.id = "
-        "target.release_id INNER JOIN sys_operation_subtask subtask ON subtask.id = target.subtask_id WHERE "
+        "SELECT DISTINCT target.node_id::text FROM sys_node_release_target target INNER JOIN sys_cluster_release "
+        "release ON release.tenant_id = target.tenant_id AND release.id = target.release_id WHERE "
         "target.tenant_id = $1 AND release.cluster_id = $2 AND release.id <> $3 AND target.status IN "
-        "('pending', 'failed') AND subtask.state = 'open'",
+        "('pending', 'failed')",
         tenant_id, cluster_id, release_id);
-    const auto closed_by = origin.operation_id().value_or("");
     for (const auto& row : superseded) {
-        const auto subtask = std::string(row[0].value().value_or(""));
-        const auto node_id = row[1].value().value_or("");
-        const auto next = std::find_if(owners.begin(), owners.end(),
-            [&](const auto& owner) { return owner.first == node_id; });
-        if (next != owners.end() && next->second == subtask) {
-            continue;
-        }
-        const auto settled = co_await service::operation::settle_subtask(transaction, tenant_id, subtask,
-            next == owners.end() ? service::operation::state_cancelled : service::operation::state_merged,
-            next == owners.end() ? std::string_view{} : std::string_view(next->second), closed_by);
-        origin.touch(settled.value_or(""));
+        work.changed(row[0].value().value_or(""));
     }
     (void)co_await transaction.execute(
         "UPDATE sys_cluster_release SET manifest_digest = $3, manifest_envelope = $4, status = "
@@ -131,7 +104,14 @@ inline ruvia::task<void> activate_cluster_release(ruvia::db_transaction& transac
     co_return;
 }
 
-inline ruvia::task<std::optional<std::int64_t>> lock_current_release_schema_version(
+// The release a cluster's nodes are directed to.
+struct current_release {
+    std::string id_;
+    std::optional<std::int64_t> schema_version_;
+};
+
+// Locks the cluster FOR UPDATE; `std::nullopt` while it has no release.
+inline ruvia::task<std::optional<current_release>> lock_current_release(
     ruvia::db_transaction& transaction, std::string_view tenant_id, std::string_view cluster_id) {
     const auto rows = co_await transaction.query(
         "SELECT cluster.current_release_id, release.schema_version FROM sys_cluster cluster LEFT "
@@ -142,10 +122,11 @@ inline ruvia::task<std::optional<std::int64_t>> lock_current_release_schema_vers
     if (rows.empty()) {
         throw std::runtime_error("cluster release target does not exist");
     }
-    if (!rows.front()[0].value()) {
+    const auto id = rows.front()[0].value();
+    if (!id) {
         co_return std::nullopt;
     }
-    co_return rows.front()[1].as<std::int64_t>();
+    co_return current_release{std::string(*id), rows.front()[1].as<std::int64_t>()};
 }
 
 inline ruvia::task<std::vector<std::string>> find_certificate_consumer_clusters(

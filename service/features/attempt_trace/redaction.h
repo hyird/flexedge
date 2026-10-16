@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
@@ -26,9 +25,14 @@
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 
+#include "service/features/attempt_trace/json_excerpt.h"
 #include "service/features/attempt_trace/model.h"
 #include "service/features/attempt_trace/outbound_policy.h"
+#include "service/utils/base64.h"
+#include "service/utils/json_text.h"
+#include "service/utils/percent_encoding.h"
 #include "service/utils/sensitive_string.h"
+#include "service/utils/text.h"
 #include "service/utils/utf8.h"
 
 // The only way text reaches an attempt trace. Three layers apply to every
@@ -112,269 +116,7 @@ struct header_entry final {
     std::string_view value_;
 };
 
-namespace text_detail {
-
-[[nodiscard]] inline char lower_ascii(char value) noexcept {
-    return value >= 'A' && value <= 'Z' ? static_cast<char>(value - 'A' + 'a') : value;
-}
-
-[[nodiscard]] inline bool equals_ignore_case(std::string_view left, std::string_view right) noexcept {
-    if (left.size() != right.size()) {
-        return false;
-    }
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        if (lower_ascii(left[index]) != lower_ascii(right[index])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-[[nodiscard]] inline bool matches_ignore_case_at(std::string_view value, std::size_t position,
-    std::string_view needle) noexcept {
-    return position + needle.size() <= value.size() && equals_ignore_case(value.substr(position, needle.size()), needle);
-}
-
-[[nodiscard]] inline std::string lower(std::string_view value) {
-    std::string result(value);
-    for (auto& ch : result) {
-        ch = lower_ascii(ch);
-    }
-    return result;
-}
-
-[[nodiscard]] inline bool contains(std::span<const std::string_view> values, std::string_view value) noexcept {
-    return std::find(values.begin(), values.end(), value) != values.end();
-}
-
-[[nodiscard]] inline bool is_alnum(char value) noexcept {
-    return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9');
-}
-
-[[nodiscard]] inline bool is_base64_url(char value) noexcept {
-    return is_alnum(value) || value == '-' || value == '_';
-}
-
-// Valid UTF-8 only; NUL and control characters become spaces except line
-// feeds and tabs in multi-line text (PostgreSQL rejects NUL in jsonb).
-[[nodiscard]] inline std::string sanitized(std::string_view value, bool multiline) {
-    std::string result;
-    result.reserve(value.size());
-    for (std::size_t index = 0; index < value.size();) {
-        const auto length = service::utils::utf8_sequence_length(value, index);
-        if (length == 0) {
-            ++index;
-            continue;
-        }
-        const auto lead = static_cast<unsigned char>(value[index]);
-        if (length == 1 && (lead < 0x20 || lead == 0x7F)) {
-            if (lead == '\r') {
-                if (!multiline) {
-                    result.push_back(' ');
-                }
-            } else if (multiline && (lead == '\n' || lead == '\t')) {
-                result.push_back(static_cast<char>(lead));
-            } else {
-                result.push_back(' ');
-            }
-        } else {
-            result.append(value.substr(index, length));
-        }
-        index += length;
-    }
-    return result;
-}
-
-[[nodiscard]] inline bool unreserved(unsigned char value) noexcept {
-    return is_alnum(static_cast<char>(value)) || value == '-' || value == '.' || value == '_' || value == '~';
-}
-
-[[nodiscard]] inline std::string percent_encode(std::string_view value, bool upper_hex, bool form) {
-    constexpr std::string_view upper_digits = "0123456789ABCDEF";
-    constexpr std::string_view lower_digits = "0123456789abcdef";
-    const auto digits = upper_hex ? upper_digits : lower_digits;
-    std::string result;
-    result.reserve(value.size() * 3);
-    for (const auto raw : value) {
-        const auto ch = static_cast<unsigned char>(raw);
-        if (unreserved(ch)) {
-            result.push_back(raw);
-        } else if (form && ch == ' ') {
-            result.push_back('+');
-        } else {
-            result.push_back('%');
-            result.push_back(digits[ch >> 4]);
-            result.push_back(digits[ch & 0x0F]);
-        }
-    }
-    return result;
-}
-
-[[nodiscard]] inline int hex_value(char value) noexcept {
-    if (value >= '0' && value <= '9') {
-        return value - '0';
-    }
-    if (value >= 'a' && value <= 'f') {
-        return value - 'a' + 10;
-    }
-    if (value >= 'A' && value <= 'F') {
-        return value - 'A' + 10;
-    }
-    return -1;
-}
-
-// Decodes %XX (and '+' as space); malformed escapes are kept literally.
-[[nodiscard]] inline std::string percent_decode(std::string_view value) {
-    std::string result;
-    result.reserve(value.size());
-    for (std::size_t index = 0; index < value.size(); ++index) {
-        if (value[index] == '%' && index + 2 < value.size()) {
-            const auto high = hex_value(value[index + 1]);
-            const auto low = hex_value(value[index + 2]);
-            if (high >= 0 && low >= 0) {
-                result.push_back(static_cast<char>(high * 16 + low));
-                index += 2;
-                continue;
-            }
-        }
-        result.push_back(value[index] == '+' ? ' ' : value[index]);
-    }
-    return result;
-}
-
-[[nodiscard]] inline std::string base64_encode(std::string_view value, bool url) {
-    constexpr std::string_view standard = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    constexpr std::string_view url_safe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    const auto alphabet = url ? url_safe : standard;
-    std::string result;
-    result.reserve((value.size() + 2) / 3 * 4);
-    std::size_t index = 0;
-    for (; index + 2 < value.size(); index += 3) {
-        const auto chunk = (static_cast<unsigned char>(value[index]) << 16) |
-                           (static_cast<unsigned char>(value[index + 1]) << 8) |
-                           static_cast<unsigned char>(value[index + 2]);
-        result.push_back(alphabet[(chunk >> 18) & 0x3F]);
-        result.push_back(alphabet[(chunk >> 12) & 0x3F]);
-        result.push_back(alphabet[(chunk >> 6) & 0x3F]);
-        result.push_back(alphabet[chunk & 0x3F]);
-    }
-    const auto rest = value.size() - index;
-    if (rest > 0) {
-        auto chunk = static_cast<unsigned>(static_cast<unsigned char>(value[index])) << 16;
-        if (rest == 2) {
-            chunk |= static_cast<unsigned>(static_cast<unsigned char>(value[index + 1])) << 8;
-        }
-        result.push_back(alphabet[(chunk >> 18) & 0x3F]);
-        result.push_back(alphabet[(chunk >> 12) & 0x3F]);
-        if (rest == 2) {
-            result.push_back(alphabet[(chunk >> 6) & 0x3F]);
-        }
-        if (!url) {
-            result.append(rest == 1 ? "==" : "=");
-        }
-    }
-    return result;
-}
-
-[[nodiscard]] inline std::optional<std::string> base64_url_decode(std::string_view value) {
-    std::string result;
-    result.reserve(value.size() * 3 / 4);
-    unsigned buffer = 0;
-    int bits = 0;
-    for (const auto ch : value) {
-        int digit = -1;
-        if (ch >= 'A' && ch <= 'Z') {
-            digit = ch - 'A';
-        } else if (ch >= 'a' && ch <= 'z') {
-            digit = ch - 'a' + 26;
-        } else if (ch >= '0' && ch <= '9') {
-            digit = ch - '0' + 52;
-        } else if (ch == '-' || ch == '+') {
-            digit = 62;
-        } else if (ch == '_' || ch == '/') {
-            digit = 63;
-        } else if (ch == '=') {
-            break;
-        } else {
-            return std::nullopt;
-        }
-        buffer = (buffer << 6) | static_cast<unsigned>(digit);
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            result.push_back(static_cast<char>((buffer >> bits) & 0xFF));
-        }
-    }
-    return result;
-}
-
-inline void append_json_string(std::string& output, std::string_view value) {
-    constexpr std::string_view digits = "0123456789abcdef";
-    output.push_back('"');
-    for (const auto raw : value) {
-        const auto ch = static_cast<unsigned char>(raw);
-        switch (raw) {
-            case '"':
-                output.append("\\\"");
-                break;
-            case '\\':
-                output.append("\\\\");
-                break;
-            case '\n':
-                output.append("\\n");
-                break;
-            case '\t':
-                output.append("\\t");
-                break;
-            case '\r':
-                output.append("\\r");
-                break;
-            default:
-                if (ch < 0x20) {
-                    output.append("\\u00");
-                    output.push_back(digits[ch >> 4]);
-                    output.push_back(digits[ch & 0x0F]);
-                } else {
-                    output.push_back(raw);
-                }
-        }
-    }
-    output.push_back('"');
-}
-
-// Upper bound of the bytes `value` takes as a JSON string, quotes included.
-[[nodiscard]] inline std::size_t json_string_size(std::string_view value) noexcept {
-    std::size_t size = 2;
-    for (const auto raw : value) {
-        const auto ch = static_cast<unsigned char>(raw);
-        if (raw == '"' || raw == '\\' || raw == '\n' || raw == '\t' || raw == '\r') {
-            size += 2;
-        } else if (ch < 0x20) {
-            size += 6;
-        } else {
-            ++size;
-        }
-    }
-    return size;
-}
-
-// Lower-case media type without parameters.
-[[nodiscard]] inline std::string media_type(std::string_view content_type) {
-    const auto end = content_type.find(';');
-    auto type = content_type.substr(0, end);
-    while (!type.empty() && (type.front() == ' ' || type.front() == '\t')) {
-        type.remove_prefix(1);
-    }
-    while (!type.empty() && (type.back() == ' ' || type.back() == '\t')) {
-        type.remove_suffix(1);
-    }
-    return lower(type);
-}
-
-[[nodiscard]] inline bool json_media_type(std::string_view type) noexcept {
-    return type == "application/json" || type.ends_with("+json") || type == "application/dns-json" ||
-           type == "text/json";
-}
+namespace redaction_detail {
 
 [[nodiscard]] inline std::string_view dns_type_name(std::int64_t value) noexcept {
     switch (value) {
@@ -439,7 +181,7 @@ inline constexpr std::array signed_string_phrases{std::string_view{"string to si
     std::string_view{"string-to-sign"}, std::string_view{"stringtosign"}, std::string_view{"canonical request"},
     std::string_view{"canonicalrequest"}};
 
-}  // namespace text_detail
+}  // namespace redaction_detail
 
 class redactor final {
 public:
@@ -506,7 +248,7 @@ public:
         bool& truncated) noexcept {
         try {
             bool private_key = false;
-            auto result = scrub(text_detail::sanitized(value, multiline), private_key);
+            auto result = scrub(service::utils::sanitized_utf8(value, multiline), private_key);
             truncated = service::utils::truncate_utf8(result, limit) || truncated;
             return redacted_text(std::move(result));
         } catch (...) {
@@ -538,7 +280,7 @@ public:
                 } else {
                     masked_path.append(segment);
                 }
-                mask_next = text_detail::contains(policy.masked_path_after_, segment);
+                mask_next = service::utils::contains(policy.masked_path_after_, segment);
                 if (end == path.size()) {
                     break;
                 }
@@ -558,9 +300,9 @@ public:
                 const auto equals = part.find('=');
                 const auto raw_name = part.substr(0, equals);
                 const auto raw_value = equals == std::string_view::npos ? std::string_view{} : part.substr(equals + 1);
-                const auto name = text_detail::percent_decode(raw_name);
-                const auto value = text_detail::percent_decode(raw_value);
-                const bool allowed = text_detail::contains(policy.query_, name);
+                const auto name = service::utils::percent_decode(raw_name);
+                const auto value = service::utils::percent_decode(raw_value);
+                const bool allowed = service::utils::contains(policy.query_, name);
                 if (!allowed) {
                     remember(value);
                     remember(raw_value);
@@ -601,8 +343,8 @@ public:
     // allow-list (authorization) is a credential and becomes a known secret.
     [[nodiscard]] redacted_pair request_header(std::string_view name, std::string_view value) noexcept {
         try {
-            const auto lowered = text_detail::lower(name);
-            if (text_detail::contains(request_header_allow_list, lowered)) {
+            const auto lowered = service::utils::to_lower_ascii(name);
+            if (service::utils::contains(request_header_allow_list, lowered)) {
                 return {.name_ = text(lowered, value_bytes), .value_ = text(value, value_bytes), .redacted_ = false};
             }
             register_secret(value);
@@ -617,13 +359,18 @@ public:
         }
     }
 
-    // Response header values outside the allow-list are hidden; values of
-    // credential-bearing headers (cookies, nonces, tokens) also become known
-    // secrets so an echo elsewhere is hidden too.
-    [[nodiscard]] redacted_pair response_header(std::string_view name, std::string_view value) noexcept {
+    // Response header values outside the allow-list and the request id
+    // headers of the policy are hidden; values of credential-bearing headers
+    // (cookies, nonces, tokens) also become known secrets so an echo
+    // elsewhere is hidden too.
+    [[nodiscard]] redacted_pair response_header(const outbound_policy& policy, std::string_view name,
+        std::string_view value) noexcept {
         try {
-            const auto lowered = text_detail::lower(name);
-            if (text_detail::contains(response_header_allow_list, lowered)) {
+            const auto lowered = service::utils::to_lower_ascii(name);
+            const auto& request_id_headers = policy.identity_.request_id_headers_;
+            if (service::utils::contains(response_header_allow_list, lowered) ||
+                std::any_of(request_id_headers.begin(), request_id_headers.end(),
+                    [&](std::string_view header) { return service::utils::equals_ignore_case(header, lowered); })) {
                 return {.name_ = text(lowered, value_bytes), .value_ = text(value, value_bytes), .redacted_ = false};
             }
             if (lowered == "set-cookie" || lowered == "replay-nonce" ||
@@ -646,7 +393,7 @@ public:
         redacted_body result;
         result.bytes_ = static_cast<std::int64_t>(body.size());
         try {
-            const auto type = text_detail::media_type(content_type);
+            const auto type = service::utils::media_type(content_type);
             result.content_type_ = text(type, value_bytes);
             const auto rule = request ? policy.request_body_ : policy.response_body_;
             if (contains_private_key(body)) {
@@ -676,16 +423,17 @@ public:
                        (type == "application/pem-certificate-chain" || body.starts_with("-----BEGIN"))) {
                 excerpt = certificate_chain_view(body);
                 format = "pem_summary";
-            } else if (text_detail::json_media_type(type) || (type.empty() && looks_json)) {
-                const auto fields = request ? policy.request_fields_ : policy.response_fields_;
-                excerpt = json_view(body, fields, request ? policy.request_sized_fields_ : policy.request_sized_fields_.first(0));
+            } else if (service::utils::json_media_type(type) || (type.empty() && looks_json)) {
+                excerpt = json_view(body, {.allowed_ = request ? policy.request_fields_ : policy.response_fields_,
+                                              .sized_ = request ? policy.request_sized_fields_
+                                                                : std::span<const std::string_view>{}});
                 format = "json";
             }
             if (!excerpt) {
                 // JSON that does not parse is kept as scanned text; a JWS or a
                 // certificate chain that does not parse is never kept raw.
                 const bool json_attempted = format == "json";
-                if (type.starts_with("text/") || ((type.empty() || json_attempted) && valid_text(body))) {
+                if (type.starts_with("text/") || ((type.empty() || json_attempted) && service::utils::valid_utf8_text(body))) {
                     excerpt = std::string(body);
                     format = "text";
                 } else {
@@ -704,19 +452,20 @@ public:
         return result;
     }
 
-    // Provider request id, provider error code and, for DNS over HTTPS, the
-    // query and its answers.
+    // Provider request id and error code as named by the policy's reply
+    // identity and, for DNS over HTTPS, the query and its answers.
     [[nodiscard]] response_facts response(const outbound_policy& policy, std::span<const header_entry> headers,
         std::string_view content_type, std::string_view body, int status, std::string_view query_name,
         std::string_view query_type) noexcept {
         response_facts facts;
+        const auto& identity = policy.identity_;
         try {
-            for (const auto name : {std::string_view{"cf-ray"}, std::string_view{"x-acs-request-id"},
-                     std::string_view{"x-request-id"}}) {
-                for (const auto& header : headers) {
-                    if (facts.request_id_.empty() && text_detail::equals_ignore_case(header.name_, name)) {
-                        facts.request_id_ = text(header.value_, identifier_bytes);
-                    }
+            for (const auto name : identity.request_id_headers_) {
+                const auto header = std::find_if(headers.begin(), headers.end(),
+                    [name](const header_entry& entry) { return service::utils::equals_ignore_case(entry.name_, name); });
+                if (header != headers.end()) {
+                    facts.request_id_ = text(header->value_, identifier_bytes);
+                    break;
                 }
             }
             if (body.empty() || body.size() > parse_body_max_bytes || contains_private_key(body) ||
@@ -728,31 +477,31 @@ public:
             if (!document || !document->is_object()) {
                 return facts;
             }
-            if (facts.request_id_.empty()) {
-                if (const auto value = document->get<ruvia::string>("RequestId"); value) {
+            if (facts.request_id_.empty() && !identity.request_id_field_.empty()) {
+                if (const auto value = document->get<ruvia::string>(identity.request_id_field_); value) {
                     facts.request_id_ = text(value->view(), identifier_bytes);
                 }
             }
-            const auto type = text_detail::media_type(content_type);
-            if (const auto code = document->get<ruvia::string>("Code"); code) {
-                facts.provider_code_ = text(code->view(), identifier_bytes);
-            } else if (status >= 400 || type == "application/problem+json") {
-                if (const auto problem = document->get<ruvia::string>("type"); problem) {
-                    facts.provider_code_ = text(problem->view(), identifier_bytes);
-                } else if (const auto error = document->get<ruvia::json_object>("error"); error) {
-                    if (const auto error_type = error->get<ruvia::string>("type"); error_type) {
-                        facts.provider_code_ = text(error_type->view(), identifier_bytes);
+            if (!identity.error_code_on_failure_only_ || status >= 400 ||
+                service::utils::media_type(content_type) == "application/problem+json") {
+                const auto keep_code = [&](const ruvia::json_value& code) {
+                    if (code.is_number()) {
+                        facts.provider_code_ = text(code.view(), identifier_bytes);
+                        return true;
                     }
-                }
-            }
-            if (facts.provider_code_.empty()) {
-                if (const auto errors = document->get<ruvia::json_value>("errors"); errors && errors->is_array()) {
-                    (void)errors->for_each_element([&](const ruvia::json_value& error) {
-                        if (const auto code = error.get<ruvia::json_value>("code"); code) {
-                            facts.provider_code_ = text(code->is_string() ? unquoted(*code) : code->view(), identifier_bytes);
-                        }
+                    if (!code.is_string()) {
                         return false;
-                    });
+                    }
+                    if (const auto value = code.get<ruvia::string>(); value) {
+                        facts.provider_code_ = text(value->view(), identifier_bytes);
+                        return true;
+                    }
+                    return false;
+                };
+                for (const auto field : identity.error_code_fields_) {
+                    if (visit_field(*document, field, keep_code)) {
+                        break;
+                    }
                 }
             }
             if (policy.dns_query_) {
@@ -806,7 +555,6 @@ private:
     // Room for credentials beyond the observed values (each credential takes
     // up to seven encoded variants).
     static constexpr std::size_t maximum_credential_variants{1024};
-    static constexpr int maximum_json_depth{16};
 
     [[nodiscard]] bool known(std::string_view value) const noexcept {
         return std::any_of(secrets_.begin(), secrets_.end(), [value](const auto& secret) { return secret.view() == value; });
@@ -828,11 +576,11 @@ private:
 
     void add_secret(std::string_view value) {
         std::string json;
-        text_detail::append_json_string(json, value);
-        const std::array variants{std::string(value), text_detail::percent_encode(value, true, false),
-            text_detail::percent_encode(value, false, false), text_detail::percent_encode(value, true, true),
-            text_detail::base64_encode(value, false), text_detail::base64_encode(value, true),
-            json.substr(1, json.size() - 2)};
+        service::utils::append_json_string(json, value);
+        const std::array variants{std::string(value), service::utils::percent_encode(value),
+            service::utils::percent_encode(value, {.lower_hex_ = true}),
+            service::utils::percent_encode(value, {.form_ = true}), service::utils::base64_encode(value),
+            service::utils::base64_url_encode(value), json.substr(1, json.size() - 2)};
         for (const auto& variant : variants) {
             if (variant.size() < minimum_secret_bytes || known(variant)) {
                 continue;
@@ -851,27 +599,29 @@ private:
         return result;
     }
 
-    [[nodiscard]] static bool valid_text(std::string_view value) noexcept {
-        for (std::size_t index = 0; index < value.size();) {
-            const auto length = service::utils::utf8_sequence_length(value, index);
-            if (length == 0) {
-                return false;
-            }
-            const auto lead = static_cast<unsigned char>(value[index]);
-            if (length == 1 && lead < 0x20 && lead != '\n' && lead != '\r' && lead != '\t') {
-                return false;
-            }
-            index += length;
+    // Hands the value at `path` (path syntax of outbound_policy.h; an array
+    // segment reads its first element) to `visit`; whether `visit` took it.
+    [[nodiscard]] static bool visit_field(const ruvia::json_value& value, std::string_view path, const auto& visit) {
+        const auto dot = path.find('.');
+        auto segment = path.substr(0, dot);
+        const auto rest = dot == std::string_view::npos ? std::string_view{} : path.substr(dot + 1);
+        const bool element = segment.ends_with("[]");
+        if (element) {
+            segment.remove_suffix(2);
         }
-        return true;
-    }
-
-    [[nodiscard]] static std::string_view unquoted(const ruvia::json_value& value) noexcept {
-        auto view = value.view();
-        if (view.size() >= 2 && view.front() == '"' && view.back() == '"') {
-            view = view.substr(1, view.size() - 2);
+        const auto field = value.get<ruvia::json_value>(segment);
+        if (!field) {
+            return false;
         }
-        return view;
+        if (!element) {
+            return rest.empty() ? visit(*field) : visit_field(*field, rest, visit);
+        }
+        bool found = false;
+        (void)field->for_each_element([&](const ruvia::json_value& first) {
+            found = rest.empty() ? visit(first) : visit_field(first, rest, visit);
+            return false;
+        });
+        return found;
     }
 
     // Exact secret replacement followed by the pattern scans.
@@ -933,7 +683,7 @@ private:
                 private_key = true;
                 result.append(redacted_marker);
             } else {
-                result.append("[PEM ").append(text_detail::sanitized(label, false)).append(" ");
+                result.append("[PEM ").append(service::utils::sanitized_utf8(label, false)).append(" ");
                 result.append(std::to_string(block_end - found)).append(" bytes]");
             }
             ++redactions_;
@@ -949,14 +699,14 @@ private:
         result.reserve(value.size());
         std::size_t index = 0;
         while (index < value.size()) {
-            if (text_detail::matches_ignore_case_at(value, index, "bearer") &&
-                (index == 0 || !text_detail::is_alnum(value[index - 1]))) {
+            if (service::utils::matches_ignore_case_at(value, index, "bearer") &&
+                (index == 0 || !service::utils::is_ascii_alnum(value[index - 1]))) {
                 auto token = index + 6;
                 while (token < value.size() && (value[token] == ' ' || value[token] == '\t')) {
                     ++token;
                 }
                 auto end = token;
-                while (end < value.size() && (text_detail::is_base64_url(value[end]) || value[end] == '.' ||
+                while (end < value.size() && (service::utils::is_base64_url_char(value[end]) || value[end] == '.' ||
                                                  value[end] == '~' || value[end] == '+' || value[end] == '/' ||
                                                  value[end] == '=')) {
                     ++end;
@@ -984,12 +734,12 @@ private:
         std::size_t position = 0;
         while (found != std::string::npos) {
             const auto segment_end = [&](std::size_t start) {
-                while (start < value.size() && text_detail::is_base64_url(value[start])) {
+                while (start < value.size() && service::utils::is_base64_url_char(value[start])) {
                     ++start;
                 }
                 return start;
             };
-            const bool boundary = found == 0 || !text_detail::is_base64_url(value[found - 1]);
+            const bool boundary = found == 0 || !service::utils::is_base64_url_char(value[found - 1]);
             const auto first = segment_end(found);
             std::size_t end = std::string::npos;
             if (boundary && first - found >= 10 && first < value.size() && value[first] == '.') {
@@ -1014,7 +764,7 @@ private:
     }
 
     // The material a provider echoes after a signed-string phrase (see
-    // text_detail::signed_string_phrases) is dropped; the phrase itself and
+    // redaction_detail::signed_string_phrases) is dropped; the phrase itself and
     // the surrounding message stay readable. The echo ends at whitespace, a
     // quote, a backslash or `<`; inside an XML element (`>` right after the
     // phrase) only at `<`.
@@ -1024,8 +774,8 @@ private:
         std::size_t index = 0;
         while (index < value.size()) {
             std::size_t phrase = 0;
-            for (const auto candidate : text_detail::signed_string_phrases) {
-                if (text_detail::matches_ignore_case_at(value, index, candidate)) {
+            for (const auto candidate : redaction_detail::signed_string_phrases) {
+                if (service::utils::matches_ignore_case_at(value, index, candidate)) {
                     phrase = candidate.size();
                     break;
                 }
@@ -1036,7 +786,7 @@ private:
                 continue;
             }
             auto cursor = index + phrase;
-            if (text_detail::matches_ignore_case_at(value, cursor, " is")) {
+            if (service::utils::matches_ignore_case_at(value, cursor, " is")) {
                 cursor += 3;
             }
             bool element = false;
@@ -1072,9 +822,9 @@ private:
         std::size_t index = 0;
         while (index < value.size()) {
             std::size_t value_start = std::string::npos;
-            if (index == 0 || (!text_detail::is_alnum(value[index - 1]) && value[index - 1] != '_')) {
-                for (const auto name : text_detail::sensitive_parameter_names) {
-                    if (!text_detail::matches_ignore_case_at(value, index, name)) {
+            if (index == 0 || (!service::utils::is_ascii_alnum(value[index - 1]) && value[index - 1] != '_')) {
+                for (const auto name : redaction_detail::sensitive_parameter_names) {
+                    if (!service::utils::matches_ignore_case_at(value, index, name)) {
                         continue;
                     }
                     auto cursor = index + name.size();
@@ -1086,7 +836,7 @@ private:
                     }
                     if (cursor < value.size() && (value[cursor] == '=' || value[cursor] == ':')) {
                         ++cursor;
-                    } else if (text_detail::matches_ignore_case_at(value, cursor, "%3D")) {
+                    } else if (service::utils::matches_ignore_case_at(value, cursor, "%3D")) {
                         cursor += 3;
                     } else {
                         continue;
@@ -1110,7 +860,7 @@ private:
             while (end < value.size()) {
                 const auto ch = value[end];
                 if (ch == '&' || ch == '"' || ch == ',' || ch == ' ' || ch == '\n' || ch == '\t' || ch == '}' ||
-                    ch == ';' || ch == '\'' || text_detail::matches_ignore_case_at(value, end, "%26")) {
+                    ch == ';' || ch == '\'' || service::utils::matches_ignore_case_at(value, end, "%26")) {
                     break;
                 }
                 ++end;
@@ -1128,123 +878,26 @@ private:
         return result;
     }
 
-    // Allow-listed, pretty-printed JSON; nullopt when the body is not JSON.
-    [[nodiscard]] std::optional<std::string> json_view(std::string_view body, std::span<const std::string_view> allowed,
-        std::span<const std::string_view> sized) {
-        std::pmr::monotonic_buffer_resource pool;
-        const auto document = ruvia::json_value::parse(body, {.resource_ = &pool});
-        if (!document) {
-            return std::nullopt;
+    // Allow-listed JSON strings are stored scrubbed and capped like any text.
+    struct kept_json_string final {
+        redactor* owner_;
+
+        void operator()(std::string& output, std::string_view value) const {
+            service::utils::append_json_string(output, owner_->text(value, value_bytes).view());
         }
-        std::string output;
-        std::string path;
-        render_json(*document, path, allowed, sized, {}, false, 0, output);
+    };
+
+    // Allow-listed, pretty-printed JSON; nullopt when the body is not JSON.
+    [[nodiscard]] std::optional<std::string> json_view(std::string_view body, const json_excerpt_fields& fields) {
+        json_excerpt excerpt;
+        auto output = excerpt.document(body, fields, kept_json_string{this});
+        count(excerpt);
         return output;
     }
 
-    void render_json(const ruvia::json_value& value, std::string& path, std::span<const std::string_view> allowed,
-        std::span<const std::string_view> sized, std::span<const std::string_view> dropped, bool subtree, int depth,
-        std::string& output) {
-        const auto indent = [&](int level) { output.append(static_cast<std::size_t>(level) * 2, ' '); };
-        const auto kind = value.kind();
-        if (kind == ruvia::json_value::kind_type::object || kind == ruvia::json_value::kind_type::array) {
-            const bool descend = subtree || path.empty() || container_allowed(allowed, path);
-            if (!descend || depth >= maximum_json_depth) {
-                text_detail::append_json_string(output, redacted_marker);
-                ++redactions_;
-                return;
-            }
-            const bool whole = subtree || (!path.empty() && text_detail::contains(allowed, path));
-            if (kind == ruvia::json_value::kind_type::object) {
-                std::size_t written = 0;
-                output.push_back('{');
-                (void)value.for_each_field([&](std::string_view key, const ruvia::json_value& field) {
-                    if (path.empty() && text_detail::contains(dropped, key)) {
-                        return true;
-                    }
-                    output.append(written++ == 0 ? "\n" : ",\n");
-                    indent(depth + 1);
-                    text_detail::append_json_string(output, text_detail::sanitized(key, false));
-                    output.append(": ");
-                    const auto previous = path.size();
-                    if (!path.empty()) {
-                        path.push_back('.');
-                    }
-                    path.append(key);
-                    render_json(field, path, allowed, sized, {}, whole, depth + 1, output);
-                    path.resize(previous);
-                    return true;
-                });
-                if (written > 0) {
-                    output.push_back('\n');
-                    indent(depth);
-                }
-                output.push_back('}');
-                return;
-            }
-            std::size_t count = 0;
-            output.push_back('[');
-            const auto previous = path.size();
-            path.append("[]");
-            (void)value.for_each_element([&](const ruvia::json_value& element) {
-                if (count++ >= max_json_items) {
-                    return true;
-                }
-                output.append(count == 1 ? "\n" : ",\n");
-                indent(depth + 1);
-                render_json(element, path, allowed, sized, {}, whole, depth + 1, output);
-                return true;
-            });
-            path.resize(previous);
-            if (count > max_json_items) {
-                items_omitted_ = true;
-                output.append(",\n");
-                indent(depth + 1);
-                text_detail::append_json_string(output, "… " + std::to_string(count - max_json_items) + " more");
-            }
-            if (count > 0) {
-                output.push_back('\n');
-                indent(depth);
-            }
-            output.push_back(']');
-            return;
-        }
-        if (kind == ruvia::json_value::kind_type::null) {
-            output.append("null");
-            return;
-        }
-        if (!subtree && !text_detail::contains(allowed, path)) {
-            if (kind == ruvia::json_value::kind_type::string && text_detail::contains(sized, path)) {
-                const auto decoded = value.get<ruvia::string>();
-                const auto name = path.substr(path.rfind('.') == std::string::npos ? 0 : path.rfind('.') + 1);
-                std::string upper(name);
-                for (auto& ch : upper) {
-                    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-                }
-                text_detail::append_json_string(output, "[" + upper + " " +
-                                                            std::to_string(decoded ? decoded->view().size() : 0) +
-                                                            " bytes]");
-                return;
-            }
-            text_detail::append_json_string(output, redacted_marker);
-            ++redactions_;
-            return;
-        }
-        if (kind == ruvia::json_value::kind_type::string) {
-            const auto decoded = value.get<ruvia::string>();
-            text_detail::append_json_string(output, decoded ? text(decoded->view(), value_bytes).view()
-                                                            : std::string_view{redacted_marker});
-            return;
-        }
-        output.append(text_detail::sanitized(value.view(), false));
-    }
-
-    [[nodiscard]] static bool container_allowed(std::span<const std::string_view> allowed, std::string_view path) {
-        return std::any_of(allowed.begin(), allowed.end(), [path](std::string_view candidate) {
-            return candidate == path ||
-                   (candidate.size() > path.size() && candidate.starts_with(path) &&
-                       (candidate[path.size()] == '.' || candidate[path.size()] == '['));
-        });
+    void count(const json_excerpt& excerpt) noexcept {
+        redactions_ += excerpt.redactions();
+        items_omitted_ = items_omitted_ || excerpt.items_omitted();
     }
 
     // ACME JWS: the allow-listed protected header (alg, url; kid and jwk
@@ -1257,39 +910,42 @@ private:
         }
         static constexpr std::array protected_fields{std::string_view{"alg"}, std::string_view{"url"}};
         static constexpr std::array dropped_fields{std::string_view{"nonce"}};
+        json_excerpt excerpt;
         std::string output = "{\n  \"protected\": ";
         const auto protected_value = document->get<ruvia::string>("protected");
-        const auto protected_json = protected_value ? text_detail::base64_url_decode(protected_value->view()) : std::nullopt;
+        const auto protected_json =
+            protected_value ? service::utils::base64_url_decode(protected_value->view()) : std::nullopt;
         std::optional<ruvia::json_value> header;
         if (protected_json) {
             header = ruvia::json_value::parse(std::string_view(*protected_json), {.resource_ = &pool});
         }
         if (header && header->is_object()) {
-            std::string path;
-            render_json(*header, path, protected_fields, {}, dropped_fields, false, 1, output);
+            excerpt.render(*header, {.allowed_ = protected_fields, .dropped_ = dropped_fields}, 1, output,
+                kept_json_string{this});
         } else {
-            text_detail::append_json_string(output, redacted_marker);
+            service::utils::append_json_string(output, redacted_marker);
             ++redactions_;
         }
         output.append(",\n  \"payload\": ");
         const auto payload_value = document->get<ruvia::string>("payload");
-        const auto payload = payload_value ? text_detail::base64_url_decode(payload_value->view()) : std::nullopt;
+        const auto payload = payload_value ? service::utils::base64_url_decode(payload_value->view()) : std::nullopt;
         if (payload && payload->empty()) {
-            text_detail::append_json_string(output, "(POST-as-GET)");
+            service::utils::append_json_string(output, "(POST-as-GET)");
         } else {
             std::optional<ruvia::json_value> parsed;
             if (payload) {
                 parsed = ruvia::json_value::parse(std::string_view(*payload), {.resource_ = &pool});
             }
             if (parsed) {
-                std::string path;
-                render_json(*parsed, path, policy.request_fields_, policy.request_sized_fields_, {}, false, 1, output);
+                excerpt.render(*parsed, {.allowed_ = policy.request_fields_, .sized_ = policy.request_sized_fields_}, 1,
+                    output, kept_json_string{this});
             } else {
-                text_detail::append_json_string(output, redacted_marker);
+                service::utils::append_json_string(output, redacted_marker);
                 ++redactions_;
             }
         }
         output.append("\n}");
+        count(excerpt);
         if (const auto signature = document->get<ruvia::string>("signature"); signature) {
             remember(signature->view());
         }
@@ -1307,14 +963,14 @@ private:
                 continue;
             }
             const auto equals = part.find('=');
-            const auto name = text_detail::percent_decode(part.substr(0, equals));
-            const auto value = equals == std::string_view::npos ? std::string{}
-                                                                : text_detail::percent_decode(part.substr(equals + 1));
+            const auto name = service::utils::percent_decode(part.substr(0, equals));
+            const auto value =
+                equals == std::string_view::npos ? std::string{} : service::utils::percent_decode(part.substr(equals + 1));
             if (!output.empty()) {
                 output.push_back('&');
             }
             output.append(name).push_back('=');
-            if (text_detail::contains(policy.request_fields_, name)) {
+            if (service::utils::contains(policy.request_fields_, name)) {
                 output.append(value);
             } else {
                 remember(value);
@@ -1346,13 +1002,13 @@ private:
             }
             output.append(count == 1 ? "\n" : ",\n");
             output.append("  {\n    \"subject\": ");
-            text_detail::append_json_string(output, text(name_text(X509_get_subject_name(certificate.get())), value_bytes).view());
+            service::utils::append_json_string(output, text(name_text(X509_get_subject_name(certificate.get())), value_bytes).view());
             output.append(",\n    \"issuer\": ");
-            text_detail::append_json_string(output, text(name_text(X509_get_issuer_name(certificate.get())), value_bytes).view());
+            service::utils::append_json_string(output, text(name_text(X509_get_issuer_name(certificate.get())), value_bytes).view());
             output.append(",\n    \"serial_number\": ");
-            text_detail::append_json_string(output, serial_text(certificate.get()));
+            service::utils::append_json_string(output, serial_text(certificate.get()));
             output.append(",\n    \"not_after\": ");
-            text_detail::append_json_string(output, time_text(X509_get0_notAfter(certificate.get())));
+            service::utils::append_json_string(output, time_text(X509_get0_notAfter(certificate.get())));
             output.append("\n  }");
         }
         ERR_clear_error();
@@ -1406,7 +1062,7 @@ private:
         if (const auto status = document.get<ruvia::int64>("Status"); status) {
             const auto value = static_cast<std::int64_t>(*status);
             result.rcode_number_ = std::to_string(value);
-            const auto name = text_detail::dns_rcode_name(value);
+            const auto name = redaction_detail::dns_rcode_name(value);
             result.rcode_ = name.empty() ? "RCODE" + result.rcode_number_ : std::string(name);
         }
         if (const auto answers = document.get<ruvia::json_value>("Answer"); answers && answers->is_array()) {
@@ -1421,7 +1077,7 @@ private:
                 }
                 if (const auto type = answer.get<ruvia::int64>("type"); type) {
                     const auto number = static_cast<std::int64_t>(*type);
-                    const auto name = text_detail::dns_type_name(number);
+                    const auto name = redaction_detail::dns_type_name(number);
                     item.type_ = text(name.empty() ? "TYPE" + std::to_string(number) : std::string(name), identifier_bytes);
                 }
                 if (const auto ttl = answer.get<ruvia::int64>("TTL"); ttl) {

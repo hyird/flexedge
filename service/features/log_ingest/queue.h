@@ -3,7 +3,6 @@
 #include <ruvia/core/task.h>
 #include <ruvia/web/redis/redis.h>
 
-#include <algorithm>
 #include <array>
 #include <charconv>
 #include <chrono>
@@ -16,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-#include "service/features/background/work_available.h"
+#include "service/features/background/reliable_stream.h"
 #include "service/utils/redis_reply.h"
 
 namespace service::log_ingest::queue {
@@ -43,34 +42,35 @@ inline constexpr std::int64_t retry_maximum_ms{60000};
 inline constexpr std::uint64_t read_batch_size{1};
 inline constexpr std::uint64_t reclaim_batch_size{1};
 inline constexpr std::int64_t reclaim_idle_ms{5 * 60 * 1000};
-inline constexpr std::string_view initialize_script{R"lua(
-local result = redis.pcall('XGROUP', 'CREATE', KEYS[1], ARGV[1], '0', 'MKSTREAM')
-if type(result) == 'table' and result.err then
-    if string.find(result.err, 'BUSYGROUP', 1, true) then
-        return 0
-    end
-    return redis.error_reply(result.err)
-end
-return 1
-)lua"};
-inline constexpr std::string_view push_script{R"lua(
-local wake_type = redis.call('TYPE', KEYS[3]).ok
-if wake_type ~= 'none' and wake_type ~= 'stream' then return redis.error_reply('invalid work availability key type') end
+
+inline constexpr service::background::reliable_stream::definition stream{
+    .stream_ = stream_key,
+    .group_ = consumer_group,
+    .bytes_ = retained_bytes_key,
+    .retry_ = retry_schedule_key,
+    .attempts_ = retry_attempts_key,
+    .failed_ = failed_stream_key,
+    .failed_bytes_ = failed_bytes_key,
+    .max_failed_entries_ = max_failed_entries,
+    .max_failed_bytes_ = max_failed_bytes,
+    .retry_initial_ = std::chrono::milliseconds(retry_initial_ms),
+    .retry_maximum_ = std::chrono::milliseconds(retry_maximum_ms),
+    .reclaim_idle_ = std::chrono::milliseconds(reclaim_idle_ms),
+};
+
+// The live budget accounts payload bytes only.
+inline constexpr std::string_view push_body{R"lua(
 local payload_bytes = string.len(ARGV[1])
-local maximum_entries = tonumber(ARGV[2])
-local maximum_bytes = tonumber(ARGV[3])
-local retained_bytes = tonumber(redis.call('GET', KEYS[2]) or '0')
-if redis.call('XLEN', KEYS[1]) >= maximum_entries or
-   payload_bytes > maximum_bytes - retained_bytes then
+if not reliable_admit(KEYS[2], redis.call('XLEN', KEYS[1]), tonumber(ARGV[2]), tonumber(ARGV[3]), payload_bytes) then
     return 0
 end
 local id = redis.call('XADD', KEYS[1], '*', 'payload', ARGV[1])
 redis.call('INCRBY', KEYS[2], payload_bytes)
-redis.call('XADD', KEYS[3], 'MAXLEN', '~', 10000, '*', 'type', 'log-ingest')
 return id
 )lua"};
-inline constexpr std::string_view finish_script{R"lua(
-local kinds = {'stream','string','zset','hash','hash','stream'}
+
+inline constexpr std::string_view finish_body{R"lua(
+local kinds = {'stream','string','zset','hash','hash'}
 for index, kind in ipairs(kinds) do
     local actual = redis.call('TYPE', KEYS[index]).ok
     if actual ~= 'none' and actual ~= kind then return redis.error_reply('invalid log completion key type') end
@@ -79,141 +79,65 @@ local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[2], ARGV[2], '1')
 if #pending > 0 and (#pending[1] < 2 or pending[1][2] ~= ARGV[3]) then
     return 0
 end
-local rows = redis.call('XRANGE', KEYS[1], ARGV[2], ARGV[2], 'COUNT', 1)
-if #rows == 0 then return 1 end
+local fields = reliable_fields(KEYS[1], ARGV[2])
+if fields == nil then return 1 end
 if #pending == 0 then return 0 end
-local payload_bytes = 0
-for index = 1, #rows[1][2], 2 do
-    if rows[1][2][index] == 'payload' then
-        payload_bytes = string.len(rows[1][2][index + 1])
-    end
-end
-local acknowledged = redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
-if acknowledged == 0 then return 0 end
-redis.call('XDEL', KEYS[1], ARGV[2])
-local retained_bytes = tonumber(redis.call('GET', KEYS[2]) or '0')
-local remaining = retained_bytes - payload_bytes
-if remaining > 0 then
-    redis.call('SET', KEYS[2], remaining)
-else
-    redis.call('DEL', KEYS[2])
-end
-redis.call('ZREM', KEYS[3], ARGV[2])
-redis.call('HDEL', KEYS[4], ARGV[2])
+reliable_remove(KEYS[1], ARGV[1], KEYS[3], KEYS[4], KEYS[2], ARGV[2], string.len(fields['payload'] or ''))
 redis.call('HINCRBY', KEYS[5], 'finished', 1)
-redis.call('XADD', KEYS[6], 'MAXLEN', '~', 10000, '*', 'type', 'outbox')
 return 1
 )lua"};
 
-inline constexpr std::string_view retry_script{R"lua(
-local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[2], ARGV[2], '1')
-if #pending == 0 or pending[1][2] ~= ARGV[3] then return 0 end
-local attempt = redis.call('HINCRBY', KEYS[3], ARGV[2], 1)
-local delay = math.min(tonumber(ARGV[5]), tonumber(ARGV[4]) * 2 ^ math.min(attempt - 1, 16))
-local clock = redis.call('TIME')
-local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
-redis.call('ZADD', KEYS[2], now + delay, ARGV[2])
-redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[3], 0, ARGV[2], 'JUSTID')
+inline constexpr std::string_view retry_body{R"lua(
+if not reliable_owned(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) then return 0 end
+local delay = reliable_retry(KEYS[1], ARGV[1], KEYS[2], KEYS[3], ARGV[2], ARGV[3], tonumber(ARGV[4]), tonumber(ARGV[5]))
 redis.call('HINCRBY', KEYS[4], 'retried', 1)
 return delay
 )lua"};
 
-inline constexpr std::string_view claim_retry_script{R"lua(
-local clock = redis.call('TIME')
-local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
-local ids = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, ARGV[3])
-local entries = {}
-for _, id in ipairs(ids) do
-    local claimed = redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, id)
-    redis.call('ZREM', KEYS[2], id)
-    if #claimed > 0 then
-        entries[#entries + 1] = claimed[1]
-    else
-        redis.call('HDEL', KEYS[3], id)
-    end
-end
-return entries
-)lua"};
-
-inline constexpr std::string_view fail_script{R"lua(
-local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[2], ARGV[2], '1')
-if #pending == 0 or pending[1][2] ~= ARGV[3] then return -1 end
-local rows = redis.call('XRANGE', KEYS[1], ARGV[2], ARGV[2], 'COUNT', 1)
-if #rows == 0 then return -1 end
-local payload = ''
-for index = 1, #rows[1][2], 2 do
-    if rows[1][2][index] == 'payload' then payload = rows[1][2][index + 1] end
-end
+inline constexpr std::string_view fail_body{R"lua(
+if not reliable_owned(KEYS[1], ARGV[1], ARGV[2], ARGV[3]) then return -1 end
+local fields = reliable_fields(KEYS[1], ARGV[2])
+if fields == nil then return -1 end
+local payload = fields['payload'] or ''
 local reason = ARGV[4]
-local retained_bytes = tonumber(redis.call('GET', KEYS[6]) or '0')
 local record_bytes = string.len(payload) + string.len(reason) + string.len(ARGV[2]) + 64
-if redis.call('XLEN', KEYS[5]) >= tonumber(ARGV[5]) or
-   record_bytes > tonumber(ARGV[6]) - retained_bytes then
-    return 0
-end
-local clock = redis.call('TIME')
-local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
 local attempts = redis.call('HGET', KEYS[4], ARGV[2]) or '0'
-redis.call('XADD', KEYS[5], '*', 'source_id', ARGV[2], 'payload', payload,
-    'reason', reason, 'attempts', attempts, 'failed_unix_ms', tostring(now),
-    'retained_bytes', tostring(record_bytes))
-redis.call('INCRBY', KEYS[6], record_bytes)
-redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
-redis.call('XDEL', KEYS[1], ARGV[2])
-local remaining = tonumber(redis.call('GET', KEYS[2]) or '0') - string.len(payload)
-if remaining > 0 then redis.call('SET', KEYS[2], remaining) else redis.call('DEL', KEYS[2]) end
-redis.call('ZREM', KEYS[3], ARGV[2])
-redis.call('HDEL', KEYS[4], ARGV[2])
+local archived = reliable_archive(KEYS[5], KEYS[6], tonumber(ARGV[5]), tonumber(ARGV[6]), record_bytes,
+    {'source_id', ARGV[2], 'payload', payload, 'reason', reason, 'attempts', attempts,
+     'failed_unix_ms', tostring(reliable_now()), 'retained_bytes', tostring(record_bytes)})
+if not archived then return 0 end
+reliable_remove(KEYS[1], ARGV[1], KEYS[3], KEYS[4], KEYS[2], ARGV[2], string.len(payload))
 redis.call('HINCRBY', KEYS[7], 'failed', 1)
 return 1
 )lua"};
 
-inline constexpr std::string_view replay_failed_script{R"lua(
-local wake_type = redis.call('TYPE', KEYS[6]).ok
-if wake_type ~= 'none' and wake_type ~= 'stream' then return redis.error_reply('invalid work availability key type') end
-local rows = redis.call('XRANGE', KEYS[1], ARGV[1], ARGV[1], 'COUNT', 1)
-if #rows == 0 then return 0 end
-local fields = {}
-for index = 1, #rows[1][2], 2 do fields[rows[1][2][index]] = rows[1][2][index + 1] end
+inline constexpr std::string_view replay_failed_body{R"lua(
+local fields = reliable_fields(KEYS[1], ARGV[1])
+if fields == nil then return 0 end
 if fields['payload'] == nil or fields['retained_bytes'] == nil then
     return redis.error_reply('invalid failed log delivery')
 end
 local payload_bytes = string.len(fields['payload'])
-local retained_bytes = tonumber(redis.call('GET', KEYS[4]) or '0')
-if redis.call('XLEN', KEYS[3]) >= tonumber(ARGV[2]) or
-   payload_bytes > tonumber(ARGV[3]) - retained_bytes then return 0 end
+if not reliable_admit(KEYS[4], redis.call('XLEN', KEYS[3]), tonumber(ARGV[2]), tonumber(ARGV[3]), payload_bytes) then
+    return 0
+end
 local id = redis.call('XADD', KEYS[3], '*', 'payload', fields['payload'])
 redis.call('INCRBY', KEYS[4], payload_bytes)
 redis.call('XDEL', KEYS[1], ARGV[1])
-local remaining = tonumber(redis.call('GET', KEYS[2]) or '0') - tonumber(fields['retained_bytes'])
-if remaining > 0 then redis.call('SET', KEYS[2], remaining) else redis.call('DEL', KEYS[2]) end
+reliable_release(KEYS[2], tonumber(fields['retained_bytes']))
 redis.call('HINCRBY', KEYS[5], 'replayed', 1)
-redis.call('XADD', KEYS[6], 'MAXLEN', '~', 10000, '*', 'type', 'log-ingest')
 return id
 )lua"};
 
-inline constexpr std::string_view statistics_script{R"lua(
+inline constexpr std::string_view statistics_body{R"lua(
 local pending = redis.call('XPENDING', KEYS[1], ARGV[1])
-return {redis.call('XLEN', KEYS[1]), tonumber(redis.call('GET', KEYS[2]) or '0'), pending[1],
+return {redis.call('XLEN', KEYS[1]), reliable_counter(KEYS[2]), pending[1],
     redis.call('ZCARD', KEYS[3]), redis.call('XLEN', KEYS[4]),
-    tonumber(redis.call('GET', KEYS[5]) or '0'),
+    reliable_counter(KEYS[5]),
     tonumber(redis.call('HGET', KEYS[6], 'retried') or '0'),
     tonumber(redis.call('HGET', KEYS[6], 'failed') or '0'),
     tonumber(redis.call('HGET', KEYS[6], 'finished') or '0'),
     tonumber(redis.call('HGET', KEYS[6], 'replayed') or '0')}
-)lua"};
-
-inline constexpr std::string_view reclaim_script{R"lua(
-local pending = redis.call('XPENDING', KEYS[1], ARGV[1], 'IDLE', ARGV[3], '-', '+', ARGV[4])
-local entries = {}
-for _, entry in ipairs(pending) do
-    local claimed = redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], ARGV[3], entry[1])
-    if #claimed > 0 then
-        redis.call('ZREM', KEYS[2], entry[1])
-        entries[#entries + 1] = claimed[1]
-    end
-end
-return entries
 )lua"};
 
 struct entry final {
@@ -259,45 +183,37 @@ inline std::int64_t parse_integer(std::string_view value) {
     return parsed;
 }
 
-inline entry parse_entry(const ruvia::redis_value& source) {
-    if (source.kind() != ruvia::redis_value::kind_type::array) {
-        throw std::runtime_error("unexpected Redis log stream entry");
-    }
-    const auto parts = source.array();
-    if (parts.size() != 2 || parts[0].kind() != ruvia::redis_value::kind_type::string ||
-        parts[1].kind() != ruvia::redis_value::kind_type::array) {
-        throw std::runtime_error("unexpected Redis log stream entry");
-    }
-    entry entry{.id_ = std::string(parts[0].string()), .payload_ = {}, .valid_ = false};
-    const auto fields = parts[1].array();
-    for (std::size_t index = 0; index + 1 < fields.size(); index += 2) {
-        if (fields[index].kind() == ruvia::redis_value::kind_type::string &&
-            fields[index].string() == payload_field &&
-            fields[index + 1].kind() == ruvia::redis_value::kind_type::string) {
-            entry.payload_ = std::string(fields[index + 1].string());
-            entry.valid_ = fields.size() == 2 && !entry.payload_.empty();
+// A delivery is valid only as a single non-empty payload field.
+inline entry to_entry(service::background::reliable_stream::entry source) {
+    entry output{.id_ = std::move(source.id_), .payload_ = {}, .valid_ = false};
+    for (auto& [name, value] : source.fields_) {
+        if (name == payload_field) {
+            output.payload_ = std::move(value);
+            output.valid_ = source.fields_.size() == 1 && !output.payload_.empty();
         }
     }
-    return entry;
+    return output;
+}
+
+inline std::vector<entry> to_entries(std::vector<service::background::reliable_stream::entry> sources) {
+    std::vector<entry> output;
+    output.reserve(sources.size());
+    for (auto& source : sources) {
+        output.push_back(to_entry(std::move(source)));
+    }
+    return output;
 }
 
 inline ruvia::task<void> initialize(ruvia::redis_handle redis) {
-    const std::array<std::string_view, 1> keys{stream_key};
-    const std::array<std::string_view, 1> arguments{consumer_group};
-    const auto result = co_await redis.eval(initialize_script, keys, arguments);
-    require_redis_success(result, "could not initialize Redis log stream");
-    if (result.kind() != ruvia::redis_value::kind_type::integer ||
-        (result.integer() != 0 && result.integer() != 1)) {
-        throw std::runtime_error("unexpected Redis log stream initialization reply");
-    }
+    co_await service::background::reliable_stream::initialize(redis, stream);
 }
 
 inline ruvia::task<bool> push(ruvia::redis_handle redis, std::string_view payload) {
     const auto maximum_entries = std::to_string(max_entries);
     const auto maximum_bytes = std::to_string(max_retained_bytes);
-    const std::array<std::string_view, 3> keys{stream_key, retained_bytes_key, service::background::work_available::stream_key};
+    const std::array<std::string_view, 2> keys{stream_key, retained_bytes_key};
     const std::array<std::string_view, 3> arguments{payload, maximum_entries, maximum_bytes};
-    const auto result = co_await redis.eval(push_script, keys, arguments);
+    const auto result = co_await redis.eval(service::background::reliable_stream::script<push_body>, keys, arguments);
     require_redis_success(result, "could not append Redis log stream entry");
     if (result.kind() == ruvia::redis_value::kind_type::integer && result.integer() == 0) {
         co_return false;
@@ -308,59 +224,21 @@ inline ruvia::task<bool> push(ruvia::redis_handle redis, std::string_view payloa
     co_return true;
 }
 
-inline std::vector<entry> entries(const std::optional<ruvia::redis_x_read_group_result>& result) {
-    std::vector<entry> output;
-    if (!result) {
-        return output;
-    }
-    if (result->streams().size() != 1 || result->streams().front().stream() != stream_key) {
-        throw std::runtime_error("unexpected Redis log stream read reply");
-    }
-    const auto& stream = result->streams().front();
-    output.reserve(stream.entries().size());
-    for (const auto& source : stream.entries()) {
-        entry entry{.id_ = std::string(source.id()), .payload_ = {}, .valid_ = false};
-        for (const auto& field : source.fields()) {
-            if (field.key() == payload_field) {
-                entry.payload_ = std::string(field.value());
-                entry.valid_ = source.fields().size() == 1 && !entry.payload_.empty();
-            }
-        }
-        output.push_back(std::move(entry));
-    }
-    return output;
-}
-
 inline ruvia::task<std::vector<entry>> read(ruvia::redis_handle redis, std::string_view consumer) {
-    const std::array streams{
-        ruvia::redis_stream_read_view{.stream_ = stream_key, .id_ = std::string_view{">"}}};
-    ruvia::redis_x_read_group_options options{.count_ = read_batch_size};
-    co_return entries(co_await redis.xread_group(consumer_group, consumer, streams, options));
+    co_return to_entries(co_await service::background::reliable_stream::read(redis, stream, consumer, read_batch_size));
 }
 
 inline ruvia::task<std::chrono::milliseconds> retry_wait(ruvia::redis_handle redis,
     std::chrono::milliseconds maximum) {
-    constexpr std::string_view script{R"lua(
-local due = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
-if #due == 0 then return tonumber(ARGV[1]) end
-local clock = redis.call('TIME')
-local now = tonumber(clock[1])*1000 + math.floor(tonumber(clock[2])/1000)
-return math.max(0, math.min(tonumber(ARGV[1]), tonumber(due[2])-now))
-)lua"};
-    const std::array keys{retry_schedule_key};
-    const auto limit = std::to_string(std::max<std::int64_t>(0, maximum.count()));
-    const std::array<std::string_view, 1> arguments{limit};
-    const auto result = co_await redis.eval(script, keys, arguments);
-    require_redis_success(result, "could not inspect log retry deadline");
-    co_return std::chrono::milliseconds(result.integer());
+    co_return co_await service::background::reliable_stream::next_due(redis, stream, maximum);
 }
 
 inline ruvia::task<void> finish(ruvia::redis_handle redis, std::string_view consumer,
     const entry& entry) {
-    const std::array<std::string_view, 6> keys{stream_key, retained_bytes_key,
-        retry_schedule_key, retry_attempts_key, statistics_key, service::background::work_available::stream_key};
+    const std::array<std::string_view, 5> keys{stream_key, retained_bytes_key,
+        retry_schedule_key, retry_attempts_key, statistics_key};
     const std::array<std::string_view, 3> arguments{consumer_group, entry.id_, consumer};
-    const auto result = co_await redis.eval(finish_script, keys, arguments);
+    const auto result = co_await redis.eval(service::background::reliable_stream::script<finish_body>, keys, arguments);
     require_redis_success(result, "could not finish Redis log stream entry");
     if (result.kind() != ruvia::redis_value::kind_type::integer || result.integer() != 1) {
         throw std::runtime_error("Redis log stream entry is no longer owned by this consumer");
@@ -368,21 +246,7 @@ inline ruvia::task<void> finish(ruvia::redis_handle redis, std::string_view cons
 }
 
 inline ruvia::task<std::vector<entry>> reclaim_stale(ruvia::redis_handle redis, std::string_view consumer) {
-    const auto minimum_idle = std::to_string(reclaim_idle_ms);
-    const auto count = std::to_string(reclaim_batch_size);
-    const std::array<std::string_view, 2> keys{stream_key, retry_schedule_key};
-    const std::array<std::string_view, 4> arguments{consumer_group, consumer, minimum_idle, count};
-    const auto value = co_await redis.eval(reclaim_script, keys, arguments);
-    require_redis_success(value, "could not reclaim Redis log stream entries");
-    if (value.kind() != ruvia::redis_value::kind_type::array) {
-        throw std::runtime_error("unexpected Redis log stream reclaim reply");
-    }
-    std::vector<entry> entries;
-    entries.reserve(value.array().size());
-    for (const auto& source : value.array()) {
-        entries.push_back(parse_entry(source));
-    }
-    co_return entries;
+    co_return to_entries(co_await service::background::reliable_stream::reclaim(redis, stream, consumer, reclaim_batch_size));
 }
 
 // Returns zero only after ownership was lost. Retry state survives process loss;
@@ -394,7 +258,7 @@ inline ruvia::task<std::chrono::milliseconds> schedule_retry(ruvia::redis_handle
     const std::array<std::string_view, 4> keys{stream_key, retry_schedule_key,
         retry_attempts_key, statistics_key};
     const std::array<std::string_view, 5> arguments{consumer_group, entry.id_, consumer, initial, maximum};
-    const auto result = co_await redis.eval(retry_script, keys, arguments);
+    const auto result = co_await redis.eval(service::background::reliable_stream::script<retry_body>, keys, arguments);
     require_redis_success(result, "could not schedule Redis log delivery retry");
     if (result.kind() != ruvia::redis_value::kind_type::integer || result.integer() < 0 ||
         result.integer() > retry_maximum_ms) {
@@ -404,20 +268,7 @@ inline ruvia::task<std::chrono::milliseconds> schedule_retry(ruvia::redis_handle
 }
 
 inline ruvia::task<std::vector<entry>> claim_retries(ruvia::redis_handle redis, std::string_view consumer) {
-    const auto count = std::to_string(read_batch_size);
-    const std::array<std::string_view, 3> keys{stream_key, retry_schedule_key, retry_attempts_key};
-    const std::array<std::string_view, 3> arguments{consumer_group, consumer, count};
-    const auto result = co_await redis.eval(claim_retry_script, keys, arguments);
-    require_redis_success(result, "could not claim Redis log delivery retries");
-    if (result.kind() != ruvia::redis_value::kind_type::array) {
-        throw std::runtime_error("unexpected Redis log delivery retry claim reply");
-    }
-    std::vector<entry> output;
-    output.reserve(result.array().size());
-    for (const auto& source : result.array()) {
-        output.push_back(parse_entry(source));
-    }
-    co_return output;
+    co_return to_entries(co_await service::background::reliable_stream::claim_due(redis, stream, consumer, read_batch_size));
 }
 
 // A full failure archive applies backpressure: the input remains pending and
@@ -433,7 +284,7 @@ inline ruvia::task<failure_result> fail(ruvia::redis_handle redis, std::string_v
         retry_schedule_key, retry_attempts_key, failed_stream_key, failed_bytes_key, statistics_key};
     const std::array<std::string_view, 6> arguments{consumer_group, entry.id_, consumer,
         reason, maximum_entries, maximum_bytes};
-    const auto result = co_await redis.eval(fail_script, keys, arguments);
+    const auto result = co_await redis.eval(service::background::reliable_stream::script<fail_body>, keys, arguments);
     require_redis_success(result, "could not archive failed Redis log delivery");
     if (result.kind() != ruvia::redis_value::kind_type::integer) {
         throw std::runtime_error("unexpected Redis log failure archive reply");
@@ -501,15 +352,16 @@ inline ruvia::task<std::vector<failed_entry>> read_failed(ruvia::redis_handle re
 }
 
 // Empty means the record is absent or the live queue has reached its budget.
-// The original failed record is retained until the live append succeeds.
+// The original failed record is retained until the live append succeeds. The
+// caller wakes its own log ingest loop for the replayed delivery.
 inline ruvia::task<std::optional<std::string>> replay_failed(ruvia::redis_handle redis,
     std::string_view failed_id) {
     const auto maximum_entries = std::to_string(max_entries);
     const auto maximum_bytes = std::to_string(max_retained_bytes);
-    const std::array<std::string_view, 6> keys{failed_stream_key, failed_bytes_key,
-        stream_key, retained_bytes_key, statistics_key, service::background::work_available::stream_key};
+    const std::array<std::string_view, 5> keys{failed_stream_key, failed_bytes_key,
+        stream_key, retained_bytes_key, statistics_key};
     const std::array<std::string_view, 3> arguments{failed_id, maximum_entries, maximum_bytes};
-    const auto result = co_await redis.eval(replay_failed_script, keys, arguments);
+    const auto result = co_await redis.eval(service::background::reliable_stream::script<replay_failed_body>, keys, arguments);
     require_redis_success(result, "could not replay failed Redis log delivery");
     if (result.kind() == ruvia::redis_value::kind_type::integer && result.integer() == 0) {
         co_return std::nullopt;
@@ -524,7 +376,7 @@ inline ruvia::task<statistics> inspect_statistics(ruvia::redis_handle redis) {
     const std::array<std::string_view, 6> keys{stream_key, retained_bytes_key,
         retry_schedule_key, failed_stream_key, failed_bytes_key, statistics_key};
     const std::array<std::string_view, 1> arguments{consumer_group};
-    const auto result = co_await redis.eval(statistics_script, keys, arguments);
+    const auto result = co_await redis.eval(service::background::reliable_stream::script<statistics_body>, keys, arguments);
     require_redis_success(result, "could not inspect Redis log delivery statistics");
     if (result.kind() != ruvia::redis_value::kind_type::array || result.array().size() != 10) {
         throw std::runtime_error("unexpected Redis log delivery statistics reply");

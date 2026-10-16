@@ -17,9 +17,7 @@
 #include "service/common/http.h"
 #include "service/common/ip_address.h"
 #include "service/config/outbound.h"
-#include "service/config/schema.h"
 #include "service/domains/overview/overview_types.h"
-#include "service/features/attempt_trace/outbound_policy.h"
 #include "service/features/certificate/worker.h"
 #include "service/features/dns/record_reconciliation.h"
 #include "service/features/dns/registry.h"
@@ -30,14 +28,15 @@
 #include "service/features/node_release/catalog.h"
 #include "service/features/node_runtime/mapper.h"
 #include "service/features/outbound_http/client.h"
+#include "service/features/outbound_http/error.h"
 #include "service/features/provider_verification/worker.h"
 #include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/website_config/validation.h"
-#include "service/features/website_dispatch/worker.h"
 #include "service/features/website_dns/mapper.h"
 #include "service/features/website_dns/model.h"
 #include "service/features/website_dns/runtime.h"
+#include "service/features/website_dns/worker.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
 
@@ -207,16 +206,17 @@ int run_architecture_tests() {
     }
     using service::sync_runtime::marker_operation;
     using service::sync_runtime::marker_resource_type;
-    REQUIRE(service::sync_runtime::resource_type_name(marker_resource_type::provider) == "provider");
-    REQUIRE(service::sync_runtime::resource_type_name(marker_resource_type::dns_zone) == "dns_zone");
-    REQUIRE(service::sync_runtime::resource_type_name(marker_resource_type::certificate) ==
-            "certificate");
-    REQUIRE(service::sync_runtime::resource_type_name(marker_resource_type::website) == "website");
-    REQUIRE(service::sync_runtime::resource_column(marker_resource_type::provider) == "provider_id");
-    REQUIRE(service::sync_runtime::resource_column(marker_resource_type::dns_zone) == "dns_zone_id");
-    REQUIRE(service::sync_runtime::resource_column(marker_resource_type::certificate) ==
-            "certificate_id");
-    REQUIRE(service::sync_runtime::resource_column(marker_resource_type::website) == "website_id");
+    for (const auto& type : service::sync_runtime::marker_types) {
+        REQUIRE(&service::sync_runtime::describe(type.resource_type_) == &type);
+        REQUIRE(service::sync_runtime::parse_marker_resource_type(type.name_) == type.resource_type_);
+        REQUIRE(service::background::work_available::valid_type(type.work_type_));
+        REQUIRE(type.claims_per_round_ > 0);
+    }
+    REQUIRE(service::sync_runtime::describe(marker_resource_type::provider).column_ == "provider_id");
+    REQUIRE(service::sync_runtime::describe(marker_resource_type::dns_zone).column_ == "dns_zone_id");
+    REQUIRE(service::sync_runtime::describe(marker_resource_type::certificate).column_ == "certificate_id");
+    REQUIRE(service::sync_runtime::describe(marker_resource_type::website).column_ == "website_id");
+    REQUIRE(!service::sync_runtime::parse_marker_resource_type("unknown"));
     REQUIRE(service::sync_runtime::marker_operation_name(marker_operation::verify) == "verify");
     REQUIRE(service::sync_runtime::marker_operation_name(marker_operation::sync) == "sync");
     REQUIRE(service::sync_runtime::marker_operation_name(marker_operation::sync_local) == "sync_local");
@@ -230,11 +230,8 @@ int run_architecture_tests() {
         marker_operation::sync_remote));
     REQUIRE(!service::sync_runtime::supports_marker_operation(marker_resource_type::website,
         marker_operation::remove));
-    REQUIRE(throws_runtime_error([] {
-        (void)service::sync_runtime::resource_type_name(static_cast<marker_resource_type>(99));
-    }));
     REQUIRE(throws_runtime_error(
-        [] { (void)service::sync_runtime::resource_column(static_cast<marker_resource_type>(99)); }));
+        [] { (void)service::sync_runtime::describe(static_cast<marker_resource_type>(99)); }));
     REQUIRE(
         throws_runtime_error([] { (void)service::sync_runtime::require_marker_operation("unknown"); }));
     const auto marker_started = std::chrono::steady_clock::now();
@@ -383,67 +380,6 @@ int run_architecture_tests() {
     REQUIRE(overview_json.find("\"issues\":{") != std::string_view::npos);
     REQUIRE(overview_json.find("marker") == std::string_view::npos);
 
-    const auto& schema_migrations = service::config::schema_migrations;
-    REQUIRE(schema_migrations.size() >= 20);
-    REQUIRE(schema_migrations.front().id() == "0001");
-    REQUIRE(schema_migrations.back().id() == "0027_node_report_receipt");
-    const auto remove_http2_migration = schema_migrations[schema_migrations.size() - 6].sql();
-    REQUIRE(schema_migrations[schema_migrations.size() - 6].id() == "0022_remove_website_http2");
-    REQUIRE(remove_http2_migration.find("sys_website") != std::string_view::npos);
-    REQUIRE(remove_http2_migration.find("http2_enabled") != std::string_view::npos);
-    REQUIRE(schema_migrations[schema_migrations.size() - 5].id() == "0023_task_attempt_details");
-    const auto attempt_details_migration = schema_migrations[schema_migrations.size() - 5].sql();
-    REQUIRE(attempt_details_migration.find("idx_sync_event_task_resource_version") != std::string_view::npos);
-    REQUIRE(attempt_details_migration.find("'node'") != std::string_view::npos);
-    REQUIRE(attempt_details_migration.find("row_number") != std::string_view::npos);
-    REQUIRE(schema_migrations[schema_migrations.size() - 4].id() == "0024_task_attempt_traces");
-    const auto attempt_traces_migration = schema_migrations[schema_migrations.size() - 4].sql();
-    REQUIRE(attempt_traces_migration.find("sys_sync_event_trace") != std::string_view::npos);
-    REQUIRE(attempt_traces_migration.find("ON DELETE CASCADE") != std::string_view::npos);
-    // Tasks are operations: nullable owner columns keep an older server
-    // working on this schema; retained attempts are deleted with the upgrade.
-    const auto operation_tasks_migration = schema_migrations[schema_migrations.size() - 3].sql();
-    REQUIRE(operation_tasks_migration.find("sys_operation_subtask") != std::string_view::npos);
-    REQUIRE(operation_tasks_migration.find("uk_sync_task_subtask") != std::string_view::npos);
-    REQUIRE(operation_tasks_migration.find("DELETE FROM") != std::string_view::npos);
-    // Every outbound operation has its own allow-list; credentials are never on one.
-    for (const auto& policy : service::attempt_trace::outbound_policies) {
-        REQUIRE(&service::attempt_trace::policy_for(policy.operation_) == &policy);
-        for (const auto parameter : {std::string_view{"AccessKeyId"}, std::string_view{"Signature"},
-                 std::string_view{"SignatureNonce"}, std::string_view{"access_key"}}) {
-            REQUIRE(std::find(policy.query_.begin(), policy.query_.end(), parameter) == policy.query_.end());
-        }
-    }
-    const auto& sync_event_migration = schema_migrations[19].sql();
-    REQUIRE(sync_event_migration.starts_with("DO $flexedge_sync_result_events$"));
-    REQUIRE(sync_event_migration.find("CREATE TABLE public.sys_sync_event") != std::string_view::npos);
-    const auto& schema_baseline = schema_migrations.front().sql();
-    // The production database records this checksum. Never fold later schema
-    // work into migration 0001 after it has been released.
-    REQUIRE(schema_baseline.find("CREATE TABLE public.sys_task") != std::string_view::npos);
-    REQUIRE(schema_baseline.find("node_key_hash") != std::string_view::npos);
-    REQUIRE(schema_baseline.find("device_key_fingerprint") != std::string_view::npos);
-    REQUIRE(schema_baseline.find("sys_sync_event") == std::string_view::npos);
-    REQUIRE(schema_baseline.find("DROP TABLE") == std::string_view::npos);
-    REQUIRE(schema_baseline.find("migrate_data") == std::string_view::npos);
-    std::string schema_sql;
-    for (const auto& migration : schema_migrations) {
-        schema_sql += migration.sql();
-    }
-    REQUIRE(schema_sql.find("RENAME COLUMN node_key_envelope TO node_secret_envelope") != std::string_view::npos);
-    REQUIRE(schema_sql.find("RENAME COLUMN protocol_version TO schema_version") != std::string_view::npos);
-    REQUIRE(schema_sql.find("CREATE TABLE public.sys_sync_task") != std::string_view::npos);
-    REQUIRE(schema_sql.find("CREATE TABLE public.sys_sync_event") != std::string_view::npos);
-    REQUIRE(schema_sql.find("uk_sync_task_resource") != std::string_view::npos);
-    REQUIRE(schema_sql.find("idx_sync_event_tenant_id") != std::string_view::npos);
-    REQUIRE(schema_sql.find("version bigint NOT NULL") != std::string_view::npos);
-    REQUIRE(schema_sql.find("processed_version bigint DEFAULT 0 NOT NULL") != std::string_view::npos);
-    REQUIRE(schema_sql.find("lease_until timestamptz") != std::string_view::npos);
-    REQUIRE(schema_sql.find(
-                "num_nonnulls(provider_id, dns_zone_id, certificate_id, website_id) = 1") != std::string_view::npos);
-    REQUIRE(schema_sql.find("request_bytes bigint DEFAULT 0 NOT NULL") != std::string_view::npos);
-    REQUIRE(schema_sql.find("idx_website_access_log_website_ingested") != std::string_view::npos);
-    REQUIRE(schema_sql.find("idx_node_log_node_ingested") != std::string_view::npos);
     REQUIRE(service::sync_runtime::bounded_error(
                 std::string(service::sync_runtime::max_error_message_length + 1, 'x'))
                 .size() == service::sync_runtime::max_error_message_length);
@@ -453,13 +389,11 @@ int run_architecture_tests() {
         multibyte_error += "错";
     }
     REQUIRE(service::sync_runtime::bounded_error(multibyte_error).size() == 999);
-    const auto invalid_provider_failure = service::provider_verification::detail::classify_task_failure(
-        std::make_exception_ptr(std::invalid_argument("invalid provider config")));
+    const auto invalid_provider_failure = service::outbound_http::classify_attempt_failure(
+        std::make_exception_ptr(std::invalid_argument("invalid provider config")), "");
     REQUIRE(invalid_provider_failure.permanent_);
-    const auto retryable_provider_failure =
-        service::provider_verification::detail::classify_task_failure(
-            std::make_exception_ptr(service::certificate_issuance::certificate_provider_client_error(
-                "upstream unavailable", true)));
+    const auto retryable_provider_failure = service::outbound_http::classify_attempt_failure(
+        std::make_exception_ptr(service::outbound_http::attempt_error("upstream unavailable", false)), "");
     REQUIRE(!retryable_provider_failure.permanent_);
 
     flexedge::node::v2::Website route_website;

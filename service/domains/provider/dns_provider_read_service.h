@@ -10,9 +10,11 @@
 #include <string_view>
 #include <vector>
 
+#include "service/common/database.h"
 #include "service/common/http.h"
 #include "service/domains/provider/dns_provider_error.h"
 #include "service/domains/provider/dns_provider_types.h"
+#include "service/domains/provider/provider_reference.h"
 #include "service/features/dns/provider_config_mapper.h"
 
 namespace service::provider {
@@ -24,29 +26,23 @@ public:
         std::int64_t skip,
         const std::optional<std::string>& keyword,
         const std::optional<std::string>& status) const {
-        std::string where =
-            " FROM sys_provider provider WHERE provider.tenant_id = $1 AND provider.kind = "
-            "'dns' AND provider.deleted_at IS NULL";
-        std::vector<ruvia::db_value> params{ruvia::db_value{tenant_id}};
         std::optional<std::string> pattern;
-        if (status) {
-            where += " AND provider.status = $" + std::to_string(params.size() + 1);
-            params.emplace_back(std::string_view(*status));
-        }
         if (keyword) {
             pattern = "%" + service::common::escape_like_pattern(*keyword) + "%";
-            const auto placeholder = "$" + std::to_string(params.size() + 1);
-            where += " AND (provider.name ILIKE " + placeholder + " OR provider.account_id ILIKE " +
-                     placeholder + ")";
-            params.emplace_back(std::string_view(*pattern));
         }
-        const auto count_rows = co_await c.db().query("SELECT COUNT(*)" + where, params);
-        const auto total = count_rows.empty() ? std::int64_t{0}
-                                              : count_rows.front()[0].template as<std::int64_t>().value_or(0);
-        const auto rows =
-            co_await c.db().query(select_columns() + where + " ORDER BY provider.sort DESC LIMIT " +
-                                      std::to_string(page_size) + " OFFSET " + std::to_string(skip),
-                params);
+        const auto filter = [&](ruvia::db_query& query) {
+            source(query, tenant_id);
+            if (status) {
+                query.and_where(query.sql({"provider.status = ", ""}, {query.value(*status)}));
+            }
+            if (pattern) {
+                const auto value = query.value(*pattern);
+                query.and_where(query.sql(
+                    {"provider.name ILIKE ", " OR provider.account_id ILIKE ", ""}, {value, value}));
+            }
+        };
+        const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
+        const auto total = page_rows.total_;
 
         dns_provider_page_data_dto result({.resource_ = c.pool()});
         result.template set<"total">(total);
@@ -54,7 +50,7 @@ public:
         result.template set<"page_size">(page_size);
         result.template set<"total_pages">(page_size > 0 ? (total + page_size - 1) / page_size : 0);
         auto& items = result.template ensure<"list">();
-        for (const auto& row : rows) {
+        for (const auto& row : page_rows.rows_) {
             fill(items.emplace_back(ruvia::model_options{.resource_ = c.pool()}), parse_row(c, row));
         }
         co_return result;
@@ -62,12 +58,12 @@ public:
 
     ruvia::task<dns_provider_dto> get(auto& c, const std::string& tenant_id,
         const std::string& id) const {
-        const auto rows = co_await c.db().query(
-            select_columns() +
-                " FROM sys_provider provider WHERE provider.id = $1 AND "
-                "provider.tenant_id = $2 AND provider.kind = 'dns' AND "
-                "provider.deleted_at IS NULL LIMIT 1",
-            id, tenant_id);
+        ruvia::db_query query(c.pool());
+        source(query, tenant_id);
+        query.and_where(query.sql({"provider.id = ", ""}, {query.value(id)}));
+        project(query);
+        query.limit(1);
+        const auto rows = co_await c.db().query(query);
         if (rows.empty()) {
             service::common::throw_app_error(dns_provider_error::not_found);
         }
@@ -92,16 +88,23 @@ private:
         std::int64_t zone_count_{};
     };
 
-    static std::string select_columns() {
-        return "SELECT provider.id, provider.provider, provider.revision, provider.name, "
-               "provider.account_id, provider.config::text, provider.status, "
-               "TO_CHAR(provider.last_verified_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-               "provider.last_error, TO_CHAR(provider.created_at, "
-               "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-               "TO_CHAR(provider.updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'), "
-               "(SELECT COUNT(*) FROM sys_dns_zone zone WHERE zone.tenant_id = "
-               "provider.tenant_id AND zone.provider_id = provider.id AND zone.deleted_at IS "
-               "NULL)";
+    static void source(ruvia::db_query& query, const std::string& tenant_id) {
+        query.from("sys_provider", "provider")
+            .where(query.sql({"provider.tenant_id = ", ""}, {query.value(tenant_id)}))
+            .and_where(live_dns_provider_predicate(query, "provider"));
+    }
+
+    static void project(ruvia::db_query& query) {
+        query
+            .select(service::common::sql_columns(query,
+                {"provider.id", "provider.provider", "provider.revision", "provider.name",
+                    "provider.account_id", "provider.config::text", "provider.status",
+                    "TO_CHAR(provider.last_verified_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')",
+                    "provider.last_error", "TO_CHAR(provider.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')",
+                    "TO_CHAR(provider.updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')",
+                    "SELECT COUNT(*) FROM sys_dns_zone zone WHERE zone.tenant_id = provider.tenant_id "
+                    "AND zone.provider_id = provider.id AND zone.deleted_at IS NULL"}))
+            .order_by(query.sql("provider.sort"), ruvia::db_order_direction::desc);
     }
 
     template <typename row_type>

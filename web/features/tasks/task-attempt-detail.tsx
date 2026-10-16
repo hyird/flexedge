@@ -1,7 +1,11 @@
 import type { ReactNode } from 'react'
 import { Chip, Link, Table } from '@heroui/react'
 import { formatDate } from '@/lib/format'
-import type { StatusTone } from '@/lib/status'
+import {
+  describeStatus,
+  statusReserve,
+  type StatusDictionary,
+} from '@/lib/status'
 import { CopyButton } from '@/components/copy-button'
 import { Mono } from '@/components/mono'
 import { StatusChip } from '@/components/status-chip'
@@ -106,8 +110,8 @@ const dnsChanges = {
   created: { label: '新增', tone: 'success' },
   updated: { label: '修改', tone: 'accent' },
   deleted: { label: '删除', tone: 'danger' },
-} as const
-const dnsChangeLabels = Object.values(dnsChanges).map((change) => change.label)
+} as const satisfies StatusDictionary
+const dnsChangeReserve = statusReserve(dnsChanges)
 
 type DnsRecord = DetailOf<'dns_sync'>['created'][number]
 
@@ -178,9 +182,8 @@ function DnsSyncDetail({ detail }: { detail: DetailOf<'dns_sync'> }) {
                           first={
                             <span className='flex min-w-0 items-center gap-1.5'>
                               <StatusChip
-                                label={dnsChanges[row.change].label}
-                                tone={dnsChanges[row.change].tone}
-                                reserve={dnsChangeLabels}
+                                {...dnsChanges[row.change]}
+                                reserve={dnsChangeReserve}
                               />
                               <Mono truncate className='max-w-36'>
                                 {row.record.name}
@@ -327,10 +330,8 @@ const domainStatuses = {
   verified: { label: '解析正确', tone: 'success' },
   invalid: { label: '解析不匹配', tone: 'danger' },
   unverified: { label: '无法检查', tone: 'warning' },
-} as const satisfies Record<string, { label: string; tone: StatusTone }>
-const domainStatusLabels = Object.values(domainStatuses).map(
-  (status) => status.label
-)
+} as const satisfies StatusDictionary
+const domainStatusReserve = statusReserve(domainStatuses)
 
 function WebsiteDomainsDetail({
   detail,
@@ -396,14 +397,8 @@ function WebsiteDomainsDetail({
                   </Table.Cell>
                   <Table.Cell>
                     <StatusChip
-                      label={
-                        known(domainStatuses, domain.status)?.label ??
-                        (domain.status || '未知')
-                      }
-                      tone={
-                        known(domainStatuses, domain.status)?.tone ?? 'default'
-                      }
-                      reserve={domainStatusLabels}
+                      {...describeStatus(domainStatuses, domain.status)}
+                      reserve={domainStatusReserve}
                     />
                   </Table.Cell>
                 </Table.Row>
@@ -505,8 +500,8 @@ function ProviderDetail({
 const nodeResults = {
   applied: { label: '已应用', tone: 'success' },
   failed: { label: '应用失败', tone: 'danger' },
-} as const
-const nodeResultLabels = [nodeResults.applied.label, nodeResults.failed.label]
+} as const satisfies StatusDictionary
+const nodeResultReserve = statusReserve(nodeResults)
 const nodePhases = {
   '': '—',
   stage: '暂存配置',
@@ -516,10 +511,6 @@ const nodePhases = {
 
 function NodeApplyDetail({ detail }: { detail: DetailOf<'node_apply'> }) {
   const failed = detail.result === 'failed'
-  const result = known(nodeResults, detail.result) ?? {
-    label: detail.result || '未知',
-    tone: 'default' as const,
-  }
   return (
     <DetailBlock title='节点应用记录'>
       <Facts
@@ -538,9 +529,8 @@ function NodeApplyDetail({ detail }: { detail: DetailOf<'node_apply'> }) {
             '结果',
             <StatusChip
               key='result'
-              label={result.label}
-              tone={result.tone}
-              reserve={nodeResultLabels}
+              {...describeStatus(nodeResults, detail.result)}
+              reserve={nodeResultReserve}
             />,
           ],
           [

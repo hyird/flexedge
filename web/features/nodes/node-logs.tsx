@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import { ArrowRotateLeft, Pause, Play } from '@gravity-ui/icons'
 import { Alert, Button } from '@heroui/react'
@@ -7,37 +6,31 @@ import { formatDate } from '@/lib/format'
 import { EmptyState } from '@/components/page'
 import { Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
-import { useTabPanelLoading } from '@/components/tab-panel-hold'
 import { useLiveLogs } from '@/features/logs/use-live-logs'
-import { nodeSnapshotQuery } from './data'
-import { parseNodeLogs } from './node-log-schema'
+import { nodeLogsQuery } from './data'
+import { nodeLogStreamStateReserve, nodeLogStreamStates } from './node-display'
 
 const route = getRouteApi('/_authenticated/nodes/$nodeId')
-const streamStateLabels = ['已暂停', '实时', '连接中断', '正在连接']
 
-/** Live node log tail. The stream opens once the header's one-shot node
- * snapshot has been read (so the page never holds two connections), closes
- * when the tab is left or paused, and resumes from the last cursor. */
+/** Live node log tail: the page's live stream while this tab is open and
+ * not paused; it resumes from the last cursor after an interruption. */
 export function NodeLogs() {
   const { nodeId } = route.useParams()
   const [paused, setPaused] = useState(false)
-  // Same key as the layout header's snapshot: one shared one-shot read. Wait
-  // for this visit's read so the node stream is released before logs open.
-  const header = useQuery(nodeSnapshotQuery(nodeId))
-  // Until then the tail is not opening yet, but the tab is still loading.
-  useTabPanelLoading(!paused && !header.isFetchedAfterMount)
   const { logs, connected, error, reconnect } = useLiveLogs(
-    `/api/nodes/${nodeId}/logs/stream?limit=100`,
-    parseNodeLogs,
-    header.isFetchedAfterMount && !paused
+    nodeLogsQuery(nodeId),
+    !paused
   )
-  const state = paused
-    ? { label: '已暂停', tone: 'default' as const }
-    : connected
-      ? { label: '实时', tone: 'success' as const }
-      : error
-        ? { label: '连接中断', tone: 'danger' as const }
-        : { label: '正在连接', tone: 'accent' as const }
+  const state =
+    nodeLogStreamStates[
+      paused
+        ? 'paused'
+        : connected
+          ? 'live'
+          : error
+            ? 'interrupted'
+            : 'connecting'
+    ]
   return (
     <Section
       title='实时日志'
@@ -45,11 +38,7 @@ export function NodeLogs() {
       contentClassName='flex flex-col gap-3'
       actions={
         <>
-          <StatusChip
-            label={state.label}
-            tone={state.tone}
-            reserve={streamStateLabels}
-          />
+          <StatusChip {...state} reserve={nodeLogStreamStateReserve} />
           <Button
             size='sm'
             variant='tertiary'

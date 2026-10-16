@@ -48,34 +48,19 @@ def run(resources):
         urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
     def request(path, method="GET", data=None, revision=None):
-        # Resource reads are SSE snapshots: GET requests read the first `snapshot` frame of the
-        # matching `/stream` endpoint (access logs: `/access-logs/history/stream`).
+        # Resource reads are plain GETs (access logs: `/access-logs/history`).
+        headers = {"Content-Type": "application/json"}
         if method == "GET":
             resource, _, query = path.partition("?")
-            resource += "/history/stream" if resource.endswith("/access-logs") else "/stream"
-            req = urllib.request.Request(base + "/api/" + resource + ("?" + query if query else ""),
-                headers={"Accept": "text/event-stream"})
-            with client.open(req, timeout=10) as response:
-                event = payload = None
-                for raw in response:
-                    line = raw.decode().rstrip("\r\n")
-                    if line.startswith("event: "):
-                        event = line[7:]
-                    elif line.startswith("data: "):
-                        payload = line[6:]
-                    elif not line and event in ("snapshot", "resource-error"):
-                        result = json.loads(payload)
-                        break
-                else:
-                    raise AssertionError(f"{path}: SSE closed without snapshot")
-        else:
-            headers = {"Content-Type": "application/json"}
-            if revision is not None:
-                headers["If-Match"] = '"' + str(revision) + '"'
-            req = urllib.request.Request(base + "/api/" + path, method=method, headers=headers,
-                data=None if data is None else json.dumps(data).encode())
-            with client.open(req, timeout=10) as response:
-                result = json.load(response)
+            if resource.endswith("/access-logs"):
+                resource += "/history"
+            path = resource + ("?" + query if query else "")
+        if revision is not None:
+            headers["If-Match"] = '"' + str(revision) + '"'
+        req = urllib.request.Request(base + "/api/" + path, method=method, headers=headers,
+            data=None if data is None else json.dumps(data).encode())
+        with client.open(req, timeout=10) as response:
+            result = json.load(response)
         if result["code"] != 0:
             raise AssertionError(f"{path}: business error {result['code']}")
         return result.get("data")

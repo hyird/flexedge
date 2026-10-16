@@ -1,0 +1,102 @@
+#pragma once
+
+#include "service/features/live_resource/notification_outbox.h"
+#include "service/features/node_presence/node_presence.h"
+
+namespace service::node_presence {
+
+// Resource events carry node heartbeat/runtime patches. Their owner publishes
+// the patch, cache invalidations and online deadline together, including replay
+// fencing. The generic outbox only owns durable claiming and retry.
+struct resource_relay final {
+    static constexpr std::string_view kind = service::live_resource::outbox::resource_kind;
+
+    static ruvia::task<void> publish(ruvia::redis_handle redis, std::string_view id, std::string_view payload) {
+        namespace outbox = service::live_resource::outbox;
+        auto fields = outbox::unpack(payload);
+        auto notification = notifications::decode(fields);
+        if (!notification) {
+            throw std::runtime_error("invalid resource outbox notification");
+        }
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+        if (!notification->node_id_.empty() && notification->node_seen_unix_ms_ > 0 &&
+            now - notification->node_seen_unix_ms_ >
+                std::chrono::duration_cast<std::chrono::milliseconds>(service::node::online_window).count()) {
+            // A delayed patch cannot replace newer runtime. Keep its original
+            // heartbeat timestamp and request a recovery snapshot instead.
+            notification->node_runtime_.clear();
+            notification->origin_runtime_.clear();
+            notification->missed_until_ = now;
+        }
+        if (notification->missed_until_) {
+            notification->missed_until_ = now;
+            fields = notifications::encode(*notification);
+        }
+        std::vector<std::string> invalidations;
+        for (const auto& change : notification->changes_) {
+            auto scopes = redis_snapshot_cache::invalidation_scopes(notification->tenant_id_, change.resource_, change.id_);
+            invalidations.insert(invalidations.end(), scopes.begin(), scopes.end());
+        }
+        if (notification->missed_until_) {
+            invalidations.push_back(notification->tenant_id_ == notifications::all_tenants
+                                        ? "*"
+                                        : redis_snapshot_cache::tenant_scope(notification->tenant_id_));
+        }
+        fields.emplace_back("event_id", id);
+        const std::array<std::string, 6> keys{"flexedge:notification-published:v1:" + std::string(id),
+            std::string(notifications::stream_key), std::string(redis_snapshot_cache::generation_keys[0]),
+            std::string(redis_snapshot_cache::generation_keys[1]), std::string(redis_snapshot_cache::generation_keys[2]),
+            std::string(deadlines_key)};
+        std::vector<std::string> arguments{std::to_string(notifications::max_entries), std::to_string(invalidations.size())};
+        arguments.insert(arguments.end(), invalidations.begin(), invalidations.end());
+        for (const auto& [name, value] : fields) {
+            arguments.push_back(name);
+            arguments.push_back(value);
+        }
+        arguments.insert(arguments.end(), {notification->tenant_id_, notification->node_id_,
+                                              std::to_string(notification->node_seen_unix_ms_), std::string(id)});
+        std::array<std::string_view, 6> key_views;
+        std::transform(keys.begin(), keys.end(), key_views.begin(), [](const auto& key) { return std::string_view(key); });
+        std::vector<std::string_view> argument_views;
+        argument_views.reserve(arguments.size());
+        for (const auto& argument : arguments) {
+            argument_views.push_back(argument);
+        }
+        const auto script = std::string(redis_snapshot_cache::invalidation_lua) + record_lua + std::string(publish_script);
+        const auto result = co_await redis.eval(script, key_views, argument_views);
+        service::utils::require_redis_success(result, "could not publish committed resource notification");
+        if (result.kind() != ruvia::redis_value::kind_type::string) {
+            throw std::runtime_error("invalid resource outbox publish result");
+        }
+    }
+
+private:
+    static constexpr std::string_view publish_script{R"lua(
+local duplicate = redis.call('GET', KEYS[1])
+if duplicate then return duplicate end
+local stream_type = redis.call('TYPE', KEYS[2]).ok
+if stream_type ~= 'none' and stream_type ~= 'stream' then
+    return redis.error_reply('notification target must be a stream')
+end
+snapshot_validate_generations(KEYS[3], KEYS[4], KEYS[5])
+local has_presence = ARGV[#ARGV-2] ~= ''
+if has_presence then
+    presence_validate(KEYS[6])
+    local tenant, node, seen = ARGV[#ARGV-3], ARGV[#ARGV-2], tonumber(ARGV[#ARGV-1])
+    if tenant == '' or string.find(tenant, '|', 1, true) or string.find(node, '|', 1, true) or not seen or seen <= 0 then
+        return redis.error_reply('invalid presence metadata')
+    end
+end
+local scopes = {}
+for i=1,tonumber(ARGV[2]) do scopes[i] = ARGV[2+i] end
+local entry = redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[1], '*', unpack(ARGV, 3+#scopes, #ARGV-4))
+snapshot_invalidate(KEYS[3], KEYS[4], KEYS[5], scopes, ARGV[#ARGV])
+if has_presence then presence_record(KEYS[6], ARGV[#ARGV-3], ARGV[#ARGV-2], tonumber(ARGV[#ARGV-1])) end
+redis.call('SET', KEYS[1], entry, 'EX', 604800)
+return entry
+)lua"};
+};
+
+}  // namespace service::node_presence

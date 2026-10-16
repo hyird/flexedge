@@ -15,7 +15,7 @@ struct certificate_provider_error {
     static inline constexpr service::common::app_error_def access_key_required{
         16014, "ZeroSSL API Access Key 不能为空", 422};
     static inline constexpr service::common::app_error_def revision_conflict{
-        16016, "配置已被其他请求修改，请刷新后重试", 412};
+        16018, "配置已被其他请求修改，请刷新后重试", 412};
 };
 
 }  // namespace service::provider

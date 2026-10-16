@@ -20,19 +20,6 @@ inline bool redirect_status(std::int64_t status) {
     return status == 301 || status == 302 || status == 307 || status == 308;
 }
 
-inline std::string_view redirect_status_line(std::int64_t status) {
-    switch (status) {
-        case 301:
-            return "301 Moved Permanently";
-        case 307:
-            return "307 Temporary Redirect";
-        case 308:
-            return "308 Permanent Redirect";
-        default:
-            return "302 Found";
-    }
-}
-
 inline bool valid_match_type(std::string_view type) {
     return type == "exact" || type == "prefix" || type == "suffix" || type == "regex";
 }

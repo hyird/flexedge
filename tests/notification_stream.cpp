@@ -23,6 +23,9 @@
 #include <asio/post.hpp>
 
 #include "service/features/live_resource/notification_reader.h"
+#include "service/features/log_ingest/fanout.h"
+#include "service/features/node_channel/report_waits.h"
+#include "service/features/node_dispatch/fanout.h"
 #include "support/redis_test.h"
 
 namespace {
@@ -31,6 +34,9 @@ namespace live = service::live_resource;
 namespace logs = service::log_ingest;
 namespace available = service::background::work_available;
 using clock_type = std::chrono::steady_clock;
+// The production handler list of every Web Worker (server.cpp).
+using reader = live::notification_reader<live::resource_subscriptions, service::node_dispatch::fanout::desired_state_waits,
+    logs::fanout::log_tails, logs::fanout::log_tail_recovery, service::node_channel::report_receipts>;
 
 void require(bool condition, std::string_view message) {
     if (!condition) {
@@ -44,7 +50,6 @@ struct reader_context final {
     live::hub resources_;
     logs::fanout::hub logs_;
     service::node_dispatch::fanout::hub dispatch_;
-    available::signals available_;
     service::node_channel::report_waits report_waits_;
     std::optional<service::node_channel::report_waits::subscription> report_subscription_;
     std::optional<live::hub::subscription> resource_subscription_;
@@ -70,11 +75,10 @@ struct reader_context final {
             return resources_;
         } else if constexpr (std::is_same_v<state_type, logs::fanout::hub>) {
             return logs_;
-        } else if constexpr (std::is_same_v<state_type, available::signals>) {
-            return available_;
         } else if constexpr (std::is_same_v<state_type, service::node_channel::report_waits>) {
             return report_waits_;
         } else {
+            static_assert(std::is_same_v<state_type, service::node_dispatch::fanout::hub>);
             return dispatch_;
         }
     }
@@ -124,31 +128,13 @@ ruvia::task<void> subscribe(reader_context& context) {
 ruvia::task<void> initial_log_snapshot(reader_context& context) {
     require((co_await context.log_subscription_->receive_for(std::chrono::seconds(2), {})).has_value(), "the real reader initializes its own log tails");
     require((co_await context.other_tenant_log_->receive_for(std::chrono::seconds(2), {})).has_value(), "initial readiness covers every local log tail");
-    for (const auto type : available::types) {
-        co_await available::wait(context, type, std::chrono::milliseconds(10));
-    }
     require((co_await context.report_subscription_->receive_for(std::chrono::seconds(1), {})).has_value(),
         "startup rechecks receipts that raced the completion cursor snapshot");
 }
 
-ruvia::task<void> receive_work_and_receipt(reader_context& context) {
-    const auto started = clock_type::now();
-    co_await available::wait(context, "dns-sync", std::chrono::seconds(2));
-    require(clock_type::now() - started < std::chrono::seconds(1), "broadcast hints immediately wake this worker's task channel");
+ruvia::task<void> receive_receipt(reader_context& context) {
     require((co_await context.report_subscription_->receive_for(std::chrono::seconds(2), {})).has_value(),
         "completion ids wake only this worker's active matching receipt subscription");
-}
-
-ruvia::task<void> verify_coalescing(reader_context& context) {
-    auto& signal = available::get_signals(context).for_type("certificate");
-    for (std::size_t index = 0; index < 100; ++index) {
-        signal.notify();
-    }
-    co_await signal.wait(std::chrono::seconds(1), {});
-    const auto started = clock_type::now();
-    co_await signal.wait(std::chrono::milliseconds(50), {});
-    require(clock_type::now() - started >= std::chrono::milliseconds(35),
-        "one hundred hints coalesce to one temporary availability signal");
 }
 
 ruvia::task<void> quiet(reader_context& context) {
@@ -173,11 +159,6 @@ ruvia::task<void> receive_recovery(reader_context& context) {
     require((co_await context.other_tenant_resource_->receive_for(std::chrono::seconds(2), {})).has_value(), "connection recovery covers all local resource tenants");
     (void)context.other_tenant_resource_->drain();
     require((co_await context.other_tenant_log_->receive_for(std::chrono::seconds(2), {})).has_value(), "connection recovery covers all local log tenants");
-    const auto started = clock_type::now();
-    for (const auto type : available::types) {
-        co_await available::wait(context, type, std::chrono::milliseconds(100));
-    }
-    require(clock_type::now() - started < std::chrono::milliseconds(300), "recovery wakes every local task type without a new producer event");
     require((co_await context.report_subscription_->receive_for(std::chrono::seconds(1), {})).has_value(),
         "recovery rechecks active connection receipts");
 }
@@ -212,13 +193,7 @@ ruvia::task<void> receive_log_gap(reader_context& context) {
         "a log-only trim leaves other resource tenants quiet");
 }
 
-ruvia::task<void> receive_signal_gap(reader_context& context) {
-    const auto started = clock_type::now();
-    for (const auto type : available::types) {
-        co_await available::wait(context, type, std::chrono::milliseconds(100));
-    }
-    require(clock_type::now() - started < std::chrono::milliseconds(300),
-        "a trimmed work hint wakes every local claimant immediately");
+ruvia::task<void> receive_receipt_gap(reader_context& context) {
     require((co_await context.report_subscription_->receive_for(std::chrono::seconds(1), {})).has_value(),
         "a trimmed completion hint rechecks the original connection's receipt");
     require(!(co_await context.report_subscription_->receive_for(std::chrono::milliseconds(40), {})).has_value(),
@@ -355,8 +330,7 @@ ruvia::task<void> publish_change(ruvia::redis_client& admin) {
     co_await publish_fields(admin, logs::notifications::stream_key, log_fields);
 }
 
-ruvia::task<void> publish_work_and_receipt(ruvia::redis_client& admin) {
-    co_await available::publish(admin.handle(), "dns-sync");
+ruvia::task<void> publish_receipt(ruvia::redis_client& admin) {
     const std::vector<std::pair<std::string, std::string>> fields{{"report_id", "123-1"}};
     co_await publish_fields(admin, service::node_channel::completion_stream_key, fields);
 }
@@ -365,7 +339,8 @@ ruvia::task<void> reset_generation(ruvia::redis_client& admin) {
     (void)co_await admin.handle().del(available::generation_key);
     // This append returns the existing BLOCK normally. The next generation
     // check must notice lost metadata without relying on a command failure.
-    co_await available::publish(admin.handle(), "outbox");
+    const std::vector<std::pair<std::string, std::string>> fields{{"report_id", "unrelated-report"}};
+    co_await publish_fields(admin, service::node_channel::completion_stream_key, fields);
 }
 
 ruvia::task<void> publish_tenant_recovery(ruvia::redis_client& admin) {
@@ -385,7 +360,7 @@ ruvia::task<void> disconnect_readers(redis_inspector& inspector, std::vector<std
 
 ruvia::task<void> clean(ruvia::redis_client& admin) {
     (void)co_await admin.handle().command("DEL", live::notifications::stream_key, logs::notifications::stream_key,
-        available::stream_key, available::generation_key, service::node_channel::completion_stream_key);
+        available::generation_key, service::node_channel::completion_stream_key);
     for (const auto key : live::redis_snapshot_cache::keys) {
         (void)co_await admin.handle().command("DEL", key);
     }
@@ -399,7 +374,6 @@ for i,key in ipairs(KEYS) do
   local tenant='unrelated-tenant'
   if mode==0 then redis.call('XADD',key,'*','tenant_id',tenant,'changes',ARGV[#KEYS+1])
   elseif mode==1 then redis.call('XADD',key,'*','tenant_id',tenant,'resource_type','node','resource_id','node-a')
-  elseif mode==2 then redis.call('XADD',key,'*','type','certificate')
   else redis.call('XADD',key,'*','report_id','unrelated-report') end
  end
  redis.call('XTRIM',key,'MAXLEN',2)
@@ -416,17 +390,15 @@ return 1
         // This command wakes the suspended readers' XREAD before the next
         // command removes that returned event from the retained prefix.
         if (index == 0) {
-            co_await publish_fields(admin, live::notification_streams[index], fields);
+            co_await publish_fields(admin, reader::keys[index], fields);
         } else if (index == 1) {
             const std::vector<std::pair<std::string, std::string>> values{{"tenant_id", "tenant-a"}, {"resource_type", "node"}, {"resource_id", "node-a"}};
-            co_await publish_fields(admin, live::notification_streams[index], values);
-        } else if (index == 2) {
-            co_await available::publish(admin.handle(), "dns-sync");
+            co_await publish_fields(admin, reader::keys[index], values);
         } else {
             const std::vector<std::pair<std::string, std::string>> values{{"report_id", "123-1"}};
-            co_await publish_fields(admin, live::notification_streams[index], values);
+            co_await publish_fields(admin, reader::keys[index], values);
         }
-        keys.push_back(live::notification_streams.at(index));
+        keys.push_back(reader::keys.at(index));
         modes.push_back(std::to_string(index));
     }
     std::vector<std::string_view> arguments;
@@ -440,24 +412,24 @@ return 1
 }
 
 ruvia::task<void> verify_atomic_batches(ruvia::redis_client& admin) {
-    std::array<live::notification_cursor, live::notification_streams.size()> cursors;
+    std::array<live::notification_cursor, reader::keys.size()> cursors;
     const auto generation = co_await available::generation(admin.handle());
     constexpr std::string_view append{R"lua(
 for i=1,tonumber(ARGV[1]) do redis.call('XADD',KEYS[1],'*','fixture','value') end
 if ARGV[2]~='' then redis.call('XTRIM',KEYS[1],'MAXLEN',ARGV[2]) end
 return 1
 )lua"};
-    const std::array keys{live::notification_streams[0]};
+    const std::array keys{reader::keys[0]};
     const std::array<std::string_view, 2> initial{"3", ""};
     (void)co_await admin.handle().eval(append, keys, initial);
-    const auto heads = co_await live::read_notification_batch(admin.handle(), cursors, true);
-    require(live::matching_notification_generation(heads, generation), "head capture includes the same atomic generation");
+    const auto heads = co_await live::read_notification_batch(admin.handle(), reader::keys, cursors, true);
+    require(live::matching_notification_generation(heads, generation, reader::keys.size()), "head capture includes the same atomic generation");
     for (std::size_t index = 0; index < cursors.size(); ++index) {
         live::accept_notification_cursor(cursors[index], heads.array()[1].array()[index]);
     }
     const std::array<std::string_view, 2> boundary{"2", "2"};
     (void)co_await admin.handle().eval(append, keys, boundary);
-    const auto accepted = co_await live::read_notification_batch(admin.handle(), cursors, false);
+    const auto accepted = co_await live::read_notification_batch(admin.handle(), reader::keys, cursors, false);
     const auto first = accepted.array()[1].array()[0].array();
     require(first[4].integer() == 0 && first[1].array().size() == 2,
         "trimming only previously consumed entries does not trigger recovery");
@@ -468,14 +440,14 @@ return 1
     for (std::size_t index = 0; index < cursors.size(); ++index) {
         live::accept_notification_cursor(cursors[index], accepted.array()[1].array()[index]);
     }
-    const auto missed = co_await live::read_notification_batch(admin.handle(), cursors, false);
+    const auto missed = co_await live::read_notification_batch(admin.handle(), reader::keys, cursors, false);
     const auto gap = missed.array()[1].array()[0].array();
     require(gap[4].integer() == 1 && gap[1].array().empty() && gap[3].integer() == 13,
         "trim after an accepted batch recovers exactly the missing suffix and advances to the current head");
     for (std::size_t index = 0; index < cursors.size(); ++index) {
         live::accept_notification_cursor(cursors[index], missed.array()[1].array()[index]);
     }
-    const auto quiet = co_await live::read_notification_batch(admin.handle(), cursors, false);
+    const auto quiet = co_await live::read_notification_batch(admin.handle(), reader::keys, cursors, false);
     require(quiet.array()[1].array()[0].array()[4].integer() == 0,
         "an acknowledged gap cannot generate repeated recovery snapshots");
 
@@ -485,22 +457,22 @@ return 1
         id = std::string(entry.string());
     }
     (void)co_await admin.handle().command("XDEL", keys[0], appended[1]);
-    const auto hole = co_await live::read_notification_batch(admin.handle(), cursors, false);
+    const auto hole = co_await live::read_notification_batch(admin.handle(), reader::keys, cursors, false);
     require(hole.array()[1].array()[0].array()[4].integer() == 1,
         "an unread middle deletion is detected without a prefix overrun");
     auto unknown_counter = cursors;
     unknown_counter[0] = {.id_ = "0-0", .seen_entries_ = -1};
-    const auto conservative = co_await live::read_notification_batch(admin.handle(), unknown_counter, false);
+    const auto conservative = co_await live::read_notification_batch(admin.handle(), reader::keys, unknown_counter, false);
     require(conservative.array()[1].array()[0].array()[4].integer() == 1,
         "an unavailable old-server ordinal falls back to conservative stream recovery");
     (void)co_await admin.handle().command("XTRIM", keys[0], "MAXLEN", "0");
-    const auto emptied = co_await live::read_notification_batch(admin.handle(), unknown_counter, false);
+    const auto emptied = co_await live::read_notification_batch(admin.handle(), reader::keys, unknown_counter, false);
     require(emptied.array()[1].array()[0].array()[4].integer() == 1,
         "legacy metadata also detects an unread stream that was trimmed completely empty");
 
     (void)co_await admin.handle().del(available::generation_key);
-    const auto reset = co_await live::read_notification_batch(admin.handle(), cursors, false);
-    require(!live::matching_notification_generation(reset, generation), "reset between generation lookup and batch read rejects that batch");
+    const auto reset = co_await live::read_notification_batch(admin.handle(), reader::keys, cursors, false);
+    require(!live::matching_notification_generation(reset, generation, reader::keys.size()), "reset between generation lookup and batch read rejects that batch");
     (void)co_await available::generation(admin.handle());
     co_await clean(admin);
 }
@@ -529,14 +501,14 @@ int main() {
             admin_loop.start(verify_atomic_batches(admin)).get();
             first_loop.start(subscribe(first_context)).get();
             second_loop.start(subscribe(second_context)).get();
-            first_reader.emplace(first_loop.start(live::read_notifications(first_context)));
+            first_reader.emplace(first_loop.start(reader::run(first_context)));
             first_loop.start(initial_log_snapshot(first_context)).get();
             (void)admin_loop.start(wait_blocked(admin, inspector, config->database_, 1)).get();
             admin_loop.start(publish_change(admin)).get();
             first_loop.start(receive_business_change(first_context)).get();
             second_loop.start(quiet(second_context)).get();
 
-            second_reader.emplace(second_loop.start(live::read_notifications(second_context)));
+            second_reader.emplace(second_loop.start(reader::run(second_context)));
             second_loop.start(initial_log_snapshot(second_context)).get();
             (void)admin_loop.start(wait_blocked(admin, inspector, config->database_, 2)).get();
             admin_loop.start(publish_change(admin)).get();
@@ -545,10 +517,9 @@ int main() {
             first_loop.start(quiet(first_context)).get();
             second_loop.start(quiet(second_context)).get();
 
-            admin_loop.start(publish_work_and_receipt(admin)).get();
-            first_loop.start(receive_work_and_receipt(first_context)).get();
-            second_loop.start(receive_work_and_receipt(second_context)).get();
-            first_loop.start(verify_coalescing(first_context)).get();
+            admin_loop.start(publish_receipt(admin)).get();
+            first_loop.start(receive_receipt(first_context)).get();
+            second_loop.start(receive_receipt(second_context)).get();
             first_loop.start(quiet(first_context)).get();
             second_loop.start(quiet(second_context)).get();
 
@@ -578,10 +549,10 @@ int main() {
             (void)admin_loop.start(wait_blocked(admin, inspector, config->database_, 2)).get();
             {
                 paused_worker first_paused(first_loop), second_paused(second_loop);
-                admin_loop.start(trim_notifications(admin, {2, 3})).get();
+                admin_loop.start(trim_notifications(admin, {2})).get();
             }
-            first_loop.start(receive_signal_gap(first_context)).get();
-            second_loop.start(receive_signal_gap(second_context)).get();
+            first_loop.start(receive_receipt_gap(first_context)).get();
+            second_loop.start(receive_receipt_gap(second_context)).get();
             first_loop.start(quiet(first_context)).get();
             second_loop.start(quiet(second_context)).get();
 
@@ -644,6 +615,6 @@ int main() {
         std::cerr << error.what() << '\n';
         return 1;
     }
-    std::cout << "Combined notification reader: one BLOCK per worker, atomic cursor batches, trim recovery for SSE/work/receipts, no unrelated recovery, generation recovery and cancellation passed\n";
+    std::cout << "Combined notification reader: one BLOCK per worker, atomic cursor batches, trim recovery for SSE/log tails/receipts, no unrelated recovery, generation recovery and cancellation passed\n";
     return 0;
 }

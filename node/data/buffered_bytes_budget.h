@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
-#include <system_error>
 #include <utility>
 
 namespace flexedge::node {
@@ -134,10 +133,6 @@ inline void buffered_bytes_lease::reset() noexcept {
         budget_->release(std::exchange(bytes_, 0));
     }
     budget_ = nullptr;
-}
-
-inline bool buffered_bytes_exhausted(const std::error_code& error) noexcept {
-    return error == std::make_error_code(std::errc::not_enough_memory);
 }
 
 inline constexpr std::size_t maximum_request_buffer_bytes{128 * 1024 * 1024};

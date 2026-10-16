@@ -206,7 +206,7 @@ int main() {
         std::ofstream(bad_directory / "active") << "not a directory";
         flexedge::node::state_store bad_store(bad_directory, std::string(state_secret));
         auto candidate = snapshot(false);
-        candidate.active.mutable_node_spec()->mutable_content()->set_enabled(false);
+        candidate.node_spec.set_enabled(false);
         candidate.mutableWebsite()->set_https_enabled(false);
         for (auto& domain : *candidate.mutableWebsite()->mutable_domains()) {
             domain.set_https_enabled(false);
@@ -221,6 +221,9 @@ int main() {
             require_trace_shape(result, config, started, unix_ms_now());
             return result;
         };
+        const auto health_reports = [&] {
+            return control.loop(0).start(plane.report({})).get().origin_health_->reports();
+        };
 
         const auto applied = apply(good_store, candidate);
         REQUIRE(applied.applied());
@@ -230,8 +233,8 @@ int main() {
         REQUIRE(logged(applied, "info", "compiled the configuration: 1 websites, 1 endpoints, node disabled"));
         REQUIRE(logged(applied, "info", "prepared listeners: 0 new, 0 retired"));
         REQUIRE(activation_runtime.applied_node_spec_revision() == 3);
-        REQUIRE(good_store.load().active_.node_spec().content().revision() == 3);
-        const auto original_reports = plane.origin_health_reports();
+        REQUIRE(good_store.load().contents_.node_spec_.revision() == 3);
+        const auto original_reports = health_reports();
         REQUIRE(original_reports.size() == 1);
         REQUIRE(original_reports.front().website_id_ == "website-1");
         REQUIRE(original_reports.front().origin_id_ == "origin-1");
@@ -244,8 +247,8 @@ int main() {
             asio::ip::tcp::endpoint(asio::ip::address_v4::any(), 0));
         const auto candidate_port = reservation.local_endpoint().port();
         reservation.close();
-        candidate.active.mutable_node_spec()->mutable_content()->set_enabled(true);
-        auto* candidate_endpoint = candidate.active.mutable_node_spec()->mutable_content()->mutable_endpoints(0);
+        candidate.node_spec.set_enabled(true);
+        auto* candidate_endpoint = candidate.node_spec.mutable_endpoints(0);
         candidate_endpoint->set_http_port(candidate_port);
         candidate_endpoint->set_https_port(candidate_port == 443 ? 444 : 443);
         candidate.finalize();
@@ -256,8 +259,8 @@ int main() {
         REQUIRE((phases(persist_failed) == std::vector<std::string>{"stage", "validate", "prepare_listeners", "activate"}));
         REQUIRE(logged(persist_failed, "info", "prepared listeners: 1 new, 0 retired"));
         REQUIRE(activation_runtime.applied_node_spec_revision() == 3);
-        REQUIRE(good_store.load().active_.node_spec().content().revision() == 3);
-        const auto rolled_back_reports = plane.origin_health_reports();
+        REQUIRE(good_store.load().contents_.node_spec_.revision() == 3);
+        const auto rolled_back_reports = health_reports();
         REQUIRE(rolled_back_reports.size() == 1);
         REQUIRE(rolled_back_reports.front().website_id_ == "website-1");
         REQUIRE(rolled_back_reports.front().origin_id_ == "origin-1");
@@ -275,8 +278,8 @@ int main() {
         const auto activated = apply(good_store, candidate);
         REQUIRE(activated.applied());
         REQUIRE(activation_runtime.applied_node_spec_revision() == 4);
-        REQUIRE(good_store.load().active_.node_spec().content().revision() == 4);
-        const auto activated_reports = plane.origin_health_reports();
+        REQUIRE(good_store.load().contents_.node_spec_.revision() == 4);
+        const auto activated_reports = health_reports();
         REQUIRE(activated_reports.size() == 1);
         REQUIRE(activated_reports.front().website_id_ == "website-1");
         REQUIRE(activated_reports.front().origin_id_ == "origin-replacement");
@@ -287,7 +290,7 @@ int main() {
             asio::ip::tcp::endpoint(asio::ip::address_v4::any(), 0));
         auto blocked = candidate;
         blocked.setGeneration(5);
-        blocked.active.mutable_node_spec()->mutable_content()->mutable_endpoints(0)->set_http_port(
+        blocked.node_spec.mutable_endpoints(0)->set_http_port(
             occupied.local_endpoint().port());
         blocked.finalize();
         const auto bind_failed = apply(good_store, blocked);
@@ -308,7 +311,7 @@ int main() {
         // A release older than the active one is rejected while preparing, before any listener.
         REQUIRE((phases(stale) == std::vector<std::string>{"stage", "validate", "prepare_listeners"}));
         REQUIRE(activation_runtime.applied_node_spec_revision() == 4);
-        REQUIRE(good_store.load().active_.node_spec().content().revision() == 4);
+        REQUIRE(good_store.load().contents_.node_spec_.revision() == 4);
         // A configuration that does not compile fails in the validate step itself.
         auto invalid = candidate;
         invalid.setGeneration(6);

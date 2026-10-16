@@ -18,10 +18,31 @@
 #include "ruvia/web/model.h"
 
 #include "service/config/outbound.h"
+#include "service/features/attempt_trace/outbound_policy.h"
 #include "service/features/background/task_context.h"
 #include "service/features/outbound_http/client.h"
 
 namespace service::website_dns {
+
+// Trace policy of a DNS over HTTPS (JSON API) query.
+namespace doh_trace {
+
+using namespace std::string_view_literals;
+
+inline constexpr std::array request_id_headers{"x-request-id"sv};
+inline constexpr std::array query{"name"sv, "type"sv, "cd"sv, "do"sv};
+inline constexpr std::array response{"Status"sv, "TC"sv, "RD"sv, "RA"sv, "AD"sv, "CD"sv, "Question[].name"sv,
+    "Question[].type"sv, "Answer[].name"sv, "Answer[].type"sv, "Answer[].TTL"sv, "Answer[].data"sv,
+    "Authority[].name"sv, "Authority[].type"sv, "Authority[].TTL"sv, "Authority[].data"sv, "Comment"sv};
+
+inline constexpr service::attempt_trace::outbound_policy resolve{.code_ = "doh.resolve",
+    .query_ = query,
+    .response_body_ = service::attempt_trace::body_rule::json,
+    .response_fields_ = response,
+    .identity_ = {.request_id_headers_ = request_id_headers},
+    .dns_query_ = true};
+
+}  // namespace doh_trace
 
 RUVIA_MODEL(dns_doh_answer_input, RUVIA_OPTIONAL_FIELD(type, ruvia::int64),
     RUVIA_OPTIONAL_FIELD(data, ruvia::string));
@@ -76,19 +97,15 @@ inline ruvia::task<std::vector<std::string>> resolve_answers(service::background
         ruvia::http_header_view{"accept", "application/dns-json"}};
     const auto target = "/resolve?name=" + std::string(query_name) + "&type=" + std::string(query_type) +
                         "&cd=0&do=0";
-    const auto response = co_await service::outbound_http::send_buffered(
-        context, scope,
-        {.origin_alias_ = service::config::ali_dns_doh_origin_alias,
-            .operation_ = service::attempt_trace::outbound_operation::doh_resolve,
-            .subject_ = hostname},
-        trace,
+    const auto response = co_await service::outbound_http::send_buffered(context, scope,
+        {.origin_alias_ = service::config::ali_dns_doh_origin_alias, .policy_ = &doh_trace::resolve, .subject_ = hostname},
+        {.label_ = "公共 DNS 探测服务", .timeout_ = std::chrono::seconds(10)}, trace,
         {
             .method_ = ruvia::known_http_method_token(ruvia::http_known_method::get),
             .target_ = target,
             .headers_ = headers,
             .content_ = ruvia::http_client_request_content_view::none(),
-        },
-        {.timeout_ = std::chrono::seconds(10), .stop_token_ = context.get_stop_token()});
+        });
     if (!response.status().is_successful()) {
         throw std::runtime_error("公共 DNS 探测服务返回异常");
     }

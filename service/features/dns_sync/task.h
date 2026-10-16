@@ -17,8 +17,6 @@ struct dns_task final {
     std::int64_t failures_;
     // Monotonic instant the claim acquired the lease: the attempt start.
     std::chrono::steady_clock::time_point claimed_at_{};
-    // The subtask doing this work, empty for work of no task.
-    service::operation::work_owner owner_{};
 };
 
 }  // namespace service::dns_sync::detail

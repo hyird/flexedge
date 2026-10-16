@@ -4,10 +4,10 @@ import { getRouteApi } from '@tanstack/react-router'
 import { ArrowLeft, Gear, Globe, Server } from '@gravity-ui/icons'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Skeleton } from '@heroui/react'
-import { ApiBusinessError } from '@/lib/api-response'
+import { apiErrorCode } from '@/lib/api'
 import { ratioOf } from '@/lib/format'
 import { useArrivalState } from '@/lib/history-state'
-import { statusLabels } from '@/lib/status'
+import { describeStatus, enablementStatuses, statusReserve } from '@/lib/status'
 import { useTabSwitchGuard } from '@/lib/unsaved-changes'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
 import { CopyButton } from '@/components/copy-button'
@@ -22,7 +22,7 @@ import { ClusterConfig } from './cluster-config'
 import { ClusterLifecycleActions } from './cluster-lifecycle-actions'
 import { ClusterNodes } from './cluster-nodes'
 import { ClusterWebsites } from './cluster-websites'
-import { clusterSnapshotKey, clusterSnapshotQuery } from './data'
+import { clusterSnapshotQuery, refreshClusterSnapshot } from './data'
 import type { Cluster } from './types'
 
 const route = getRouteApi('/_authenticated/clusters/$clusterId')
@@ -35,7 +35,7 @@ const tabs = [
   { id: 'config', label: '配置', icon: <Gear /> },
 ] as const
 type Tab = (typeof tabs)[number]['id']
-const clusterStatusLabels = statusLabels(['enabled', 'disabled'])
+const clusterStatusReserve = statusReserve(enablementStatuses)
 
 function ClusterSummary({ cluster }: { cluster: Cluster }) {
   const online = ratioOf(cluster.online_node_count, cluster.node_count)
@@ -91,8 +91,8 @@ function ClusterSummary({ cluster }: { cluster: Cluster }) {
 }
 
 /** `/clusters/$clusterId` with in-page tabs held in component state (the URL
- * never changes; 节点 by default). Header and summary come from one snapshot
- * of `/api/clusters/:id/stream`, which the 配置 tab edits; the 节点/网站 tab's
+ * never changes; 节点 by default). Header and summary come from one read of
+ * `GET /api/clusters/:id`, which the 配置 tab edits; the 节点/网站 tab's
  * list owns the page's only live stream. Writes on this page re-read the
  * snapshot, and so does an online/offline transition or node add/remove
  * reported by the live 节点 list (once per burst; runtime metric patches
@@ -106,19 +106,14 @@ export function ClusterDetailLayout() {
   useEffect(
     () =>
       watchClusterNodeTransitions(client, clusterId, () => {
-        void client.invalidateQueries({
-          queryKey: [...clusterSnapshotKey, clusterId],
-        })
+        void refreshClusterSnapshot(client, clusterId)
       }),
     [client, clusterId]
   )
   const query = useQuery(clusterSnapshotQuery(clusterId))
   const cluster = query.data
   useBreadcrumbLabel(cluster?.name)
-  if (
-    query.error instanceof ApiBusinessError &&
-    query.error.code === clusterNotFoundCode
-  )
+  if (apiErrorCode(query.error) === clusterNotFoundCode)
     return (
       <Page>
         <EmptyState
@@ -135,7 +130,10 @@ export function ClusterDetailLayout() {
         <DetailHeader
           title={cluster.name}
           status={
-            <StatusChip status={cluster.status} reserve={clusterStatusLabels} />
+            <StatusChip
+              {...describeStatus(enablementStatuses, cluster.status)}
+              reserve={clusterStatusReserve}
+            />
           }
           meta={[
             <Mono key='domain'>{cluster.access_domain}</Mono>,
@@ -173,16 +171,13 @@ export function ClusterDetailLayout() {
         onSelectionChange={setTab}
         guard={tabGuard}
       >
-        {/* The tab's live list opens after the header's one-shot read, so
-            the page never holds two connections at once. */}
-        {query.isFetchedAfterMount &&
-          (tab === 'nodes' ? (
-            <ClusterNodes key={arrivalKey} />
-          ) : tab === 'websites' ? (
-            <ClusterWebsites key={arrivalKey} />
-          ) : (
-            <ClusterConfig key={arrivalKey} />
-          ))}
+        {tab === 'nodes' ? (
+          <ClusterNodes key={arrivalKey} />
+        ) : tab === 'websites' ? (
+          <ClusterWebsites key={arrivalKey} />
+        ) : (
+          <ClusterConfig key={arrivalKey} />
+        )}
       </PageTabs>
     </Page>
   )

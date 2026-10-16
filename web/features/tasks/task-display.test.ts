@@ -2,347 +2,191 @@ import { createElement } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'vitest'
-import { navigationItemFor } from '@/components/layout/navigation'
+import { describeStatus } from '@/lib/status'
 import { taskAttemptTraceQuery } from './data'
 import { tasksSearchSchema } from './search'
-import { SubtaskLinkContext } from './subtask-link-context'
 import { AttemptTimeline } from './task-attempt-trace'
-import { SubtaskList } from './task-detail-sheet'
 import {
-  describeOperationStatus,
-  formatOperationSummary,
-  operationHref,
-  operationTitle,
-  operationTarget,
-  subtaskNote,
-  subtaskRows,
-  subtaskTitle,
+  parseTaskKey,
+  recentTaskOrder,
+  taskHref,
+  taskNote,
+  taskStatuses,
+  taskTarget,
+  taskTitle,
 } from './task-display'
-import {
-  operationDetailSchema,
-  subtaskHistorySchema,
-  taskAttemptTraceSchema,
-  type Subtask,
-} from './types'
+import { taskHistorySchema, taskAttemptTraceSchema, type Task } from './types'
 
-const subtask: Subtask = {
-  id: 'sub-1',
-  parent_id: '',
-  kind: 'node_publish',
-  resource_type: 'node',
-  resource_id: 'node-1',
-  resource_name: '北京',
-  resource_deleted: false,
+const task: Task = {
+  resource_type: 'dns_zone',
+  resource_id: 'zone-1',
+  resource_kind: '',
+  name: 'a-z.xin',
+  operation: 'sync',
   status: 'completed',
   warning: '',
-  node_offline: false,
-  created_at: '2026-10-15T08:00:00.000000+00',
-  running_since: '',
-  finished_at: '2026-10-15T08:00:02.400000+00',
-  duration_ms: 2400,
+  error: '',
+  next_attempt_at: '',
+  updated_at: '2026-10-15T08:00:00.000000+00',
+  last_success_at: '2026-10-15T08:00:00.000000+00',
   attempt_count: 1,
   failure_count: 0,
-  recovered: false,
-  next_attempt_at: '',
-  error: '',
+  node_offline: false,
 }
 
-test('titles name the action or kind and the object; unknown codes stay raw', () => {
-  expect(
-    operationTitle({ action: 'website.update', target_name: '品牌官网' })
-  ).toBe('保存网站配置 · 品牌官网')
-  expect(operationTitle({ action: 'website.purge', target_name: 'x' })).toBe(
-    'website.purge · x'
+test('titles name the task type and the object; unknown codes stay raw', () => {
+  expect(taskTitle(task)).toBe('DNS 同步 · a-z.xin')
+  expect(taskTitle({ ...task, operation: 'delete' })).toBe(
+    '删除托管域 · a-z.xin'
   )
-  for (const [action, label] of [
-    ['cluster.create', '创建集群'],
-    ['provider.create', '添加服务商'],
-    ['provider.delete', '删除服务商'],
-    ['certificate.update', '保存证书设置'],
+  for (const [resource_type, operation, label] of [
+    ['website', 'apply', '网站检查'],
+    ['certificate', 'issue', '证书签发'],
+    ['certificate', 'renew', '证书续期'],
+    ['provider', 'verify', '服务商验证'],
+    ['node', 'publish', '节点配置下发'],
+    ['gateway', 'purge', 'gateway'],
   ])
-    expect(operationTitle({ action, target_name: '对象' })).toBe(
+    expect(taskTitle({ resource_type, operation, name: '对象' })).toBe(
       `${label} · 对象`
     )
-  expect(subtaskTitle(subtask)).toBe('节点发布 · 北京')
-  expect(subtaskTitle({ kind: 'cache_purge', resource_name: 'y' })).toBe(
-    'cache_purge · y'
-  )
-  expect(describeOperationStatus('partial_failed')).toEqual({
-    label: '部分失败',
-    tone: 'danger',
+  expect(describeStatus(taskStatuses, 'attention_required')).toEqual({
+    label: '需处理',
+    tone: 'warning',
   })
-  expect(describeOperationStatus('queued').tone).toBe('default')
-  expect(describeOperationStatus('future')).toEqual({
+  expect(describeStatus(taskStatuses, 'queued').tone).toBe('default')
+  expect(describeStatus(taskStatuses, 'future')).toEqual({
     label: 'future',
     tone: 'default',
   })
-  expect(operationHref('op 1')).toBe('/tasks?task=op+1')
 })
 
-test('the change summary is one short line', () => {
-  expect(
-    formatOperationSummary({
-      target_type: 'website',
-      summary: { sections: ['domains', 'https', 'future'] },
-    })
-  ).toBe('变更：域名、HTTPS、future')
-  expect(
-    formatOperationSummary({
-      target_type: 'cluster',
-      summary: { sections: ['dns'] },
-    })
-  ).toBe('变更：接入域名')
-  expect(
-    formatOperationSummary({
-      target_type: 'dns_zone',
-      summary: { record_counts: { created: 2, updated: 1, deleted: 0 } },
-    })
-  ).toBe('新增 2 · 修改 1')
-  expect(
-    formatOperationSummary({
-      target_type: 'provider',
-      summary: { credentials_changed: true },
-    })
-  ).toBe('已更换凭据')
-  expect(formatOperationSummary({ target_type: 'dns_zone', summary: {} })).toBe(
-    ''
-  )
+test('a task is addressed as <resource_type>:<resource_id> in the URL', () => {
+  const ref = { resourceType: 'node', resourceId: 'node-1' }
+  expect(taskHref(ref)).toBe('/tasks?task=node%3Anode-1')
+  expect(parseTaskKey('node:node-1')).toEqual(ref)
+  for (const value of ['node', 'gateway:x', 'node:', ':x', 'node:a b'])
+    expect(parseTaskKey(value)).toBeUndefined()
 })
 
-test('targets link to their resource pages; providers open the tab of target_kind', () => {
-  const target = (
-    target_type: string,
-    target_id: string,
-    target_name: string,
-    extra: { target_deleted?: boolean; target_kind?: string } = {}
-  ) =>
-    operationTarget({
-      target_type,
-      target_id,
-      target_name,
-      target_deleted: false,
-      ...extra,
+test('tasks link to their resource pages; providers open the list of resource_kind searched for the account', () => {
+  expect(
+    taskTarget({ ...task, resource_type: 'website', resource_id: 'w 1' })
+  ).toBe('/websites/w%201')
+  expect(taskTarget(task)).toBe('/dns-zones/zone-1')
+  expect(
+    taskTarget({ ...task, resource_type: 'node', resource_id: 'n1' })
+  ).toBe('/nodes/n1')
+  expect(
+    taskTarget({
+      ...task,
+      resource_type: 'provider',
+      resource_kind: 'certificate',
+      name: 'ZeroSSL',
     })
-  expect(target('website', 'w 1', '官网')).toEqual({ href: '/websites/w%201' })
-  expect(target('cluster', 'c1', '北方')?.href).toBe('/clusters/c1')
+  ).toBe('/providers/certificate?q=ZeroSSL')
   expect(
-    target('website', 'w1', '官网', { target_deleted: true })
-  ).toBeUndefined()
-  expect(
-    target('provider', 'p1', 'ZeroSSL', { target_kind: 'certificate' })
-  ).toEqual({
-    href: '/providers',
-    state: { providers: { tab: 'certificate', q: 'ZeroSSL' } },
+    taskTarget({ ...task, resource_type: 'provider', resource_kind: 'dns' })
+  ).toBe('/providers/dns?q=a-z.xin')
+  expect(taskTarget({ ...task, resource_type: 'gateway' })).toBeUndefined()
+})
+
+test('each task has at most one note, in priority order', () => {
+  expect(taskNote(task)).toBeNull()
+  const retrying = {
+    ...task,
+    status: 'retrying',
+    failure_count: 2,
+    next_attempt_at: '2026-10-15T08:01:00.000000+00',
+  }
+  expect(taskNote(retrying)).toEqual({
+    kind: 'retry',
+    at: '2026-10-15T08:01:00.000000+00',
   })
-  // The name no longer decides the tab: only `target_kind` does.
-  expect(
-    target('provider', 'p2', 'zerossl', { target_kind: 'dns' })?.state
-  ).toEqual({ providers: { tab: 'dns', q: 'zerossl' } })
-  expect(target('provider', 'p3', 'x')?.state).toEqual({
-    providers: { tab: 'dns', q: 'x' },
-  })
-  expect(target('gateway', 'g1', 'x')).toBeUndefined()
-})
-
-test('subtasks render in creation order with children one level in', () => {
-  const rows = subtaskRows([
-    { ...subtask, id: 'issue', kind: 'certificate_issue' },
-    { ...subtask, id: 'publish' },
-    { ...subtask, id: 'challenge', parent_id: 'issue' },
-    { ...subtask, id: 'cleanup', parent_id: 'issue' },
-    { ...subtask, id: 'grandchild', parent_id: 'challenge' },
-    { ...subtask, id: 'orphan', parent_id: 'gone' },
-  ])
-  expect(rows.map((row) => [row.subtask.id, row.depth])).toEqual([
-    ['issue', 0],
-    ['challenge', 1],
-    ['grandchild', 1],
-    ['cleanup', 1],
-    ['publish', 0],
-    ['orphan', 0],
-  ])
-})
-
-test('each subtask has at most one extra note, in priority order', () => {
-  expect(subtaskNote(subtask)).toBeNull()
-  expect(
-    subtaskNote({
-      ...subtask,
-      status: 'retrying',
-      next_attempt_at: '2026-10-15T08:01:00.000000+00',
-    })
-  ).toEqual({ kind: 'retry', at: '2026-10-15T08:01:00.000000+00' })
-  expect(
-    subtaskNote({ ...subtask, status: 'retrying', node_offline: true })
-  ).toEqual({ kind: 'offline' })
-  expect(
-    subtaskNote({
-      ...subtask,
-      status: 'merged',
-      merged_into: {
-        operation_id: 'op-2',
-        subtask_id: 'sub-9',
-        action: 'website.update',
-        target_name: '品牌官网',
-        status: 'running',
-      },
-    })
-  ).toEqual({
-    kind: 'merged',
-    operationId: 'op-2',
-    subtaskId: 'sub-9',
-    label: '保存网站配置 · 品牌官网',
+  expect(taskNote({ ...retrying, node_offline: true })).toEqual({
+    kind: 'offline',
   })
   expect(
-    subtaskNote({
-      ...subtask,
-      status: 'cancelled',
-      closed_by: {
-        operation_id: 'op-3',
-        action: 'website.delete',
-        target_name: '品牌官网',
-      },
-    })
-  ).toEqual({ kind: 'closed', label: '删除网站 · 品牌官网', verb: '取消' })
-  // Merged without a receiver: 「因 … 合并」; neither object: no note.
-  expect(
-    subtaskNote({
-      ...subtask,
-      status: 'merged',
-      closed_by: {
-        operation_id: 'op-4',
-        action: 'website.update',
-        target_name: '品牌官网',
-      },
-    })
-  ).toEqual({ kind: 'closed', label: '保存网站配置 · 品牌官网', verb: '合并' })
-  expect(subtaskNote({ ...subtask, status: 'merged' })).toBeNull()
-  expect(subtaskNote({ ...subtask, status: 'cancelled' })).toBeNull()
-  expect(
-    subtaskNote({
-      ...subtask,
+    taskNote({
+      ...task,
       status: 'attention_required',
       warning: 'dns_conflict',
+      failure_count: 1,
     })
   ).toEqual({ kind: 'warning', label: '存在冲突记录' })
   expect(
-    subtaskNote({
-      ...subtask,
-      status: 'attention_required',
-      warning: 'future_warning',
-    })
-  ).toEqual({ kind: 'warning', label: 'future_warning' })
-  expect(
-    subtaskNote({ ...subtask, recovered: true, failure_count: 2 })
-  ).toEqual({ kind: 'recovered', failures: 2 })
-})
-
-test('each subtask is a menu-icon timeline node with status and duration, without expansion', () => {
-  const operation = operationDetailSchema.parse({
-    id: 'op-1',
-    action: 'website.update',
-    target_type: 'website',
-    target_id: 'w1',
-    target_name: '品牌官网',
-    target_deleted: false,
-    actor_type: 'user',
-    actor_name: 'QA',
-    created_at: '2026-10-15T08:00:00.000000+00',
-    updated_at: '2026-10-15T08:00:00.000000+00',
-    finished_at: '',
-    status: 'retrying',
-    subtask_count: 4,
-    settled_count: 2,
-    failed_count: 1,
-    next_attempt_at: '',
-    error: '',
-    summary: {},
-    subtasks: [
-      {
-        ...subtask,
-        kind: 'dns_sync',
-        resource_type: 'dns_zone',
-        resource_name: 'a-z.xin',
-      },
-      {
-        ...subtask,
-        id: 'sub-2',
-        status: 'retrying',
-        finished_at: '',
-        duration_ms: 0,
-        next_attempt_at: '2026-10-15T08:01:00.000000+00',
-      },
-      {
-        ...subtask,
-        id: 'sub-3',
-        parent_id: 'sub-1',
-        kind: 'website_check',
-        resource_type: 'website',
-        resource_name: '品牌官网',
-        status: 'attention_required',
-        warning: 'domain_unverified',
-      },
-      { ...subtask, id: 'sub-4', recovered: true, failure_count: 3 },
-    ],
+    taskNote({ ...task, status: 'attention_required', warning: 'future' })
+  ).toEqual({ kind: 'warning', label: 'future' })
+  expect(taskNote({ ...task, failure_count: 3 })).toEqual({
+    kind: 'recovered',
+    failures: 3,
   })
-  const render = () =>
-    renderToStaticMarkup(
-      createElement(
-        QueryClientProvider,
-        { client: new QueryClient() },
-        createElement(SubtaskList, {
-          operation,
-        })
-      )
-    )
-  const html = render()
-  expect(html).toContain('DNS 同步 · a-z.xin')
-  expect(html).toContain('节点发布 · 北京')
-  expect(html).toContain('重试中')
-  expect(html).toMatch(/重试|即将重试/)
-  expect(html).toContain('域名未生效')
-  expect(html).toContain('失败 3 次后成功')
-  expect(html).toContain('2.4 秒')
-  // The child row is indented one level.
-  expect(html.match(/ms-6/g)).toHaveLength(1)
-  expect(html.match(/data-slot="timeline-item"/g)).toHaveLength(4)
-  for (const path of ['/dns-zones', '/websites', '/nodes']) {
-    const Icon = navigationItemFor(path)!.icon
-    expect(html).toContain(
-      renderToStaticMarkup(createElement(Icon, { 'aria-hidden': true }))
-    )
-  }
-  expect(html).not.toContain('data-slot="accordion')
-  expect(html).not.toContain('aria-expanded')
-  expect(html).not.toContain('执行记录')
-  expect(html).not.toContain('失败原因：')
-
-  operation.subtasks[1].error = 'DNS 请求超时，等待重试'
-  operation.subtasks[2].status = 'failed'
-  operation.subtasks[2].error = '域名解析结果不匹配\n请检查 CNAME 记录'
-  // Old errors must not appear after a subtask has recovered.
-  operation.subtasks[3].error = '已经恢复的旧错误'
-  const failure = render()
-  expect(failure).toContain('失败原因：DNS 请求超时，等待重试')
-  expect(failure).toContain('失败原因：域名解析结果不匹配\n请检查 CNAME 记录')
-  expect(failure).not.toContain('已经恢复的旧错误')
-  operation.subtasks[2].error = ''
-  expect(render()).toContain('失败原因：未提供失败原因')
+  // Still failing: the count is not a recovery.
+  expect(taskNote({ ...task, status: 'failed', failure_count: 3 })).toBeNull()
 })
 
-test('a trace step links to another subtask of the open task only', () => {
-  const summary = subtaskHistorySchema.parse({
-    subtask_id: 'sub-1',
+test('recent tasks list active ones first, then by last update', () => {
+  const at = (minute: number) => `2026-10-15T08:0${minute}:00.000000+00`
+  const list = [
+    { ...task, resource_id: 'old-done', updated_at: at(1) },
+    { ...task, resource_id: 'new-done', updated_at: at(5) },
+    {
+      ...task,
+      resource_id: 'old-queued',
+      status: 'queued',
+      updated_at: at(0),
+    },
+    {
+      ...task,
+      resource_id: 'new-running',
+      status: 'running',
+      updated_at: at(3),
+    },
+  ]
+  expect(recentTaskOrder(list).map((item) => item.resource_id)).toEqual([
+    'new-running',
+    'old-queued',
+    'new-done',
+    'old-done',
+  ])
+})
+
+test('search schema keeps valid filters and the open task, drops invalid ones', () => {
+  expect(
+    tasksSearchSchema.parse({
+      status: 'attention',
+      type: 'certificate',
+      task: 'certificate:cert-1',
+    })
+  ).toMatchObject({
+    status: 'attention',
+    type: 'certificate',
+    task: 'certificate:cert-1',
+  })
+  expect(tasksSearchSchema.parse({ status: 'failed' }).status).toBe('failed')
+  expect(
+    tasksSearchSchema.parse({
+      status: 'merged',
+      type: 'cluster',
+      task: 'op-1',
+      action: 'website.update',
+    })
+  ).toEqual({})
+})
+
+test('a trace step of another task links to that task', () => {
+  const summary = taskHistorySchema.parse({
     summary: {
       attempt_count: 1,
       failure_count: 0,
       first_failure_at: '',
       last_success_at: '',
-      next_attempt_at: '',
     },
     list: [
       {
+        id: '7',
         attempt: 1,
+        operation: 'issue',
         outcome: 'completed',
         error: '',
         started_at: '',
@@ -353,82 +197,41 @@ test('a trace step links to another subtask of the open task only', () => {
         trace: {
           state: 'available',
           attempt_id: '7',
-          step_count: 1,
-          steps: [{ code: 'dns_challenge', label: '写入验证记录' }],
+          step_count: 2,
+          steps: [{ code: 'dns_challenge', label: '写入 DNS 验证记录' }],
         },
       },
     ],
   }).list[0].trace
+  const ref = { resourceType: 'certificate', resourceId: 'cert-1' }
   const client = new QueryClient()
   client.setQueryData(
-    taskAttemptTraceQuery('op-1', '7').queryKey,
+    taskAttemptTraceQuery(ref, '7').queryKey,
     taskAttemptTraceSchema.parse({
       state: 'available',
       steps: [
         {
           code: 'dns_challenge',
-          label: '写入验证记录',
-          related_task: { subtask_id: 'sub-2', label: 'DNS 验证记录' },
+          label: '写入 DNS 验证记录',
+          related_task: {
+            resource_type: 'dns_zone',
+            resource_id: 'zone-1',
+            label: 'DNS 同步 · a-z.xin',
+          },
         },
-        {
-          code: 'cleanup',
-          label: '清理验证记录',
-          related_task: { subtask_id: 'elsewhere', label: '其他任务' },
-        },
+        { code: 'validate', label: '证书颁发机构验证' },
       ],
     })
   )
-  const render = (context: boolean) =>
-    renderToStaticMarkup(
-      createElement(
-        QueryClientProvider,
-        { client },
-        createElement(
-          SubtaskLinkContext,
-          {
-            value: context
-              ? { has: (id: string) => id === 'sub-2', open: () => undefined }
-              : null,
-          },
-          createElement(AttemptTimeline, {
-            operationId: 'op-1',
-            trace: summary,
-          })
-        )
-      )
+  const html = renderToStaticMarkup(
+    createElement(
+      QueryClientProvider,
+      { client },
+      createElement(AttemptTimeline, { task: ref, trace: summary })
     )
-  const html = render(true)
-  expect(html).toContain('关联：DNS 验证记录')
-  expect(html).not.toContain('其他任务')
-  expect(render(false)).not.toContain('关联')
-})
-
-test('search schema keeps valid filters and the open task, drops invalid ones', () => {
-  expect(
-    tasksSearchSchema.parse({
-      status: 'attention',
-      action: 'website.update',
-      target_type: 'certificate',
-      actor: 'system',
-      days: 7,
-      task: 'op-1',
-    })
-  ).toMatchObject({
-    status: 'attention',
-    action: 'website.update',
-    target_type: 'certificate',
-    actor: 'system',
-    days: 7,
-    task: 'op-1',
-  })
-  expect(
-    tasksSearchSchema.parse({
-      status: 'recovered',
-      action: 'website.purge',
-      target_type: 'gateway',
-      actor: 'someone',
-      days: 3,
-      task: '',
-    })
-  ).toEqual({})
+  )
+  expect(html).toContain('关联任务：DNS 同步 · a-z.xin')
+  expect(html).toContain('href="/tasks?task=dns_zone%3Azone-1"')
+  expect(html).toContain('证书颁发机构验证')
+  expect(html.match(/关联任务/g)).toHaveLength(1)
 })

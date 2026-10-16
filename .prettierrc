@@ -34,7 +34,6 @@
     "^@/assets/(.*)",
     "^@/stores/(.*)",
     "^@/lib/(.*)",
-    "^@/context/(.*)",
     "^@/hooks/(.*)",
     "^@/components/layout/(.*)",
     "^@/components/ui/(.*)",

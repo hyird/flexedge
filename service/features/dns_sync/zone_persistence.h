@@ -20,6 +20,7 @@
 #include "service/features/dns_sync/task.h"
 #include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
+#include "service/features/sync_runtime/work_commit.h"
 
 namespace service::dns_sync::detail {
 
@@ -111,26 +112,19 @@ import_initial_remote_records(service::background::task_context& context, const 
 
     const auto config_json = ruvia::to_json(imported_config, {.resource_ = context.pool()});
     const auto runtime_json = ruvia::to_json(imported_runtime, {.resource_ = context.pool()});
-    const auto updated = co_await transaction.query(
-        "UPDATE sys_dns_zone SET config = $1::jsonb, runtime = $2::jsonb, revision = revision + "
-        "1, desired_revision = desired_revision + 1, sync_status = 'pending', last_error = NULL, "
-        "updated_at = NOW() WHERE id = $3 AND tenant_id = $4 AND revision = $5 AND "
-        "desired_revision = $6 AND deleted_at IS NULL RETURNING desired_revision",
-        std::string_view(config_json), std::string_view(runtime_json), task.resource_id_, task.tenant_id_,
-        config_revision, task.version_);
-    if (updated.empty()) {
-        (void)co_await service::sync_runtime::release_running(transaction, lease);
-        co_await transaction.commit();
-        co_return;
-    }
+    // The lease is released first: the imported revision supersedes it.
     if (!co_await service::sync_runtime::release_running(transaction, lease)) {
         throw std::runtime_error("DNS 同步标记 lease 已失效");
     }
-    // The same subtask continues with the imported revision.
-    auto origin = service::operation::work_origin::continuing(task.owner_);
-    (void)co_await enqueue_zone_revision(transaction, task.tenant_id_, task.resource_id_,
-        updated.front()[0].as<std::int64_t>().value_or(task.version_ + 1), origin);
-    co_await service::sync_runtime::commit_origin(transaction, context, task.tenant_id_, origin);
+    // The task continues with the imported revision.
+    service::background::queued_work work;
+    (void)co_await advance_zone_revision(transaction, task.tenant_id_, task.resource_id_,
+        {.config_json_ = std::string_view(config_json),
+            .runtime_json_ = std::string_view(runtime_json),
+            .expected_revision_ = config_revision,
+            .expected_desired_revision_ = task.version_},
+        work);
+    co_await service::sync_runtime::commit_work(transaction, context, task.tenant_id_, work);
     co_return;
 }
 
@@ -280,28 +274,21 @@ inline ruvia::task<bool> persist_remote_merge(service::background::task_context&
 
     const auto config_json = ruvia::to_json(merged_config, {.resource_ = context.pool()});
     const auto runtime_json = ruvia::to_json(merged_runtime, {.resource_ = context.pool()});
-    const auto updated = co_await transaction.query(
-        "UPDATE sys_dns_zone SET config = $1::jsonb, runtime = $2::jsonb, revision = revision + "
-        "1, desired_revision = desired_revision + 1, sync_status = 'pending', last_error = NULL, "
-        "updated_at = NOW() WHERE id = $3 AND tenant_id = $4 AND revision = $5 AND "
-        "desired_revision = $6 AND deleted_at IS NULL RETURNING desired_revision",
-        std::string_view(config_json), std::string_view(runtime_json), task.resource_id_, task.tenant_id_,
-        config_revision, desired_revision);
-    if (updated.empty()) {
-        (void)co_await service::sync_runtime::release_running(transaction, lease);
-        co_await transaction.commit();
-        co_return false;
-    }
-    if (!co_await service::sync_runtime::renew_running_lease(transaction, lease)) {
+    // The lease is released first: the merged revision supersedes it.
+    if (!co_await service::sync_runtime::release_running(transaction, lease)) {
         throw std::runtime_error("DNS 同步标记 lease 已失效");
     }
-    // The same subtask continues with the merged revision.
-    auto origin = service::operation::work_origin::continuing(task.owner_);
-    (void)co_await enqueue_zone_revision(transaction, task.tenant_id_, task.resource_id_,
-        updated.front()[0].as<std::int64_t>().value_or(desired_revision + 1), origin, task.operation_);
-    (void)co_await service::sync_runtime::release_running(transaction, lease);
-    co_await service::sync_runtime::commit_origin(transaction, context, task.tenant_id_, origin);
-    co_return true;
+    // The task continues with the merged revision.
+    service::background::queued_work work;
+    const auto merged_revision = co_await advance_zone_revision(transaction, task.tenant_id_, task.resource_id_,
+        {.config_json_ = std::string_view(config_json),
+            .runtime_json_ = std::string_view(runtime_json),
+            .expected_revision_ = config_revision,
+            .expected_desired_revision_ = desired_revision,
+            .operation_ = task.operation_},
+        work);
+    co_await service::sync_runtime::commit_work(transaction, context, task.tenant_id_, work);
+    co_return merged_revision.has_value();
 }
 
 // Records the attempt's runtime and completes the marker. Records the attempt left unpushed
@@ -329,12 +316,11 @@ inline ruvia::task<void> persist_synced_zone(service::background::task_context& 
             throw std::runtime_error("DNS 同步标记 lease 已失效");
         }
         if (task.operation_ == service::sync_runtime::marker_operation::remove) {
-            const auto removed = co_await service::sync_runtime::remove_running(transaction, lease);
-            if (!removed) {
+            if (!co_await service::sync_runtime::remove_running(transaction, lease)) {
                 throw std::runtime_error("DNS 删除同步标记 lease 已失效");
             }
             result_transition.marker_transitioned_ = true;
-            result_transition.owner_ = *removed;
+            result_transition.resumed_ = co_await service::sync_runtime::resume_waiters(transaction, lease, true);
         } else {
             result_transition = co_await service::sync_runtime::complete_running_and_record_event(
                 transaction, lease, detail);
@@ -357,19 +343,24 @@ finish_deleted_zone_without_remote(service::background::task_context& context, c
         "sync_status = 'synced', last_synced_at = NOW(), last_error = NULL, updated_at = NOW() "
         "WHERE id = $1 AND tenant_id = $2 AND desired_revision = $3",
         task.resource_id_, task.tenant_id_, task.version_);
-    std::optional<service::operation::work_owner> removed;
+    bool removed = false;
+    std::vector<service::sync_runtime::marker_waiter> resumed;
     if (updated.affected_rows() != 0) {
         removed = co_await service::sync_runtime::remove_running(transaction, lease);
         if (!removed) {
             throw std::runtime_error("DNS 删除同步标记 lease 已失效");
         }
+        resumed = co_await service::sync_runtime::resume_waiters(transaction, lease, true);
     } else {
         (void)co_await service::sync_runtime::release_running(transaction, lease);
     }
-    if (removed && !removed->operation_id_.empty()) {
-        (void)co_await service::live_resource::enqueue_notification(transaction,
-            service::live_resource::notifications::resource_notification(task.tenant_id_)
-                .changed(service::live_resource::resource::operations, removed->operation_id_));
+    if (removed) {
+        service::live_resource::notifications::resource_notification notification(task.tenant_id_);
+        notification.changed(service::live_resource::resource::tasks, task.resource_id_);
+        for (const auto& waiter : resumed) {
+            notification.changed(service::live_resource::resource::tasks, waiter.resource_id_);
+        }
+        (void)co_await service::live_resource::enqueue_notification(transaction, notification);
     }
     co_await transaction.commit();
     co_return;

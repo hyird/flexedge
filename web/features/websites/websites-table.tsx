@@ -3,6 +3,13 @@ import { Link } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import type { ListSearchState } from '@/lib/list-search'
+import {
+  describeStatus,
+  enablementStatuses,
+  statusOptions,
+  statusReserve,
+  type StatusDictionary,
+} from '@/lib/status'
 import { cn } from '@/lib/utils'
 import { DataTable } from '@/components/data-table'
 import { LinkButton } from '@/components/link-button'
@@ -19,17 +26,21 @@ import {
 import type { Website } from './types'
 import {
   defaultOrigin,
+  deployStatuses,
   deployStatusReserve,
   websiteName,
   websiteStatusReserve,
 } from './website-display'
 import { websiteFilterKeys, type WebsitesSearch } from './websites-search'
 
-const statusOptions = [
-  { id: 'enabled', label: '已启用' },
-  { id: 'disabled', label: '已停用' },
-]
-const httpsReserve = ['TLS 1.2+', 'TLS 1.3+', '未启用']
+const websiteStatusOptions = statusOptions(enablementStatuses)
+/** HTTPS column: the minimum TLS version, or disabled. */
+const httpsStatuses = {
+  '1.2': { label: 'TLS 1.2+', tone: 'accent' },
+  '1.3': { label: 'TLS 1.3+', tone: 'accent' },
+  disabled: { label: '未启用', tone: 'default' },
+} as const satisfies StatusDictionary
+const httpsReserve = statusReserve(httpsStatuses)
 
 /** Websites list body (toolbar, table, pagination). With `clusterId` the list
  * is fixed to that cluster and the cluster filter and column are hidden; with
@@ -152,7 +163,7 @@ export function WebsitesTable({
       cell: (website) => (
         <div className='flex items-center gap-2'>
           <StatusChip
-            status={website.runtime.deploy_status}
+            {...describeStatus(deployStatuses, website.runtime.deploy_status)}
             reserve={deployStatusReserve}
           />
           <span className='text-xs text-muted tabular-nums'>
@@ -166,23 +177,27 @@ export function WebsitesTable({
       id: 'https',
       header: 'HTTPS',
       minWidth: 110,
-      cell: (website) =>
-        website.config.https_enabled ? (
-          <StatusChip
-            label={`TLS ${website.config.minimum_tls_version}+`}
-            tone='accent'
-            reserve={httpsReserve}
-          />
-        ) : (
-          <StatusChip label='未启用' tone='default' reserve={httpsReserve} />
-        ),
+      cell: (website) => (
+        <StatusChip
+          {...describeStatus(
+            httpsStatuses,
+            website.config.https_enabled
+              ? website.config.minimum_tls_version
+              : 'disabled'
+          )}
+          reserve={httpsReserve}
+        />
+      ),
     },
     {
       id: 'status',
       header: '状态',
       minWidth: 100,
       cell: (website) => (
-        <StatusChip status={website.status} reserve={websiteStatusReserve} />
+        <StatusChip
+          {...describeStatus(enablementStatuses, website.status)}
+          reserve={websiteStatusReserve}
+        />
       ),
     },
     {
@@ -231,7 +246,7 @@ export function WebsitesTable({
                   status: (value || undefined) as WebsitesSearch['status'],
                 })
               }
-              options={statusOptions}
+              options={websiteStatusOptions}
             />
           </>
         }

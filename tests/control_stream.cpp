@@ -179,17 +179,23 @@ void verify_delivery_protocol() {
             throw std::runtime_error("delivery protocol regression");
         }
     };
+    v2::NodeSpecContent node_spec;
+    node_spec.set_revision(8);
+    v2::ClusterReleaseContent release;
+    release.set_release_id("new-release");
     v2::DesiredState state;
-    state.mutable_node_spec()->mutable_content()->set_revision(8);
-    state.mutable_release()->mutable_content()->set_release_id("new-release");
-    state.mutable_release()->set_digest_sha256("new-digest");
-    const auto changed = release_probe_replies("watch-1", "binary", 7, "older", "older", state);
+    *state.mutable_node_spec() = pack_artifact<v2::NodeSpec>(node_spec);
+    *state.mutable_release() = pack_artifact<v2::ClusterReleaseManifest>(release);
+    const auto changed = release_probe_replies("watch-1", "binary", 8, "new-release",
+        state.release().digest_sha256(), state);
     require(changed.size() == 2);
     require(changed[0].has_release_probe_ack() && changed[1].has_desired_state());
     require(changed[0].request_id() == changed[1].request_id());
-    require(changed[0].release_probe_ack().desired_release_id() ==
-            changed[1].desired_state().release().content().release_id());
+    require(changed[0].release_probe_ack().desired_release_id() == "new-release");
     require(changed[0].release_probe_ack().desired_node_spec_revision() == 8);
+    require(changed[0].release_probe_ack().desired_manifest_digest() ==
+            changed[1].desired_state().release().digest_sha256());
+    require(changed[1].desired_state().SerializeAsString() == state.SerializeAsString());
     require(release_probe_replies("watch-2", "binary", 8, "new-release", "new-digest", {}).size() ==
             1);
 
@@ -280,16 +286,14 @@ ruvia::task<bool> watch_signal(service::node_dispatch::fanout::hub::subscription
 // One Web Worker's delivery state, as its reader sees it.
 struct worker_states final {
     service::live_resource::hub live_;
-    service::log_ingest::fanout::hub logs_;
     service::node_dispatch::fanout::hub dispatch_;
 
     template <typename state_type>
     state_type& worker_state() {
         if constexpr (std::is_same_v<state_type, service::live_resource::hub>) {
             return live_;
-        } else if constexpr (std::is_same_v<state_type, service::log_ingest::fanout::hub>) {
-            return logs_;
         } else {
+            static_assert(std::is_same_v<state_type, service::node_dispatch::fanout::hub>);
             return dispatch_;
         }
     }
@@ -303,7 +307,8 @@ void verify_watch_notifications() {
     auto watch = states.dispatch_.subscribe(loop.handle(), "delivery-test");
     loops.start();
     const auto deliver = [&](resource_notification value) {
-        service::live_resource::deliver_notification(states, value, std::nullopt);
+        service::live_resource::resource_subscriptions::deliver(states, value, std::nullopt);
+        service::node_dispatch::fanout::desired_state_waits::deliver(states, value, std::nullopt);
     };
     deliver(std::move(resource_notification("delivery-test").node_runtime("node-runtime-test", "{}")));
     if (loop.start(watch_signal(watch, std::chrono::milliseconds(20))).get()) {

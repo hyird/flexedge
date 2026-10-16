@@ -24,17 +24,15 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     const std::string next_cluster = "00000000-0000-0000-0000-000000000011";
     const auto id = co_await service::website::insert_website(transaction, tenant, cluster, "enabled", "{}");
     require(!id.empty());
-    require((co_await service::website::find_website_revision(transaction, tenant, id)) == 1);
     require((co_await service::website::lock_website_revision(transaction, tenant, id)) == 1);
     auto snapshot = co_await service::website::lock_website_snapshot(transaction, tenant, id);
     require(snapshot && snapshot->revision_ == 1);
     require(snapshot && snapshot->cluster_id_ == cluster && snapshot->config_json_ == "{}");
-    require(!(co_await service::website::find_website_revision(transaction, other_tenant, id)));
     require(!(co_await service::website::lock_website_revision(transaction, other_tenant, id)));
     require(!(co_await service::website::lock_website_snapshot(transaction, other_tenant, id)));
     require(!(co_await service::website::update_website(transaction, other_tenant, id, 1, next_cluster, "disabled", "{}")));
     require(!(co_await service::website::update_website(transaction, tenant, id, 9, next_cluster, "disabled", "{}")));
-    require((co_await service::website::find_website_revision(transaction, tenant, id)) == 1);
+    require((co_await service::website::lock_website_revision(transaction, tenant, id)) == 1);
     require((co_await service::website::update_website(transaction, tenant, id, 1, next_cluster, "disabled", "{\"v\":2}")) == 2);
     snapshot = co_await service::website::lock_website_snapshot(transaction, tenant, id);
     require(snapshot && snapshot->revision_ == 2);
@@ -50,7 +48,6 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     const auto deleted = co_await service::website::soft_delete_website(transaction, tenant, id, 2);
     require(deleted && deleted->revision_ == 3);
     require(deleted && deleted->cluster_id_ == snapshot->cluster_id_ && deleted->config_json_ == snapshot->config_json_);
-    require(!(co_await service::website::find_website_revision(transaction, tenant, id)));
     require(!(co_await service::website::lock_website_snapshot(transaction, tenant, id)));
     require(!(co_await service::website::lock_website_revision(transaction, tenant, id)));
     require(!(co_await service::website::soft_delete_website(transaction, tenant, id, 3)));
@@ -65,7 +62,7 @@ ruvia::task<void> verify(ruvia::db_client& client) {
         "UPDATE sys_website SET revision = NULL, config = NULL WHERE id = $1", corrupt_id);
     bool revision_rejected = false;
     try {
-        (void)co_await service::website::find_website_revision(transaction, tenant, corrupt_id);
+        (void)co_await service::website::lock_website_revision(transaction, tenant, corrupt_id);
     } catch (const std::exception&) {
         revision_rejected = true;
     }

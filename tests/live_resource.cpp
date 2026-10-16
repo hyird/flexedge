@@ -521,20 +521,20 @@ int main() {
         node.reset();
         fanout.publish("tenant-a", resource::nodes, "node-a");
 
-        // Subtask attempt notices reach only incremental parts of exactly that
-        // operation in that tenant; other operation subscriptions just re-read.
+        // Task attempt notices reach only incremental parts of exactly that
+        // task in that tenant; other task subscriptions just re-read.
         using service::live_resource::subscription_part;
         using service::live_resource::task_attempt_notice;
         std::vector<subscription_part> history_parts;
-        history_parts.push_back({resource::operations, "task-a", service::live_resource::query_key("history", "s"), true});
-        history_parts.push_back({resource::operations, "task-a", service::live_resource::query_key("detail")});
+        history_parts.push_back({resource::tasks, "task-a", service::live_resource::query_key("history"), true});
+        history_parts.push_back({resource::tasks, "task-a", service::live_resource::query_key("detail")});
         auto history = fanout.subscribe(first_loop.handle(), "tenant-a", std::move(history_parts));
-        auto other_task = fanout.subscribe(first_loop.handle(), "tenant-a", resource::operations, "task-b");
-        auto task_list = fanout.subscribe(second_loop.handle(), "tenant-a", resource::operations);
+        auto other_task = fanout.subscribe(first_loop.handle(), "tenant-a", resource::tasks, "task-b");
+        auto task_list = fanout.subscribe(second_loop.handle(), "tenant-a", resource::tasks);
         std::vector<subscription_part> foreign_parts;
-        foreign_parts.push_back({resource::operations, "task-a", service::live_resource::query_key("history", "s"), true});
+        foreign_parts.push_back({resource::tasks, "task-a", service::live_resource::query_key("history"), true});
         auto foreign_history = fanout.subscribe(second_loop.handle(), "tenant-b", std::move(foreign_parts));
-        fanout.publish_task_attempt("tenant-a", "task-a", {.subtask_id_ = "s", .event_id_ = 7});
+        fanout.publish_task_attempt("tenant-a", "task-a", task_attempt_notice{.event_id_ = 7});
         REQUIRE(first_loop.start(receive(history, std::chrono::seconds(1))).get().has_value());
         const auto attempt = history.drain(0);
         REQUIRE(attempt.task_attempts_.size() == 1 && attempt.task_attempts_[0].event_id_ == 7 &&
@@ -549,7 +549,7 @@ int main() {
         // A part that falls behind drops its notices for one recovery snapshot.
         for (std::int64_t event = 0; event <= static_cast<std::int64_t>(service::live_resource::max_pending_task_attempts);
             ++event) {
-            fanout.publish_task_attempt("tenant-a", "task-a", {.subtask_id_ = "s", .event_id_ = event});
+            fanout.publish_task_attempt("tenant-a", "task-a", task_attempt_notice{.event_id_ = event});
         }
         const auto overflow = history.drain(0);
         REQUIRE(overflow.history_reset_ && overflow.task_attempts_.empty());
@@ -563,7 +563,7 @@ int main() {
         const auto other_recovered = other_task.drain();
         REQUIRE(other_recovered.snapshot_ && other_recovered.recovery_ && !foreign_history.drain().snapshot_);
         // Ordinary changes are not recoveries.
-        fanout.publish("tenant-a", resource::operations, "task-b");
+        fanout.publish("tenant-a", resource::tasks, "task-b");
         const auto ordinary = other_task.drain();
         REQUIRE(ordinary.snapshot_ && !ordinary.recovery_);
 
@@ -585,8 +585,8 @@ int main() {
         namespace notifications = service::live_resource::notifications;
         notifications::resource_notification sent("tenant-a");
         sent.changed(resource::websites, "site")
-            .changed(resource::operations)
-            .task_attempt("task-a", {.subtask_id_ = "s", .event_id_ = 9})
+            .changed(resource::tasks)
+            .task_attempt("task-a", 9)
             .task_history_reset("task-b")
             .node_runtime("node-a", R"({"id":"node-a"})")
             .origin_runtime("site", R"({"id":"site"})")
@@ -594,8 +594,8 @@ int main() {
         const auto fields = notifications::encode(notifications::bounded(sent));
         const auto parsed = notifications::decode(fields);
         REQUIRE(parsed && parsed->tenant_id_ == "tenant-a" && parsed->changes_ == sent.changes_ &&
-                parsed->task_attempts_.size() == 1 && parsed->task_attempts_[0].notice_.event_id_ == 9 &&
-                parsed->task_attempts_[0].notice_.subtask_id_ == "s" && parsed->task_history_resets_[0] == "task-b" &&
+                parsed->task_attempts_.size() == 1 && parsed->task_attempts_[0].task_id_ == "task-a" &&
+                parsed->task_attempts_[0].notice_.event_id_ == 9 && parsed->task_history_resets_[0] == "task-b" &&
                 parsed->node_id_ == "node-a" && parsed->node_runtime_ == R"({"id":"node-a"})" &&
                 parsed->origin_runtime_.size() == 1 && parsed->node_config_ && !parsed->missed_until_);
         notifications::resource_notification many("tenant-a");

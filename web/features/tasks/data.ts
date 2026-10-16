@@ -1,161 +1,116 @@
-import type { z } from 'zod'
 import { queryOptions } from '@tanstack/react-query'
-import { streamPath } from '@/lib/api'
-import { ApiProtocolError } from '@/lib/api-response'
-import {
-  readLiveEvent,
-  readLiveQuery,
-  readLiveSnapshot,
-  snapshotQueryOptions,
-} from '@/lib/live-query'
+import { getData, streamPath } from '@/lib/api'
+import { parseResponseData } from '@/lib/api-response'
+import { readLiveEvent, readLiveQuery } from '@/lib/live-query'
 import { validateCollectionPage } from '@/lib/pagination'
 import { queryKeys } from '@/lib/query-keys'
 import { mergeAttemptEvent } from './task-history'
 import {
-  operationDetailSchema,
-  operationPageSchema,
-  subtaskHistorySchema,
   taskAttemptTraceSchema,
+  taskHistorySchema,
+  taskPageSchema,
+  taskSchema,
+  type TaskRef,
 } from './types'
 
-/** List filters of `/api/operations/stream` (contract §2.1). */
-export type OperationFilters = {
+/** List filters of `/api/tasks` and its stream. */
+export type TaskFilters = {
   page?: number
   page_size?: number
   status?: string
-  action?: string
-  target_type?: string
-  actor?: string
-  days?: number
+  type?: string
   keyword?: string
 }
 
-function parse<T>(schema: z.ZodType<T>, value: unknown): T {
-  const result = schema.safeParse(value)
-  if (!result.success) throw new ApiProtocolError()
-  return result.data
-}
-
 function parsePage(value: unknown, page: number) {
-  const data = parse(operationPageSchema, value)
+  const data = parseResponseData(taskPageSchema, value)
   validateCollectionPage(data, page)
   return data
 }
 
-/** Task list on `/tasks`: live while observed (the page disables it while
- * the detail sheet owns the page's stream). */
-export function operationsQuery(params: OperationFilters = {}) {
+/** Task list on `/tasks`: live while observed. An open detail sheet takes
+ * over the page's stream; the list recovers when it closes. */
+export function tasksQuery(params: TaskFilters = {}) {
   return queryOptions({
     retry: false,
-    queryKey: [...queryKeys.operations, 'list', params],
+    queryKey: [...queryKeys.tasks, 'list', params],
     queryFn: ({ queryKey, signal }) =>
-      readLiveQuery(
-        streamPath('/operations', params),
-        queryKey,
-        signal,
-        (data) => parsePage(data, params.page ?? 1)
+      readLiveQuery(streamPath('/tasks', params), queryKey, signal, (data) =>
+        parsePage(data, params.page ?? 1)
       ),
   })
 }
 
-/** One-shot read of the newest tasks (first frame, then the stream closes):
- * the header task center reads 20, the overview 6. The `once` key keeps it
- * apart from the live list. */
-export function recentOperationsQuery(pageSize: number) {
-  return snapshotQueryOptions(
-    streamPath('/operations', { page: 1, page_size: pageSize }),
-    [...queryKeys.operations, 'once', pageSize],
-    (data) => parsePage(data, 1)
-  )
-}
-
-/** Task detail: the open sheet's only live stream. `subtaskId` is the
- * expanded subtask; changing it changes the URL, so the old connection is
- * released before the new one opens. The task's previous snapshot stays on
- * screen meanwhile (no skeleton for the header or subtask list). */
-export function operationDetailQuery(id: string, subtaskId: string | null) {
+/** The most recently updated tasks, read over GET: the header task center
+ * reads 20, the overview 6. Dropped when the view closes, so opening it again
+ * reads the current tasks. */
+export function recentTasksQuery(pageSize: number) {
   return queryOptions({
     retry: false,
-    queryKey: [...queryKeys.operations, 'detail', id, subtaskId ?? ''],
+    gcTime: 0,
+    queryKey: [...queryKeys.tasks, 'recent', pageSize],
+    queryFn: async ({ signal }) =>
+      parsePage(
+        await getData<unknown>(
+          '/tasks',
+          { page: 1, page_size: pageSize },
+          signal
+        ),
+        1
+      ),
+  })
+}
+
+function taskPath(resourceType: string, resourceId: string) {
+  return `/tasks/${encodeURIComponent(resourceType)}/${encodeURIComponent(resourceId)}`
+}
+
+/** Task detail: the open sheet's live stream (`snapshot` event). */
+export function taskDetailQuery({ resourceType, resourceId }: TaskRef) {
+  return queryOptions({
+    retry: false,
+    queryKey: [...queryKeys.tasks, 'detail', resourceType, resourceId],
     queryFn: ({ queryKey, signal }) =>
       readLiveQuery(
-        operationStreamPath(id, subtaskId),
+        streamPath(taskPath(resourceType, resourceId)),
         queryKey,
         signal,
-        (data) => parse(operationDetailSchema, data)
+        (data) => parseResponseData(taskSchema, data)
       ),
-    placeholderData: (previous, previousQuery) =>
-      previousQuery?.queryKey[2] === id ? previous : undefined,
   })
 }
 
-function operationStreamPath(id: string, subtaskId: string | null) {
-  return streamPath(`/operations/${encodeURIComponent(id)}`, {
-    subtask_id: subtaskId ?? undefined,
-  })
-}
-
-/** Execution records of the expanded subtask: the `history` event of the
- * detail stream (same connection), with each `attempt` event merged in
- * (contract §3.2). A new `history` frame replaces the records. */
-export function subtaskHistoryQuery(id: string, subtaskId: string) {
+/** Execution records: the `history` event of the detail stream (same
+ * connection), with each `attempt` event merged in. A new `history` frame
+ * replaces the records. */
+export function taskHistoryQuery({ resourceType, resourceId }: TaskRef) {
   return queryOptions({
     retry: false,
-    queryKey: [...queryKeys.operations, 'detail', id, subtaskId, 'records'],
+    queryKey: [
+      ...queryKeys.tasks,
+      'detail',
+      resourceType,
+      resourceId,
+      'records',
+    ],
     queryFn: ({ queryKey, signal }) =>
       readLiveEvent(
-        operationStreamPath(id, subtaskId),
+        streamPath(taskPath(resourceType, resourceId)),
         'history',
         queryKey,
         signal,
-        (data) => parse(subtaskHistorySchema, data),
+        (data) => parseResponseData(taskHistorySchema, data),
         (current, value, event) =>
           event === 'attempt' ? mergeAttemptEvent(current, value) : undefined
       ),
   })
 }
 
-/** Trace reads open at once; later reads wait in request order. */
-export const traceReadLimit = 2
-let openTraceReads = 0
-const queuedTraceReads = new Set<() => void>()
-
-/** Takes one of the `traceReadLimit` slots, waiting while all are taken. A
- * read cancelled while waiting leaves the queue without opening a stream. */
-function acquireTraceRead(signal: AbortSignal) {
-  if (signal.aborted) return Promise.reject(signal.reason)
-  if (openTraceReads < traceReadLimit) {
-    openTraceReads += 1
-    return Promise.resolve()
-  }
-  return new Promise<void>((resolve, reject) => {
-    const start = () => {
-      queuedTraceReads.delete(start)
-      signal.removeEventListener('abort', cancel)
-      openTraceReads += 1
-      resolve()
-    }
-    const cancel = () => {
-      queuedTraceReads.delete(start)
-      reject(signal.reason)
-    }
-    queuedTraceReads.add(start)
-    signal.addEventListener('abort', cancel, { once: true })
-  })
-}
-
-function releaseTraceRead() {
-  openTraceReads -= 1
-  queuedTraceReads.values().next().value?.()
-}
-
-/** Full trace of one attempt: a one-shot snapshot (the stream closes after
- * its first frame), never part of the records themselves. It is read only
- * once the attempt is `visible`, with at most `traceReadLimit` reads open at
- * once. Stored traces never change, so the snapshot is cached for good: no
- * event reads it again. Closing the sheet cancels pending and queued reads. */
+/** Full trace of one attempt, read over GET once the attempt is `visible`;
+ * never part of the records themselves. Stored traces never change, so a
+ * trace is cached for good. Closing the sheet cancels pending reads. */
 export function taskAttemptTraceQuery(
-  operationId: string,
+  { resourceType, resourceId }: TaskRef,
   attemptId: string,
   visible = true
 ) {
@@ -164,21 +119,21 @@ export function taskAttemptTraceQuery(
     staleTime: Infinity,
     gcTime: Infinity,
     enabled: visible,
-    queryKey: [...queryKeys.operations, 'trace', operationId, attemptId],
-    queryFn: async ({ queryKey, signal }) => {
-      await acquireTraceRead(signal)
-      try {
-        return await readLiveSnapshot(
-          streamPath(
-            `/operations/${encodeURIComponent(operationId)}/attempts/${attemptId}/trace`
-          ),
-          queryKey,
-          signal,
-          (data) => parse(taskAttemptTraceSchema, data)
+    queryKey: [
+      ...queryKeys.tasks,
+      'trace',
+      resourceType,
+      resourceId,
+      attemptId,
+    ],
+    queryFn: async ({ signal }) =>
+      parseResponseData(
+        taskAttemptTraceSchema,
+        await getData<unknown>(
+          `${taskPath(resourceType, resourceId)}/attempts/${encodeURIComponent(attemptId)}/trace`,
+          undefined,
+          signal
         )
-      } finally {
-        releaseTraceRead()
-      }
-    },
+      ),
   })
 }

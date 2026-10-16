@@ -7,7 +7,6 @@ import {
   createSessionExpiryHandler,
   recoverStreamSession,
 } from './session-expiry'
-import { registerSessionCleanup } from './session-lifecycle'
 
 const clients: ReturnType<typeof createAppQueryClient>[] = []
 afterEach(() => clients.splice(0).forEach((client) => client.clear()))
@@ -39,7 +38,7 @@ test('stream recovery keeps the session on transient transport failure', async (
   }
 })
 
-test('a final query 401 tears down cached resources and streams before navigation', async () => {
+test('a final query 401 tears down cached resources before navigation', async () => {
   const errors: unknown[] = []
   const client = createAppQueryClient(
     (message) => errors.push(message),
@@ -48,10 +47,6 @@ test('a final query 401 tears down cached resources and streams before navigatio
   clients.push(client)
   client.setQueryData(queryKeys.session, { id: 'admin' })
   client.setQueryData(['nodes'], ['old'])
-  let stopped = false
-  registerSessionCleanup(client, () => {
-    stopped = true
-  })
   let navigated!: () => void
   const navigation = new Promise<void>((resolve) => {
     navigated = resolve
@@ -59,7 +54,6 @@ test('a final query 401 tears down cached resources and streams before navigatio
   const expire = createSessionExpiryHandler(
     client,
     () => {
-      expect(stopped).toBe(true)
       expect(client.getQueryCache().getAll()).toHaveLength(0)
       navigated()
     },

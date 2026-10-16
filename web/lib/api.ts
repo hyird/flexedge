@@ -1,6 +1,11 @@
+import { z } from 'zod'
 import axios, { type RawAxiosRequestHeaders } from 'axios'
 import { createApiClient } from './api-client'
-import { requireResponseData, type ApiResponse } from './api-response'
+import {
+  ApiBusinessError,
+  requireResponseData,
+  type ApiResponse,
+} from './api-response'
 
 export type PageData<T> = {
   list: T[]
@@ -8,6 +13,17 @@ export type PageData<T> = {
   page: number
   page_size: number
   total_pages: number
+}
+
+/** Runtime schema of a `PageData` page of `item`. */
+export function pageDataSchema<T extends z.ZodType>(item: T) {
+  return z.object({
+    list: z.array(item),
+    total: z.number().int(),
+    page: z.number().int(),
+    page_size: z.number().int(),
+    total_pages: z.number().int(),
+  })
 }
 
 export const api = createApiClient()
@@ -43,12 +59,27 @@ export async function getData<T>(
   return requireResponseData(response.data)
 }
 
+/** Business code of a failed read: a stream's `resource-error` frame or the
+ * envelope of an HTTP error response. */
+export function apiErrorCode(error: unknown) {
+  if (error instanceof ApiBusinessError) return error.code
+  if (axios.isAxiosError<ApiResponse>(error)) {
+    const code = error.response?.data?.code
+    if (typeof code === 'number') return code
+  }
+  return undefined
+}
+
+/** Result of a write: the response envelope plus the resource revision the
+ * write produced (the `ETag` of creates, updates and deletes). */
+export type WriteResult<T> = ApiResponse<T> & { revision?: number }
+
 export async function sendData<T = never>(
   method: 'post' | 'put' | 'delete',
   url: string,
   data?: unknown,
   revision?: number
-) {
+): Promise<WriteResult<T>> {
   const headers: RawAxiosRequestHeaders | undefined =
     revision === undefined ? undefined : { 'If-Match': `"${revision}"` }
   const response = await api.request<ApiResponse<T>>({
@@ -57,7 +88,8 @@ export async function sendData<T = never>(
     data,
     headers,
   })
-  return response.data
+  const etag = /^"(\d+)"$/.exec(String(response.headers.etag ?? ''))
+  return { ...response.data, revision: etag ? Number(etag[1]) : undefined }
 }
 
 export function apiErrorMessage(error: unknown) {
@@ -84,4 +116,10 @@ export function isRevisionConflict(error: unknown) {
     axios.isAxiosError(error) &&
     (error.response?.status === 409 || error.response?.status === 412)
   )
+}
+
+/** True when the API answered 401: the session is gone (after the client's
+ * own refresh attempt). */
+export function isUnauthorized(error: unknown) {
+  return axios.isAxiosError(error) && error.response?.status === 401
 }

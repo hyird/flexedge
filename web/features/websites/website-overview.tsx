@@ -5,7 +5,11 @@ import { ListView, type DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Alert, Button } from '@heroui/react'
 import { formatBytes, formatDate, ratioOf } from '@/lib/format'
-import { statusLabels } from '@/lib/status'
+import {
+  describeStatus,
+  statusReserve,
+  type StatusDictionary,
+} from '@/lib/status'
 import { cn } from '@/lib/utils'
 import { DataTable, TruncatedText } from '@/components/data-table'
 import { Mono } from '@/components/mono'
@@ -19,23 +23,25 @@ import type { Website, WebsiteDomain } from './types'
 import { useOpenWebsiteTab, useWebsite } from './website-context'
 import {
   defaultOrigin,
+  deployStatuses,
   deployStatusReserve,
+  domainResolutionReserve,
+  domainResolutionStatuses,
   originAddress,
   originGroups,
   originHealth,
+  originHealthReserve,
+  originHealthStatuses,
 } from './website-display'
 
 type OriginState = Website['runtime']['origin_states'][number]
 
-const resolutionReserve = statusLabels([
-  'verified',
-  'unverified',
-  'invalid',
-  'pending',
-  'resolved',
-])
-const originStatusReserve = statusLabels(['healthy', 'unhealthy', 'unknown'])
-const certificateReserve = ['可用', '不可用']
+/** Whether a bound certificate can serve HTTPS now. */
+const certificateUsability = {
+  usable: { label: '可用', tone: 'success' },
+  unusable: { label: '不可用', tone: 'warning' },
+} as const satisfies StatusDictionary
+const certificateReserve = statusReserve(certificateUsability)
 
 function kpiStatus(part: number, total: number) {
   if (total === 0 || part === total) return 'success' as const
@@ -48,8 +54,11 @@ export function WebsiteOverview() {
   const openTab = useOpenWebsiteTab()
   const probe = useMutation({
     mutationFn: () => probeWebsiteDns(website.id),
-    onSuccess: (response) =>
-      toastWriteSuccess('DNS 探测已提交，结果会自动更新', response.data),
+    onSuccess: () =>
+      toastWriteSuccess('DNS 探测已提交，结果会自动更新', {
+        resourceType: 'website',
+        resourceId: website.id,
+      }),
   })
   const { runtime, config } = website
   const health = originHealth(website)
@@ -57,8 +66,11 @@ export function WebsiteOverview() {
   const origin = defaultOrigin(website)
   const domainState = (domain: WebsiteDomain) =>
     runtime.domain_states.find((state) => state.id === domain.id)
+  // A domain without a probe result is unverified (website_runtime_mapper.h).
+  const resolution = (domain: WebsiteDomain) =>
+    domainState(domain)?.resolution_status ?? 'unverified'
   const resolved = config.domains.filter(
-    (domain) => domainState(domain)?.resolution_status === 'resolved'
+    (domain) => resolution(domain) === 'verified'
   ).length
 
   const domainColumns: DataGridColumn<WebsiteDomain>[] = [
@@ -91,8 +103,8 @@ export function WebsiteOverview() {
       minWidth: 110,
       cell: (domain) => (
         <StatusChip
-          status={domainState(domain)?.resolution_status ?? 'pending'}
-          reserve={resolutionReserve}
+          {...describeStatus(domainResolutionStatuses, resolution(domain))}
+          reserve={domainResolutionReserve}
         />
       ),
     },
@@ -162,7 +174,10 @@ export function WebsiteOverview() {
       header: '状态',
       minWidth: 100,
       cell: (state) => (
-        <StatusChip status={state.status} reserve={originStatusReserve} />
+        <StatusChip
+          {...describeStatus(originHealthStatuses, state.status)}
+          reserve={originHealthReserve}
+        />
       ),
     },
     {
@@ -215,7 +230,7 @@ export function WebsiteOverview() {
           />
           <KPI.Footer className='text-xs text-muted'>
             <StatusChip
-              status={runtime.deploy_status}
+              {...describeStatus(deployStatuses, runtime.deploy_status)}
               reserve={deployStatusReserve}
             />
           </KPI.Footer>
@@ -350,8 +365,9 @@ export function WebsiteOverview() {
                   </ListView.ItemContent>
                   <ListView.ItemAction>
                     <StatusChip
-                      label={certificate.usable ? '可用' : '不可用'}
-                      tone={certificate.usable ? 'success' : 'warning'}
+                      {...certificateUsability[
+                        certificate.usable ? 'usable' : 'unusable'
+                      ]}
                       reserve={certificateReserve}
                     />
                   </ListView.ItemAction>

@@ -51,10 +51,23 @@ export default defineConfig(
         },
       ],
       'no-duplicate-imports': 'error',
+      // Business data never polls: live views use SSE (web/lib/live-query.ts).
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector:
+            'Identifier[name=/^refetchInterval/], Property[key.value=/^refetchInterval/]',
+          message:
+            'Polling is forbidden; live data comes from the SSE stream in the domain data module.',
+        },
+      ],
     },
   },
   {
-    files: ['web/features/**/*.tsx'],
+    // Feature UI and hooks reach the API only through their domain data
+    // module (`features/<domain>/data.ts`).
+    files: ['web/features/**/*.{ts,tsx}'],
+    ignores: ['web/features/**/data.ts', 'web/**/*.test.{ts,tsx}'],
     rules: {
       'no-restricted-imports': [
         'error',
@@ -69,7 +82,13 @@ export default defineConfig(
           patterns: [
             {
               group: ['@/lib/api', '**/lib/api', '**/lib/api.ts'],
-              importNames: ['api', 'getData', 'getAllPages', 'sendData'],
+              importNames: [
+                'api',
+                'getData',
+                'sendData',
+                'streamPath',
+                'normalizeApiPath',
+              ],
               message:
                 'HTTP requests belong in domain data modules; UI may import error formatting helpers.',
             },
@@ -81,14 +100,46 @@ export default defineConfig(
               ],
               message: 'UI must not construct HTTP clients.',
             },
+            {
+              group: [
+                '@/lib/live-query',
+                '**/lib/live-query',
+                '**/lib/live-query.ts',
+              ],
+              importNames: [
+                'LiveQueryManager',
+                'readLiveQuery',
+                'readLiveEvent',
+                'readLiveAppend',
+              ],
+              message: 'Live reads belong in domain data modules.',
+            },
+            {
+              group: [
+                '@/lib/event-stream',
+                '**/lib/event-stream',
+                '**/lib/event-stream.ts',
+              ],
+              message: 'Streams are opened by the live-query layer only.',
+            },
+            {
+              group: [
+                '@/lib/resource',
+                '**/lib/resource',
+                '**/lib/resource.ts',
+              ],
+              importNames: ['resourceListSearchQuery'],
+              message: 'Resource searches belong in domain data modules.',
+            },
           ],
         },
       ],
     },
   },
   {
-    // Shared primitives and utilities cannot depend on business features.
-    files: ['web/lib/**/*.{ts,tsx}', 'web/components/*.{ts,tsx}'],
+    // Shared primitives, utilities and the app layout cannot depend on
+    // business features; routes assemble them.
+    files: ['web/lib/**/*.{ts,tsx}', 'web/components/**/*.{ts,tsx}'],
     languageOptions: { parser: tseslint.parser },
     rules: {
       'no-restricted-imports': [

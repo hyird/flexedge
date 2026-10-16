@@ -5,21 +5,18 @@
 #include <ruvia/web/context.h>
 #include <ruvia/web/streaming.h>
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
-#include <memory>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <utility>
 
 #include "service/common/connection_error.h"
-#include "service/domains/auth/auth_session_read_service.h"
-#include "service/domains/auth/session_credential.h"
 #include "service/features/live_resource/read_scope.h"
+#include "service/features/live_resource/sse.h"
 #include "service/features/log_ingest/fanout.h"
 #include "service/features/log_ingest/tail.h"
-#include "service/middleware/auth.h"
 
 namespace service::log_ingest {
 
@@ -51,10 +48,7 @@ template <typename fetch_type>
 ruvia::task<void> stream_sse_tail(ruvia::context& c, fanout::hub::subscription subscription,
     std::optional<tail_cursor> after, fetch_type fetch) {
     try {
-        auto events = c.stream_sse();
-        auto credential = std::make_shared<std::optional<service::auth::session_credential>>(
-            service::auth::read_session_cookie(c));
-        auto checked_at = std::chrono::steady_clock::now();
+        service::live_resource::sse_connection events(c);
         auto initial = co_await service::live_resource::read_once<tail_batch>(c,
             [fetch, after](auto& read) { return fetch(read, after); });
         const auto initial_cursor = initial.cursor_;
@@ -69,22 +63,13 @@ ruvia::task<void> stream_sse_tail(ruvia::context& c, fanout::hub::subscription s
         co_await events.write(initial_message);
 
         while (!events.aborted()) {
-            if (std::chrono::steady_clock::now() - checked_at >= fanout::sse_heartbeat_interval) {
-                const auto principal = co_await service::live_resource::read_once<std::optional<service::auth::authenticated_principal>>(
-                    c, [credential](auto& read) -> ruvia::task<std::optional<service::auth::authenticated_principal>> {
-                        if (!*credential) {
-                            co_return std::nullopt;
-                        }
-                        co_return co_await service::auth::resolve_session_principal(read.db(), **credential);
-                    });
-                if (!principal || principal->system_tenant_id_ != service::middleware::current_tenant_id(c)) {
-                    co_await events.write({.data_ = "{}", .event_ = "session-expired"});
-                    co_return;
-                }
-                checked_at = std::chrono::steady_clock::now();
+            if (!co_await events.session_valid()) {
+                co_return;
             }
-            const auto signal =
-                co_await subscription.receive_for(fanout::sse_heartbeat_interval, c.get_stop_token());
+            const auto signal = co_await subscription.receive_for(
+                std::max(events.next_wake_at() - service::live_resource::sse_connection::clock::now(),
+                    service::live_resource::sse_connection::clock::duration::zero()),
+                c.get_stop_token());
             if (events.aborted()) {
                 co_return;
             }
@@ -92,7 +77,7 @@ ruvia::task<void> stream_sse_tail(ruvia::context& c, fanout::hub::subscription s
                 if (signal.status() != ruvia::worker_wait_status::timed_out) {
                     co_return;
                 }
-                co_await events.write({.event_ = "heartbeat"});
+                co_await events.keep_alive();
                 continue;
             }
 

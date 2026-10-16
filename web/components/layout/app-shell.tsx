@@ -1,23 +1,31 @@
-import { useState } from 'react'
+import { type ReactNode, useState } from 'react'
 import { Outlet, useLocation } from '@tanstack/react-router'
 import { Globe } from '@gravity-ui/icons'
 import { AppLayout, Navbar, Sheet, Sidebar } from '@heroui-pro/react'
 import { Tooltip } from '@heroui/react'
-import { AccountMenu } from './account-menu'
 import { AppBreadcrumbs } from './app-breadcrumbs'
 import {
   BreadcrumbLabelContext,
   BreadcrumbLabelStore,
 } from './breadcrumb-trail'
-import { CommandPalette } from './command-palette'
+import { CommandPalette, type ResourceSearchSource } from './command-palette'
 import { navigation, navigationGroups, navigationItemFor } from './navigation'
-import { TaskCenter } from './task-center'
 import { ThemeMenu } from './theme-menu'
 
 /** Authenticated workspace: collapsible sidebar (sheet on mobile), navbar with
- * breadcrumbs, search, task center and theme menu. In-app links route through
- * the React Aria RouterProvider installed by the root route. */
-export function AppShell() {
+ * breadcrumbs, search, task center and theme menu. The route assembling it
+ * passes the business parts: the account menu, the task center and the
+ * command palette's resource searches. In-app links route through the React
+ * Aria RouterProvider installed by the root route. */
+export function AppShell({
+  account,
+  taskCenter,
+  resourceSearch,
+}: {
+  account: ReactNode
+  taskCenter: ReactNode
+  resourceSearch: ResourceSearchSource[]
+}) {
   const [breadcrumbLabels] = useState(() => new BreadcrumbLabelStore())
   return (
     <BreadcrumbLabelContext.Provider value={breadcrumbLabels}>
@@ -33,12 +41,12 @@ export function AppShell() {
         sidebar={
           <>
             <Sidebar>
-              <SidebarNavigation />
+              <SidebarNavigation account={account} />
               <Sidebar.Rail aria-label='展开或收起侧栏' />
             </Sidebar>
             <Sidebar.Mobile role='navigation' aria-label='导航菜单'>
               <Sheet.Heading className='sr-only'>导航菜单</Sheet.Heading>
-              <SidebarNavigation idPrefix='mobile-' />
+              <SidebarNavigation account={account} idPrefix='mobile-' />
             </Sidebar.Mobile>
           </>
         }
@@ -58,8 +66,8 @@ export function AppShell() {
                 <AppBreadcrumbs />
               </div>
               <Navbar.Content className='gap-1'>
-                <CommandPalette />
-                <TaskCenter />
+                <CommandPalette resourceSearch={resourceSearch} />
+                {taskCenter}
                 <ThemeMenu />
               </Navbar.Content>
             </Navbar.Header>
@@ -74,7 +82,13 @@ export function AppShell() {
   )
 }
 
-function SidebarNavigation({ idPrefix = '' }: { idPrefix?: string }) {
+function SidebarNavigation({
+  account,
+  idPrefix = '',
+}: {
+  account: ReactNode
+  idPrefix?: string
+}) {
   const { pathname } = useLocation()
   const current = navigationItemFor(pathname)
   return (
@@ -115,9 +129,7 @@ function SidebarNavigation({ idPrefix = '' }: { idPrefix?: string }) {
           </Sidebar.Group>
         ))}
       </Sidebar.Content>
-      <Sidebar.Footer>
-        <AccountMenu />
-      </Sidebar.Footer>
+      <Sidebar.Footer>{account}</Sidebar.Footer>
     </>
   )
 }

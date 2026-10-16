@@ -12,11 +12,18 @@ import {
 } from '@gravity-ui/icons'
 import { Command } from '@heroui-pro/react'
 import { Button, Kbd, Spinner } from '@heroui/react'
-import {
-  resourceSearchQuery,
-  resourceSearchSources,
-} from './command-resource-search'
+import type { ResourceSearchHit, ResourceSearchQuery } from '@/lib/resource'
 import { navigation } from './navigation'
+
+/** One resource list the palette searches (assembled by the route). */
+export type ResourceSearchSource = {
+  label: string
+  icon: typeof Globe
+  /** Detail route prefix of the found resources. */
+  path: string
+  /** The owning domain's palette search (`xxxSearchQuery`). */
+  search: (keyword: string) => ResourceSearchQuery
+}
 
 /** Quick actions only navigate; each target page opens its own create view
  * (URL contract listed in the foundation API notes). */
@@ -33,7 +40,11 @@ const isMac =
   typeof navigator !== 'undefined' && /Mac|iP(hone|ad)/.test(navigator.platform)
 
 /** Navbar search trigger plus the ⌘K / Ctrl+K command palette. */
-export function CommandPalette() {
+export function CommandPalette({
+  resourceSearch,
+}: {
+  resourceSearch: ResourceSearchSource[]
+}) {
   const [isOpen, setOpen] = useState(false)
   useEffect(() => {
     const toggle = (event: KeyboardEvent) => {
@@ -71,7 +82,10 @@ export function CommandPalette() {
       <Command>
         <Command.Backdrop isOpen={isOpen} onOpenChange={setOpen}>
           <Command.Container size='lg'>
-            <CommandPaletteDialog onClose={() => setOpen(false)} />
+            <CommandPaletteDialog
+              resourceSearch={resourceSearch}
+              onClose={() => setOpen(false)}
+            />
           </Command.Container>
         </Command.Backdrop>
       </Command>
@@ -79,9 +93,15 @@ export function CommandPalette() {
   )
 }
 
-// Mounted only while the palette is open: its resource queries (and their
-// one-shot streams) exist only during that time.
-function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
+// Mounted only while the palette is open: its resource searches exist only
+// during that time.
+function CommandPaletteDialog({
+  resourceSearch,
+  onClose,
+}: {
+  resourceSearch: ResourceSearchSource[]
+  onClose: () => void
+}) {
   const router = useRouter()
   const [input, setInput] = useState('')
   const [keyword, setKeyword] = useState('')
@@ -93,12 +113,18 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
     return () => window.clearTimeout(timer)
   }, [input])
   const searches = useQueries({
-    queries: resourceSearchSources.map((source) =>
-      resourceSearchQuery(source, keyword)
-    ),
+    queries: resourceSearch.map((source) => ({
+      ...source.search(keyword),
+      select: (hits: ResourceSearchHit[]) =>
+        hits.map((hit) => ({
+          key: `${source.path}/${hit.id}`,
+          label: hit.label,
+          href: `${source.path}/${hit.id}`,
+        })),
+    })),
   })
   const isSearching = searches.some((search) => search.isFetching)
-  const hits = resourceSearchSources.flatMap((source, index) =>
+  const hits = resourceSearch.flatMap((source, index) =>
     (searches[index].data ?? []).map((hit) => ({ ...hit, source }))
   )
   const failed = searches.some((search) => search.isError)

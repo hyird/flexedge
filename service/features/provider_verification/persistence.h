@@ -8,15 +8,17 @@
 #include <string_view>
 #include <utility>
 
+#include "service/features/background/queued_work.h"
 #include "service/features/background/task_context.h"
 #include "service/features/certificate/provider_runtime_credentials.h"
 #include "service/features/dns_sync/queue.h"
-#include "service/features/provider_verification/failure.h"
+#include "service/features/outbound_http/error.h"
 #include "service/features/provider_verification/queue.h"
 #include "service/features/provider_verification/task.h"
 #include "service/features/provider_verification/verification.h"
 #include "service/features/sync_runtime/error.h"
 #include "service/features/sync_runtime/state.h"
+#include "service/features/sync_runtime/work_commit.h"
 
 namespace service::provider_verification::detail {
 
@@ -29,11 +31,11 @@ inline ruvia::task<void> reconcile(service::background::task_context& context) {
         "provider.verification_generation LIMIT 64");
     for (const auto& row : rows) {
         const auto tenant_id = std::string(row[0].value().value_or(""));
-        auto origin = service::operation::work_origin::repair();
+        service::background::queued_work work;
         auto transaction = co_await context.db().begin_transaction();
         const auto provider_id = std::string(row[2].value().value_or(""));
-        co_await service::provider_verification::mark_current(transaction, tenant_id, provider_id, origin);
-        co_await service::sync_runtime::commit_origin(transaction, context, tenant_id, origin);
+        co_await service::provider_verification::mark_current(transaction, tenant_id, provider_id, work);
+        co_await service::sync_runtime::commit_work(transaction, context, tenant_id, work);
     }
     co_return;
 }
@@ -85,14 +87,14 @@ inline ruvia::task<void> complete_verification(service::background::task_context
     std::string runtime_json;
     if (dns) {
         if (!result.dns_runtime_) {
-            throw verification_error("DNS 服务商检测结果缺失", true);
+            throw service::outbound_http::attempt_error("DNS 服务商检测结果缺失", true);
         }
         runtime_json = std::move(*result.dns_runtime_);
     } else {
         const auto runtime = service::certificate_issuance::parse_certificate_provider_runtime(
             rows.front()[0].value().value_or("{}"), {.resource_ = context.pool()});
         if (!runtime) {
-            throw verification_error("证书供应商 runtime 损坏", true);
+            throw service::outbound_http::attempt_error("证书供应商 runtime 损坏", true);
         }
         runtime_json = service::certificate_issuance::serialize_certificate_provider_runtime(
             runtime, result.eab_, context.pool());
@@ -104,14 +106,14 @@ inline ruvia::task<void> complete_verification(service::background::task_context
         std::string_view(runtime_json), task.provider_id_, task.tenant_id_, task.provider_revision_,
         task.generation_);
     service::sync_runtime::running_result_transition result_transition;
-    // The zone syncs a verified DNS provider causes are its children.
-    auto origin = service::operation::work_origin::caused_by(task.owner_);
+    // A verified DNS provider re-syncs its zones.
+    service::background::queued_work work;
     if (updated.affected_rows() == 0) {
         (void)co_await service::sync_runtime::release_running(transaction, lease);
     } else {
         if (dns) {
             co_await service::dns_sync::mark_provider_zones_dirty(transaction, task.tenant_id_,
-                task.provider_id_, origin);
+                task.provider_id_, work);
         }
         result_transition = co_await service::sync_runtime::complete_running_and_record_event(
             transaction, lease, detail);
@@ -120,7 +122,7 @@ inline ruvia::task<void> complete_verification(service::background::task_context
         }
     }
     co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease,
-        result_transition, trace, false, &origin);
+        result_transition, trace, false, &work);
     co_return;
 }
 

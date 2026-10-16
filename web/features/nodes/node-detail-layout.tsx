@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import { ArrowLeft, ChartLine, FileText, Gear } from '@gravity-ui/icons'
-import { ApiBusinessError } from '@/lib/api-response'
+import { apiErrorCode } from '@/lib/api'
 import { useArrivalState } from '@/lib/history-state'
+import { describeStatus } from '@/lib/status'
 import { useTabSwitchGuard } from '@/lib/unsaved-changes'
 import { useBreadcrumbLabel } from '@/components/layout/breadcrumb-trail'
 import { DetailHeader, DetailHeaderSkeleton } from '@/components/detail-header'
@@ -14,10 +15,10 @@ import { StatusChip } from '@/components/status-chip'
 import { nodeQuery, nodeSnapshotQuery } from './data'
 import { NodeConfig } from './node-config'
 import { NodeConnectionChip } from './node-connection-chip'
+import { nodeStatusReserve, nodeStatuses } from './node-display'
 import { NodeLifecycleActions } from './node-lifecycle-actions'
 import { NodeLogs } from './node-logs'
 import { NodeOverview } from './node-overview'
-import { nodeStatusLabels } from './node-status'
 
 const route = getRouteApi('/_authenticated/nodes/$nodeId')
 // service/domains/node/node_error.h NOT_FOUND
@@ -48,10 +49,7 @@ export function NodeDetailLayout() {
   // Entering the logs tab keeps the last live frame until the snapshot lands.
   const node = onLogs ? (snapshot.data ?? live.data) : live.data
   useBreadcrumbLabel(node?.name)
-  const notFound =
-    query.error instanceof ApiBusinessError &&
-    query.error.code === nodeNotFoundCode
-  if (notFound)
+  if (apiErrorCode(query.error) === nodeNotFoundCode)
     return (
       <Page>
         <EmptyState
@@ -75,8 +73,8 @@ export function NodeDetailLayout() {
             </span>,
             <StatusChip
               key='status'
-              status={node.status}
-              reserve={nodeStatusLabels}
+              {...describeStatus(nodeStatuses, node.status)}
+              reserve={nodeStatusReserve}
             />,
           ]}
           actions={

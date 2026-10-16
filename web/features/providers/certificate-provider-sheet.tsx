@@ -2,7 +2,6 @@ import { type FormEvent, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiErrorMessage } from '@/lib/api'
 import { fieldErrors } from '@/lib/form-errors'
-import { queryKeys } from '@/lib/query-keys'
 import { FormSheet } from '@/components/form-sheet'
 import { Choice, Field } from '@/components/forms'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
@@ -10,7 +9,7 @@ import {
   certificateProviderFormSchema,
   type CertificateProviderFormValues,
 } from './certificate-provider-form'
-import { saveCertificateProvider } from './data'
+import { afterProviderWrite, saveCertificateProvider } from './data'
 import { providerLabel } from './provider-display'
 import {
   ProviderRemoval,
@@ -29,9 +28,8 @@ export function CertificateProviderSheet({
 }) {
   const client = useQueryClient()
   const [initial] = useState<CertificateProviderFormValues>(() => ({
-    provider: provider?.provider === 'zerossl' ? 'zerossl' : 'letsencrypt',
-    credential_mode:
-      provider?.credential_mode === 'access_key' ? 'access_key' : 'email',
+    provider: provider?.provider ?? 'letsencrypt',
+    credential_mode: provider?.credential_mode ?? 'email',
     account_email: provider?.account_email ?? '',
     access_key: '',
   }))
@@ -47,11 +45,8 @@ export function CertificateProviderSheet({
     mutationFn: (input: CertificateProviderFormValues) =>
       saveCertificateProvider(input, provider),
     onSuccess: (response) => {
-      toastWriteSuccess(response.message || '已保存', response.data)
-      void client.invalidateQueries({
-        queryKey: [...queryKeys.providers, 'certificate'],
-        refetchType: 'none',
-      })
+      toastWriteSuccess(response.message || '已保存')
+      void afterProviderWrite(client, 'certificate')
       onClose()
     },
   })
