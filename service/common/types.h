@@ -6,8 +6,8 @@
 
 namespace service::common {
 
-// The task (operation) a write started, present only when the write
-// scheduled background work (docs/task-center.md).
+// The task (operation) a resource write started, including writes that need
+// no background subtasks (docs/task-center.md).
 RUVIA_MODEL(operation_reference_dto, RUVIA_REQUIRED_FIELD_NAME("operation_id", operation_id, ruvia::string));
 
 RUVIA_MODEL(operation_response, RUVIA_REQUIRED_FIELD(code, ruvia::int64),

@@ -126,10 +126,10 @@ private:
     }
 
     ruvia::task<ruvia::http_response> create(ruvia::context& c) {
-        co_await get_cluster_command_service().create(c, tenant_id(c),
+        const auto operation_id = co_await get_cluster_command_service().create(c, tenant_id(c),
             c.req().validated<save_cluster_body>());
         service::common::set_revision_etag(c, 1);
-        co_return c.json(service::common::operation(c, "集群已创建"));
+        co_return c.json(service::common::operation(c, "集群已创建", operation_id));
     }
 
     ruvia::task<ruvia::http_response> update(ruvia::context& c) {

@@ -1166,7 +1166,7 @@ generatedWebsites.forEach(([name, host, status, logging, deploy], index) => {
 // ?subtask_id=` (`snapshot`, then `history` of the expanded subtask; a new
 // record arrives as `attempt` before the new `snapshot`) and
 // `/api/operations/:id/attempts/:attempt_id/trace/stream` (one-shot trace).
-// Writes that start background work create a task and answer its
+// Every successful resource write creates a task and answers its
 // `operation_id` (contract §6). QA controls (`/__qa/control?event=…`):
 // - `operation-attempt&operation=<id>&subtask=<id>&outcome=failed|completed`
 //   appends a record now (failed → retrying, retry 15 s later;
@@ -3522,8 +3522,8 @@ db.operations = [
       ),
     ]
   ),
-  // Cancelled without `closed_by`: deleting the certificate provider (a
-  // write without a task of its own) cancelled the pending check.
+  // Deleting the certificate provider cancelled the pending check; the
+  // deleting operation is retained even though it has no background work.
   seedOperation(
     7015,
     {
@@ -3541,8 +3541,21 @@ db.operations = [
         status: 'cancelled',
         created_at: historyAt(-86_400),
         finished_at: historyAt(-86_380),
+        closed_by: { operation_id: uuid(7016) },
       }),
     ]
+  ),
+  seedOperation(
+    7016,
+    {
+      action: 'provider.delete',
+      target_type: 'provider',
+      target_kind: 'certificate',
+      target_id: removedProviderId,
+      target_name: 'letsencrypt',
+      created_at: historyAt(-86_380),
+    },
+    []
   ),
 ]
 const seed = structuredClone(db)
@@ -3875,7 +3888,7 @@ function operationDto(operation) {
         ? (settled
             .map((subtask) => subtask.finished_at)
             .sort()
-            .at(-1) ?? '')
+            .at(-1) ?? operation.created_at)
         : '',
     status: deriveOperationStatus(statuses),
     subtask_count: subtasks.length,
@@ -4019,9 +4032,8 @@ function operationPage(query) {
     attention: count('attention'),
   }
 }
-/** Background work a write starts (design §1.2), as `[kind, resource type,
- * resource]`; two or three nodes are enough to show a publish per node. */
-function plannedSubtasks(action, target) {
+/** Background work a write starts, as `[kind, resource type, resource]`. */
+function plannedSubtasks(action, target, summary) {
   const zoneById = (id) => db.zones.find((zone) => zone.id === id),
     clusterZone = (id) =>
       zoneById(db.clusters.find((cluster) => cluster.id === id)?.dns_zone_id),
@@ -4034,9 +4046,11 @@ function plannedSubtasks(action, target) {
     publish = (clusterId) =>
       db.nodes
         .filter(
-          (node) => node.cluster_id === clusterId && node.status === 'enabled'
+          (node) =>
+            node.cluster_id === clusterId &&
+            node.status === 'enabled' &&
+            node.runtime.registration_status === 'registered'
         )
-        .slice(0, 3)
         .map((node) => ['node_publish', 'node', node]),
     websiteZones = () =>
       target.config.domains
@@ -4056,18 +4070,32 @@ function plannedSubtasks(action, target) {
       return [...dnsSync(...websiteZones()), ...publish(target.cluster_id)]
     case 'website.check_domains':
       return [['website_check', 'website', target]]
+    case 'cluster.create':
+    case 'provider.create':
+    case 'provider.delete':
+    case 'certificate.update':
+      return []
     case 'cluster.update':
       return [...dnsSync(zoneById(target.dns_zone_id)), ...publish(target.id)]
     case 'cluster.delete':
-    case 'certificate.delete':
       return dnsSync(zoneById(target.dns_zone_id))
+    case 'certificate.delete': {
+      const zone = zoneById(target.dns_zone_id)
+      return zone?.runtime.challenge_records?.some(
+        (record) => record.certificate_id === target.id
+      )
+        ? dnsSync(zone)
+        : []
+    }
     case 'node.create':
     case 'node.delete':
     case 'node.reset_credentials':
       return dnsSync(clusterZone(target.cluster_id))
     case 'node.update':
       return [
-        ['node_config', 'node', target],
+        ...(target.runtime.registration_status === 'registered'
+          ? [['node_config', 'node', target]]
+          : []),
         ...dnsSync(clusterZone(target.cluster_id)),
       ]
     case 'system.node_register':
@@ -4100,6 +4128,9 @@ function plannedSubtasks(action, target) {
         ),
       ].flatMap(publish)
     case 'provider.update':
+      return summary.credentials_changed
+        ? [['provider_verify', 'provider', target]]
+        : []
     case 'provider.verify':
       return [['provider_verify', 'provider', target]]
   }
@@ -4120,8 +4151,8 @@ function settleOpenSubtask(subtask, settledAt, fields) {
     fields
   )
 }
-/** Cancels the open work on a deleted resource. `closedBy` is the deleting
- * task; a write without a task of its own leaves no `closed_by` (D1).
+/** Cancels open work that the current operation no longer needs.
+ * `closedBy` is the operation that caused the cancellation.
  * Returns whether anything changed. */
 function cancelOpenWork(resourceType, resourceId, settledAt, closedBy) {
   let changed = false
@@ -4140,15 +4171,15 @@ function cancelOpenWork(resourceType, resourceId, settledAt, closedBy) {
       }
   return changed
 }
-/** Records a new task with queued subtasks (D1: none without background
- * work). Open subtasks of other tasks on the same carrier settle as merged
+/** Records one user operation, including one without background work.
+ * Open subtasks of other tasks on the same carrier settle as merged
  * into the new ones (design §4); a deletion cancels the open work on the
  * deleted resource. Callers broadcast `operations`. */
 function startOperation(action, targetType, target, summary = {}) {
-  const planned = plannedSubtasks(action, target)
-  if (!planned.length) return undefined
+  const planned = plannedSubtasks(action, target, summary)
   const now = Date.now(),
     system = action.startsWith('system.')
+  if (system && !planned.length) return undefined
   const operation = {
     id: randomUUID(),
     action,
@@ -4190,7 +4221,11 @@ function startOperation(action, targetType, target, summary = {}) {
           merged_into: { operation_id: operation.id, subtask_id: receiver.id },
         })
     }
-  if (action.endsWith('.delete'))
+  if (
+    action.endsWith('.delete') ||
+    action === 'node.reset_credentials' ||
+    (action === 'provider.update' && !summary.credentials_changed)
+  )
     cancelOpenWork(targetType, target.id, operation.created_at, operation.id)
   db.operations.push(operation)
   return operation
@@ -4982,7 +5017,7 @@ function control(query) {
       fail('资源不存在', 404)
     const operation =
       startOperation(action, targetType, target) ??
-      fail('该操作没有后台工作，不产生任务', 409)
+      fail('该系统动作没有后台工作，不产生任务', 409)
     broadcast(['operations'])
     return {
       operation_id: operation.id,
@@ -5337,9 +5372,12 @@ const resourceTargetTypes = {
 }
 const creationActions = {
   websites: 'website.create',
+  clusters: 'cluster.create',
   nodes: 'node.create',
   'dns-zones': 'dns_zone.create',
   certificates: 'certificate.create',
+  'providers/dns': 'provider.create',
+  'providers/certificate': 'provider.create',
 }
 const deletionActions = {
   websites: 'website.delete',
@@ -5347,6 +5385,8 @@ const deletionActions = {
   nodes: 'node.delete',
   'dns-zones': 'dns_zone.delete',
   certificates: 'certificate.delete',
+  'providers/dns': 'provider.delete',
+  'providers/certificate': 'provider.delete',
 }
 const sectionOrder = [
   'basic',
@@ -5506,8 +5546,6 @@ async function mutate(req, res, url) {
   if (!(req.method === 'POST' && action === 'sync')) requireRevision(req, item)
   if (req.method === 'DELETE') {
     rejectDelete(resource, id)
-    list.splice(list.indexOf(item), 1)
-    refreshRelations()
     const started =
       deletionActions[resource] &&
       startOperation(
@@ -5515,15 +5553,12 @@ async function mutate(req, res, url) {
         resourceTargetTypes[resource],
         item
       )
-    // Provider deletion has no task (D1) but cancels the pending checks,
-    // which then carry no `closed_by`.
-    const cancelled =
-      resource.startsWith('providers/') &&
-      cancelOpenWork('provider', item.id, historyStamp(Date.now()))
+    list.splice(list.indexOf(item), 1)
+    refreshRelations()
     broadcast([
       resource,
       'clusters',
-      ...(started || cancelled ? ['operations'] : []),
+      ...(started ? ['operations'] : []),
     ])
     return json(res, operationData(started), '资源已删除', item.revision + 1)
   }
@@ -5569,27 +5604,29 @@ async function mutate(req, res, url) {
         sync_status: 'synced',
         synced_revision: item.revision + 1,
       }))
-    } else if (resource === 'certificates')
+    } else if (resource === 'certificates') {
       item.config = { ...item.config, ...input }
-    else if (resource === 'providers/dns') {
+      task = ['certificate.update', {}]
+    } else if (resource === 'providers/dns') {
+      task = ['provider.update', { credentials_changed: !!input.api_token }]
       if (input.name) item.name = input.name
       if (input.api_token) {
         item.token_hint = `****${input.api_token.slice(-4)}`
         item.status = 'unverified'
-        task = ['provider.update', { credentials_changed: true }]
       }
     } else if (resource === 'providers/certificate') {
-      if (
+      const changed = !!(
         input.access_key ||
         input.credential_mode !== item.credential_mode ||
-        (input.account_email && input.account_email !== item.account_email)
+        input.account_email !== item.account_email
       )
-        task = ['provider.update', { credentials_changed: true }]
+      task = ['provider.update', { credentials_changed: changed }]
       item.credential_mode = input.credential_mode
       if (input.account_email) item.account_email = input.account_email
+      else delete item.account_email
       if (input.access_key)
         item.access_key_hint = `****${input.access_key.slice(-4)}`
-      item.status = 'unverified'
+      if (changed) item.status = 'unverified'
     } else {
       const sections = changedSections(
         submitted(item, input),
@@ -5630,7 +5667,7 @@ async function mutate(req, res, url) {
   if (req.method === 'PUT') touch(item)
   else item.updated_at = nextTime()
   refreshRelations()
-  // Certificate renewal settings (PUT) start no background work (D1).
+  // Settings-only writes retain their completed task without queued work.
   const started =
     task &&
     startOperation(task[0], resourceTargetTypes[resource], item, task[1])

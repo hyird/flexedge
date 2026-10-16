@@ -142,10 +142,10 @@ private:
             });
     }
     ruvia::task<ruvia::http_response> create_dns(ruvia::context& c) {
-        co_await get_dns_provider_service().create(c, tenant_id(c),
+        const auto operation_id = co_await get_dns_provider_service().create(c, tenant_id(c),
             c.req().validated<create_dns_provider_body>());
         service::common::set_revision_etag(c, 1);
-        co_return c.json(service::common::operation(c, "DNS 服务商账号已添加"));
+        co_return c.json(service::common::operation(c, "DNS 服务商账号已添加", operation_id));
     }
     ruvia::task<ruvia::http_response> update_dns(ruvia::context& c) {
         auto v = expected_revision(c);
@@ -168,10 +168,10 @@ private:
         co_return c.json(service::common::operation(c, "DNS 服务商账号已移除", operation_id));
     }
     ruvia::task<ruvia::http_response> create_certificate(ruvia::context& c) {
-        co_await get_certificate_provider_service().create(
+        const auto operation_id = co_await get_certificate_provider_service().create(
             c, tenant_id(c), c.req().validated<create_certificate_provider_body>());
         service::common::set_revision_etag(c, 1);
-        co_return c.json(service::common::operation(c, "证书供应商已保存"));
+        co_return c.json(service::common::operation(c, "证书供应商已保存", operation_id));
     }
     ruvia::task<ruvia::http_response> update_certificate(ruvia::context& c) {
         auto v = expected_revision(c);

@@ -82,13 +82,9 @@ export function WebsitesTable({
       isRowHeader: true,
       minWidth: 150,
       cell: (website) => (
-        <Link
-          to='/websites/$websiteId'
-          params={{ websiteId: website.id }}
-          className='link block truncate font-medium'
-        >
+        <span className='block truncate font-medium'>
           {websiteName(website)}
-        </Link>
+        </span>
       ),
     },
     {

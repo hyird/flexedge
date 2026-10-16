@@ -97,6 +97,7 @@ public:
             throw;
         }
         auto origin = start(c, service::operation::action::certificate_create, certificate_id);
+        (void)co_await origin.require_operation(transaction, tenant_id);
         (void)co_await service::certificate_issuance::enqueue_certificate_revision(
             transaction, tenant_id, certificate_id, 1, service::sync_runtime::marker_operation::issue, origin);
         co_await transaction.commit();
@@ -104,7 +105,7 @@ public:
         co_return origin.operation_id();
     }
 
-    ruvia::task<void> update(
+    ruvia::task<std::optional<std::string>> update(
         ruvia::context& c, const std::string& tenant_id, const std::string& id,
         std::int64_t expected_revision,
         const ruvia::validated_json<service::certificate_issuance::certificate_config_input>& config) {
@@ -132,11 +133,11 @@ public:
         if (result.affected_rows() == 0) {
             service::common::throw_app_error(certificate_error::revision_conflict);
         }
+        auto origin = start(c, service::operation::action::certificate_update, id);
+        (void)co_await origin.require_operation(transaction, tenant_id);
         co_await transaction.commit();
-        co_await service::live_resource::notify(c,
-            service::live_resource::notifications::resource_notification(tenant_id)
-                .changed(service::live_resource::resource::certificates, id));
-        co_return;
+        co_await notify(c, tenant_id, id, origin);
+        co_return origin.operation_id();
     }
 
     ruvia::task<std::optional<std::string>> renew(ruvia::context& c, const std::string& tenant_id,
@@ -165,6 +166,7 @@ public:
         if (result.affected_rows() == 0) {
             service::common::throw_app_error(certificate_error::revision_conflict);
         }
+        (void)co_await origin.require_operation(transaction, tenant_id);
         (void)co_await service::certificate_issuance::enqueue_certificate_revision(
             transaction, tenant_id, id, issuance_revision, service::sync_runtime::marker_operation::renew, origin);
         co_await transaction.commit();
@@ -204,6 +206,7 @@ public:
         if (result.affected_rows() == 0) {
             service::common::throw_app_error(certificate_error::not_found);
         }
+        (void)co_await origin.require_operation(transaction, tenant_id);
         co_await service::certificate_issuance::retire_dns_challenges_for_deleted_certificate(
             transaction, tenant_id, dns_zone_id, id, origin);
         co_await service::sync_runtime::remove_marker(

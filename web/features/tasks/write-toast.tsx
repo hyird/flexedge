@@ -1,8 +1,8 @@
 import { Link, toast } from '@heroui/react'
 import { operationHref } from './task-display'
 
-/** `operation_id` of a write response's `data` (contract §6): present only
- * when the write started background work, i.e. created a task. */
+/** `operation_id` of a tracked resource write response's `data`: every
+ * successful operation has a task, including writes with no background work. */
 export function operationIdOf(data: unknown) {
   if (typeof data !== 'object' || data === null || !('operation_id' in data))
     return undefined

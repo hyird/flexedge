@@ -1,16 +1,18 @@
 @import 'tailwindcss';
 @import '@heroui/styles';
 @import '@heroui-pro/react/css';
+@import '../assets/fonts/maple-mono-nf-cn/maple-mono-nf-cn.css';
 
-/* System font stacks only: the console ships as one file without web fonts. */
+/* 与 CloudTerminal 统一：正文与代码都使用随单文件构建内联的 Nerd Font。 */
 @theme {
-  --font-sans: Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-sans:
+    'Maple Mono NF CN', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
   --font-mono:
-    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    'Maple Mono NF CN', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-/* HeroUI owns the light/dark palette, surface elevation and component
-   proportions. Keep application overrides limited to workspace behavior. */
+/* HeroUI owns the palette and proportions; grouped content shares one
+   surface across charts, embedded tables and standalone lists. */
 :root {
   --workspace-navbar-height: 3.5rem;
   /* Sticky save bars and table viewports subtract the shell chrome. */
@@ -53,9 +55,14 @@
   }
 }
 
-/* Application behavior shared by resource grids. Component appearance uses
-   the HeroUI defaults, matching the official demos. */
+/* Shared surface treatment uses the documented HeroUI component slots. */
 @layer components {
+  .widget {
+    @apply overflow-hidden bg-surface shadow-surface;
+  }
+  .widget > .widget__content {
+    @apply m-0 rounded-none bg-transparent shadow-none;
+  }
   /* Tables keep one scroll viewport so the sticky header and body columns
      stay aligned; narrow screens scroll horizontally inside it. */
   .data-grid {
@@ -74,7 +81,7 @@
     z-index: 3;
     /* A sticky cell needs its own opaque surface after the native thead
        scrolls away; otherwise rows show through primary table headers. */
-    background: var(--color-surface-secondary);
+    background: var(--color-surface);
   }
   .data-grid .table__column[data-pinned] {
     z-index: 4;

@@ -41,6 +41,7 @@ public:
         if (!revision) {
             service::common::throw_app_error(website_error::not_found);
         }
+        (void)co_await origin.require_operation(transaction, tenant_id);
         (void)co_await service::sync_runtime::upsert_marker(transaction, tenant_id,
             service::sync_runtime::marker_resource_type::website, id, service::sync_runtime::marker_operation::apply,
             *revision, origin);
@@ -71,6 +72,7 @@ public:
             co_await validate_certificates(transaction, tenant_id, config);
             const auto website_id = co_await insert_website(transaction, tenant_id, cluster_id, status, config_json);
             auto origin = start(c, service::operation::action::website_create, website_id);
+            (void)co_await origin.require_operation(transaction, tenant_id);
             co_await replace_relation_projections(transaction, tenant_id, website_id, domain_claims,
                 config.certificate_ids_);
             co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id, cluster_id, origin);
@@ -141,6 +143,7 @@ public:
             if (!revision) {
                 service::common::throw_app_error(website_error::revision_conflict);
             }
+            (void)co_await origin.require_operation(transaction, tenant_id);
             co_await replace_relation_projections(transaction, tenant_id, id, domain_claims, config.certificate_ids_);
             if (previous_cluster_id != cluster_id) {
                 co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id, previous_cluster_id,
@@ -179,6 +182,7 @@ public:
         }
         const auto& previous_config = previous->config_json_;
         const auto& cluster_id = previous->cluster_id_;
+        (void)co_await origin.require_operation(transaction, tenant_id);
         co_await clear_relation_projections(transaction, tenant_id, id);
         co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id, cluster_id, origin);
         co_await service::website_dns::reconcile_config_change(transaction, tenant_id, previous_config,

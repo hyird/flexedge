@@ -13,9 +13,8 @@ namespace service::node_dispatch {
 
 namespace detail {
 
-// The subtasks of excluded targets are cancelled; the excluding task is
-// named when the write scheduled work of its own (cancelling alone starts
-// no task).
+// The subtasks of excluded targets are cancelled and name the operation
+// that excluded them, including writes with no background work of their own.
 template <typename rows_type>
 ruvia::task<void> cancel_excluded(ruvia::db_transaction& transaction, std::string_view tenant_id,
     const rows_type& rows, service::operation::work_origin& origin) {

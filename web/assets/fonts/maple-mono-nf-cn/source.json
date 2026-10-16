@@ -1,0 +1,163 @@
+{
+  "project": "https://github.com/subframe7536/maple-font",
+  "version": "v7.9",
+  "archive": "MapleMono-NF-CN-unhinted.zip",
+  "sha256": "ab88522932cf4015dffeaef6dedc59a22a5fefecdcc6e583d9fcd997da5b7cac",
+  "conversion": "fontTools unicode-range subsets as WOFF2; original outlines, metrics, names and layout preserved",
+  "tools": {
+    "fonttools": "4.66.1",
+    "brotli": "1.2.0"
+  },
+  "chunks": [
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-base.woff2",
+      "codepoints": 2368,
+      "bytes": 223936
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-cjk.woff2",
+      "codepoints": 3819,
+      "bytes": 924284
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-nerd.woff2",
+      "codepoints": 2051,
+      "bytes": 318708
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-mdi.woff2",
+      "codepoints": 6880,
+      "bytes": 367876
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-ext.woff2",
+      "codepoints": 752,
+      "bytes": 58492
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-han01.woff2",
+      "codepoints": 1723,
+      "bytes": 423284
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-han02.woff2",
+      "codepoints": 1723,
+      "bytes": 472104
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-han03.woff2",
+      "codepoints": 1723,
+      "bytes": 465540
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-han04.woff2",
+      "codepoints": 1723,
+      "bytes": 531460
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-han05.woff2",
+      "codepoints": 1723,
+      "bytes": 489952
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-han06.woff2",
+      "codepoints": 1723,
+      "bytes": 559896
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-han07.woff2",
+      "codepoints": 1723,
+      "bytes": 507780
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-han08.woff2",
+      "codepoints": 1723,
+      "bytes": 493476
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-han09.woff2",
+      "codepoints": 1723,
+      "bytes": 520404
+    },
+    {
+      "file": "MapleMonoNFCN-Regular-v7.9-han10.woff2",
+      "codepoints": 1714,
+      "bytes": 585464
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-base.woff2",
+      "codepoints": 2368,
+      "bytes": 225964
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-cjk.woff2",
+      "codepoints": 3819,
+      "bytes": 946168
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-nerd.woff2",
+      "codepoints": 2051,
+      "bytes": 318512
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-mdi.woff2",
+      "codepoints": 6880,
+      "bytes": 367596
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-ext.woff2",
+      "codepoints": 752,
+      "bytes": 59528
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-han01.woff2",
+      "codepoints": 1723,
+      "bytes": 433604
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-han02.woff2",
+      "codepoints": 1723,
+      "bytes": 483864
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-han03.woff2",
+      "codepoints": 1723,
+      "bytes": 475976
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-han04.woff2",
+      "codepoints": 1723,
+      "bytes": 540852
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-han05.woff2",
+      "codepoints": 1723,
+      "bytes": 500988
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-han06.woff2",
+      "codepoints": 1723,
+      "bytes": 574728
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-han07.woff2",
+      "codepoints": 1723,
+      "bytes": 518956
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-han08.woff2",
+      "codepoints": 1723,
+      "bytes": 503708
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-han09.woff2",
+      "codepoints": 1723,
+      "bytes": 530616
+    },
+    {
+      "file": "MapleMonoNFCN-Bold-v7.9-han10.woff2",
+      "codepoints": 1714,
+      "bytes": 597232
+    }
+  ]
+}

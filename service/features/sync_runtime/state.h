@@ -417,8 +417,8 @@ inline ruvia::task<void> remove_marker(ruvia::db_transaction& transaction, std::
         settled = co_await service::operation::settle_subtask(transaction, tenant_id, subtask,
             service::operation::state_completed);
     } else {
-        // Cancelling alone starts no task: the cancelling task is named
-        // only when the write scheduled work of its own.
+        // A user operation owns its cancellation even when it schedules
+        // no background work of its own.
         settled = co_await service::operation::settle_subtask(transaction, tenant_id, subtask,
             service::operation::state_cancelled, {}, origin.operation_id().value_or(""));
     }

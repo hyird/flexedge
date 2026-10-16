@@ -42,8 +42,10 @@ enum class action {
     dns_zone_sync_remote,
     dns_zone_delete,
     certificate_create,
+    certificate_update,
     certificate_renew,
     certificate_delete,
+    provider_create,
     provider_update,
     provider_verify,
     provider_delete,
@@ -97,10 +99,14 @@ enum class action {
             return "dns_zone.delete";
         case action::certificate_create:
             return "certificate.create";
+        case action::certificate_update:
+            return "certificate.update";
         case action::certificate_renew:
             return "certificate.renew";
         case action::certificate_delete:
             return "certificate.delete";
+        case action::provider_create:
+            return "provider.create";
         case action::provider_update:
             return "provider.update";
         case action::provider_verify:
@@ -300,9 +306,10 @@ ruvia::task<std::optional<std::string>> settle_subtask(database_type& database, 
 }
 
 // Where a write's background work comes from. Passed by reference through
-// every enqueue and publish path of one transaction; it creates the user or
-// system task on its first subtask and remembers every task whose state the
-// transaction changed, which the caller notifies after the commit.
+// every enqueue and publish path of one transaction. User commands create
+// their task explicitly, including commands with no background work; system
+// actions can create it on their first subtask. It remembers every task whose
+// state the transaction changed, which the caller notifies after the commit.
 class work_origin final {
 public:
     enum class mode {
@@ -355,8 +362,8 @@ public:
         return owner_;
     }
 
-    // The task new subtasks join, created by its first subtask (start), or
-    // nothing when this origin creates no subtasks.
+    // The task new subtasks join: the explicitly created user task, the
+    // system task created on its first subtask, or the running work's task.
     [[nodiscard]] std::optional<std::string> operation_id() const {
         if (mode_ == mode::start) {
             return created_;

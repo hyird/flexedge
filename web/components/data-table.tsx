@@ -10,9 +10,9 @@ type DataTableEmpty = {
   action?: ReactNode
 }
 
-// Embedded grids share the existing card's surface. Keep the sticky header
-// opaque, but use a separator instead of a second rounded gray panel.
-const embeddedTableClassName =
+// Native secondary tables provide a flat body. Standalone lists add one
+// surface to the root; embedded lists share their Section or Widget surface.
+const tableClassName =
   '[&_thead_th]:rounded-none [&_thead_th]:border-b [&_thead_th]:border-separator [&_thead_th]:bg-surface'
 
 function defaultRowId(item: object) {
@@ -119,10 +119,12 @@ export function DataTable<T extends object>({
       {isLoading && !data?.length ? (
         <div role='status' aria-label={`正在加载${label}`}>
           <Table
-            variant={variant}
+            variant='secondary'
             className={cn(
               'data-grid',
-              variant === 'secondary' && embeddedTableClassName
+              tableClassName,
+              variant === 'primary' &&
+                'overflow-hidden rounded-2xl bg-surface shadow-surface'
             )}
           >
             <Table.ScrollContainer>
@@ -166,10 +168,12 @@ export function DataTable<T extends object>({
           data={data}
           columns={columns.map(withEnforcedWidth)}
           getRowId={getRowId}
-          variant={variant}
+          variant='secondary'
           className={cn(
             'min-w-0',
-            variant === 'secondary' && embeddedTableClassName
+            tableClassName,
+            variant === 'primary' &&
+              'overflow-hidden rounded-2xl bg-surface shadow-surface'
           )}
           contentClassName='min-w-(--data-table-min-width)'
           renderEmptyState={() => (

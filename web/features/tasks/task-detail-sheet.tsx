@@ -1,17 +1,18 @@
-import { useEffect, useEffectEvent, useState, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link as RouterLink } from '@tanstack/react-router'
-import { Accordion, Link, Skeleton } from '@heroui/react'
+import { ListCheck } from '@gravity-ui/icons'
+import { Timeline } from '@heroui-pro/react'
+import { Link, Skeleton } from '@heroui/react'
 import { ApiBusinessError } from '@/lib/api-response'
 import { useDisplaySeconds } from '@/lib/display-clock'
 import { formatDate, parseDate } from '@/lib/format'
-import { useArrivalState } from '@/lib/history-state'
 import { cn } from '@/lib/utils'
+import { navigationItemFor } from '@/components/layout/navigation'
 import { FormSheet } from '@/components/form-sheet'
 import { EmptyState, QueryNotice } from '@/components/page'
 import { StatusChip } from '@/components/status-chip'
 import { operationDetailQuery } from './data'
-import { SubtaskLinkContext } from './subtask-link-context'
 import {
   actorLabel,
   describeOperationStatus,
@@ -24,19 +25,14 @@ import {
   subtaskTitle,
 } from './task-display'
 import { formatDuration, formatElapsed } from './task-history'
-import { RetryCountdown, SubtaskHistoryPanel } from './task-history-panel'
+import { RetryCountdown } from './task-history-panel'
 import type { OperationDetail, Subtask } from './types'
 
 /** Contract §7: the task does not exist (or expired). */
 export const operationNotFoundCode = 16701
-/** Contract §7: the expanded subtask does not belong to the task (cleaned up). */
-export const subtaskNotFoundCode = 16705
 
-/** Task detail opened from `/tasks?task=<operation id>`: a header, the
- * subtasks in creation order (children one level in) and the expanded
- * subtask's live 执行记录. One live stream serves all of it; expanding
- * another subtask or collapsing switches its URL, keeping the task on screen.
- * The expanded subtask is component state (seeded by a link's history state). */
+/** Task detail opened from `/tasks?task=<operation id>`: one live stream
+ * supplies the header and the subtask timeline, including failure reasons. */
 export function TaskDetailSheet({
   operationId,
   onClose,
@@ -44,30 +40,14 @@ export function TaskDetailSheet({
   operationId: string
   onClose: () => void
 }) {
-  const [expanded, setExpanded] = useArrivalState<string | null>(
-    (state) => state.tasks?.subtask ?? null
-  )
   // Errors render inside the sheet (not-found state or QueryNotice).
   const detail = useQuery({
-    ...operationDetailQuery(operationId, expanded),
+    ...operationDetailQuery(operationId, null),
     meta: { inlineError: true },
   })
-  // The records panel mounts one commit after the detail query moved to the
-  // new URL: this effect runs after the detail query's own (declaration
-  // order), so the old stream is released before any binding opens the new
-  // one, even though child effects run before parent effects.
-  const [recordsFor, setRecordsFor] = useState(expanded)
-  useEffect(() => {
-    queueMicrotask(() => setRecordsFor(expanded))
-  }, [expanded])
   const operation = detail.data
   const code =
     detail.error instanceof ApiBusinessError ? detail.error.code : undefined
-  // The expanded subtask was cleaned up: collapse and reconnect without it.
-  const collapseMissing = useEffectEvent(() => setExpanded(null))
-  useEffect(() => {
-    if (code === subtaskNotFoundCode) collapseMissing()
-  }, [code])
   const status = operation && describeOperationStatus(operation.status)
   return (
     <FormSheet
@@ -89,25 +69,12 @@ export function TaskDetailSheet({
         <EmptyState title='任务不存在或已过期' />
       ) : (
         <>
-          {code !== subtaskNotFoundCode && (
-            <QueryNotice query={detail} onRetry={() => detail.refetch()} />
-          )}
+          <QueryNotice query={detail} onRetry={() => detail.refetch()} />
           {operation ? (
-            <SubtaskLinkContext
-              value={{
-                has: (id) => operation.subtasks.some((item) => item.id === id),
-                open: setExpanded,
-              }}
-            >
+            <>
               <OperationHeader operation={operation} />
-              <SubtaskList
-                operation={operation}
-                expanded={expanded}
-                onExpandedChange={setExpanded}
-                recordsFor={recordsFor}
-                streamFailed={detail.isError}
-              />
-            </SubtaskLinkContext>
+              <SubtaskList operation={operation} />
+            </>
           ) : (
             detail.isPending && (
               <div
@@ -158,75 +125,68 @@ function OperationHeader({ operation }: { operation: OperationDetail }) {
   )
 }
 
-/** Subtasks in creation order, children one level in; one expanded at a
- * time, and only the expanded one reads its execution records. */
-export function SubtaskList({
-  operation,
-  expanded,
-  recordsFor = expanded,
-  onExpandedChange,
-  streamFailed,
-}: {
-  operation: OperationDetail
-  expanded: string | null
-  /** The subtask whose records may be read (see `TaskDetailSheet`). */
-  recordsFor?: string | null
-  onExpandedChange: (id: string | null) => void
-  streamFailed: boolean
-}) {
+const resourceMenuPaths: Record<string, string> = {
+  website: '/websites',
+  certificate: '/certificates',
+  dns_zone: '/dns-zones',
+  provider: '/providers',
+  node: '/nodes',
+}
+
+/** Each subtask is one timeline node with its resource's menu icon. */
+export function SubtaskList({ operation }: { operation: OperationDetail }) {
   const rows = subtaskRows(operation.subtasks)
   if (!rows.length) return <EmptyState size='sm' title='暂无子任务' />
   return (
     <section aria-label='子任务' className='flex min-w-0 flex-col'>
-      <Accordion
-        className='rounded-xl border border-separator'
-        expandedKeys={expanded ? [expanded] : []}
-        // One item at a time: the set holds the new item or nothing.
-        onExpandedChange={(keys) =>
-          onExpandedChange((keys.values().next().value as string) ?? null)
-        }
-      >
-        {rows.map(({ subtask, depth }) => (
-          <Accordion.Item key={subtask.id} id={subtask.id}>
-            <Accordion.Heading
-              className={cn(
-                'min-w-0 items-center gap-2 pe-3',
-                depth > 0 && 'ps-6'
-              )}
+      <Timeline aria-label='执行步骤' size='sm' density='comfortable'>
+        {rows.map(({ subtask, depth }) => {
+          const status = describeOperationStatus(subtask.status)
+          const failed = status.tone === 'danger' || status.tone === 'warning'
+          const Icon =
+            navigationItemFor(
+              resourceMenuPaths[subtask.resource_type] ?? '/tasks'
+            )?.icon ?? ListCheck
+          return (
+            <Timeline.Item
+              key={subtask.id}
+              status={
+                status.tone === 'accent'
+                  ? 'current'
+                  : status.tone === 'default'
+                    ? 'muted'
+                    : status.tone
+              }
+              className={cn('min-w-0', depth > 0 && 'ms-6')}
             >
-              <Accordion.Trigger className='min-w-0 flex-1 justify-start gap-2 px-3 py-2.5 font-normal'>
-                <Accordion.Indicator className='order-first ms-0 -rotate-90 data-[expanded=true]:rotate-0' />
-                <span
-                  title={subtaskTitle(subtask)}
-                  className='min-w-0 flex-1 truncate text-start'
-                >
-                  {subtaskTitle(subtask)}
-                </span>
-                <SubtaskStatus subtask={subtask} />
-              </Accordion.Trigger>
-              <SubtaskNoteSlot
-                subtask={subtask}
-                operationId={operation.id}
-                onExpand={onExpandedChange}
-              />
-              <SubtaskDuration subtask={subtask} />
-            </Accordion.Heading>
-            <Accordion.Panel>
-              <Accordion.Body className='px-3 pb-3'>
-                {/* Only the expanded subtask reads its records. */}
-                {expanded === subtask.id && recordsFor === subtask.id && (
-                  <SubtaskHistoryPanel
+              <Timeline.Marker>
+                <Icon aria-hidden />
+              </Timeline.Marker>
+              <Timeline.Content className='min-w-0 gap-1.5'>
+                <div className='flex min-h-10 min-w-0 items-center gap-2 sm:min-h-0'>
+                  <span
+                    title={subtaskTitle(subtask)}
+                    className='line-clamp-2 min-w-0 flex-1 text-start text-sm break-words sm:block sm:truncate'
+                  >
+                    {subtaskTitle(subtask)}
+                  </span>
+                  <SubtaskStatus subtask={subtask} />
+                  <SubtaskNoteSlot
+                    subtask={subtask}
                     operationId={operation.id}
-                    subtaskId={subtask.id}
-                    resourceType={subtask.resource_type}
-                    showErrors={!streamFailed}
                   />
+                  <SubtaskDuration subtask={subtask} />
+                </div>
+                {failed && (subtask.error || status.tone === 'danger') && (
+                  <p className='m-0 text-xs break-words whitespace-pre-wrap text-danger'>
+                    失败原因：{subtask.error || '未提供失败原因'}
+                  </p>
                 )}
-              </Accordion.Body>
-            </Accordion.Panel>
-          </Accordion.Item>
-        ))}
-      </Accordion>
+              </Timeline.Content>
+            </Timeline.Item>
+          )
+        })}
+      </Timeline>
     </section>
   )
 }
@@ -242,18 +202,16 @@ function SubtaskStatus({ subtask }: { subtask: Subtask }) {
   )
 }
 
-const noteSlot = 'w-8 shrink-0 truncate text-xs leading-5 sm:w-44'
+const noteSlot = 'w-6 shrink-0 truncate text-xs leading-5 sm:w-32'
 
 /** The row's fixed extra-info slot (contract §5.2); empty but reserved when
  * nothing applies, so status changes never move the duration. */
 function SubtaskNoteSlot({
   subtask,
   operationId,
-  onExpand,
 }: {
   subtask: Subtask
   operationId: string
-  onExpand: (id: string) => void
 }) {
   const note = subtaskNote(subtask)
   if (!note) return <span aria-hidden className={noteSlot} />
@@ -261,18 +219,14 @@ function SubtaskNoteSlot({
     case 'merged': {
       const text = `由 ${note.label} 执行`
       return note.operationId === operationId ? (
-        <Link
-          className={cn(noteSlot, 'block')}
-          onPress={() => onExpand(note.subtaskId)}
-        >
+        <span className={noteSlot} title={text}>
           {text}
-        </Link>
+        </span>
       ) : (
         <RouterLink
           from='/tasks/'
           to='.'
           search={(previous) => ({ ...previous, task: note.operationId })}
-          state={{ tasks: { subtask: note.subtaskId } }}
           title={text}
           className={cn(noteSlot, 'link block')}
         >

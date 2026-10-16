@@ -140,11 +140,11 @@ private:
     }
     ruvia::task<ruvia::http_response> update(ruvia::context& c) {
         auto v = expected_revision(c);
-        co_await get_certificate_command_service().update(
+        const auto operation_id = co_await get_certificate_command_service().update(
             c, tenant_id(c), require_id(c), v,
             c.req().validated_json<service::certificate_issuance::certificate_config_input>());
         service::common::set_revision_etag(c, v + 1);
-        co_return c.json(service::common::operation(c, "证书设置已更新"));
+        co_return c.json(service::common::operation(c, "证书设置已更新", operation_id));
     }
     ruvia::task<ruvia::http_response> renew(ruvia::context& c) {
         auto v = expected_revision(c);

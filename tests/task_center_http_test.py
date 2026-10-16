@@ -1,10 +1,11 @@
-"""Read-only task-center SSE integration test; run with task_center_read_model_test.py --keep-fixture."""
+"""Local task-center reads and resource writes; run after the isolated --keep-fixture setup."""
 import http.cookies
 import json
 import os
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 base = os.environ.get("TASK_QA_URL", "http://127.0.0.1:1102")
 if urllib.parse.urlparse(base).hostname not in {"127.0.0.1", "localhost", "::1"}:
@@ -20,13 +21,15 @@ def sub(n, i=1):
     return f"00000000-0000-4000-8000-0000000b{n:02d}{i:02d}"
 
 
-def request(path, expected=200, body=None, authenticated=True):
+def request(path, expected=200, body=None, authenticated=True, method=None, revision=None):
     global cookie
     headers = {"Content-Type": "application/json"}
     if authenticated and cookie:
         headers["Cookie"] = cookie
+    if revision is not None:
+        headers["If-Match"] = f'"{revision}"'
     req = urllib.request.Request(base + path, headers=headers,
-        data=json.dumps(body).encode() if body is not None else None)
+        data=json.dumps(body).encode() if body is not None else None, method=method)
     try:
         response = urllib.request.urlopen(req, timeout=10)
     except urllib.error.HTTPError as error:
@@ -35,7 +38,8 @@ def request(path, expected=200, body=None, authenticated=True):
     for value in response.headers.get_all("Set-Cookie", []):
         parsed = http.cookies.SimpleCookie(value)
         cookie = "; ".join(f"{key}={item.value}" for key, item in parsed.items())
-    return json.load(response)
+    with response:
+        return json.load(response)
 
 
 def frames(path, count=1):
@@ -224,5 +228,65 @@ snapshot(f"/api/operations/{op(11)}/stream", expected_code=16701)
 snapshot("/api/operations/invalid/stream", expected_code=10001)
 assert all(item["id"] != op(11) for item in snapshot("/api/operations/stream?page_size=100")["list"])
 request("/api/tasks/stream", 404)
+
+# Actual authenticated writes, after all fixed-fixture count assertions.
+# Creating a provider and changing only its display name schedules no worker
+# or external API call, but each successful request still owns one task.
+def operation_ids():
+    page = snapshot("/api/operations/stream?page_size=100")
+    assert page["total"] == len(page["list"]), page
+    return {item["id"] for item in page["list"]}
+
+
+def write_operation(path, action, body=None, method="POST", revision=None):
+    before = operation_ids()
+    response = request(path, body=body, method=method, revision=revision)
+    assert response["code"] == 0, response
+    operation_id = response.get("data", {}).get("operation_id")
+    assert operation_id and operation_id not in before, response
+    after = operation_ids()
+    assert after == before | {operation_id}, (path, before, after, operation_id)
+    task = snapshot(f"/api/operations/{operation_id}/stream")
+    assert task["action"] == action and task["actor_type"] == "user", task
+    assert (task["status"], task["subtask_count"], task["settled_count"], task["subtasks"]) == \
+        ("completed", 0, 0, []), task
+    assert task["finished_at"] == task["created_at"], task
+    return task
+
+
+def failed_write(path, status, code, body=None, method="POST", revision=None):
+    before = operation_ids()
+    response = request(path, expected=status, body=body, method=method, revision=revision)
+    assert response["code"] == code and not response.get("data", {}).get("operation_id"), response
+    assert operation_ids() == before, (path, "failed write created a task")
+
+
+account_id = uuid.uuid4().hex
+provider_name = "Task operation QA " + account_id[:8]
+provider_body = {"name": provider_name, "provider": "cloudflare", "account_id": account_id,
+                 "api_token": "qa-only-token-never-used-for-network"}
+created = write_operation("/api/providers/dns", "provider.create", provider_body)
+provider_id = created["target_id"]
+assert created["target_type"] == "provider" and created["target_kind"] == "dns", created
+assert created["target_name"] == provider_name and created["target_deleted"] is False, created
+failed_write("/api/providers/dns", 409, 16102, provider_body)
+
+updated = write_operation(f"/api/providers/dns/{provider_id}", "provider.update",
+    {"name": provider_name + " renamed"}, method="PUT", revision=1)
+assert updated["target_id"] == provider_id and updated["summary"] == {"credentials_changed": False}, updated
+again = write_operation(f"/api/providers/dns/{provider_id}", "provider.update",
+    {"name": provider_name + " again"}, method="PUT", revision=2)
+assert len({created["id"], updated["id"], again["id"]}) == 3, (created, updated, again)
+failed_write(f"/api/providers/dns/{provider_id}", 412, 16107,
+    {"name": "Must not be saved"}, method="PUT", revision=1)
+provider = snapshot(f"/api/providers/dns/{provider_id}/stream")
+assert provider["name"] == provider_name + " again" and provider["revision"] == 3, provider
+
+deleted = write_operation(f"/api/providers/dns/{provider_id}", "provider.delete", method="DELETE", revision=3)
+assert deleted["target_id"] == provider_id and deleted["target_deleted"] is True, deleted
+assert deleted["target_name"] == provider_name + " again", deleted
+snapshot(f"/api/providers/dns/{provider_id}/stream", expected_code=16101)
+
 print("Task SSE integration passed: authentication, pagination, filters, validation, detail roll-up, merged/closed_by, "
-      "target kinds, subtask history, attempt traces, tenant isolation, removed /api/tasks.")
+      "target kinds, subtask history, attempt traces, tenant isolation, removed /api/tasks, "
+      "one root per actual resource write including zero-child operations, failed writes leave no task.")

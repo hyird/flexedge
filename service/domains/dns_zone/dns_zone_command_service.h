@@ -68,6 +68,7 @@ public:
                     ruvia::db_value{std::string_view(runtime_json)}));
             const auto zone_id = std::string(inserted.front()[0].value().value_or(""));
             auto origin = start(c, service::operation::action::dns_zone_create, zone_id);
+            (void)co_await origin.require_operation(transaction, tenant_id);
             co_await service::dns_sync::enqueue_zone_revision(transaction, tenant_id, zone_id,
                 inserted.front()[1].as<std::int64_t>().value_or(1), origin);
             co_await transaction.commit();
@@ -127,6 +128,7 @@ public:
             service::common::throw_app_error(dns_zone_error::revision_conflict);
         }
         const auto desired_revision = rows.front()[1].as<std::int64_t>().value_or(1);
+        (void)co_await origin.require_operation(transaction, tenant_id);
         co_await service::dns_sync::enqueue_zone_revision(transaction, tenant_id, id, desired_revision, origin);
         co_await transaction.commit();
         co_await notify(c, tenant_id, id, origin);
@@ -152,6 +154,7 @@ public:
         if (rows.empty()) {
             service::common::throw_app_error(dns_zone_error::not_found);
         }
+        (void)co_await origin.require_operation(transaction, tenant_id);
         co_await service::dns_sync::enqueue_zone_revision(transaction, tenant_id, id,
             rows.front()[0].as<std::int64_t>().value_or(1), origin,
             conflict_policy == "remote"  ? service::sync_runtime::marker_operation::sync_remote
@@ -194,6 +197,7 @@ public:
             "deleted_at = NOW(), updated_at = NOW() WHERE id = $3 AND tenant_id = $4 AND "
             "revision = $5",
             revision, desired_revision, id, tenant_id, expected_revision);
+        (void)co_await origin.require_operation(transaction, tenant_id);
         (void)co_await service::dns_sync::enqueue_zone_deletion(transaction, tenant_id, id, desired_revision,
             origin);
         co_await transaction.commit();

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -25,7 +26,7 @@ namespace service::cluster {
 
 class cluster_command_service final {
 public:
-    ruvia::task<void> create(ruvia::context& c, const std::string& tenant_id,
+    ruvia::task<std::optional<std::string>> create(ruvia::context& c, const std::string& tenant_id,
         const save_cluster_body& body) {
         const auto normalized = normalize(body);
         if (!normalized) {
@@ -50,25 +51,27 @@ public:
                     ruvia::db_value{std::string_view(name)},
                     ruvia::db_value{std::string_view(hostname_prefix)},
                     ruvia::db_value{status}));
-            // A new cluster has no nodes yet: its first release targets none
-            // and starts no task.
+            // The user operation is retained even though a new cluster's
+            // first release has no node targets.
             auto origin = start(c, service::operation::action::cluster_create,
                 std::string(rows.front()[0].value().value_or("")));
+            (void)co_await origin.require_operation(transaction, tenant_id);
             co_await service::node_dispatch::publish_cluster_release(transaction, tenant_id,
                 rows.front()[0].value().value_or(""), origin);
             co_await transaction.commit();
-            co_await service::live_resource::notify(c,
-                service::live_resource::notifications::resource_notification(tenant_id)
-                    .node_config()
-                    .changed(service::live_resource::resource::clusters, rows.front()[0].value().value_or(""))
-                    .changed(service::live_resource::resource::nodes));
+            service::live_resource::notifications::resource_notification notification(tenant_id);
+            notification.node_config()
+                .changed(service::live_resource::resource::clusters, rows.front()[0].value().value_or(""))
+                .changed(service::live_resource::resource::nodes);
+            origin.add_changes(notification);
+            co_await service::live_resource::notify(c, notification);
+            co_return origin.operation_id();
         } catch (const ruvia::db_error& error) {
             if (is_identity_conflict(error)) {
                 service::common::throw_app_error(cluster_error::exists);
             }
             throw;
         }
-        co_return;
     }
 
     ruvia::task<std::optional<std::string>> update(ruvia::context& c, const std::string& tenant_id,
@@ -125,6 +128,7 @@ public:
             }
             auto origin = start(c, service::operation::action::cluster_update, id,
                 service::operation::sections_summary(sections));
+            (void)co_await origin.require_operation(transaction, tenant_id);
             co_await service::cluster_dns::reconcile_zone_transition(transaction, tenant_id,
                 std::string(rows.front()[0].value().value_or("")), std::string(rows.front()[1].value().value_or("")),
                 origin);
@@ -179,6 +183,7 @@ public:
         if (clusters.front()[3].as<bool>().value_or(false)) {
             service::common::throw_app_error(cluster_error::website_cleanup_active);
         }
+        (void)co_await origin.require_operation(transaction, tenant_id);
         const auto rows = co_await transaction.query(
             "UPDATE sys_cluster SET revision = revision + 1, deleted_at = NOW(), updated_at = "
             "NOW() WHERE id = $1 AND tenant_id = $2 AND revision = $3 AND deleted_at IS NULL "

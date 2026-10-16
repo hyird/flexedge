@@ -2,6 +2,7 @@ import { createElement } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'vitest'
+import { navigationItemFor } from '@/components/layout/navigation'
 import { taskAttemptTraceQuery } from './data'
 import { tasksSearchSchema } from './search'
 import { SubtaskLinkContext } from './subtask-link-context'
@@ -53,6 +54,15 @@ test('titles name the action or kind and the object; unknown codes stay raw', ()
   expect(operationTitle({ action: 'website.purge', target_name: 'x' })).toBe(
     'website.purge · x'
   )
+  for (const [action, label] of [
+    ['cluster.create', '创建集群'],
+    ['provider.create', '添加服务商'],
+    ['provider.delete', '删除服务商'],
+    ['certificate.update', '保存证书设置'],
+  ])
+    expect(operationTitle({ action, target_name: '对象' })).toBe(
+      `${label} · 对象`
+    )
   expect(subtaskTitle(subtask)).toBe('节点发布 · 北京')
   expect(subtaskTitle({ kind: 'cache_purge', resource_name: 'y' })).toBe(
     'cache_purge · y'
@@ -227,7 +237,7 @@ test('each subtask has at most one extra note, in priority order', () => {
   ).toEqual({ kind: 'recovered', failures: 2 })
 })
 
-test('subtask rows show status, the fixed note slot and duration on one line', () => {
+test('each subtask is a menu-icon timeline node with status and duration, without expansion', () => {
   const operation = operationDetailSchema.parse({
     id: 'op-1',
     action: 'website.update',
@@ -248,7 +258,12 @@ test('subtask rows show status, the fixed note slot and duration on one line', (
     error: '',
     summary: {},
     subtasks: [
-      { ...subtask, kind: 'dns_sync', resource_name: 'a-z.xin' },
+      {
+        ...subtask,
+        kind: 'dns_sync',
+        resource_type: 'dns_zone',
+        resource_name: 'a-z.xin',
+      },
       {
         ...subtask,
         id: 'sub-2',
@@ -262,6 +277,7 @@ test('subtask rows show status, the fixed note slot and duration on one line', (
         id: 'sub-3',
         parent_id: 'sub-1',
         kind: 'website_check',
+        resource_type: 'website',
         resource_name: '品牌官网',
         status: 'attention_required',
         warning: 'domain_unverified',
@@ -269,18 +285,17 @@ test('subtask rows show status, the fixed note slot and duration on one line', (
       { ...subtask, id: 'sub-4', recovered: true, failure_count: 3 },
     ],
   })
-  const html = renderToStaticMarkup(
-    createElement(
-      QueryClientProvider,
-      { client: new QueryClient() },
-      createElement(SubtaskList, {
-        operation,
-        expanded: null,
-        onExpandedChange: () => undefined,
-        streamFailed: false,
-      })
+  const render = () =>
+    renderToStaticMarkup(
+      createElement(
+        QueryClientProvider,
+        { client: new QueryClient() },
+        createElement(SubtaskList, {
+          operation,
+        })
+      )
     )
-  )
+  const html = render()
   expect(html).toContain('DNS 同步 · a-z.xin')
   expect(html).toContain('节点发布 · 北京')
   expect(html).toContain('重试中')
@@ -289,9 +304,30 @@ test('subtask rows show status, the fixed note slot and duration on one line', (
   expect(html).toContain('失败 3 次后成功')
   expect(html).toContain('2.4 秒')
   // The child row is indented one level.
-  expect(html.match(/ps-6/g)).toHaveLength(1)
-  // Collapsed rows read no execution records.
+  expect(html.match(/ms-6/g)).toHaveLength(1)
+  expect(html.match(/data-slot="timeline-item"/g)).toHaveLength(4)
+  for (const path of ['/dns-zones', '/websites', '/nodes']) {
+    const Icon = navigationItemFor(path)!.icon
+    expect(html).toContain(
+      renderToStaticMarkup(createElement(Icon, { 'aria-hidden': true }))
+    )
+  }
+  expect(html).not.toContain('data-slot="accordion')
+  expect(html).not.toContain('aria-expanded')
   expect(html).not.toContain('执行记录')
+  expect(html).not.toContain('失败原因：')
+
+  operation.subtasks[1].error = 'DNS 请求超时，等待重试'
+  operation.subtasks[2].status = 'failed'
+  operation.subtasks[2].error = '域名解析结果不匹配\n请检查 CNAME 记录'
+  // Old errors must not appear after a subtask has recovered.
+  operation.subtasks[3].error = '已经恢复的旧错误'
+  const failure = render()
+  expect(failure).toContain('失败原因：DNS 请求超时，等待重试')
+  expect(failure).toContain('失败原因：域名解析结果不匹配\n请检查 CNAME 记录')
+  expect(failure).not.toContain('已经恢复的旧错误')
+  operation.subtasks[2].error = ''
+  expect(render()).toContain('失败原因：未提供失败原因')
 })
 
 test('a trace step links to another subtask of the open task only', () => {

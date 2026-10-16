@@ -30,7 +30,7 @@
 #include "support/postgres_test.h"
 #include "support/recorded_notifications.h"
 
-// Tasks as operations (build/operation-tasks/contract.md, docs/task-center.md)
+// Tasks as operations (docs/task-center.md)
 // on the real schema: migration 0025 (fresh install, upgrade with retained
 // rows, repeated run, rejected drift), a server without task tracking on the
 // new schema, ownership through markers and release targets (merge, cancel,
@@ -444,6 +444,7 @@ ruvia::task<void> insert_fixture(ruvia::db_handle& db) {
 // Queues a DNS sync of zone `index` at `version` for `origin`, committed.
 ruvia::task<std::string> queue_zone(ruvia::db_handle& db, int index, std::int64_t version, work_origin& origin) {
     auto transaction = co_await db.begin_transaction();
+    (void)co_await origin.require_operation(transaction, tenant);
     const auto marker = co_await service::sync_runtime::upsert_marker(transaction, tenant,
         marker_resource_type::dns_zone, zone(index), marker_operation::sync, version, origin);
     co_await transaction.commit();
@@ -452,6 +453,7 @@ ruvia::task<std::string> queue_zone(ruvia::db_handle& db, int index, std::int64_
 
 ruvia::task<void> publish(ruvia::db_handle& db, std::string_view cluster_id, work_origin& origin) {
     auto transaction = co_await db.begin_transaction();
+    (void)co_await origin.require_operation(transaction, tenant);
     co_await service::node_dispatch::publish_cluster_release(transaction, tenant, cluster_id, origin);
     co_await transaction.commit();
 }
@@ -527,6 +529,7 @@ ruvia::task<merge_results> verify_merge_and_cancel(ruvia::db_handle& db, read_co
     (void)co_await queue_zone(db, 1, 3, second);
     const auto first_id = operation_of(first);
     const auto second_id = operation_of(second);
+    require(first_id != second_id, "consecutive user writes always have distinct root tasks");
     require(std::find(second.touched().begin(), second.touched().end(), first_id) != second.touched().end(),
         "the merged task is notified with the write");
     const auto merged = co_await tasks().detail(context, std::string(tenant), first_id);
@@ -623,20 +626,23 @@ ruvia::task<merge_results> verify_merge_and_cancel(ruvia::db_handle& db, read_co
                 mixed.get<"status">().view() == "cancelled",
         "merged and cancelled subtasks roll up as cancelled");
 
-    // Deleting a node cancels its pending targets; a write without work of
-    // its own starts no task and is not named.
-    auto silent_delete = user(action::node_delete, "node", node_offline);
+    // Deleting a node is a task even when it only cancels someone else's work.
+    auto offline_delete = user(action::node_delete, "node", node_offline);
     {
         auto transaction = co_await db.begin_transaction();
+        (void)co_await offline_delete.require_operation(transaction, tenant);
         co_await service::node_dispatch::exclude_pending_node_targets(transaction, std::string(tenant),
-            std::string(node_offline), silent_delete);
+            std::string(node_offline), offline_delete);
         co_await transaction.commit();
     }
-    require(!silent_delete.operation_id().has_value() && silent_delete.touched().size() == 1,
-        "cancelling alone starts no task but notifies the cancelled one");
+    const auto deleted = co_await tasks().detail(context, std::string(tenant), operation_of(offline_delete));
+    require(deleted.get<"action">().view() == "node.delete" && deleted.get<"status">().view() == "completed" &&
+                deleted.get<"subtasks">().empty() && offline_delete.touched().size() == 2,
+        "cancelling alone creates a completed root and notifies both operations");
     auto node_delete = user(action::node_delete, "node", node_online);
     {
         auto transaction = co_await db.begin_transaction();
+        (void)co_await node_delete.require_operation(transaction, tenant);
         co_await service::cluster_dns::reconcile_cluster(transaction, std::string(tenant), std::string(cluster),
             node_delete);
         co_await service::node_dispatch::exclude_pending_node_targets(transaction, std::string(tenant),
@@ -646,12 +652,14 @@ ruvia::task<merge_results> verify_merge_and_cancel(ruvia::db_handle& db, read_co
     const auto cancelled = co_await tasks().detail(context, std::string(tenant), operation_of(save_c));
     require(cancelled.get<"status">().view() == "cancelled" &&
                 subtask_in(cancelled, node_offline).get<"status">().view() == "cancelled" &&
-                !subtask_in(cancelled, node_offline).get<"closed_by">().has_value() &&
+                subtask_in(cancelled, node_offline).get<"closed_by">().has_value() &&
+                subtask_in(cancelled, node_offline).get<"closed_by">()->get<"operation_id">().view() ==
+                    operation_of(offline_delete) &&
                 !subtask_in(cancelled, node_offline).get<"node_offline">().value_ &&
                 subtask_in(cancelled, node_online).get<"closed_by">()->get<"operation_id">().view() ==
                     operation_of(node_delete) &&
                 subtask_in(cancelled, node_online).get<"closed_by">()->get<"target_name">().view() == "北京",
-        "excluded targets are cancelled, naming the deleting task when it has work");
+        "excluded targets name the deleting task even when that task has no background work");
 
     // Node configuration: a newer spec merges the older one; reset cancels.
     auto config_a = user(action::node_update, "node", node_spare, R"({"sections":["basic"]})");
@@ -659,11 +667,13 @@ ruvia::task<merge_results> verify_merge_and_cancel(ruvia::db_handle& db, read_co
     auto reset = user(action::node_reset_credentials, "node", node_spare);
     {
         auto transaction = co_await db.begin_transaction();
+        (void)co_await config_a.require_operation(transaction, tenant);
         co_await service::node_dispatch::track_node_config(transaction, tenant, node_spare, 2, config_a);
         co_await transaction.commit();
     }
     {
         auto transaction = co_await db.begin_transaction();
+        (void)co_await config_b.require_operation(transaction, tenant);
         co_await service::node_dispatch::track_node_config(transaction, tenant, node_spare, 3, config_b);
         co_await transaction.commit();
     }
@@ -677,11 +687,17 @@ ruvia::task<merge_results> verify_merge_and_cancel(ruvia::db_handle& db, read_co
         "node configuration merges into the newer spec revision");
     {
         auto transaction = co_await db.begin_transaction();
+        (void)co_await reset.require_operation(transaction, tenant);
         co_await service::node_dispatch::cancel_node_config(transaction, tenant, node_spare, reset);
         co_await transaction.commit();
     }
     const auto config_cancelled = co_await tasks().detail(context, std::string(tenant), operation_of(config_b));
-    require(config_cancelled.get<"status">().view() == "cancelled", "reset credentials cancels pending configuration");
+    require(config_cancelled.get<"status">().view() == "cancelled" &&
+                subtask_in(config_cancelled, node_spare, "node_config")
+                        .get<"closed_by">()
+                        ->get<"operation_id">()
+                        .view() == operation_of(reset),
+        "reset credentials cancels pending configuration and owns the cancellation");
     co_return merge_results{.merged_operation_ = first_id, .cancelled_operation_ = operation_of(save_c)};
 }
 
@@ -820,7 +836,7 @@ ruvia::task<status_results> verify_statuses(ruvia::db_handle& db, read_context& 
         "failed beside completed work is partial_failed");
 
     // A task without subtasks is completed.
-    auto empty = user(action::provider_update, "provider", dns_provider, R"({"credentials_changed":true})");
+    auto empty = user(action::provider_update, "provider", dns_provider, R"({"credentials_changed":false})");
     {
         auto transaction = co_await db.begin_transaction();
         (void)co_await empty.require_operation(transaction, tenant);
@@ -1107,11 +1123,13 @@ ruvia::task<void> verify_certificate_children(ruvia::db_handle& db, read_context
     auto request = user(action::certificate_create, "certificate", certificate);
     {
         auto transaction = co_await db.begin_transaction();
+        (void)co_await request.require_operation(transaction, tenant);
         (void)co_await service::certificate_issuance::enqueue_certificate_revision(transaction, tenant, certificate,
             1, marker_operation::issue, request);
         co_await transaction.commit();
     }
     const auto operation = operation_of(request);
+    const auto root_count = integer(co_await db.query("SELECT count(*) FROM sys_operation"));
     const auto claimed = co_await db.query(
         "UPDATE sys_sync_task marker SET lease_owner = $2, lease_until = NOW() + INTERVAL '60 seconds' WHERE "
         "certificate_id = $1 RETURNING marker.id::text, " +
@@ -1154,8 +1172,9 @@ ruvia::task<void> verify_certificate_children(ruvia::db_handle& db, read_context
                 issuance.get<"status">().view() == "running" && published.get<"status">().view() == "completed" &&
                 retired.get<"status">().view() == "queued" && detail.get<"status">().view() == "running" &&
                 detail.get<"target_name">().view() == "www.z17.example.com" &&
-                detail.get<"subtasks">()[0].get<"id">().view() == owner.subtask_id_,
-        "DNS-01 publish and cleanup are children of the issuance subtask");
+                detail.get<"subtasks">()[0].get<"id">().view() == owner.subtask_id_ &&
+                integer(co_await db.query("SELECT count(*) FROM sys_operation")) == root_count,
+        "DNS-01 publish and cleanup remain children of the original user operation, without extra roots");
 }
 
 // ---------------------------------------------------------------------------
@@ -1209,6 +1228,77 @@ ruvia::task<void> verify_retention(ruvia::db_handle& db, const status_results& s
         "deleting a task releases its marker, which stays");
 }
 
+// A root belongs to the business transaction, independently of how many
+// background operations it needs. Failed writes roll back the whole change.
+ruvia::task<void> verify_user_operation_transactions(ruvia::db_handle& db, read_context& context) {
+    const auto before = co_await db.query(
+        "SELECT (SELECT count(*) FROM sys_operation), (SELECT count(*) FROM sys_operation_subtask), "
+        "(SELECT count(*) FROM sys_sync_task), (SELECT name FROM sys_provider WHERE id = $1)",
+        dns_provider);
+    auto failed = user(action::provider_update, "provider", dns_provider);
+    bool rejected = false;
+    {
+        auto transaction = co_await db.begin_transaction();
+        try {
+            (void)co_await transaction.execute("UPDATE sys_provider SET name = 'Rolled back' WHERE id = $1", dns_provider);
+            (void)co_await failed.require_operation(transaction, tenant);
+            (void)co_await service::sync_runtime::upsert_marker(transaction, tenant, marker_resource_type::provider,
+                dns_provider, marker_operation::verify, 5000, failed);
+            (void)co_await transaction.query("SELECT 1 / 0");
+        } catch (const ruvia::db_error&) {
+            rejected = true;
+        }
+        // SQL errors retire the transaction lease and roll back its writes.
+        // Explicit rollback is only valid while the transaction is active.
+        if (transaction.active()) {
+            co_await transaction.rollback();
+        }
+    }
+    const auto after = co_await db.query(
+        "SELECT (SELECT count(*) FROM sys_operation), (SELECT count(*) FROM sys_operation_subtask), "
+        "(SELECT count(*) FROM sys_sync_task), (SELECT name FROM sys_provider WHERE id = $1)",
+        dns_provider);
+    require(rejected && failed.operation_id().has_value() && integer(after, 0) == integer(before, 0) &&
+                integer(after, 1) == integer(before, 1) && integer(after, 2) == integer(before, 2) &&
+                text(after, 3) == text(before, 3) &&
+                integer(co_await db.query("SELECT count(*) FROM sys_operation WHERE id = $1::uuid",
+                    operation_of(failed))) == 0,
+        "a database failure rolls back the business change, root, child and queued work together");
+
+    auto first = user(action::cluster_update, "cluster", cluster);
+    {
+        auto write = co_await db.begin_transaction();
+        const auto first_id = co_await first.require_operation(write, tenant);
+        require(first_id == co_await first.require_operation(write, tenant),
+            "requiring the operation twice keeps one root in the transaction");
+        (void)co_await service::sync_runtime::upsert_marker(write, tenant, marker_resource_type::dns_zone,
+            zone(15), marker_operation::sync, 5000, first);
+        (void)co_await service::sync_runtime::upsert_marker(write, tenant, marker_resource_type::dns_zone,
+            zone(16), marker_operation::sync, 5000, first);
+        co_await write.commit();
+    }
+    const auto operation = co_await tasks().detail(context, std::string(tenant), operation_of(first));
+    require(integer(co_await db.query("SELECT count(*) FROM sys_operation")) == integer(before, 0) + 1 &&
+                operation.get<"action">().view() == "cluster.update" && operation.get<"subtasks">().size() == 2 &&
+                operation.get<"subtask_count">().value_ == 2 &&
+                subtask_in(operation, zone(15)).get<"kind">().view() == "dns_sync" &&
+                subtask_in(operation, zone(16)).get<"kind">().view() == "dns_sync",
+        "one user operation owns all required background work under exactly one root");
+
+    auto second = user(action::cluster_update, "cluster", cluster);
+    {
+        auto write = co_await db.begin_transaction();
+        (void)co_await second.require_operation(write, tenant);
+        co_await write.commit();
+    }
+    const auto empty = co_await tasks().detail(context, std::string(tenant), operation_of(second));
+    require(operation_of(first) != operation_of(second) &&
+                integer(co_await db.query("SELECT count(*) FROM sys_operation")) == integer(before, 0) + 2 &&
+                empty.get<"status">().view() == "completed" && empty.get<"subtasks">().empty() &&
+                empty.get<"finished_at">().view() == empty.get<"created_at">().view(),
+        "the next operation has its own completed root even when it needs no background work");
+}
+
 ruvia::task<void> verify_work(ruvia::db_client& client) {
     co_await client.connect();
     auto db = client.handle();
@@ -1222,6 +1312,7 @@ ruvia::task<void> verify_work(ruvia::db_client& client) {
     co_await verify_tenant_isolation(db, context, owned);
     co_await verify_certificate_children(db, context);
     co_await verify_retention(db, statuses);
+    co_await verify_user_operation_transactions(db, context);
 }
 
 }  // namespace

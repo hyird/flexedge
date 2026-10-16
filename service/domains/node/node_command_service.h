@@ -68,6 +68,7 @@ public:
                     ruvia::db_value{secret_envelope}, ruvia::db_value{std::string_view(config_json)}));
             const auto node_id = std::string(rows.front()[0].value().value_or(""));
             auto origin = start(c, service::operation::action::node_create, node_id);
+            (void)co_await origin.require_operation(transaction, tenant_id);
             co_await service::node_dispatch::ensure_cluster_release(transaction, tenant_id, cluster_id, origin);
             co_await replace_endpoint_claims(transaction, tenant_id, node_id, stored_config.endpoints_);
             co_await service::cluster_dns::reconcile_cluster(transaction, tenant_id, cluster_id, origin);
@@ -139,6 +140,7 @@ public:
                 .target_type_ = "node",
                 .target_id_ = id,
                 .summary_ = service::operation::sections_summary(sections)});
+            (void)co_await origin.require_operation(transaction, tenant_id);
             co_await service::node_dispatch::ensure_cluster_release(transaction, tenant_id, cluster_id, origin);
             const auto rows = co_await transaction.query(
                 "UPDATE sys_node SET cluster_id = $1, name = $2, status = $3, config = "
@@ -217,6 +219,7 @@ public:
             service::common::throw_app_error(node_error::revision_conflict);
         }
         const auto cluster_id = std::string(rows.front()[0].value().value_or(""));
+        (void)co_await origin.require_operation(transaction, tenant_id);
         co_await clear_endpoint_claims(transaction, tenant_id, id);
         co_await service::cluster_dns::reconcile_cluster(transaction, tenant_id, cluster_id, origin);
         co_await service::node_dispatch::exclude_pending_node_targets(transaction, tenant_id, id, origin);
@@ -247,6 +250,7 @@ public:
             service::common::throw_app_error(node_error::revision_conflict);
         }
         const auto current_cluster_id = current_rows.front()[1].value().value_or("");
+        (void)co_await origin.require_operation(transaction, tenant_id);
         co_await service::node_dispatch::ensure_cluster_release(transaction, tenant_id, current_cluster_id, origin);
         const auto agent_id = service::utils::random_token().substr(0, 32);
         service::utils::sensitive_string secret(service::utils::random_token());
