@@ -61,6 +61,9 @@ public:
         auto work = co_await load_work(context_, task_);
         attempt_.provider_ = work.provider_;
         attempt_.domains_ = work.domains_;
+        if (!co_await await_challenge_dns(context_, trace_, task_, lease_, work, attempt_)) {
+            co_return;
+        }
         if (work.eab_) {
             trace_.register_secret(work.eab_->key_id_);
             trace_.register_secret(work.eab_->hmac_key_.view());
@@ -280,7 +283,7 @@ inline ruvia::task<void> process_task(service::background::task_context& context
     } catch (...) {
         exception = std::current_exception();
     }
-    if (exception) {
+    if (!context.get_stop_token().stop_requested() && exception) {
         const auto failure = service::outbound_http::classify_attempt_failure(exception, "证书任务发生未知错误");
         const bool keep_progress = !failure.permanent_ && keeps_progress(exception);
         trace.mark_failure(failure.message_);

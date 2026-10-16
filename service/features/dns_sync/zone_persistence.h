@@ -188,8 +188,7 @@ store_conflicts(service::background::task_context& context, service::attempt_tra
         if (!co_await service::sync_runtime::renew_running_lease(transaction, lease)) {
             throw std::runtime_error("DNS 同步标记 lease 已失效");
         }
-        result_transition = co_await service::sync_runtime::complete_running_and_record_event(
-            transaction, lease, detail);
+        result_transition = co_await service::sync_runtime::record_running_result(transaction, lease, service::sync_runtime::attempt_result::completed(), detail);
         if (!result_transition.marker_transitioned_) {
             throw std::runtime_error("DNS 同步标记 lease 已失效");
         }
@@ -322,8 +321,7 @@ inline ruvia::task<void> persist_synced_zone(service::background::task_context& 
             result_transition.marker_transitioned_ = true;
             result_transition.resumed_ = co_await service::sync_runtime::resume_waiters(transaction, lease, true);
         } else {
-            result_transition = co_await service::sync_runtime::complete_running_and_record_event(
-                transaction, lease, detail);
+            result_transition = co_await service::sync_runtime::record_running_result(transaction, lease, service::sync_runtime::attempt_result::completed(), detail);
             if (!result_transition.marker_transitioned_) {
                 throw std::runtime_error("DNS 同步标记 lease 已失效");
             }
@@ -377,8 +375,8 @@ inline ruvia::task<void> fail_dns_task(service::background::task_context& contex
     (void)co_await transaction.query(
         "SELECT id FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 LIMIT 1 FOR UPDATE",
         task.tenant_id_, task.resource_id_);
-    const auto result_transition = co_await service::sync_runtime::fail_running_and_record_event(
-        transaction, lease, message, detail);
+    const auto result_transition = co_await service::sync_runtime::record_running_result(
+        transaction, lease, permanent ? service::sync_runtime::attempt_result::failed(message) : service::sync_runtime::attempt_result::retry(message), detail);
     if (result_transition.marker_transitioned_) {
         (void)co_await transaction.execute(
             "UPDATE sys_dns_zone SET sync_status = $2, last_error = $3, updated_at = NOW() WHERE "

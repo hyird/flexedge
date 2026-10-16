@@ -236,6 +236,64 @@ struct running_result_transition final {
     std::vector<marker_waiter> resumed_{};
 };
 
+enum class attempt_outcome {
+    completed,
+    retryable_failure,
+    terminal_failure,
+    waiting,
+};
+
+// Borrows its error or dependency id until the result transaction completes.
+// Terminal failure finishes this version; an explicit upsert can reset the
+// same task. Waiting ends this attempt without finishing the task.
+class attempt_result final {
+public:
+    [[nodiscard]] static attempt_result completed() {
+        return attempt_result(attempt_outcome::completed);
+    }
+
+    [[nodiscard]] static attempt_result retry(std::string_view error) {
+        return attempt_result(attempt_outcome::retryable_failure, error);
+    }
+
+    [[nodiscard]] static attempt_result failed(std::string_view error) {
+        return attempt_result(attempt_outcome::terminal_failure, error);
+    }
+
+    [[nodiscard]] static attempt_result waiting(std::string_view task_id, std::int64_t version) {
+        if (task_id.empty() || version <= 0) {
+            throw std::invalid_argument("invalid sync marker wait");
+        }
+        return attempt_result(attempt_outcome::waiting, {}, task_id, version);
+    }
+
+    [[nodiscard]] attempt_outcome outcome() const noexcept {
+        return outcome_;
+    }
+    [[nodiscard]] std::string_view error() const noexcept {
+        return error_;
+    }
+    [[nodiscard]] std::string_view wait_task_id() const noexcept {
+        return wait_task_id_;
+    }
+    [[nodiscard]] std::int64_t wait_version() const noexcept {
+        return wait_version_;
+    }
+
+private:
+    explicit attempt_result(attempt_outcome outcome, std::string_view error = {},
+        std::string_view wait_task_id = {}, std::int64_t wait_version = 0)
+        : outcome_(outcome),
+          error_(error),
+          wait_task_id_(wait_task_id),
+          wait_version_(wait_version) {}
+
+    attempt_outcome outcome_{};
+    std::string_view error_{};
+    std::string_view wait_task_id_{};
+    std::int64_t wait_version_{};
+};
+
 inline constexpr std::int64_t retry_delay_seconds{15};
 // The one marker lease length: a claim and every renewal hold the marker this
 // long; an expired lease is recovered for retry.
@@ -404,6 +462,21 @@ inline ruvia::task<std::string> upsert_marker(ruvia::db_transaction& transaction
     co_return std::string(rows.front()[0].value().value_or(""));
 }
 
+// Maintenance rechecks this after locking the aggregate. A scan's earlier
+// missing/outdated candidate must not reset a result committed in between.
+inline ruvia::task<bool> marker_version_exists(ruvia::db_transaction& transaction, std::string_view tenant_id,
+    marker_resource_type resource_type, std::string_view resource_id, std::int64_t version) {
+    ruvia::db_query marker;
+    marker.select(marker.column("id"))
+        .from("sys_sync_task")
+        .where(detail::equals(marker, marker.column("tenant_id"), marker.value(tenant_id)))
+        .and_where(detail::equals(marker, marker.column("resource_type"), marker.value(describe(resource_type).name_)))
+        .and_where(detail::equals(marker, marker.column("resource_id"), marker.value(resource_id)))
+        .and_where(detail::equals(marker, marker.column("version"), marker.value(version)))
+        .limit(1);
+    co_return !(co_await transaction.query(marker)).empty();
+}
+
 // Removes a resource's marker (the resource is deleted or needs no more
 // work): its task disappears.
 inline ruvia::task<void> remove_marker(ruvia::db_transaction& transaction, std::string_view tenant_id,
@@ -423,27 +496,56 @@ inline ruvia::task<void> remove_marker(ruvia::db_transaction& transaction, std::
 
 template <typename database_type>
 inline ruvia::task<bool> renew_running_lease(database_type& database, const running_marker_lease& lease) {
-    const auto result = co_await database.execute(
-        "UPDATE sys_sync_task SET lease_until = NOW() + make_interval(secs => $5) WHERE "
-        "tenant_id = $1 AND id = $2 AND version = $3 AND lease_owner = $4 AND "
-        "lease_until IS NOT NULL",
-        lease.marker_.tenant_id_, lease.marker_.marker_id_, lease.marker_.version_, lease.owner_,
-        std::int64_t{lease_duration.count()});
-    co_return result.affected_rows() != 0;
+    ruvia::db_query renewal;
+    renewal.update("sys_sync_task")
+        .set("lease_until", detail::now_plus(renewal, lease_duration))
+        .where(detail::equals(renewal, renewal.column("tenant_id"), renewal.value(lease.marker_.tenant_id_)))
+        .and_where(detail::equals(renewal, renewal.column("id"), renewal.value(lease.marker_.marker_id_)))
+        .and_where(detail::equals(renewal, renewal.column("version"), renewal.value(lease.marker_.version_)))
+        .and_where(detail::equals(renewal, renewal.column("lease_owner"), renewal.value(lease.owner_)))
+        .and_where(renewal.binary(renewal.column("lease_until"), ruvia::db_binary_operator::greater, renewal.call("now")));
+    const auto renewed = co_await database.execute(renewal);
+    co_return renewed.affected_rows() != 0;
 }
 
+// All attempt outcomes use the same version/owner/expiry fence. The task's
+// non-null next_attempt_at is meaningful only for an unfinished, unparked
+// task; terminal results never expose it as a retry schedule.
 template <typename database_type>
-inline ruvia::task<bool> complete_running(database_type& database, const running_marker_lease& lease) {
-    const auto result = co_await database.execute(
-        "UPDATE sys_sync_task SET is_done = CASE WHEN version = $3 THEN TRUE ELSE FALSE END, "
-        "is_ok = CASE WHEN version = $3 THEN TRUE ELSE FALSE END, "
-        "processed_version = CASE WHEN version = $3 THEN $3 ELSE processed_version END, "
-        "error = CASE WHEN version = $3 THEN '' ELSE error END, count_fails = CASE WHEN version = "
-        "$3 THEN 0 ELSE count_fails END, lease_owner = NULL, lease_until = NULL, "
-        "next_attempt_at = NOW(), updated_at = NOW() WHERE tenant_id = $1 AND id = $2 AND "
-        "lease_owner = $4 AND lease_until IS NOT NULL",
-        lease.marker_.tenant_id_, lease.marker_.marker_id_, lease.marker_.version_, lease.owner_);
-    co_return result.affected_rows() != 0;
+inline ruvia::task<bool> transition_running(database_type& database, const running_marker_lease& lease,
+    const attempt_result& result) {
+    const auto outcome = result.outcome();
+    const bool completed = outcome == attempt_outcome::completed;
+    const bool terminal = outcome == attempt_outcome::terminal_failure;
+    const bool retry = outcome == attempt_outcome::retryable_failure;
+    const bool waiting = outcome == attempt_outcome::waiting;
+    ruvia::db_query transition;
+    transition.update("sys_sync_task")
+        .set("is_done", transition.value(completed || terminal))
+        .set("is_ok", transition.value(completed))
+        .set("error", transition.value(result.error()))
+        .set("count_fails", retry || terminal
+                                ? transition.binary(transition.column("count_fails"), ruvia::db_binary_operator::add,
+                                      transition.value(std::int64_t{1}))
+                                : transition.value(std::int64_t{0}))
+        .set("next_attempt_at", retry ? detail::now_plus(transition, std::chrono::seconds(retry_delay_seconds))
+                                      : transition.call("now"))
+        .set("lease_owner", transition.null_value())
+        .set("lease_until", transition.null_value())
+        .set("wait_task_id", waiting ? transition.value(result.wait_task_id()) : transition.null_value())
+        .set("wait_version", waiting ? transition.value(result.wait_version()) : transition.null_value())
+        .set("updated_at", transition.call("now"))
+        .where(detail::equals(transition, transition.column("tenant_id"), transition.value(lease.marker_.tenant_id_)))
+        .and_where(detail::equals(transition, transition.column("id"), transition.value(lease.marker_.marker_id_)))
+        .and_where(detail::equals(transition, transition.column("version"), transition.value(lease.marker_.version_)))
+        .and_where(detail::equals(transition, transition.column("lease_owner"), transition.value(lease.owner_)))
+        .and_where(transition.binary(transition.column("lease_until"), ruvia::db_binary_operator::greater,
+            transition.call("now")));
+    if (completed || terminal) {
+        transition.set("processed_version", transition.value(lease.marker_.version_));
+    }
+    const auto transitioned = co_await database.execute(transition);
+    co_return transitioned.affected_rows() != 0;
 }
 
 // Releases the markers parked on the lease's marker; they run after
@@ -479,21 +581,15 @@ inline ruvia::task<std::vector<marker_waiter>> resume_waiters(database_type& dat
     co_return waiters;
 }
 
-// Records the attempt that just transitioned the marker and returns its row
-// id. Must run in the same transaction right after complete_running/
-// fail_running/the park: the row is copied from the marker only while the
-// marker is in the matching state, and that UPDATE holds the marker row lock
-// that serializes attempt numbering. `detail` is validated before binding
-// (accepted_detail), so an unusable detail is replaced by the dropped marker
-// instead of failing the result transaction.
+// The transition holds the marker row lock until this insert and its
+// transaction commit, serializing attempt numbers and the domain result.
 template <typename database_type>
 inline ruvia::task<std::optional<std::int64_t>> record_running_result_event(database_type& database,
-    const running_marker_lease& lease,
-    std::string_view outcome, std::string_view detail) {
-    if (outcome != event_outcome_completed && outcome != event_outcome_failed && outcome != event_outcome_progressed) {
-        throw std::invalid_argument("invalid sync marker event outcome");
-    }
-    const bool failed = outcome == event_outcome_failed;
+    const running_marker_lease& lease, attempt_outcome outcome, std::string_view detail) {
+    const bool failed = outcome == attempt_outcome::retryable_failure || outcome == attempt_outcome::terminal_failure;
+    const auto event_outcome = failed                                ? event_outcome_failed
+                               : outcome == attempt_outcome::waiting ? event_outcome_progressed
+                                                                     : event_outcome_completed;
     const auto elapsed = elapsed_milliseconds(lease.started_);
     ruvia::db_query source;
     const auto marker = [&](std::string_view column) { return source.column(column, "marker"); };
@@ -503,26 +599,24 @@ inline ruvia::task<std::optional<std::int64_t>> record_running_result_event(data
     source.from("sys_sync_task", "marker");
     const auto emitted_at = join_attempt_clock(source);
     source.select({marker("tenant_id"), marker("id"), marker("resource_type"), marker("resource_id"),
-        marker("operation"), marker("version"), source.cast(source.value(outcome), ruvia::db_data_type::text),
+        marker("operation"), marker("version"), source.cast(source.value(event_outcome), ruvia::db_data_type::text),
         source.call("left", {marker("error"), source.value(std::int64_t{1000})}),
         next_attempt_number(source, {.tenant_id_ = {"tenant_id", "marker"}, .task_id_ = {"id", "marker"}, .resource_id_ = {"resource_id", "marker"}, .version_ = {"version", "marker"}}),
         attempt_started_at(source, emitted_at, elapsed),
         source.cast(source.value(elapsed.value_or(0)), ruvia::db_data_type::big_int),
-        failed ? marker("next_attempt_at") : source.cast(source.null_value(), ruvia::db_data_type::timestamp_tz),
+        outcome == attempt_outcome::retryable_failure ? marker("next_attempt_at")
+                                                      : source.cast(source.null_value(), ruvia::db_data_type::timestamp_tz),
         source.cast(source.value(accepted_detail(detail)), ruvia::db_data_type::jsonb), emitted_at});
     source.where(equals(marker("tenant_id"), source.value(lease.marker_.tenant_id_)))
         .and_where(equals(marker("id"), source.value(lease.marker_.marker_id_)))
-        .and_where(equals(marker("version"), source.value(lease.marker_.version_)));
+        .and_where(equals(marker("version"), source.value(lease.marker_.version_)))
+        .and_where(equals(marker("is_done"), source.value(outcome == attempt_outcome::completed || outcome == attempt_outcome::terminal_failure)))
+        .and_where(equals(marker("is_ok"), source.value(outcome == attempt_outcome::completed)));
     if (failed) {
-        source.and_where(source.unary(ruvia::db_unary_operator::not_value, marker("is_done")))
-            .and_where(source.unary(ruvia::db_unary_operator::not_value, marker("is_ok")))
-            .and_where(source.binary(marker("count_fails"), ruvia::db_binary_operator::greater,
-                source.value(std::int64_t{0})));
-    } else if (outcome == event_outcome_progressed) {
-        source.and_where(source.unary(ruvia::db_unary_operator::not_value, marker("is_done")))
-            .and_where(source.unary(ruvia::db_unary_operator::is_not_null, marker("wait_task_id")));
-    } else {
-        source.and_where(marker("is_done")).and_where(marker("is_ok"));
+        source.and_where(source.binary(marker("count_fails"), ruvia::db_binary_operator::greater,
+            source.value(std::int64_t{0})));
+    } else if (outcome == attempt_outcome::waiting) {
+        source.and_where(source.unary(ruvia::db_unary_operator::is_not_null, marker("wait_task_id")));
     }
     ruvia::db_query insert;
     insert.insert_into("sys_sync_event", attempt_event_columns)
@@ -535,49 +629,27 @@ inline ruvia::task<std::optional<std::int64_t>> record_running_result_event(data
     co_return rows.front()[0].template as<std::int64_t>().value_or(0);
 }
 
-// Completes the attempt, records it and resumes the markers that awaited it.
+// The caller's transaction owns the domain update, task transition, history
+// and dependency resumption. Notifications are enqueued by its commit path.
 template <typename database_type>
-inline ruvia::task<running_result_transition>
-complete_running_and_record_event(database_type& database, const running_marker_lease& lease,
-    std::string_view detail) {
-    if (!co_await complete_running(database, lease)) {
+inline ruvia::task<running_result_transition> record_running_result(database_type& database,
+    const running_marker_lease& lease, const attempt_result& result, std::string_view detail) {
+    if (!co_await transition_running(database, lease, result)) {
         co_return running_result_transition{};
     }
-    const auto event_id = co_await record_running_result_event(database, lease, event_outcome_completed, detail);
-    co_return running_result_transition{
-        .marker_transitioned_ = true,
-        .event_recorded_ = event_id.has_value(),
-        .event_id_ = event_id,
-        .resumed_ = co_await resume_waiters(database, lease, false),
-    };
-}
-
-// Ends the attempt with its marker parked on another task (`wait_task_id` at
-// `wait_version`): the progress is recorded and the marker is not claimable
-// until resume_waiters (or the bounded wait scan) releases it.
-template <typename database_type>
-inline ruvia::task<running_result_transition> park_running_and_record_event(database_type& database,
-    const running_marker_lease& lease, std::string_view wait_task_id, std::int64_t wait_version,
-    std::string_view detail) {
-    if (wait_task_id.empty() || wait_version <= 0) {
-        throw std::invalid_argument("invalid sync marker wait");
+    const auto event_id = co_await record_running_result_event(database, lease, result.outcome(), detail);
+    if (!event_id) {
+        throw std::runtime_error("sync marker result event was not recorded");
     }
-    const auto parked = co_await database.execute(
-        "UPDATE sys_sync_task SET is_done = FALSE, is_ok = FALSE, count_fails = 0, error = '', "
-        "wait_task_id = $5, wait_version = $6, lease_owner = NULL, lease_until = NULL, "
-        "next_attempt_at = NOW(), updated_at = NOW() WHERE tenant_id = $1 AND id = $2 AND "
-        "version = $3 AND lease_owner = $4 AND lease_until IS NOT NULL",
-        lease.marker_.tenant_id_, lease.marker_.marker_id_, lease.marker_.version_, lease.owner_, wait_task_id,
-        wait_version);
-    if (parked.affected_rows() == 0) {
-        co_return running_result_transition{};
-    }
-    const auto event_id = co_await record_running_result_event(database, lease, event_outcome_progressed, detail);
-    co_return running_result_transition{
+    running_result_transition transition{
         .marker_transitioned_ = true,
-        .event_recorded_ = event_id.has_value(),
+        .event_recorded_ = true,
         .event_id_ = event_id,
     };
+    if (result.outcome() == attempt_outcome::completed || result.outcome() == attempt_outcome::terminal_failure) {
+        transition.resumed_ = co_await resume_waiters(database, lease, false);
+    }
+    co_return transition;
 }
 
 template <typename database_type>
@@ -595,39 +667,15 @@ inline ruvia::task<bool> release_running(database_type& database, const running_
 // resume_waiters(…, true) in the same transaction.
 template <typename database_type>
 inline ruvia::task<bool> remove_running(database_type& database, const running_marker_lease& lease) {
-    const auto removed = co_await database.execute(
-        "DELETE FROM sys_sync_task WHERE tenant_id = $1 AND id = $2 AND version = $3 AND "
-        "lease_owner = $4 AND lease_until IS NOT NULL",
-        lease.marker_.tenant_id_, lease.marker_.marker_id_, lease.marker_.version_, lease.owner_);
+    ruvia::db_query removal;
+    removal.delete_from("sys_sync_task")
+        .where(detail::equals(removal, removal.column("tenant_id"), removal.value(lease.marker_.tenant_id_)))
+        .and_where(detail::equals(removal, removal.column("id"), removal.value(lease.marker_.marker_id_)))
+        .and_where(detail::equals(removal, removal.column("version"), removal.value(lease.marker_.version_)))
+        .and_where(detail::equals(removal, removal.column("lease_owner"), removal.value(lease.owner_)))
+        .and_where(removal.binary(removal.column("lease_until"), ruvia::db_binary_operator::greater, removal.call("now")));
+    const auto removed = co_await database.execute(removal);
     co_return removed.affected_rows() != 0;
-}
-
-template <typename database_type>
-inline ruvia::task<bool> fail_running(database_type& database, const running_marker_lease& lease,
-    std::string_view error) {
-    const auto result = co_await database.execute(
-        "UPDATE sys_sync_task SET is_done = FALSE, is_ok = FALSE, count_fails = count_fails + 1, "
-        "error = $5, next_attempt_at = NOW() + CAST($6 AS BIGINT) * INTERVAL '1 second', "
-        "lease_owner = NULL, lease_until = NULL, updated_at = NOW() WHERE tenant_id = $1 AND "
-        "id = $2 AND version = $3 AND lease_owner = $4 AND lease_until IS NOT NULL",
-        lease.marker_.tenant_id_, lease.marker_.marker_id_, lease.marker_.version_, lease.owner_, error,
-        retry_delay_seconds);
-    co_return result.affected_rows() != 0;
-}
-
-template <typename database_type>
-inline ruvia::task<running_result_transition>
-fail_running_and_record_event(database_type& database, const running_marker_lease& lease,
-    std::string_view error, std::string_view detail) {
-    if (!co_await fail_running(database, lease, error)) {
-        co_return running_result_transition{};
-    }
-    const auto event_id = co_await record_running_result_event(database, lease, event_outcome_failed, detail);
-    co_return running_result_transition{
-        .marker_transitioned_ = true,
-        .event_recorded_ = event_id.has_value(),
-        .event_id_ = event_id,
-    };
 }
 
 }  // namespace service::sync_runtime

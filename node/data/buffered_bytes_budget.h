@@ -1,7 +1,6 @@
 #pragma once
 
 #include <algorithm>
-#include <atomic>
 #include <cstddef>
 #include <utility>
 
@@ -66,11 +65,11 @@ public:
     }
 
     [[nodiscard]] std::size_t used_bytes() const noexcept {
-        return used_bytes_.load(std::memory_order_relaxed);
+        return used_bytes_;
     }
 
     [[nodiscard]] std::size_t rejected_reservations() const noexcept {
-        return rejected_reservations_.load(std::memory_order_relaxed);
+        return rejected_reservations_;
     }
 
     [[nodiscard]] std::size_t maximum_bytes() const noexcept {
@@ -84,28 +83,23 @@ private:
         if (bytes == 0) {
             return true;
         }
-        auto used = used_bytes_.load(std::memory_order_relaxed);
-        for (;;) {
-            if (bytes > maximum_bytes_ || used > maximum_bytes_ - bytes) {
-                rejected_reservations_.fetch_add(1, std::memory_order_relaxed);
-                return false;
-            }
-            if (used_bytes_.compare_exchange_weak(used, used + bytes, std::memory_order_acq_rel,
-                    std::memory_order_relaxed)) {
-                return true;
-            }
+        if (bytes > maximum_bytes_ || used_bytes_ > maximum_bytes_ - bytes) {
+            ++rejected_reservations_;
+            return false;
         }
+        used_bytes_ += bytes;
+        return true;
     }
 
     void release(std::size_t bytes) noexcept {
         if (bytes != 0) {
-            used_bytes_.fetch_sub(bytes, std::memory_order_acq_rel);
+            used_bytes_ -= bytes;
         }
     }
 
     std::size_t maximum_bytes_{};
-    std::atomic<std::size_t> used_bytes_{};
-    std::atomic<std::size_t> rejected_reservations_{};
+    std::size_t used_bytes_{};
+    std::size_t rejected_reservations_{};
 };
 
 inline bool buffered_bytes_lease::try_grow(std::size_t bytes) noexcept {

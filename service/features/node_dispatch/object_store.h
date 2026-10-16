@@ -1,5 +1,6 @@
 #pragma once
 #include <ruvia/core/task.h>
+#include <ruvia/web/db/db_repository.h>
 #include <ruvia/web/db/db_transaction.h>
 
 #include <stdexcept>
@@ -7,6 +8,7 @@
 
 #include "node/proto/artifact.h"
 #include "node/proto/edge_control.pb.h"
+#include "service/features/node_dispatch/dispatch_entity.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
 
@@ -26,22 +28,30 @@ inline ruvia::task<void> persist_object(ruvia::db_transaction& transaction, std:
                                              : std::string_view{"certificate"};
     const std::string_view plaintext = object.content();
     const auto envelope = service::utils::seal_secret(plaintext);
-    const auto inserted = co_await transaction.execute(
-        "INSERT INTO sys_delivery_object (tenant_id, digest_sha256, kind, payload_envelope, "
-        "created_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (tenant_id, digest_sha256) DO "
-        "NOTHING",
-        tenant_id, object.digest_sha256(), kind, std::string_view(envelope));
+    dispatch_object_entity record;
+    record.set<"tenant_id">(tenant_id);
+    record.set<"digest_sha256">(object.digest_sha256());
+    record.set<"kind">(kind);
+    record.set<"payload_envelope">(envelope);
+    const auto objects = transaction.get_repository<dispatch_object_entity>();
+    const auto inserted = co_await objects.upsert(record,
+        {.conflict_paths_ = {"tenant_id", "digest_sha256"}, .do_nothing_ = true});
     if (inserted.affected_rows() == 0) {
-        const auto rows = co_await transaction.query(
-            "SELECT kind, payload_envelope FROM sys_delivery_object WHERE tenant_id = $1 AND "
-            "digest_sha256 = $2 LIMIT 1",
-            tenant_id, object.digest_sha256());
-        if (rows.size() != 1 || rows.front()[0].value().value_or("") != kind) {
+        ruvia::db_query expressions;
+        auto query = objects.create_query_builder();
+        query.select({{"kind", {}}, {"payload_envelope", {}}})
+            .where(expressions.binary(expressions.column("tenant_id"), ruvia::db_binary_operator::equal,
+                expressions.value(tenant_id)))
+            .and_where(expressions.binary(expressions.column("digest_sha256"), ruvia::db_binary_operator::equal,
+                expressions.value(object.digest_sha256())))
+            .take(1);
+        const auto stored = co_await query.get_one<stored_object_payload>();
+        if (!stored || stored->get<"kind">() != kind) {
             throw std::runtime_error("content-addressed delivery object conflicts with storage");
         }
-        service::utils::sensitive_string stored(
-            service::utils::open_secret(rows.front()[1].value().value_or("")));
-        if (stored.view() != plaintext) {
+        service::utils::sensitive_string stored_plaintext(
+            service::utils::open_secret(stored->get<"payload_envelope">()));
+        if (stored_plaintext.view() != plaintext) {
             throw std::runtime_error(
                 "content-addressed delivery object failed storage verification");
         }

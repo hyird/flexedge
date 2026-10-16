@@ -45,6 +45,8 @@
 
 namespace flexedge::node {
 
+class tls_context_set;
+
 // Worker-owned services shared by the sessions a listener admits on that worker.
 struct http_session_context final {
     runtime_state& runtime_;
@@ -84,15 +86,15 @@ public:
         }
     }
 
-    // Keeps state the client stream depends on, such as its TLS contexts, alive with it.
-    void retain(std::shared_ptr<const void> state) noexcept {
-        state_ = std::move(state);
+    // The worker-local TLS runtime must outlive this connection, including reloads.
+    void retain_tls_context(std::shared_ptr<tls_context_set> contexts) noexcept {
+        tls_contexts_ = std::move(contexts);
     }
 
 private:
     std::function<void()> close_;
     std::function<void()> on_retired_;
-    std::shared_ptr<const void> state_;
+    std::shared_ptr<tls_context_set> tls_contexts_;
 };
 
 // Serves one HTTP/1 request on a client connection: routing, local responses, proxying
@@ -255,6 +257,7 @@ private:
 
     void handle_request(const http1_request_reader& parsed) {
         const auto config = context_.runtime_.config();
+        active_patterns_ = context_.runtime_.patterns();
         if (!config) {
             reply(ruvia::http_status::service_unavailable);
             return;
@@ -293,7 +296,7 @@ private:
             match_headers.emplace_back(header.name(), header.value());
         }
         effective_route_ = evaluate_route_rules(*website, parsed.request().method(),
-            parsed.request().target(), *host, match_headers, &config->route_patterns());
+            parsed.request().target(), *host, match_headers, active_patterns_.get());
         if (!effective_route_) {
             reply(ruvia::http_status::bad_request);
             return;
@@ -417,7 +420,7 @@ private:
         auto prepared = prepare_origin_request(request_reader_, *website_,
             *request_reader_.request().header("Host"), client_address_, secure_,
             upgrade_requested_, false, force_identity_encoding_, route_,
-            &active_config_->route_patterns());
+            active_patterns_.get());
         if (!prepared) {
             reply(ruvia::http_status::bad_gateway);
             return;
@@ -603,6 +606,7 @@ private:
     }
 
     void start_tunnel(std::uint64_t attempt) {
+        exchange_->enter_tunnel();
         cancel_timer();
         if (client_upgrade_remainder_.empty()) {
             read_tunnel_client(attempt);
@@ -754,6 +758,7 @@ private:
     std::string client_address_;
     std::optional<connected_clients::address_key> client_key_;
     std::shared_ptr<const compiled_config> active_config_;
+    std::shared_ptr<const route_patterns> active_patterns_;
     const v2::Website* website_{};
     std::optional<v2::RouteRule> effective_route_;
     const v2::RouteRule* route_{};

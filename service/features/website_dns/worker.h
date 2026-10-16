@@ -35,7 +35,8 @@ inline ruvia::task<void> reconcile_markers(service::background::task_context& co
             "SELECT revision FROM sys_website WHERE tenant_id = $1 AND id = $2 AND revision = $3 "
             "AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
             tenant_id, website_id, revision);
-        if (!locked.empty()) {
+        if (!locked.empty() && !co_await service::sync_runtime::marker_version_exists(transaction, tenant_id,
+                                   service::sync_runtime::marker_resource_type::website, website_id, revision)) {
             (void)co_await service::sync_runtime::upsert_marker(transaction, tenant_id,
                 service::sync_runtime::marker_resource_type::website, website_id,
                 service::sync_runtime::marker_operation::apply, revision, work);

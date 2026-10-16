@@ -1,5 +1,5 @@
 """Local task-center reads and resource writes; run after the isolated --keep-fixture setup
-of task_center_read_model_test.py against the same database."""
+of task_center_fixture.py against the same database."""
 import http.cookies
 import json
 import os

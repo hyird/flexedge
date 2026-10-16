@@ -64,6 +64,26 @@ describe('log event contracts', () => {
     expect(merged[0].id).toBe(String(liveLogCapacity + 4))
   })
 
+  it('keeps the latest 10000 records across batches and replayed events', () => {
+    const records = Array.from({ length: 10_020 }, (_, index) => ({
+      id: String(index),
+      occurred_at: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+      message: 'original',
+    }))
+    const current = mergeLiveLogs(undefined, records.slice(0, 10_000))
+    const replayed = { ...records[9999], message: 'updated' }
+    const incoming = [...records.slice(10_000).reverse(), replayed, records[0]]
+    const merged = mergeLiveLogs(current, incoming)
+
+    expect(merged).toHaveLength(10_000)
+    expect(new Set(merged.map((entry) => entry.id)).size).toBe(10_000)
+    expect(merged[0].id).toBe('10019')
+    expect(merged.at(-1)?.id).toBe('20')
+    expect(merged.find((entry) => entry.id === replayed.id)).toEqual(replayed)
+    expect(current[0].message).toBe('original')
+    expect(incoming[0].id).toBe('10019')
+  })
+
   it('accepts omitted optional access log fields without fabricating values', () => {
     expect(parseAccessLogs(encode([accessLog]))).toEqual([accessLog])
     const detailed = {

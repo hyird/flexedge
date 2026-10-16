@@ -43,8 +43,22 @@ ruvia::task<v2::ApplyResult> apply_test_config(flexedge::node::state_store& stor
     *desired.mutable_release() = config.active.release();
     flexedge::node::apply_trace trace;
     v2::ApplyResult result;
-    (void)flexedge::node::apply_desired_config(store, data_plane, desired, config.objects, trace, result);
+    (void)co_await flexedge::node::apply_desired_config(store, data_plane, desired, config.objects, trace, result);
     co_return result;
+}
+
+ruvia::task<void> verify_stopped_activation(flexedge::node::state_store& store,
+    flexedge::node::data_plane& plane, const TestConfig& config) {
+    store.stage(config.active, config.objects);
+    auto reload = co_await plane.prepare(std::make_shared<const flexedge::node::compiled_config>(config.active, config.objects));
+    plane.request_stop_accepting();
+    bool failed = false;
+    try {
+        co_await flexedge::node::activate_staged_config(store, plane, std::move(reload));
+    } catch (const std::runtime_error&) {
+        failed = true;
+    }
+    REQUIRE(failed);
 }
 
 std::vector<std::string> phases(const v2::ApplyResult& result) {
@@ -198,7 +212,7 @@ int main() {
     } state_cleanup{state_directory};
     verify_trace_limits();
     {
-        ruvia::event_loop_pool workers({.loop_count_ = 1});
+        ruvia::event_loop_pool workers({.loop_count_ = 2});
         ruvia::event_loop_pool control({.loop_count_ = 1});
         flexedge::node::runtime_state activation_runtime;
         auto [log_sender, log_receiver] = ruvia::make_channel<flexedge::node::owned_log_batch>(
@@ -245,7 +259,7 @@ int main() {
         candidate.setGeneration(4);
         candidate.mutableWebsite()->mutable_origins(0)->set_id("origin-replacement");
         // Prepare a real listener before persistence fails. A successful
-        // exclusive rebind afterwards proves abort released the socket.
+        // exclusive rebind afterwards proves the reload destructor released the socket.
         asio::io_context reservation_context;
         asio::ip::tcp::acceptor reservation(reservation_context,
             asio::ip::tcp::endpoint(asio::ip::address_v4::any(), 0));
@@ -261,7 +275,7 @@ int main() {
         REQUIRE(persist_failed.failed_phase() == v2::APPLY_PHASE_ACTIVATE);
         REQUIRE(persist_failed.error_code() == "apply_failed" && persist_failed.retryable());
         REQUIRE((phases(persist_failed) == std::vector<std::string>{"stage", "validate", "prepare_listeners", "activate"}));
-        REQUIRE(logged(persist_failed, "info", "prepared listeners: 1 new, 0 retired"));
+        REQUIRE(logged(persist_failed, "info", "prepared listeners: 2 new, 0 retired"));
         REQUIRE(activation_runtime.applied_node_spec_revision() == 3);
         REQUIRE(good_store.load().contents_.node_spec_.revision() == 3);
         const auto rolled_back_reports = health_reports();
@@ -328,6 +342,14 @@ int main() {
         REQUIRE((phases(invalid_result) == std::vector<std::string>{"stage", "validate"}));
         REQUIRE(activation_runtime.applied_node_spec_revision() == 4);
         REQUIRE(request(candidate_port, "unknown.example.invalid").starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
+        auto interrupted = candidate;
+        interrupted.setGeneration(7);
+        interrupted.finalize();
+        control.loop(0).start(verify_stopped_activation(good_store, plane, interrupted)).get();
+        REQUIRE(activation_runtime.applied_node_spec_revision() == 4);
+        REQUIRE(good_store.load().contents_.node_spec_.revision() == 4);
+        const auto restored_reports = health_reports();
+        REQUIRE(restored_reports.size() == 1 && restored_reports.front().origin_id_ == "origin-replacement");
         shutdown.stop_and_join();
         plane.request_stop_accepting();
         plane.request_stop_accepting();

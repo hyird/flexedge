@@ -19,50 +19,48 @@ const tabs = [
 ] as const
 
 export const Route = createFileRoute('/_authenticated/providers')({
-  component: ProvidersLayout,
-})
-
-/** Both provider lists under one page title. Each tab is a link to its list
- * route, so switching tabs navigates and the selected tab follows the URL. */
-function ProvidersLayout() {
-  const pathname = useLocation({ select: (location) => location.pathname })
-  const selected =
-    tabs.find(({ href }) => pathname.startsWith(href))?.id ?? 'dns'
-  return (
-    <Page
-      title='供应商账号'
-      description='管理托管域名所用的 DNS 账号，以及签发证书所用的证书供应商凭据。'
-    >
-      <Tabs
-        variant='secondary'
-        selectedKey={selected}
-        className='-mt-2 flex w-full min-w-0 flex-1 flex-col gap-6'
+  /** Both provider lists under one page title. Each tab is a link to its list
+   * route, so switching tabs navigates and the selected tab follows the URL. */
+  component: function ProvidersLayout() {
+    const pathname = useLocation({ select: (location) => location.pathname })
+    const selected =
+      tabs.find(({ href }) => pathname.startsWith(href))?.id ?? 'dns'
+    return (
+      <Page
+        title='供应商账号'
+        description='管理托管域名所用的 DNS 账号，以及签发证书所用的证书供应商凭据。'
       >
-        <Tabs.ListContainer className='shrink-0'>
-          <Tabs.List aria-label='供应商类型'>
-            {tabs.map((tab) => (
-              <Tabs.Tab
-                key={tab.id}
-                id={tab.id}
-                href={tab.href}
-                className='w-auto flex-none px-3'
-              >
-                <span className='flex items-center gap-1.5 [&_svg]:size-4'>
-                  {tab.icon}
-                  {tab.label}
-                </span>
-                <Tabs.Indicator />
-              </Tabs.Tab>
-            ))}
-          </Tabs.List>
-        </Tabs.ListContainer>
-        <Tabs.Panel
-          id={selected}
-          className='flex min-w-0 flex-1 flex-col gap-6 p-0'
+        <Tabs
+          variant='secondary'
+          selectedKey={selected}
+          className='-mt-2 flex w-full min-w-0 flex-1 flex-col gap-6'
         >
-          <Outlet />
-        </Tabs.Panel>
-      </Tabs>
-    </Page>
-  )
-}
+          <Tabs.ListContainer className='shrink-0'>
+            <Tabs.List aria-label='供应商类型'>
+              {tabs.map((tab) => (
+                <Tabs.Tab
+                  key={tab.id}
+                  id={tab.id}
+                  href={tab.href}
+                  className='w-auto flex-none px-3'
+                >
+                  <span className='flex items-center gap-1.5 [&_svg]:size-4'>
+                    {tab.icon}
+                    {tab.label}
+                  </span>
+                  <Tabs.Indicator />
+                </Tabs.Tab>
+              ))}
+            </Tabs.List>
+          </Tabs.ListContainer>
+          <Tabs.Panel
+            id={selected}
+            className='flex min-w-0 flex-1 flex-col gap-6 p-0'
+          >
+            <Outlet />
+          </Tabs.Panel>
+        </Tabs>
+      </Page>
+    )
+  },
+})

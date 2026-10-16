@@ -6,8 +6,10 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -81,15 +83,9 @@ public:
         // so outcomes recorded against the old membership are discarded.
         std::uint64_t id_{};
         bool healthy_{true};
-        bool last_success_{true};
         std::int64_t checked_at_unix_millis_{};
         std::uint32_t latency_millis_{};
         std::string last_error_;
-
-        // Recording `success` would change neither health nor the direction of the streak.
-        [[nodiscard]] bool settled(bool success) const noexcept {
-            return healthy_ == success && last_success_ == success;
-        }
     };
 
     using origin_map =
@@ -120,14 +116,47 @@ public:
         for (const auto& [key, value] : origins_) {
             result.push_back({.website_id_ = key.website_id_,
                 .origin_id_ = key.origin_id_,
-                .status_ = value.checked_at_unix_millis_ == 0 ? "unknown"
-                           : value.healthy_                   ? "healthy"
-                                                              : "unhealthy",
+                .status_ = !value.healthy_                      ? "unhealthy"
+                           : value.checked_at_unix_millis_ == 0 ? "unknown"
+                                                                : "healthy",
                 .checked_at_unix_millis_ = value.checked_at_unix_millis_,
                 .latency_millis_ = value.latency_millis_,
                 .last_error_ = value.last_error_});
         }
         return result;
+    }
+
+    // Health used for routing stays local. The control report is conservative: an unhealthy
+    // worker makes the origin unhealthy; an unprobed healthy worker keeps it unknown. Pick
+    // the latest unhealthy diagnostic, with a deterministic tie-break independent of arrival.
+    [[nodiscard]] static std::shared_ptr<const origin_health_snapshot> merge(
+        std::span<const std::shared_ptr<const origin_health_snapshot>> snapshots) {
+        origin_map origins;
+        for (const auto& snapshot : snapshots) {
+            for (const auto& [key, value] : snapshot->origins_) {
+                auto [iterator, inserted] = origins.try_emplace(key, value);
+                auto& merged = iterator->second;
+                if (!inserted) {
+                    const auto healthy = merged.healthy_ && value.healthy_;
+                    const auto unknown = merged.checked_at_unix_millis_ == 0 || value.checked_at_unix_millis_ == 0;
+                    if ((merged.healthy_ && !value.healthy_) ||
+                        (merged.healthy_ == value.healthy_ &&
+                            std::tie(value.checked_at_unix_millis_, value.last_error_, value.latency_millis_) >
+                                std::tie(merged.checked_at_unix_millis_, merged.last_error_, merged.latency_millis_))) {
+                        merged = value;
+                    }
+                    merged.healthy_ = healthy;
+                    if (healthy && unknown) {
+                        merged.checked_at_unix_millis_ = 0;
+                        merged.latency_millis_ = 0;
+                        merged.last_error_.clear();
+                    }
+                }
+                // Membership identities only have meaning inside the worker that owns them.
+                merged.id_ = 0;
+            }
+        }
+        return std::make_shared<const origin_health_snapshot>(std::move(origins));
     }
 
 private:
@@ -151,7 +180,6 @@ struct origin_health_entry final {
     // Returns whether the snapshot-visible state changed.
     bool record(bool success, std::uint32_t threshold) noexcept {
         const auto previous_healthy = healthy_;
-        const auto previous_success = last_success_;
         if (success == last_success_) {
             streak_ = streak_ == (std::numeric_limits<std::uint32_t>::max)() ? streak_ : streak_ + 1;
         } else {
@@ -161,7 +189,7 @@ struct origin_health_entry final {
         if (streak_ >= threshold) {
             healthy_ = success;
         }
-        return healthy_ != previous_healthy || last_success_ != previous_success;
+        return healthy_ != previous_healthy;
     }
 };
 
@@ -201,7 +229,7 @@ class origin_health_state final {
         std::shared_ptr<detail::origin_health_entry>, origin_health_key_hash, origin_health_key_equal>;
 
 public:
-    // The next membership and its snapshot, built without changing the active state. Kept
+    // The next membership, built without changing the active state. Kept
     // entries are shared, so results recorded while the configuration is pending survive.
     class prepared final {
     public:
@@ -210,26 +238,20 @@ public:
         prepared(const prepared&) = delete;
         prepared& operator=(const prepared&) = delete;
 
-        [[nodiscard]] const std::shared_ptr<const origin_health_snapshot>& snapshot() const noexcept {
-            return snapshot_;
-        }
-
     private:
         friend class origin_health_state;
-        prepared(entry_map entries, std::shared_ptr<const origin_health_snapshot> snapshot)
-            : entries_(std::move(entries)),
-              snapshot_(std::move(snapshot)) {}
+        explicit prepared(entry_map entries)
+            : entries_(std::move(entries)) {}
 
         entry_map entries_;
-        std::shared_ptr<const origin_health_snapshot> snapshot_;
     };
 
-    [[nodiscard]] prepared prepare(const origin_health_key_set& keys) {
+    [[nodiscard]] prepared prepare(const origin_health_key_set& keys, const origin_health_key_set& replaced) {
         entry_map next;
         next.reserve(keys.size());
         for (const auto& key : keys) {
             const auto found = entries_.find(key);
-            if (found != entries_.end()) {
+            if (found != entries_.end() && !replaced.contains(key)) {
                 next.emplace(key, found->second);
                 continue;
             }
@@ -237,14 +259,12 @@ public:
             entry->id_ = ++last_id_;
             next.emplace(key, std::move(entry));
         }
-        auto next_snapshot = build(next);
-        return prepared(std::move(next), std::move(next_snapshot));
+        return prepared(std::move(next));
     }
 
-    // The snapshot of `next` misses results recorded after it was prepared; publish a fresh
-    // snapshot once activated.
+    // Retained entries include outcomes recorded after preparation on this same worker.
     void activate(prepared&& next) noexcept {
-        entries_ = std::move(next.entries_);
+        entries_.swap(next.entries_);
     }
 
     // Applies a request outcome for membership `id`. Returns whether the snapshot changed.
@@ -287,7 +307,6 @@ private:
         for (const auto& [key, entry] : entries) {
             origins.emplace(key, origin_health_snapshot::origin{.id_ = entry->id_,
                                      .healthy_ = entry->healthy_,
-                                     .last_success_ = entry->last_success_,
                                      .checked_at_unix_millis_ = entry->checked_at_unix_millis_,
                                      .latency_millis_ = entry->latency_millis_,
                                      .last_error_ = entry->last_error_});

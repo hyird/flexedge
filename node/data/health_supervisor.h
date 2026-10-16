@@ -3,7 +3,6 @@
 #include <ruvia/core/event_loop.h>
 #include <ruvia/core/task.h>
 
-#include <atomic>
 #include <chrono>
 #include <coroutine>
 #include <cstddef>
@@ -28,8 +27,8 @@ namespace flexedge::node {
 
 class origin_health_supervisor;
 
-// Reports request outcomes of one origin membership from a data worker. Outcomes travel to the
-// supervisor loop as messages; the worker never touches the health state itself.
+// Request outcomes and active probes belong to the same data worker. A target identifies
+// one membership so late request completions cannot affect a retired and re-added origin.
 class origin_health_target final {
 public:
     origin_health_target() = default;
@@ -56,8 +55,8 @@ private:
     std::uint64_t id_{};
 };
 
-// Single owner of origin health: runs active probes, applies the outcomes data workers send
-// and publishes an immutable origin_health_snapshot. All health state lives on its loop.
+// One data worker's health state, request outcomes, active probes and timers. Only immutable
+// copies of its snapshot leave this worker; request outcomes never travel to another loop.
 class origin_health_supervisor final : public std::enable_shared_from_this<origin_health_supervisor> {
 public:
     static std::shared_ptr<origin_health_supervisor> create(
@@ -89,12 +88,17 @@ public:
         }
     }
 
-    // Any thread.
-    [[nodiscard]] std::shared_ptr<const origin_health_snapshot> snapshot() const noexcept {
-        return published_.load(std::memory_order_acquire);
+    // Owner loop. Rebuilds on demand, including outcomes recorded in this same loop turn.
+    [[nodiscard]] std::shared_ptr<const origin_health_snapshot> snapshot() {
+        require_owner();
+        if (stale_) {
+            published_ = state_.snapshot();
+            stale_ = false;
+        }
+        return published_;
     }
 
-    // Any thread. Empty when the origin is not configured.
+    // Owner loop. Empty when the origin is not configured.
     [[nodiscard]] origin_health_target target(std::string_view website_id,
         std::string_view origin_id) {
         const auto current = snapshot();
@@ -108,19 +112,21 @@ public:
     }
 
     // Owner loop. Builds the next membership without changing the published health.
-    [[nodiscard]] origin_health_state::prepared prepare(const origin_health_key_set& keys) {
+    [[nodiscard]] origin_health_state::prepared prepare(const origin_health_key_set& keys, const origin_health_key_set& replaced) {
         if (!loop_.is_current()) {
             throw std::logic_error("origin health must be prepared on its owner loop");
         }
-        return state_.prepare(keys);
+        return state_.prepare(keys, replaced);
     }
 
     // Owner loop.
     void activate(origin_health_state::prepared&& next) noexcept {
-        auto next_snapshot = next.snapshot();
+        if (!loop_.is_current()) {
+            std::terminate();
+        }
+        cancel_probes();
         state_.activate(std::move(next));
-        published_.store(std::move(next_snapshot), std::memory_order_release);
-        schedule_publish();
+        stale_ = true;
     }
 
     void request_start() {
@@ -137,9 +143,11 @@ public:
     }
 
     void request_stop() noexcept {
-        std::lock_guard lock(lifecycle_mutex_);
-        if (stop_and_wait_completed_) {
-            return;
+        {
+            std::lock_guard lock(lifecycle_mutex_);
+            if (stop_and_wait_completed_) {
+                return;
+            }
         }
         if (loop_.is_current()) {
             stop();
@@ -187,10 +195,20 @@ private:
         stopped_ = true;
         std::error_code ignored;
         timer_.cancel(ignored);
+        cancel_probes();
+        notify_stop_waiters();
+    }
+
+    void cancel_probes() noexcept {
+        for (auto iterator = probes_.begin(); iterator != probes_.end();) {
+            auto probe = (iterator++)->second;
+            probe->cancel();
+        }
     }
 
 public:
     ruvia::task<void> stop_and_wait() {
+        require_owner();
         {
             std::lock_guard lock(lifecycle_mutex_);
             if (stop_and_wait_completed_) {
@@ -198,14 +216,6 @@ public:
             }
         }
         stop();
-        std::vector<std::shared_ptr<origin_health_probe>> active;
-        active.reserve(probes_.size());
-        for (const auto& [_, probe] : probes_) {
-            active.push_back(probe);
-        }
-        for (const auto& probe : active) {
-            probe->cancel();
-        }
         co_await stop_awaiter{this};
         std::lock_guard lock(lifecycle_mutex_);
         stop_and_wait_completed_ = true;
@@ -214,61 +224,23 @@ public:
 private:
     friend class origin_health_target;
 
-    // Any thread. An outcome that cannot change the published health is not sent; a snapshot
-    // at most one owner-loop turn old can therefore drop an outcome that would only have
-    // restarted a streak. Allocation failure drops the outcome.
+    // Owner loop. Always update the live streak; filtering against a published snapshot
+    // would lose opposite-direction outcomes and can incorrectly cross a threshold.
     void record(const origin_health_key& key, std::uint64_t id, bool success,
         std::uint32_t threshold) noexcept {
-        const auto current = snapshot();
-        const auto* origin = current->find(key.website_id_, key.origin_id_);
-        if (origin == nullptr || origin->id_ != id || origin->settled(success)) {
-            return;
+        if (!loop_.is_current()) {
+            std::terminate();
         }
-        try {
-            (void)loop_.post([weak = weak_from_this(), key, id, success, threshold] {
-                const auto self = weak.lock();
-                if (self && self->state_.record({key.website_id_, key.origin_id_}, id, success,
-                                threshold)) {
-                    self->schedule_publish();
-                }
-            });
-        } catch (...) {
-        }
+        stale_ = state_.record({key.website_id_, key.origin_id_}, id, success, threshold) || stale_;
     }
 
-    // Owner loop. Coalesces every change made in one loop turn into one snapshot.
-    void schedule_publish() noexcept {
-        stale_ = true;
-        if (publish_queued_) {
-            return;
-        }
-        try {
-            publish_queued_ = loop_.post([weak = weak_from_this()] {
-                                       if (const auto self = weak.lock()) {
-                                           self->publish_queued_ = false;
-                                           self->publish();
-                                       }
-                                   })
-                                  .accepted();
-        } catch (...) {
-            // The next tick publishes the stale state.
-        }
-    }
-
-    void publish() noexcept {
-        if (!stale_) {
-            return;
-        }
-        try {
-            published_.store(state_.snapshot(), std::memory_order_release);
-            stale_ = false;
-        } catch (...) {
-            // The next tick retries.
+    void require_owner() const {
+        if (!loop_.is_current()) {
+            throw std::logic_error("origin health must run on its data worker");
         }
     }
 
     void tick() {
-        publish();
         if (stopped_) {
             return;
         }
@@ -289,24 +261,12 @@ private:
                     }
                     auto probe = std::make_shared<origin_health_probe>(
                         loop_, state_.probe_target(key), tls_context_,
-                        origin_probe_config{
-                            .protocol_ = origin.protocol(),
-                            .host_ = origin.host(),
-                            .port_ = static_cast<std::uint16_t>(origin.port()),
-                            .path_ = website->health_check_path(),
-                            .timeout_ =
-                                std::chrono::seconds(website->health_check_timeout_seconds()),
-                            .expected_status_ = website->health_check_expected_status() == 0
-                                                    ? 200
-                                                    : website->health_check_expected_status(),
-                            .healthy_threshold_ = website->healthy_threshold(),
-                            .unhealthy_threshold_ = website->unhealthy_threshold(),
-                        });
+                        make_origin_probe_config(*website, origin));
                     probes_.emplace(probe.get(), probe);
                     probe->set_on_retired([weak = weak_from_this(), identity = probe.get()] {
                         if (const auto self = weak.lock()) {
                             self->probes_.erase(identity);
-                            self->schedule_publish();
+                            self->stale_ = true;
                             self->notify_stop_waiters();
                         }
                     });
@@ -329,14 +289,7 @@ private:
         } catch (...) {
             timer_pending_ = false;
             stopped_ = true;
-            std::vector<std::shared_ptr<origin_health_probe>> active;
-            active.reserve(probes_.size());
-            for (const auto& [_, probe] : probes_) {
-                active.push_back(probe);
-            }
-            for (const auto& probe : active) {
-                probe->cancel();
-            }
+            cancel_probes();
             notify_stop_waiters();
         }
     }
@@ -346,7 +299,7 @@ private:
     bool stop_and_wait_completed_{};
     runtime_state& runtime_;
     origin_health_state state_;
-    std::atomic<std::shared_ptr<const origin_health_snapshot>> published_{
+    std::shared_ptr<const origin_health_snapshot> published_{
         std::make_shared<const origin_health_snapshot>()};
     asio::steady_timer timer_;
     ruvia::event_loop_stop_registration stop_registration_;
@@ -357,7 +310,6 @@ private:
     bool started_{};
     bool stopped_{};
     bool stale_{};
-    bool publish_queued_{};
 };
 
 inline void origin_health_target::record(bool success, std::uint32_t threshold) const noexcept {

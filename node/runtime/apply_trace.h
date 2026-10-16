@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ruvia/core/task.h>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -100,6 +102,31 @@ public:
             .unix_ms_ = unix_ms(),
             .message_ = std::string(truncate_utf8(message, maximum_text_bytes)),
             .phase_ = current_phase_});
+    }
+
+    // Owns the callable while suspended: coroutine lambdas may borrow their closure. Timing
+    // and failures include the worker preparation/activation awaited by the operation.
+    template <typename function_type>
+    ruvia::task<typename std::invoke_result_t<function_type&>::value_type> run_async_step(
+        std::string_view phase, function_type function) {
+        using result_type = typename std::invoke_result_t<function_type&>::value_type;
+        const auto step = begin_step(phase);
+        try {
+            if constexpr (std::is_void_v<result_type>) {
+                co_await function();
+                end_step(step, true);
+            } else {
+                auto value = co_await function();
+                end_step(step, true);
+                co_return value;
+            }
+        } catch (const std::exception& error) {
+            end_step(step, false, error.what());
+            throw;
+        } catch (...) {
+            end_step(step, false, "unknown error");
+            throw;
+        }
     }
 
     // Replaces the steps and logs of `result`. Past the log cap the last slot reports how

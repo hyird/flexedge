@@ -83,10 +83,6 @@ public:
         return found == routes_.end() ? nullptr : found->second.domain_;
     }
 
-    [[nodiscard]] const flexedge::node::route_patterns& route_patterns() const noexcept {
-        return route_patterns_;
-    }
-
 private:
     void open_state(const v2::ActiveState& state) {
         if (!state.has_node_spec() || !state.has_release()) {
@@ -188,7 +184,7 @@ private:
             if (!website->enabled()) {
                 continue;
             }
-            validate_website(*website, &route_patterns_);
+            validate_website(*website);
             index_website_domains(*website);
         }
     }
@@ -201,7 +197,6 @@ private:
     std::vector<const v2::Website*> websites_;
     std::unordered_map<std::string, const v2::Certificate*> certificates_;
     std::unordered_map<std::string, compiled_route> routes_;
-    flexedge::node::route_patterns route_patterns_;
 };
 
 }  // namespace flexedge::node

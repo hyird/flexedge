@@ -1,5 +1,5 @@
-#include <optional>
 #include <stdexcept>
+#include <string_view>
 
 #include "service/features/node_dispatch/deployment_source_store.h"
 #include "support/postgres_test.h"
@@ -37,8 +37,8 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     bool rejected = false;
     try {
         (void)co_await service::node_dispatch::load_cluster_deployment_source(tx, "t", "c", "edge.example.com", true);
-    } catch (const std::bad_optional_access&) {
-        rejected = true;
+    } catch (const std::invalid_argument& error) {
+        rejected = std::string_view(error.what()).find("NULL") != std::string_view::npos;
     }
     require(rejected);
     co_await tx.rollback();

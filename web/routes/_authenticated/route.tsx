@@ -50,15 +50,13 @@ export const Route = createFileRoute('/_authenticated')({
       throw error
     }
   },
-  component: AuthenticatedLayout,
+  component: function AuthenticatedLayout() {
+    return (
+      <AppShell
+        account={<AccountMenu />}
+        taskCenter={<TaskCenter />}
+        resourceSearch={resourceSearch}
+      />
+    )
+  },
 })
-
-function AuthenticatedLayout() {
-  return (
-    <AppShell
-      account={<AccountMenu />}
-      taskCenter={<TaskCenter />}
-      resourceSearch={resourceSearch}
-    />
-  )
-}

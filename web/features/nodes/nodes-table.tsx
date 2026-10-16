@@ -14,6 +14,8 @@ import { Mono } from '@/components/mono'
 import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { clusterOptionsQuery } from '@/features/clusters/data'
+import { dnsZoneLinesQuery } from '@/features/dns-zones/data'
+import { dnsLineName } from '@/features/dns-zones/dns-lines'
 import { nodesQuery } from './data'
 import { NodeConnectionChip } from './node-connection-chip'
 import { NodeCreateSheet } from './node-create-sheet'
@@ -28,6 +30,34 @@ import type { Node } from './types'
 
 const connectionOptions = statusOptions(connectionStatuses)
 const nodeStatusOptions = statusOptions(nodeStatuses)
+
+/** Keep the endpoint order and line height aligned with the IP column.
+ * Queries are shared by zone and never open another live stream. */
+function NodeDnsLines({ node }: { node: Node }) {
+  const clusters = useQuery(clusterOptionsQuery)
+  const zoneId = clusters.data?.find(
+    (cluster) => cluster.id === node.cluster_id
+  )?.dns_zone_id
+  const lines = useQuery(dnsZoneLinesQuery(zoneId))
+  const endpoints = node.config.endpoints
+  if (!endpoints.length) return <span className='text-muted'>—</span>
+  return (
+    <ul className='flex flex-col gap-1.5'>
+      {endpoints.map((endpoint) => {
+        const name = dnsLineName(lines.data ?? [], endpoint.line_code)
+        return (
+          <li
+            key={endpoint.id}
+            title={name}
+            className='h-5 max-w-40 truncate text-[13px] leading-5 text-muted'
+          >
+            {name}
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
 
 /** Node list with toolbar, pagination and the add-node sheet, whose open
  * state belongs to the page (`/nodes?create=1`, or component state on the
@@ -65,35 +95,6 @@ export function NodesTable({
   )
   const filtered = hasListFilters(search, filterKeys)
   const columns: DataGridColumn<Node>[] = [
-    {
-      id: 'name',
-      header: '节点',
-      isRowHeader: true,
-      minWidth: 130,
-      cell: (node) => (
-        <span className='block truncate font-medium'>{node.name}</span>
-      ),
-    },
-    {
-      id: 'ip',
-      header: 'IP',
-      minWidth: 136,
-      cell: (node) =>
-        node.config.endpoints[0] ? (
-          <span className='flex min-w-0 items-center gap-1.5'>
-            <Mono truncate className='min-w-0'>
-              {node.config.endpoints[0].ip_address}
-            </Mono>
-            {node.config.endpoints.length > 1 && (
-              <span className='shrink-0 text-muted'>
-                +{node.config.endpoints.length - 1}
-              </span>
-            )}
-          </span>
-        ) : (
-          <span className='text-muted'>—</span>
-        ),
-    },
     ...(clusterId === undefined
       ? [
           {
@@ -113,10 +114,39 @@ export function NodesTable({
         ]
       : []),
     {
-      id: 'connection',
-      header: '在线状态',
-      minWidth: 100,
-      cell: (node) => <NodeConnectionChip runtime={node.runtime} />,
+      id: 'name',
+      header: '节点',
+      isRowHeader: true,
+      minWidth: 130,
+      cell: (node) => (
+        <span className='block truncate font-medium'>{node.name}</span>
+      ),
+    },
+    {
+      id: 'ip',
+      header: 'IP',
+      width: 160,
+      maxWidth: 160,
+      cell: (node) =>
+        node.config.endpoints.length ? (
+          <ul className='flex flex-col gap-1.5'>
+            {node.config.endpoints.map((endpoint) => (
+              <li key={endpoint.id} className='h-5'>
+                <Mono truncate className='w-[15ch] leading-5'>
+                  {endpoint.ip_address}
+                </Mono>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <span className='text-muted'>—</span>
+        ),
+    },
+    {
+      id: 'dns-line',
+      header: 'DNS 线路',
+      minWidth: 110,
+      cell: (node) => <NodeDnsLines node={node} />,
     },
     {
       id: 'cpu',
@@ -174,6 +204,12 @@ export function NodesTable({
           {formatNumber(liveMetrics(node.runtime).connected_ip_count)}
         </span>
       ),
+    },
+    {
+      id: 'connection',
+      header: '在线状态',
+      minWidth: 100,
+      cell: (node) => <NodeConnectionChip runtime={node.runtime} />,
     },
     {
       id: 'status',
@@ -265,7 +301,7 @@ export function NodesTable({
         isLoading={query.isPending}
         error={query.isError ? query.error : undefined}
         onRetry={() => void query.refetch()}
-        minWidth={clusterId === undefined ? 1080 : 960}
+        minWidth={clusterId === undefined ? 1224 : 1104}
         empty={
           filtered
             ? {

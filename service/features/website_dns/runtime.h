@@ -32,7 +32,7 @@ complete_stale_website_task(service::background::task_context& context,
     if (revision_changed) {
         (void)co_await service::sync_runtime::release_running(completion, marker);
     } else {
-        (void)co_await service::sync_runtime::complete_running(completion, marker);
+        (void)co_await service::sync_runtime::transition_running(completion, marker, service::sync_runtime::attempt_result::completed());
     }
     co_await completion.commit();
     co_return;
@@ -167,7 +167,7 @@ inline ruvia::task<void> probe_website(service::background::task_context& contex
     if (resource_deleted) {
         load_step.skip("网站已删除");
         auto completion = co_await db.begin_transaction();
-        (void)co_await service::sync_runtime::complete_running(completion, marker);
+        (void)co_await service::sync_runtime::transition_running(completion, marker, service::sync_runtime::attempt_result::completed());
         co_await completion.commit();
         co_return;
     }
@@ -214,8 +214,7 @@ inline ruvia::task<void> probe_website(service::background::task_context& contex
         if (!co_await service::sync_runtime::renew_running_lease(completion, marker)) {
             throw std::runtime_error("网站同步标记 lease 已失效");
         }
-        result_transition = co_await service::sync_runtime::complete_running_and_record_event(
-            completion, marker, attempt.to_json(context.pool()));
+        result_transition = co_await service::sync_runtime::record_running_result(completion, marker, service::sync_runtime::attempt_result::completed(), attempt.to_json(context.pool()));
         if (!result_transition.marker_transitioned_) {
             throw std::runtime_error("网站同步标记 lease 已失效");
         }
@@ -233,7 +232,7 @@ inline ruvia::task<void> fail_website_task(service::background::task_context& co
     const auto message = service::sync_runtime::attempt_error(trace, error);
     auto transaction = co_await context.db().begin_transaction();
     const auto result_transition =
-        co_await service::sync_runtime::fail_running_and_record_event(transaction, lease, message, detail);
+        co_await service::sync_runtime::record_running_result(transaction, lease, service::sync_runtime::attempt_result::retry(message), detail);
     co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease, result_transition,
         trace);
     if (result_transition.marker_transitioned_) {

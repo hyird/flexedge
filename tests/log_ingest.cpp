@@ -2,6 +2,7 @@
 #include <string>
 
 #include "service/features/log_ingest/envelope.h"
+#include "service/features/log_ingest/log_mapper.h"
 #include "service/features/log_ingest/tail_cursor.h"
 
 #define REQUIRE(condition)                                               \
@@ -44,6 +45,19 @@ int main() {
     REQUIRE(parsed->tenant_id() == "16e29f7c-46c7-48b6-bf6a-880ee2b998af");
     REQUIRE(parsed->agent_id() == "0123456789abcdef0123456789abcdef");
     REQUIRE(parsed->delivery().SerializeAsString() == delivery.SerializeAsString());
+
+    auto mutable_source = *parsed;
+    const auto rows = service::log_ingest::to_log_rows(mutable_source, 1787769816000);
+    REQUIRE(rows.access_.size() == 1 && rows.node_.empty());
+    REQUIRE(rows.websites_ == std::vector<std::string>{access->website_id()});
+    REQUIRE(rows.access_[0].get<"occurred_at">() == "2026-08-26T18:43:35.886Z");
+    REQUIRE(rows.access_[0].get<"response_bytes">() == 4096);
+    REQUIRE(rows.access_[0].get<"duration_ms">() == 12);
+    REQUIRE(!rows.access_[0].is_set<"created_at">());
+    mutable_source.mutable_delivery()->mutable_events(0)->mutable_access_log()->set_target("/changed");
+    REQUIRE(rows.access_[0].get<"target">() == "/asset.js?q=1");
+    REQUIRE(service::log_ingest::occurred_timestamp(1787770116001, 1787769816000) == "2026-08-26T18:43:36.000Z");
+    REQUIRE(service::log_ingest::occurred_timestamp(1787770116000, 1787769816000) == "2026-08-26T18:48:36.000Z");
 
     auto invalid_tenant = *parsed;
     invalid_tenant.set_tenant_id("tenant-1");

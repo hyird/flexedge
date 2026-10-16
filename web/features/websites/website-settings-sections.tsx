@@ -39,6 +39,7 @@ import {
   NumberField,
 } from './settings-controls'
 import type { Website, WebsiteOrigin } from './types'
+import { originGroupName } from './website-display'
 import {
   setWebsiteHttpsEnabled,
   websiteCertificateOptions,
@@ -598,7 +599,11 @@ function OriginGroupList({
                   size='sm'
                   variant='tertiary'
                   onPress={() => {
-                    const result = renameOriginGroup(values, group.name, draft)
+                    const result = renameOriginGroup(
+                      values,
+                      group.name,
+                      draft === originGroupName(group.name) ? group.name : draft
+                    )
                     if (!result.ok) {
                       setRenameError(result.message)
                       return
@@ -621,7 +626,9 @@ function OriginGroupList({
             </div>
           ) : (
             <div className='flex flex-wrap items-center gap-x-3 gap-y-1'>
-              <span className='text-sm font-medium'>{group.name}</span>
+              <span className='text-sm font-medium'>
+                {originGroupName(group.name)}
+              </span>
               {values.default_origin_group.trim() === group.name && (
                 <Chip size='sm' variant='soft' color='accent'>
                   默认
@@ -633,11 +640,11 @@ function OriginGroupList({
               </span>
               <span className='ml-auto'>
                 <IconAction
-                  label={`重命名源站组 ${group.name}`}
+                  label={`重命名源站组 ${originGroupName(group.name)}`}
                   icon={<Pencil className='size-4' />}
                   onPress={() => {
                     setRenaming(group.name)
-                    setDraft(group.name)
+                    setDraft(originGroupName(group.name))
                     setRenameError('')
                   }}
                 />
@@ -698,7 +705,7 @@ export function OriginsSection({
               onChange={(group) => update('default_origin_group', group)}
               items={groups.map((group) => ({
                 id: group.name,
-                label: group.name,
+                label: originGroupName(group.name),
               }))}
               error={errors.default_origin_group}
             />
@@ -795,8 +802,11 @@ export function OriginsSection({
               <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_7rem_7rem_8rem_6rem]'>
                 <Field
                   label='源站组'
-                  value={origin.group}
-                  onChange={(group) => patchOrigin(origin.id, { group })}
+                  value={originGroupName(origin.group)}
+                  onChange={(group) => {
+                    if (group !== originGroupName(origin.group))
+                      patchOrigin(origin.id, { group })
+                  }}
                   error={errors[`origins.${index}.group`]}
                 />
                 <Field

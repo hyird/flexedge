@@ -1,11 +1,11 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { ArrowRotateLeft, Pause, Play } from '@gravity-ui/icons'
 import { Segment, type DataGridColumn } from '@heroui-pro/react'
 import { Button, Tooltip } from '@heroui/react'
 import { formatBytes, formatDate } from '@/lib/format'
-import { pageLocally, useListState } from '@/lib/list-search'
+import { useListState } from '@/lib/list-search'
 import { statusReserve, type StatusDictionary } from '@/lib/status'
 import { CopyButton } from '@/components/copy-button'
 import { DataTable } from '@/components/data-table'
@@ -16,6 +16,7 @@ import { EmptyState } from '@/components/page'
 import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
+import { liveLogCapacity } from '@/features/logs/log-event'
 import { useLiveLogs } from '@/features/logs/use-live-logs'
 import { accessLogStatus, filterAccessLogs } from './access-log-filter'
 import type { AccessLog } from './access-log-schema'
@@ -68,11 +69,16 @@ export function AccessLogs() {
     gcTime: 0,
     placeholderData: keepPreviousData,
   })
-  const view = history
-    ? historyQuery.data
-    : pageLocally(filterAccessLogs(live.logs, filter), list.page, list.pageSize)
-  const rows = view?.list
-  const total = view?.total ?? 0
+  const liveRows = useMemo(
+    () =>
+      filterAccessLogs(live.logs, {
+        keyword: list.keyword,
+        method: search.method,
+        status_class: search.status_class,
+      }),
+    [live.logs, list.keyword, search.method, search.status_class]
+  )
+  const rows = history ? historyQuery.data?.list : liveRows
   const filtered =
     !!list.keyword || filterKeys.some((key) => search[key] !== undefined)
   const selected = openLogId
@@ -81,101 +87,112 @@ export function AccessLogs() {
       )
     : undefined
 
-  const columns: DataGridColumn<AccessLog>[] = [
-    {
-      id: 'time',
-      header: '时间',
-      minWidth: 160,
-      cell: (log) => (
-        <span className='text-[13px] tabular-nums'>
-          {formatDate(log.occurred_at)}
-        </span>
-      ),
-    },
-    {
-      id: 'node',
-      header: '节点',
-      minWidth: 120,
-      cell: (log) => (
-        <Link
-          to='/nodes/$nodeId'
-          params={{ nodeId: log.node_id }}
-          title={log.node_name}
-          className='link'
-        >
-          {log.node_name}
-        </Link>
-      ),
-    },
-    {
-      id: 'request',
-      header: '请求',
-      isRowHeader: true,
-      minWidth: 220,
-      cell: (log) => {
-        const url = log.host + log.target
-        return (
-          <Tooltip delay={300}>
-            <Button
-              size='sm'
-              variant='ghost'
-              className='h-auto w-max max-w-120 justify-start gap-2 px-1 py-0.5 text-left'
-              aria-label={`查看请求 ${log.method} ${url}`}
-              onPress={() => setOpenLogId(log.id)}
-            >
-              <span className='shrink-0 font-semibold'>{log.method}</span>
-              <Mono className='min-w-0 truncate text-accent'>{url}</Mono>
-            </Button>
-            <Tooltip.Content className='max-w-120 break-all'>
-              {log.method} {url}
-            </Tooltip.Content>
-          </Tooltip>
-        )
+  const columns = useMemo<DataGridColumn<AccessLog>[]>(
+    () => [
+      {
+        id: 'time',
+        header: '时间',
+        width: 190,
+        cell: (log) => (
+          <span className='text-[13px] tabular-nums'>
+            {formatDate(log.occurred_at)}
+          </span>
+        ),
       },
-    },
-    {
-      id: 'status',
-      header: '状态',
-      minWidth: 70,
-      cell: (log) => <StatusChip {...accessLogStatus(log.status_code)} />,
-    },
-    {
-      id: 'client',
-      header: 'IP',
-      minWidth: 130,
-      cell: (log) => (
-        <ClientIpTooltip
-          asn={log.client_ip_asn}
-          asName={log.client_ip_as_name}
-          label={log.client_ip || '—'}
-          className='font-mono text-[13px] tabular-nums'
-        />
-      ),
-    },
-    {
-      id: 'location',
-      header: 'IP 归属',
-      minWidth: 150,
-      cell: (log) => {
-        const location = formatClientLocation(log.client_ip_location)
-        return <span title={location}>{location}</span>
+      {
+        id: 'node',
+        header: '节点',
+        minWidth: 120,
+        cell: (log) => (
+          <Link
+            to='/nodes/$nodeId'
+            params={{ nodeId: log.node_id }}
+            title={log.node_name}
+            className='link block max-w-full truncate'
+          >
+            {log.node_name}
+          </Link>
+        ),
       },
-    },
-    {
-      id: 'duration',
-      header: '耗时',
-      minWidth: 70,
-      cell: (log) => <span className='tabular-nums'>{log.duration_ms} ms</span>,
-    },
-    {
-      id: 'bytes',
-      header: '响应',
-      minWidth: 80,
-      cell: (log) => (
-        <span className='tabular-nums'>{formatBytes(log.response_bytes)}</span>
-      ),
-    },
-  ]
+      {
+        id: 'request',
+        header: '请求',
+        isRowHeader: true,
+        minWidth: 300,
+        cell: (log) => {
+          const url = log.host + log.target
+          return (
+            <Tooltip delay={300}>
+              <Button
+                size='sm'
+                variant='ghost'
+                className='h-auto w-max max-w-full justify-start gap-2 px-1 py-0.5 text-left'
+                aria-label={`查看请求 ${log.method} ${url}`}
+                onPress={() => setOpenLogId(log.id)}
+              >
+                <span className='shrink-0 font-semibold'>{log.method}</span>
+                <Mono className='min-w-0 truncate text-accent'>{url}</Mono>
+              </Button>
+              <Tooltip.Content className='max-w-120 break-all'>
+                {log.method} {url}
+              </Tooltip.Content>
+            </Tooltip>
+          )
+        },
+      },
+      {
+        id: 'status',
+        header: '状态',
+        width: 80,
+        cell: (log) => <StatusChip {...accessLogStatus(log.status_code)} />,
+      },
+      {
+        id: 'client',
+        header: 'IP',
+        minWidth: 130,
+        cell: (log) => (
+          <ClientIpTooltip
+            asn={log.client_ip_asn}
+            asName={log.client_ip_as_name}
+            label={log.client_ip || '—'}
+            className='block max-w-full truncate font-mono text-[13px] tabular-nums'
+          />
+        ),
+      },
+      {
+        id: 'location',
+        header: 'IP 归属',
+        minWidth: 150,
+        cell: (log) => {
+          const location = formatClientLocation(log.client_ip_location)
+          return (
+            <span title={location} className='block max-w-full truncate'>
+              {location}
+            </span>
+          )
+        },
+      },
+      {
+        id: 'duration',
+        header: '耗时',
+        width: 90,
+        cell: (log) => (
+          <span className='tabular-nums'>{log.duration_ms} ms</span>
+        ),
+      },
+      {
+        id: 'bytes',
+        header: '响应',
+        width: 100,
+        cell: (log) => (
+          <span className='tabular-nums'>
+            {formatBytes(log.response_bytes)}
+          </span>
+        ),
+      },
+    ],
+    []
+  )
 
   const liveState = paused
     ? liveStates.paused
@@ -191,7 +208,7 @@ export function AccessLogs() {
       description={
         history
           ? '按条件查询已入库的访问记录。'
-          : '实时接收新请求，浏览器最多保留最近 1000 条。'
+          : `实时接收新请求，最多保留最近 ${liveLogCapacity} 条，最新在前。`
       }
       actions={
         <Segment
@@ -294,6 +311,7 @@ export function AccessLogs() {
         />
         <DataTable
           fit
+          virtualized={!history}
           label={history ? '历史访问日志' : '实时访问日志'}
           variant='secondary'
           columns={columns}
@@ -331,13 +349,20 @@ export function AccessLogs() {
                   }
           }
           footer={
-            <TablePagination
-              page={list.page}
-              pageSize={list.pageSize}
-              total={total}
-              onPageChange={(page) => void list.setPage(page)}
-              onPageSizeChange={(size) => void list.setPageSize(size)}
-            />
+            history ? (
+              <TablePagination
+                page={list.page}
+                pageSize={list.pageSize}
+                total={historyQuery.data?.total ?? 0}
+                onPageChange={(page) => void list.setPage(page)}
+                onPageSizeChange={(size) => void list.setPageSize(size)}
+              />
+            ) : (
+              <span className='text-[13px] text-muted tabular-nums'>
+                {filtered ? `匹配 ${rows?.length ?? 0} 条，` : ''}
+                已保留 {live.logs.length} / {liveLogCapacity} 条
+              </span>
+            )
           }
         />
       </div>

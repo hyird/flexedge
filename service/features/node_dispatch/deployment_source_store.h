@@ -1,5 +1,7 @@
 #pragma once
+
 #include <ruvia/core/task.h>
+#include <ruvia/web/db/db_repository.h>
 #include <ruvia/web/db/db_transaction.h>
 
 #include <cstdint>
@@ -10,6 +12,7 @@
 
 #include "service/features/certificate_material/model.h"
 #include "service/features/node_dispatch/deployment_source.h"
+#include "service/features/node_dispatch/dispatch_entity.h"
 
 namespace service::node_dispatch {
 
@@ -22,49 +25,63 @@ load_cluster_deployment_source(ruvia::db_transaction& transaction, std::string t
         .enabled_ = cluster_enabled,
         .websites_ = {},
         .certificates_by_website_ = {}};
-    const auto website_rows = co_await transaction.query(
-        "SELECT id, revision, status = 'enabled', config::text FROM sys_website WHERE tenant_id = "
-        "$1 AND cluster_id = $2 AND deleted_at IS NULL ORDER BY sort ASC",
-        result.tenant_id_, result.cluster_id_);
+    ruvia::db_query expressions;
+    const auto equal = [&](std::string_view column, std::string_view value, std::string_view alias) {
+        return expressions.binary(expressions.column(column, alias), ruvia::db_binary_operator::equal,
+            expressions.value(value));
+    };
+    const auto same = [&](std::string_view left_column, std::string_view left_alias,
+                          std::string_view right_column, std::string_view right_alias) {
+        return expressions.binary(expressions.column(left_column, left_alias), ruvia::db_binary_operator::equal,
+            expressions.column(right_column, right_alias));
+    };
+    auto websites = transaction.get_repository<dispatch_website_entity>().create_query_builder("website");
+    websites.select({{"id", {}}, {"revision", {}}, {"enabled", equal("status", "enabled", "website")},
+                        {"config", expressions.cast(expressions.column("config", "website"), ruvia::db_data_type::text)}})
+        .where(equal("tenant_id", result.tenant_id_, "website"))
+        .and_where(equal("cluster_id", result.cluster_id_, "website"))
+        .and_where(expressions.unary(ruvia::db_unary_operator::is_null, expressions.column("deleted_at", "website")))
+        .order_by(expressions.column("sort", "website"));
+    const auto website_rows = co_await websites.get_many<published_website>();
     result.websites_.reserve(website_rows.size());
-    for (const auto& row : website_rows) {
-        result.websites_.push_back({
-            .id_ = std::string(row[0].value().value()),
-            .revision_ = row[1].as<std::int64_t>().value(),
-            .enabled_ = row[2].as<bool>().value(),
-            .config_json_ = std::string(row[3].value().value()),
-        });
+    for (const auto& website : website_rows) {
+        result.websites_.push_back({.id_ = std::string(website.get<"id">()), .revision_ = website.get<"revision">(), .enabled_ = website.get<"enabled">(), .config_json_ = std::string(website.get<"config">())});
     }
-
-    const auto certificate_rows = co_await transaction.query(
-        "SELECT binding.website_id, certificate.id, certificate.subject_alt_names[1], "
-        "certificate.subject_alt_names[2], "
-        "certificate.material::text FROM sys_website_certificate_binding binding INNER JOIN "
-        "sys_website website ON website.tenant_id = binding.tenant_id AND website.id = "
-        "binding.website_id INNER JOIN sys_certificate certificate ON certificate.tenant_id = "
-        "binding.tenant_id AND certificate.id = binding.certificate_id WHERE "
-        "binding.tenant_id = $1 AND website.cluster_id = $2 AND website.deleted_at IS NULL AND "
-        "certificate.issued_revision > 0 AND certificate.expires_at > NOW() AND "
-        "certificate.deleted_at IS NULL ORDER BY website.sort ASC, binding.position ASC",
-        result.tenant_id_, result.cluster_id_);
-    for (const auto& row : certificate_rows) {
-        const auto material =
-            service::certificate_material::parse_stored(row[4].value().value());
+    auto certificates = transaction.get_repository<dispatch_binding_entity>().create_query_builder("binding");
+    certificates.select({{"website_id", {}}, {"id", expressions.column("id", "certificate")},
+                            {"wildcard_domain", expressions.subscript(expressions.column("subject_alt_names", "certificate"), expressions.value(1))},
+                            {"base_domain", expressions.subscript(expressions.column("subject_alt_names", "certificate"), expressions.value(2))},
+                            {"material", expressions.cast(expressions.column("material", "certificate"), ruvia::db_data_type::text)}})
+        .join<dispatch_website_entity>(ruvia::db_join_type::inner, "website",
+            expressions.binary(same("tenant_id", "website", "tenant_id", "binding"), ruvia::db_binary_operator::and_value,
+                same("id", "website", "website_id", "binding")))
+        .join<dispatch_certificate_entity>(ruvia::db_join_type::inner, "certificate",
+            expressions.binary(same("tenant_id", "certificate", "tenant_id", "binding"), ruvia::db_binary_operator::and_value,
+                same("id", "certificate", "certificate_id", "binding")))
+        .where(equal("tenant_id", result.tenant_id_, "binding"))
+        .and_where(equal("cluster_id", result.cluster_id_, "website"))
+        .and_where(expressions.unary(ruvia::db_unary_operator::is_null, expressions.column("deleted_at", "website")))
+        .and_where(expressions.binary(expressions.column("issued_revision", "certificate"), ruvia::db_binary_operator::greater,
+            expressions.value(0)))
+        .and_where(expressions.binary(expressions.column("expires_at", "certificate"), ruvia::db_binary_operator::greater,
+            expressions.call("now")))
+        .and_where(expressions.unary(ruvia::db_unary_operator::is_null, expressions.column("deleted_at", "certificate")))
+        .order_by(expressions.column("sort", "website"))
+        .add_order_by(expressions.column("position", "binding"));
+    const auto certificate_rows = co_await certificates.get_many<published_certificate>();
+    for (const auto& certificate : certificate_rows) {
+        const auto material = service::certificate_material::parse_stored(certificate.get<"material">());
         if (!material || !material->certificate_chain_pem_ || !material->private_key_envelope_) {
             throw std::runtime_error("certificate release material is invalid");
         }
         std::vector<std::string> domains;
-        for (const auto index : {2U, 3U}) {
-            if (const auto name = row[index].value(); name && !name->empty()) {
-                domains.emplace_back(*name);
-            }
+        if (!certificate.is_null<"wildcard_domain">() && !certificate.get<"wildcard_domain">().empty()) {
+            domains.emplace_back(certificate.get<"wildcard_domain">());
         }
-        result.certificates_by_website_[std::string(row[0].value().value())].push_back({
-            .id_ = std::string(row[1].value().value()),
-            .domains_ = std::move(domains),
-            .certificate_chain_pem_ = *material->certificate_chain_pem_,
-            .private_key_envelope_ = *material->private_key_envelope_,
-        });
+        if (!certificate.is_null<"base_domain">() && !certificate.get<"base_domain">().empty()) {
+            domains.emplace_back(certificate.get<"base_domain">());
+        }
+        result.certificates_by_website_[std::string(certificate.get<"website_id">())].push_back({.id_ = std::string(certificate.get<"id">()), .domains_ = std::move(domains), .certificate_chain_pem_ = *material->certificate_chain_pem_, .private_key_envelope_ = *material->private_key_envelope_});
     }
     co_return result;
 }

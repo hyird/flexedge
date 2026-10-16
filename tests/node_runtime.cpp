@@ -41,6 +41,7 @@
 #include <openssl/x509.h>
 
 #include "common/file_digest.h"
+#include "node/data/data_plane.h"
 #include "node/data/edge_listener.h"
 #include "node/data/health_supervisor.h"
 #include "node/data/origin_health.h"
@@ -62,6 +63,7 @@
 #include "node/runtime/upgrade_record.h"
 #include "tests/support/config_fixture.h"
 #include "tests/support/http_client.h"
+#include "tests/support/tls_identity.h"
 
 #define REQUIRE(condition)                                               \
     do {                                                                 \
@@ -94,7 +96,8 @@ std::shared_ptr<const flexedge::node::compiled_config> compiled(TestConfig value
 void apply(flexedge::node::runtime_state& runtime, TestConfig value) {
     auto config = compiled(std::move(value));
     runtime.validate_next(*config);
-    runtime.publish(std::move(config));
+    auto patterns = flexedge::node::compile_route_patterns(*config);
+    runtime.publish(std::move(config), std::move(patterns));
 }
 
 using flexedge::testing::request;
@@ -354,90 +357,8 @@ bool accept_until_stopped(asio::ip::tcp::acceptor& acceptor, asio::ip::tcp::sock
     return false;
 }
 
-struct pem_identity final {
-    std::string certificate_;
-    std::string private_key_;
-};
-
-pem_identity make_identity(std::string_view common_name, std::int64_t serial) {
-    const auto key = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>(
-        EVP_PKEY_Q_keygen(nullptr, nullptr, "RSA", 2048), &EVP_PKEY_free);
-    const auto certificate = std::unique_ptr<X509, decltype(&X509_free)>(X509_new(), &X509_free);
-    REQUIRE(key != nullptr);
-    REQUIRE(certificate != nullptr);
-    REQUIRE(X509_set_version(certificate.get(), 2) == 1);
-    REQUIRE(ASN1_INTEGER_set_int64(X509_get_serialNumber(certificate.get()), serial) == 1);
-    REQUIRE(X509_gmtime_adj(X509_get_notBefore(certificate.get()), 0) != nullptr);
-    REQUIRE(X509_gmtime_adj(X509_get_notAfter(certificate.get()), 3600) != nullptr);
-    REQUIRE(X509_set_pubkey(certificate.get(), key.get()) == 1);
-    auto* subject = X509_get_subject_name(certificate.get());
-    REQUIRE(subject != nullptr);
-    REQUIRE(X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC,
-                reinterpret_cast<const unsigned char*>(common_name.data()),
-                static_cast<int>(common_name.size()), -1, 0) == 1);
-    REQUIRE(X509_set_issuer_name(certificate.get(), subject) == 1);
-    REQUIRE(X509_sign(certificate.get(), key.get(), EVP_sha256()) > 0);
-
-    const auto certificate_bio =
-        std::unique_ptr<BIO, decltype(&BIO_free)>(BIO_new(BIO_s_mem()), &BIO_free);
-    const auto key_bio = std::unique_ptr<BIO, decltype(&BIO_free)>(BIO_new(BIO_s_mem()), &BIO_free);
-    REQUIRE(certificate_bio != nullptr);
-    REQUIRE(key_bio != nullptr);
-    REQUIRE(PEM_write_bio_X509(certificate_bio.get(), certificate.get()) == 1);
-    REQUIRE(PEM_write_bio_PrivateKey(key_bio.get(), key.get(), nullptr, nullptr, 0, nullptr,
-                nullptr) == 1);
-    char* certificate_bytes{};
-    char* key_bytes{};
-    const auto certificate_size = BIO_get_mem_data(certificate_bio.get(), &certificate_bytes);
-    const auto key_size = BIO_get_mem_data(key_bio.get(), &key_bytes);
-    REQUIRE(certificate_size > 0);
-    REQUIRE(key_size > 0);
-    return {
-        .certificate_ = std::string(certificate_bytes, static_cast<std::size_t>(certificate_size)),
-        .private_key_ = std::string(key_bytes, static_cast<std::size_t>(key_size)),
-    };
-}
-
-struct tls_response final {
-    std::string bytes_{};
-    std::string peer_common_name_;
-};
-
-tls_response tls_request(std::uint16_t port, std::string_view server_name) {
-    asio::io_context context;
-    asio::ssl::context tls_context(asio::ssl::context::tls_client);
-    tls_context.set_verify_mode(asio::ssl::verify_none);
-    asio::ssl::stream<asio::ip::tcp::socket> stream(context, tls_context);
-    REQUIRE(SSL_set_tlsext_host_name(stream.native_handle(), std::string(server_name).c_str()) == 1);
-    stream.lowest_layer().connect({asio::ip::address_v4::loopback(), port});
-    stream.handshake(asio::ssl::stream_base::client);
-    const auto peer = std::unique_ptr<X509, decltype(&X509_free)>(
-        SSL_get1_peer_certificate(stream.native_handle()), &X509_free);
-    REQUIRE(peer != nullptr);
-    std::array<char, 256> common_name{};
-    const auto common_name_size =
-        X509_NAME_get_text_by_NID(X509_get_subject_name(peer.get()), NID_commonName,
-            common_name.data(), static_cast<int>(common_name.size()));
-    REQUIRE(common_name_size > 0);
-    const auto bytes =
-        "GET /tls HTTP/1.1\r\nHost: " + std::string(server_name) + "\r\nConnection: close\r\n\r\n";
-    asio::write(stream, asio::buffer(bytes));
-    tls_response response{
-        .peer_common_name_ = std::string(common_name.data(), static_cast<std::size_t>(common_name_size))};
-    std::array<char, 1024> buffer{};
-    std::error_code error;
-    for (;;) {
-        const auto size = stream.read_some(asio::buffer(buffer), error);
-        response.bytes_.append(buffer.data(), size);
-        if (error == asio::error::eof || error == asio::ssl::error::stream_truncated) {
-            break;
-        }
-        if (error) {
-            throw std::system_error(error, "could not read HTTPS edge response");
-        }
-    }
-    return response;
-}
+using flexedge::testing::make_identity;
+using flexedge::testing::tls_request;
 
 std::string tls_alpn(std::uint16_t port, std::string_view server_name, bool offer_http2) {
     asio::io_context context;
@@ -608,25 +529,261 @@ std::string web_socket_round_trip(std::uint16_t port) {
     return std::string(server_bytes.data(), server_bytes.size());
 }
 
+enum class reload_action { abandon,
+    fail,
+    activate };
+
+ruvia::task<void> hold_listener_reload(flexedge::node::data_plane& plane, const TestConfig& config,
+    std::atomic<bool>& ready, ruvia::channel_receiver<bool>& release) {
+    auto prepared = co_await plane.prepare(compiled(config));
+    ready = true;
+    REQUIRE((co_await release.receive_for(std::chrono::seconds(3))).has_value());
+}
+
+ruvia::task<void> exercise_listener_reload(flexedge::node::data_plane& plane,
+    const TestConfig& config, std::size_t added, std::size_t retired, reload_action action) {
+    std::optional<flexedge::node::prepared_data_plane_reload> reload;
+    {
+        auto prepared = co_await plane.prepare(compiled(config));
+        REQUIRE(prepared.added_listeners() == added);
+        REQUIRE(prepared.retired_listeners() == retired);
+        reload.emplace(std::move(prepared));
+    }
+    // The moved-from object's destruction must leave the new owner able to commit.
+    if (action == reload_action::activate) {
+        co_await plane.activate(*reload);
+    } else if (action == reload_action::fail) {
+        throw std::runtime_error("synthetic failure after preparing listeners");
+    }
+    co_return;
+}
+
+void verify_listener_reload() {
+    using flexedge::node::data_plane;
+    using flexedge::node::loop_shutdown;
+    using flexedge::node::owned_log_batch;
+    using flexedge::node::runtime_state;
+    constexpr std::size_t worker_count = 2;
+    ruvia::event_loop_pool workers({.loop_count_ = worker_count});
+    ruvia::event_loop_pool control({.loop_count_ = 1});
+    runtime_state runtime;
+    auto [sender, receiver] = ruvia::make_channel<owned_log_batch>(control.loop(0).handle(), {.capacity_ = 32});
+    data_plane plane(workers, control.loop(0), runtime, sender);
+    loop_shutdown shutdown(workers, control);
+    workers.start();
+    control.start();
+
+    asio::io_context sockets;
+    const auto reserve_port = [&] {
+        return asio::ip::tcp::acceptor(sockets, {asio::ip::address_v4::any(), 0});
+    };
+    const auto released = [&](std::uint16_t port) {
+        return waitUntil([&] {
+            asio::ip::tcp::acceptor probe(sockets);
+            std::error_code error;
+            probe.open(asio::ip::tcp::v4(), error);
+            if (!error) {
+                probe.set_option(asio::socket_base::reuse_address(true), error);
+            }
+            if (!error) {
+                probe.bind({asio::ip::address_v4::any(), port}, error);
+            }
+            return !error;
+        },
+            std::chrono::seconds(2));
+    };
+    auto http_reservation = reserve_port();
+    auto https_reservation = reserve_port();
+    auto spare_reservation = reserve_port();
+    auto occupied = reserve_port();
+    const auto http_port = http_reservation.local_endpoint().port();
+    const auto https_port = https_reservation.local_endpoint().port();
+    const auto spare_port = spare_reservation.local_endpoint().port();
+    http_reservation.close();
+    https_reservation.close();
+    spare_reservation.close();
+
+    auto config = snapshot(false);
+    const auto identity = make_identity("www.example.com", 10);
+    config.mutableCertificate(0)->set_certificate_chain_pem(identity.certificate_);
+    config.mutableCertificate(0)->set_private_key_pem(identity.private_key_);
+    auto* endpoint = config.node_spec.mutable_endpoints(0);
+    endpoint->set_http_port(http_port);
+    endpoint->set_https_port(https_port);
+    auto* duplicate = config.node_spec.add_endpoints();
+    *duplicate = *endpoint;
+    duplicate->set_id("endpoint-duplicate");
+    duplicate->set_ip_address("127.0.0.2");
+    config.finalize();
+    const auto exercise = [&](const TestConfig& candidate, std::size_t added, std::size_t retired, reload_action action) {
+        control.loop(0).start(exercise_listener_reload(plane, candidate, added, retired, action)).get();
+    };
+    const auto require_serving = [&](std::uint16_t secure_port) {
+        REQUIRE(request(http_port, "unknown.example.com").starts_with("HTTP/1.1 421 "));
+        REQUIRE(tls_request(secure_port, "www.example.com", "unknown.example.com").bytes_.starts_with("HTTP/1.1 421 "));
+    };
+    // Both protocols deduplicate wildcard binds on every worker. Abandonment before start
+    // releases them; moving and committing the same plan keeps them serving afterwards.
+    exercise(config, 2 * worker_count, 0, reload_action::abandon);
+    REQUIRE(released(http_port));
+    REQUIRE(released(https_port));
+    exercise(config, 2 * worker_count, 0, reload_action::activate);
+    const auto active = runtime.config();
+    require_serving(https_port);
+
+    // Concurrent reports share one receiver, and must not consume one another's replies.
+    std::vector<ruvia::root_task<flexedge::node::data_plane_report>> reports;
+    for (std::size_t count = 0; count != 12; ++count) {
+        reports.push_back(control.loop(0).start(plane.report({})));
+    }
+    for (auto& report : reports) {
+        REQUIRE(report.get().load_.has_value());
+    }
+    // Cancelling a queued report must remove its waiter and let later operations proceed.
+    auto [release_sender, release_receiver] = ruvia::make_channel<bool>(control.loop(0).handle(), {.capacity_ = 1});
+    std::atomic<bool> held{};
+    auto holding = control.loop(0).start(hold_listener_reload(plane, config, held, release_receiver));
+    REQUIRE(waitUntil([&] { return held.load(); }, std::chrono::seconds(1)));
+    ruvia::stop_source cancelled;
+    auto cancelled_report = control.loop(0).start(plane.report(cancelled.token()));
+    auto waiting_report = control.loop(0).start(plane.report({}));
+    control.loop(0).start([]() -> ruvia::task<void> { co_return; }()).get();
+    cancelled.request_stop();
+    REQUIRE(!cancelled_report.get().load_.has_value());
+    REQUIRE(release_sender.send(true).accepted());
+    holding.get();
+    REQUIRE(waiting_report.get().load_.has_value());
+
+    // Abandoning a plan containing only reused listeners must not stop the active plane.
+    exercise(config, 0, 0, reload_action::abandon);
+    REQUIRE(runtime.config() == active);
+    require_serving(https_port);
+
+    auto replacement = config;
+    replacement.setGeneration(4);
+    for (auto& address : *replacement.node_spec.mutable_endpoints()) {
+        address.set_https_port(spare_port);
+    }
+    replacement.finalize();
+    exercise(replacement, worker_count, worker_count, reload_action::abandon);
+    REQUIRE(released(spare_port));
+    bool failed = false;
+    try {
+        exercise(replacement, worker_count, worker_count, reload_action::fail);
+    } catch (const std::runtime_error& error) {
+        failed = std::string_view(error.what()) == "synthetic failure after preparing listeners";
+    }
+    REQUIRE(failed);
+    REQUIRE(released(spare_port));
+    REQUIRE(runtime.config() == active);
+    require_serving(https_port);
+
+    // A later HTTPS bind failure must release the HTTP listeners already prepared.
+    auto blocked = replacement;
+    for (auto& address : *blocked.node_spec.mutable_endpoints()) {
+        address.set_http_port(spare_port);
+        address.set_https_port(occupied.local_endpoint().port());
+    }
+    blocked.finalize();
+    failed = false;
+    try {
+        exercise(blocked, 0, 0, reload_action::activate);
+    } catch (const std::runtime_error&) {
+        failed = true;
+    }
+    REQUIRE(failed);
+    REQUIRE(released(spare_port));
+    REQUIRE(runtime.config() == active);
+    require_serving(https_port);
+
+    exercise(replacement, worker_count, worker_count, reload_action::activate);
+    REQUIRE(released(https_port));
+    require_serving(spare_port);
+    replacement.setGeneration(5);
+    replacement.mutableWebsite()->set_https_enabled(false);
+    for (auto& domain : *replacement.mutableWebsite()->mutable_domains()) {
+        domain.set_https_enabled(false);
+    }
+    replacement.finalize();
+    exercise(replacement, 0, worker_count, reload_action::activate);
+    REQUIRE(released(spare_port));
+    REQUIRE(request(http_port, "unknown.example.com").starts_with("HTTP/1.1 421 "));
+    replacement.setGeneration(6);
+    replacement.node_spec.set_enabled(false);
+    replacement.finalize();
+    exercise(replacement, 0, worker_count, reload_action::activate);
+    REQUIRE(released(http_port));
+    plane.request_stop_accepting();
+    bool stopped = false;
+    try {
+        exercise(replacement, 0, 0, reload_action::activate);
+    } catch (const std::runtime_error& error) {
+        stopped = std::string_view(error.what()) == "data plane is stopping";
+    }
+    REQUIRE(stopped);
+    shutdown.stop_and_join();
+}
+
 // Replaces the origins `health` tracks on its loop, as data_plane::activate does.
 void set_health_origins(ruvia::event_loop loop, flexedge::node::origin_health_supervisor& health,
     flexedge::node::origin_health_key_set keys) {
     loop.start([](flexedge::node::origin_health_supervisor& supervisor,
                    flexedge::node::origin_health_key_set origins) -> ruvia::task<void> {
-            supervisor.activate(supervisor.prepare(origins));
+            supervisor.activate(supervisor.prepare(origins, {}));
             co_return;
         }(health, std::move(keys)))
         .get();
 }
 
-// The published health once the outcomes already sent to the supervisor loop are applied: one
-// turn applies them, the next publishes the snapshot they scheduled.
+// Copies are taken on the owner loop; request outcomes no longer need two posted turns.
 std::shared_ptr<const flexedge::node::origin_health_snapshot> settled_health(ruvia::event_loop loop,
-    const flexedge::node::origin_health_supervisor& health) {
-    for (int turn = 0; turn < 2; ++turn) {
-        loop.start([]() -> ruvia::task<void> { co_return; }()).get();
-    }
-    return health.snapshot();
+    flexedge::node::origin_health_supervisor& health) {
+    return loop.start([](flexedge::node::origin_health_supervisor& local) -> ruvia::task<std::shared_ptr<const flexedge::node::origin_health_snapshot>> {
+                   co_return local.snapshot();
+               }(health))
+        .get();
+}
+
+void record_health_failure(ruvia::event_loop loop, flexedge::node::origin_health_supervisor& health) {
+    loop.start([](flexedge::node::origin_health_supervisor& local) -> ruvia::task<void> {
+            local.target("website-1", "origin-1").failure(1);
+            co_return;
+        }(health))
+        .get();
+}
+
+ruvia::task<void> publish_runtime(flexedge::node::runtime_state& local,
+    std::shared_ptr<const flexedge::node::compiled_config> config) {
+    auto patterns = flexedge::node::compile_route_patterns(*config);
+    local.publish(std::move(config), std::move(patterns));
+    co_return;
+}
+
+void publish_tls(ruvia::event_loop loop, flexedge::node::tls_context_registry& registry,
+    std::shared_ptr<const flexedge::node::compiled_config> config) {
+    loop.start([](flexedge::node::tls_context_registry& local,
+                   std::shared_ptr<const flexedge::node::compiled_config> material) -> ruvia::task<void> {
+            local.publish(std::make_shared<flexedge::node::tls_context_set>(*material));
+            co_return;
+        }(registry, std::move(config)))
+        .get();
+}
+
+struct observed_worker final {
+    ruvia::event_loop loop_;
+    flexedge::node::worker_metrics* metrics_{};
+    const flexedge::node::connected_clients* clients_{};
+    const flexedge::node::log_producer* logs_{};
+};
+struct observed_counters final {
+    flexedge::node::data_plane_load load_{};
+    std::vector<flexedge::node::connected_clients::address_key> addresses_{};
+};
+ruvia::task<observed_counters> capture_counters(const observed_worker& worker) {
+    co_return observed_counters{.load_ = {.connection_count_ = worker.metrics_->connection_count(),
+                                    .traffic_out_bytes_ = worker.metrics_->traffic_out_bytes(),
+                                    .logs_ = worker.logs_->snapshot()},
+        .addresses_ = worker.clients_->snapshot()};
 }
 
 }  // namespace
@@ -695,6 +852,7 @@ int main(int argc, char* argv[]) {
 #endif
 
         verify_log_batches();
+        verify_listener_reload();
 
         const auto updater_binary_path = credentials_root / "node";
         {
@@ -1018,10 +1176,24 @@ int main(int argc, char* argv[]) {
         stored_snapshot.finalize();
         state_store.stage(stored_snapshot.active, stored_snapshot.objects);
         REQUIRE(!std::filesystem::exists(state_directory / "releases"));
-        state_store.activate_staged();
+        const auto no_previous = state_store.activate_staged();
+        REQUIRE(!no_previous);
         const auto persisted = state_store.load();
         REQUIRE(persisted.active_.SerializeAsString() == stored_snapshot.active.SerializeAsString());
         REQUIRE(persisted.objects_.size() == stored_snapshot.objects.size());
+        state_store.rollback_active(no_previous);
+        REQUIRE(!state_store.load().active_.has_release());
+        state_store.stage(stored_snapshot.active, stored_snapshot.objects);
+        state_store.activate_staged();
+        auto rolled_back = stored_snapshot;
+        rolled_back.setGeneration(4);
+        rolled_back.finalize();
+        state_store.stage(rolled_back.active, rolled_back.objects);
+        const auto previous_state = state_store.activate_staged();
+        REQUIRE(previous_state.has_value());
+        REQUIRE(state_store.load().active_.SerializeAsString() == rolled_back.active.SerializeAsString());
+        state_store.rollback_active(previous_state);
+        REQUIRE(state_store.load().active_.SerializeAsString() == stored_snapshot.active.SerializeAsString());
         auto stale_snapshot = snapshot();
         stale_snapshot.node_spec.set_schema_version(1);
         stale_snapshot.finalize();
@@ -1140,10 +1312,15 @@ int main(int argc, char* argv[]) {
         flexedge::node::worker_metrics second_metrics;
         ruvia::event_loop_pool loops({.loop_count_ = 2});
         ruvia::event_loop_pool control_loops({.loop_count_ = 1});
+        flexedge::node::runtime_state first_runtime;
+        flexedge::node::runtime_state second_runtime;
+        first_runtime.publish(runtime.config(), flexedge::node::compile_route_patterns(*runtime.config()));
+        second_runtime.publish(runtime.config(), flexedge::node::compile_route_patterns(*runtime.config()));
         flexedge::node::origin_tls_context first_origin_tls;
         flexedge::node::origin_tls_context second_origin_tls;
         auto listener_health =
-            flexedge::node::origin_health_supervisor::create(loops.loop(0), runtime, first_origin_tls);
+            flexedge::node::origin_health_supervisor::create(loops.loop(0), first_runtime, first_origin_tls);
+        auto second_listener_health = flexedge::node::origin_health_supervisor::create(loops.loop(1), second_runtime, second_origin_tls);
         flexedge::node::origin_connection_pool first_origin_connections(loops.loop(0).executor(),
             first_origin_tls);
         flexedge::node::origin_connection_pool second_origin_connections(loops.loop(1).executor(),
@@ -1152,6 +1329,8 @@ int main(int argc, char* argv[]) {
             flexedge::node::maximum_request_buffer_bytes);
         flexedge::node::buffered_bytes_budget response_buffers(
             flexedge::node::maximum_response_buffer_bytes);
+        flexedge::node::buffered_bytes_budget second_request_buffers(flexedge::node::maximum_request_buffer_bytes);
+        flexedge::node::buffered_bytes_budget second_response_buffers(flexedge::node::maximum_response_buffer_bytes);
         auto [log_sender, log_receiver] =
             ruvia::make_channel<flexedge::node::owned_log_batch>(control_loops.loop(0).handle(), {.capacity_ = 128});
         flexedge::node::log_producer first_worker_logs(loops.loop(0), log_sender);
@@ -1165,7 +1344,7 @@ int main(int argc, char* argv[]) {
                                          flexedge::node::origin_connection_pool& origin_connections,
                                          flexedge::node::buffered_bytes_budget& requests) {
             return flexedge::node::http_session_context{
-                .runtime_ = runtime,
+                .runtime_ = first_runtime,
                 .health_ = health,
                 .metrics_ = metrics,
                 .clients_ = clients,
@@ -1177,8 +1356,8 @@ int main(int argc, char* argv[]) {
         };
         const auto first_context = session_context(*listener_health, first_metrics, first_clients,
             first_worker_logs, first_origin_connections, request_buffers);
-        const auto second_context = session_context(*listener_health, second_metrics,
-            second_clients, second_worker_logs, second_origin_connections, request_buffers);
+        const flexedge::node::http_session_context second_context{
+            .runtime_ = second_runtime, .health_ = *second_listener_health, .metrics_ = second_metrics, .clients_ = second_clients, .logs_ = second_worker_logs, .origin_connections_ = second_origin_connections, .request_buffers_ = second_request_buffers, .response_buffers_ = second_response_buffers};
         // As data_plane does once the configuration that added a listener is active.
         const auto start = [](const std::shared_ptr<flexedge::node::edge_listener>& listener) {
             listener->request_start();
@@ -1201,6 +1380,12 @@ int main(int argc, char* argv[]) {
         flexedge::node::loop_shutdown shutdown(loops, control_loops);
         loops.start();
         control_loops.start();
+        const auto publish = [&](TestConfig value) {
+            apply(runtime, std::move(value));
+            const auto config = runtime.config();
+            loops.loop(0).start(publish_runtime(first_runtime, config)).get();
+            loops.loop(1).start(publish_runtime(second_runtime, config)).get();
+        };
         const auto collect_node_logs = [&] {
             loops.loop(0).start(flush_logs(first_worker_logs)).get();
             loops.loop(1).start(flush_logs(second_worker_logs)).get();
@@ -1209,17 +1394,30 @@ int main(int argc, char* argv[]) {
         // Each worker owns its counters; a separate control loop collects their immutable
         // copies, as the heartbeat does.
         const std::array connected_workers{
-            flexedge::node::worker_counters{
+            observed_worker{
                 .loop_ = loops.loop(0), .metrics_ = &first_metrics, .clients_ = &first_clients, .logs_ = &first_worker_logs},
-            flexedge::node::worker_counters{
+            observed_worker{
                 .loop_ = loops.loop(1), .metrics_ = &second_metrics, .clients_ = &second_clients, .logs_ = &second_worker_logs},
         };
-        const auto load_of = [&](std::span<const flexedge::node::worker_counters> workers) {
-            const auto owner = control_loops.loop(0);
-            return owner.start(flexedge::node::collect_worker_load(owner.handle(), workers, {})).get();
+        const auto load_of = [&](std::span<const observed_worker> workers) -> std::optional<flexedge::node::data_plane_load> {
+            flexedge::node::data_plane_load result;
+            std::vector<flexedge::node::connected_clients::address_key> addresses;
+            for (const auto& worker : workers) {
+                const auto copy = worker.loop_.start(capture_counters(worker)).get();
+                result.connection_count_ += copy.load_.connection_count_;
+                result.traffic_out_bytes_ += copy.load_.traffic_out_bytes_;
+                result.logs_.published_events_ += copy.load_.logs_.published_events_;
+                result.logs_.queued_events_ += copy.load_.logs_.queued_events_;
+                result.logs_.dropped_events_ += copy.load_.logs_.dropped_events_;
+                addresses.insert(addresses.end(), copy.addresses_.begin(), copy.addresses_.end());
+            }
+            std::ranges::sort(addresses);
+            addresses.erase(std::ranges::unique(addresses).begin(), addresses.end());
+            result.connected_ip_count_ = static_cast<std::int64_t>(addresses.size());
+            return result;
         };
         const auto count_ips =
-            [&](std::span<const flexedge::node::worker_counters> workers) -> std::optional<std::int64_t> {
+            [&](std::span<const observed_worker> workers) -> std::optional<std::int64_t> {
             if (const auto load = load_of(workers)) {
                 return load->connected_ip_count_;
             }
@@ -1271,10 +1469,11 @@ int main(int argc, char* argv[]) {
             auto* origin = pending_config.mutableWebsite()->mutable_origins(0);
             origin->set_host("127.0.0.1");
             origin->set_port(origin_acceptor.local_endpoint().port());
-            apply(runtime, std::move(pending_config));
+            publish(std::move(pending_config));
             const flexedge::node::origin_health_key_set keys{
                 {.website_id_ = "website-1", .origin_id_ = "origin-1"}};
             set_health_origins(loops.loop(0), *listener_health, keys);
+            set_health_origins(loops.loop(1), *second_listener_health, keys);
             std::atomic<bool> replaced_health{false};
             std::jthread upstream([&](std::stop_token stop) {
                 asio::ip::tcp::socket socket(origin_context);
@@ -1287,7 +1486,9 @@ int main(int argc, char* argv[]) {
                     return;
                 }
                 set_health_origins(loops.loop(0), *listener_health, {});
+                set_health_origins(loops.loop(1), *second_listener_health, {});
                 set_health_origins(loops.loop(0), *listener_health, keys);
+                set_health_origins(loops.loop(1), *second_listener_health, keys);
                 replaced_health.store(true);
                 // Closing without a response drives the real failure callback.
             });
@@ -1297,6 +1498,7 @@ int main(int argc, char* argv[]) {
             REQUIRE(replaced_health.load());
             REQUIRE(failed_response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
             REQUIRE(settled_health(loops.loop(0), *listener_health)->healthy("website-1", "origin-1"));
+            REQUIRE(settled_health(loops.loop(1), *second_listener_health)->healthy("website-1", "origin-1"));
         }
         const auto no_route_response = request(port, "unknown.example.com");
         REQUIRE(no_route_response.starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
@@ -1326,7 +1528,7 @@ int main(int argc, char* argv[]) {
             website->set_health_check_enabled(false);
             website->mutable_origins(0)->set_host("127.0.0.1");
             website->mutable_origins(0)->set_port(reset_acceptor.local_endpoint().port());
-            apply(runtime, std::move(reset_config));
+            publish(std::move(reset_config));
             std::atomic<bool> origin_received{};
             std::atomic<bool> client_reset{};
             std::jthread reset_origin([&](std::stop_token stop) {
@@ -1377,7 +1579,7 @@ int main(int argc, char* argv[]) {
             website->set_health_check_enabled(false);
             website->mutable_origins(0)->set_host("127.0.0.1");
             website->mutable_origins(0)->set_port(reset_acceptor.local_endpoint().port());
-            apply(runtime, std::move(reset_config));
+            publish(std::move(reset_config));
             std::jthread reset_origin([&](std::stop_token stop) {
                 asio::ip::tcp::socket socket(reset_context);
                 if (!accept_until_stopped(reset_acceptor, socket, stop)) {
@@ -1523,7 +1725,7 @@ int main(int argc, char* argv[]) {
 
         auto redirect_snapshot = snapshot(true);
         redirect_snapshot.setGeneration(next_generation++);
-        apply(runtime, std::move(redirect_snapshot));
+        publish(std::move(redirect_snapshot));
         const auto redirect_response = request(port);
         REQUIRE(redirect_response.starts_with("HTTP/1.1 301 Moved Permanently\r\n"));
         REQUIRE(redirect_response.find("Location: https://www.example.com/a?q=1\r\n") !=
@@ -1543,7 +1745,7 @@ int main(int argc, char* argv[]) {
         auto* route_header = route->add_response_headers();
         route_header->set_name("X-Edge-Route");
         route_header->set_value("matched");
-        apply(runtime, std::move(route_snapshot));
+        publish(std::move(route_snapshot));
         const auto route_response = request(port);
         REQUIRE(route_response.starts_with("HTTP/1.1 302 Found\r\n"));
         REQUIRE(route_response.find("Location: /moved?q=1\r\n") != std::string::npos);
@@ -1579,7 +1781,7 @@ int main(int argc, char* argv[]) {
             fallback->set_action("redirect");
             fallback->set_redirect_status(302);
             fallback->set_redirect_url("/fallback");
-            apply(runtime, std::move(advanced));
+            publish(std::move(advanced));
             const auto answer = request(port, "www.example.com", "x-channel: beta\r\n", "/old/a%2Fb?q=a+b", "POST", "payload");
             REQUIRE(answer.starts_with("HTTP/1.1 " + std::to_string(status) + ' ' +
                                        std::string(ruvia::http_reason_phrase(ruvia::http_status_code::from_value(
@@ -1646,7 +1848,7 @@ int main(int argc, char* argv[]) {
             framing_snapshot.mutableWebsite()->mutable_origins(0)->set_host("127.0.0.1");
             framing_snapshot.mutableWebsite()->mutable_origins(0)->set_port(
                 echo_acceptor.local_endpoint().port());
-            apply(runtime, std::move(framing_snapshot));
+            publish(std::move(framing_snapshot));
             const auto echoed_count = [&] {
                 std::lock_guard lock(echo_mutex);
                 return echoed_bodies.size();
@@ -1777,7 +1979,7 @@ int main(int argc, char* argv[]) {
             flexedge::node::origin_candidates(proxy_snapshot.website(), 0, source_route);
         REQUIRE(candidates.size() == 1);
         REQUIRE(candidates.front()->id() == "origin-backup");
-        apply(runtime, std::move(proxy_snapshot));
+        publish(std::move(proxy_snapshot));
         const auto proxy_started = std::chrono::steady_clock::now();
         const auto proxy_response = request(port, "WWW.Example.COM:80", {}, "/a/users?q=1");
         REQUIRE(saw_route_rewrite.load());
@@ -1823,7 +2025,7 @@ int main(int argc, char* argv[]) {
         compression_route->set_origin_group("default");
         compression_route->set_rewrite_mode("replace_prefix");
         compression_route->set_rewrite_path("/a/once");
-        apply(runtime, std::move(compression_snapshot));
+        publish(std::move(compression_snapshot));
         const auto compressed_proxy_response =
             request(port, "www.example.com", "Accept-Encoding: gzip\r\n");
         REQUIRE(compressed_proxy_response.find("Content-Encoding: gzip\r\n") != std::string::npos);
@@ -1865,17 +2067,17 @@ int main(int argc, char* argv[]) {
         health_website->set_unhealthy_threshold(1);
         health_website->mutable_origins(0)->set_host("127.0.0.1");
         health_website->mutable_origins(0)->set_port(health_port);
-        apply(runtime, std::move(health_snapshot));
+        publish(std::move(health_snapshot));
         auto node_health =
-            flexedge::node::origin_health_supervisor::create(loops.loop(0), runtime, first_origin_tls);
+            flexedge::node::origin_health_supervisor::create(loops.loop(0), first_runtime, first_origin_tls);
         const flexedge::node::origin_health_key_set health_keys{
             {.website_id_ = "website-1", .origin_id_ = "origin-1"}};
         set_health_origins(loops.loop(0), *node_health, health_keys);
-        node_health->target("website-1", "origin-1").failure(1);
+        record_health_failure(loops.loop(0), *node_health);
         REQUIRE(!settled_health(loops.loop(0), *node_health)->healthy("website-1", "origin-1"));
         node_health->request_start();
         const auto node_healthy = waitUntil(
-            [&] { return node_health->snapshot()->healthy("website-1", "origin-1"); },
+            [&] { return settled_health(loops.loop(0), *node_health)->healthy("website-1", "origin-1"); },
             std::chrono::seconds(3));
         if (!node_healthy) {
             std::cerr << "health requests=" << health_requests.load() << '\n';
@@ -1922,10 +2124,9 @@ int main(int argc, char* argv[]) {
         api_domain->set_https_enabled(true);
         api_domain->set_certificate_digest(flexedge::node::artifact_digest(
             flexedge::node::serialize_artifact(tls_snapshot.contents.back())));
-        apply(runtime, std::move(tls_snapshot));
+        publish(std::move(tls_snapshot));
         flexedge::node::tls_context_registry tls_contexts;
-        tls_contexts.publish(
-            std::make_shared<const flexedge::node::tls_context_set>(*runtime.config()));
+        publish_tls(loops.loop(0), tls_contexts, runtime.config());
         auto https_listener = flexedge::node::edge_listener::create(loops.loop(0),
             session_context(*node_health, first_metrics, first_clients, first_worker_logs,
                 first_origin_connections, request_buffers),
@@ -1979,9 +2180,8 @@ int main(int argc, char* argv[]) {
         refreshed_snapshot.mutableCertificate(0)->set_certificate_chain_pem(
             refreshed_identity.certificate_);
         refreshed_snapshot.mutableCertificate(0)->set_private_key_pem(refreshed_identity.private_key_);
-        apply(runtime, std::move(refreshed_snapshot));
-        tls_contexts.publish(
-            std::make_shared<const flexedge::node::tls_context_set>(*runtime.config()));
+        publish(std::move(refreshed_snapshot));
+        publish_tls(loops.loop(0), tls_contexts, runtime.config());
         const auto refreshed_response = tls_request(https_port, "www.example.com");
         REQUIRE(refreshed_response.peer_common_name_ == "refreshed.example.com");
         REQUIRE(refreshed_response.bytes_.starts_with("HTTP/1.1 200 OK\r\n"));
@@ -2027,12 +2227,12 @@ int main(int argc, char* argv[]) {
         secure_origin_website->mutable_origins(0)->set_protocol("https");
         secure_origin_website->mutable_origins(0)->set_host("localhost");
         secure_origin_website->mutable_origins(0)->set_port(secure_origin_port);
-        apply(runtime, std::move(secure_origin_snapshot));
+        publish(std::move(secure_origin_snapshot));
         flexedge::node::origin_tls_context trusted_origin_tls(localhost_identity.certificate_);
         flexedge::node::origin_connection_pool trusted_origin_connections(loops.loop(0).executor(),
             trusted_origin_tls);
         auto secure_origin_health =
-            flexedge::node::origin_health_supervisor::create(loops.loop(0), runtime, trusted_origin_tls);
+            flexedge::node::origin_health_supervisor::create(loops.loop(0), first_runtime, trusted_origin_tls);
         set_health_origins(loops.loop(0), *secure_origin_health, health_keys);
         const auto secure_origin_context = session_context(*secure_origin_health, first_metrics,
             first_clients, first_worker_logs, trusted_origin_connections, request_buffers);
@@ -2045,11 +2245,11 @@ int main(int argc, char* argv[]) {
         REQUIRE(secure_origin_response.starts_with("HTTP/1.1 200 OK\r\n"));
         REQUIRE(secure_origin_response.ends_with("\r\n\r\nSECURE"));
 
-        secure_origin_health->target("website-1", "origin-1").failure(1);
+        record_health_failure(loops.loop(0), *secure_origin_health);
         REQUIRE(!settled_health(loops.loop(0), *secure_origin_health)->healthy("website-1", "origin-1"));
         secure_origin_health->request_start();
         REQUIRE(waitUntil(
-            [&] { return secure_origin_health->snapshot()->healthy("website-1", "origin-1"); },
+            [&] { return settled_health(loops.loop(0), *secure_origin_health)->healthy("website-1", "origin-1"); },
             std::chrono::seconds(3)));
         secure_origin_health->request_stop();
         secure_origin_listener->request_stop();
@@ -2107,7 +2307,7 @@ int main(int argc, char* argv[]) {
         buffered_origin_website->mutable_origins(0)->set_protocol("https");
         buffered_origin_website->mutable_origins(0)->set_host("localhost");
         buffered_origin_website->mutable_origins(0)->set_port(buffered_origin_port);
-        apply(runtime, std::move(buffered_origin_snapshot));
+        publish(std::move(buffered_origin_snapshot));
         auto buffered_origin_listener = flexedge::node::edge_listener::create(loops.loop(0),
             secure_origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0),
             nullptr);
@@ -2143,7 +2343,7 @@ int main(int argc, char* argv[]) {
         untrusted_origin->set_protocol("https");
         untrusted_origin->set_host("localhost");
         untrusted_origin->set_port(untrusted_origin_port);
-        apply(runtime, std::move(untrusted_origin_snapshot));
+        publish(std::move(untrusted_origin_snapshot));
         const auto untrusted_origin_response = request(port);
         REQUIRE(untrusted_origin_response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
 
@@ -2183,7 +2383,7 @@ int main(int argc, char* argv[]) {
         auto* web_socket_origin_config = web_socket_snapshot.mutableWebsite()->mutable_origins(0);
         web_socket_origin_config->set_host("127.0.0.1");
         web_socket_origin_config->set_port(web_socket_port);
-        apply(runtime, std::move(web_socket_snapshot));
+        publish(std::move(web_socket_snapshot));
         REQUIRE(web_socket_round_trip(port) == "PONG");
         REQUIRE(upgrade_headers_preserved.load());
 
@@ -2219,9 +2419,9 @@ int main(int argc, char* argv[]) {
         reusable_website->set_health_check_enabled(false);
         reusable_website->mutable_origins(0)->set_host("127.0.0.1");
         reusable_website->mutable_origins(0)->set_port(reusable_origin_port);
-        apply(runtime, std::move(reusable_origin_snapshot));
+        publish(std::move(reusable_origin_snapshot));
         auto reusable_origin_health =
-            flexedge::node::origin_health_supervisor::create(loops.loop(0), runtime, first_origin_tls);
+            flexedge::node::origin_health_supervisor::create(loops.loop(0), first_runtime, first_origin_tls);
         auto reusable_edge_listener = flexedge::node::edge_listener::create(loops.loop(0),
             session_context(*reusable_origin_health, first_metrics, first_clients,
                 first_worker_logs, first_origin_connections, request_buffers),

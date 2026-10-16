@@ -29,6 +29,7 @@
 #include "node/data/origin_health.h"
 #include "node/data/origin_tls.h"
 #include "node/data/origin_transport.h"
+#include "node/proto/edge_control.pb.h"
 
 namespace flexedge::node {
 
@@ -41,7 +42,13 @@ struct origin_probe_config final {
     std::uint32_t expected_status_{200};
     std::uint32_t healthy_threshold_{2};
     std::uint32_t unhealthy_threshold_{3};
+
+    bool operator==(const origin_probe_config&) const = default;
 };
+
+[[nodiscard]] inline origin_probe_config make_origin_probe_config(const v2::Website& website, const v2::Origin& origin) {
+    return {.protocol_ = origin.protocol(), .host_ = origin.host(), .port_ = static_cast<std::uint16_t>(origin.port()), .path_ = website.health_check_path(), .timeout_ = std::chrono::seconds(website.health_check_timeout_seconds()), .expected_status_ = website.health_check_expected_status() == 0 ? 200 : website.health_check_expected_status(), .healthy_threshold_ = website.healthy_threshold(), .unhealthy_threshold_ = website.unhealthy_threshold()};
+}
 
 // Sends one HEAD request to an origin over its own origin_transport and records whether the
 // final status matched. Retires once completed and every started operation has finished.

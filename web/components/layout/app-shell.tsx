@@ -40,7 +40,7 @@ export function AppShell({
         sidebarCollapsible='icon'
         sidebar={
           <>
-            <Sidebar>
+            <Sidebar className='[--sidebar-width:12rem]'>
               <SidebarNavigation account={account} />
               <Sidebar.Rail aria-label='展开或收起侧栏' />
             </Sidebar>

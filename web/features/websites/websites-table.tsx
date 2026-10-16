@@ -26,6 +26,7 @@ import {
 import type { Website } from './types'
 import {
   defaultOrigin,
+  originGroupName,
   deployStatuses,
   deployStatusReserve,
   websiteName,
@@ -151,7 +152,7 @@ export function WebsitesTable({
           <span
             className={cn('block max-w-52 truncate', !origin && 'text-muted')}
           >
-            {origin ? origin.group : '未配置'}
+            {origin ? originGroupName(origin.group) : '未配置'}
           </span>
         )
       },

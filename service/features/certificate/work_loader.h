@@ -1,7 +1,10 @@
 #pragma once
 
 #include <ruvia/core/task.h>
+#include <ruvia/web/db/db_repository.h>
+#include <ruvia/web/db/db_transaction.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -11,14 +14,25 @@
 
 #include "service/features/background/task_context.h"
 #include "service/features/certificate/acme_types.h"
+#include "service/features/certificate/challenge_dns_entity.h"
 #include "service/features/certificate/issuance_state.h"
 #include "service/features/certificate/provider_config_mapper.h"
 #include "service/features/certificate/task.h"
 #include "service/features/dns/driver.h"
+#include "service/features/dns_sync/mapper.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
 
 namespace service::certificate_issuance::worker_detail {
+
+struct challenge_dns_sync final {
+    std::int64_t synced_revision_{};
+    std::string task_id_{};
+    std::int64_t version_{};
+    bool done_{};
+    bool ok_{};
+    bool challenge_records_synced_{};
+};
 
 struct certificate_work final {
     std::string tenant_id_;
@@ -35,6 +49,72 @@ struct certificate_work final {
     std::optional<issuance_state> progress_;
 };
 
+// Read after locking the zone: its result writer locks the same row before
+// transitioning the DNS marker and resuming waiters. A later park therefore
+// cannot miss an already committed dependency result.
+inline ruvia::task<challenge_dns_sync> load_challenge_dns(ruvia::db_transaction& transaction,
+    const certificate_task& task, const certificate_work& work, std::pmr::memory_resource* resource) {
+    ruvia::db_query expressions(resource);
+    const auto equal = [&](ruvia::db_expression left, ruvia::db_expression right) {
+        return expressions.binary(left, ruvia::db_binary_operator::equal, right);
+    };
+    const auto all = [&](ruvia::db_expression left, ruvia::db_expression right) {
+        return expressions.binary(left, ruvia::db_binary_operator::and_value, right);
+    };
+    const auto tenant = equal(expressions.column("tenant_id", "zone"),
+        expressions.cast(expressions.value(task.tenant_id_), ruvia::db_data_type::uuid));
+    const auto id = equal(expressions.column("id", "zone"),
+        expressions.cast(expressions.value(work.dns_zone_id_), ruvia::db_data_type::uuid));
+    expressions.select(expressions.column("id", "zone"))
+        .from("sys_dns_zone", "zone")
+        .where(all(tenant, id))
+        .and_where(expressions.unary(ruvia::db_unary_operator::is_null, expressions.column("deleted_at", "zone")))
+        .lock({.mode_ = ruvia::db_row_lock::update});
+    if ((co_await transaction.query(expressions)).empty()) {
+        throw acme_error("DNS-01 托管域名不存在", true);
+    }
+    auto query = transaction.get_repository<challenge_zone_entity>().create_query_builder("zone");
+    query.join<challenge_task_entity>(ruvia::db_join_type::left, "task",
+             all(all(equal(expressions.column("tenant_id", "task"), expressions.column("tenant_id", "zone")),
+                     equal(expressions.column("resource_type", "task"), expressions.value(std::string_view{"dns_zone"}))),
+                 equal(expressions.column("resource_id", "task"), expressions.column("id", "zone"))))
+        .where(all(tenant, id))
+        .select({{"synced_revision", expressions.column("synced_revision", "zone")},
+            {"runtime", expressions.cast(expressions.column("runtime", "zone"), ruvia::db_data_type::text)},
+            {"task_id", expressions.cast(expressions.column("id", "task"), ruvia::db_data_type::text)},
+            {"version", expressions.column("version", "task")},
+            {"is_done", expressions.column("is_done", "task")}, {"is_ok", expressions.column("is_ok", "task")}});
+    const auto row = co_await query.get_one<challenge_dns_projection>();
+    if (!row) {
+        throw acme_error("DNS-01 托管域名不存在", true);
+    }
+    const auto runtime = service::dns_sync::parse_stored_runtime(row->get<"runtime">(), {.resource_ = resource});
+    if (!runtime) {
+        throw acme_error("DNS-01 托管域名运行状态损坏", true);
+    }
+    std::size_t matched = 0;
+    bool synced = true;
+    for (const auto& challenge : runtime->challenge_records_) {
+        if (challenge.certificate_id_ != task.certificate_id_) {
+            continue;
+        }
+        ++matched;
+        const auto state = std::ranges::find_if(runtime->record_states_, [&](const auto& value) {
+            return value.id_ && *value.id_ == challenge.id_;
+        });
+        if (state == runtime->record_states_.end() || state->sync_status_ != "synced" ||
+            state->synced_revision_.value_or(0) < work.progress_->dns_revision_) {
+            synced = false;
+        }
+    }
+    co_return challenge_dns_sync{.synced_revision_ = row->get<"synced_revision">(),
+        .task_id_ = row->is_null<"task_id">() ? std::string{} : std::string(row->get<"task_id">()),
+        .version_ = row->is_null<"version">() ? 0 : row->get<"version">(),
+        .done_ = !row->is_null<"is_done">() && row->get<"is_done">(),
+        .ok_ = !row->is_null<"is_ok">() && row->get<"is_ok">(),
+        .challenge_records_synced_ = synced && matched != 0 && matched == work.progress_->authorizations_.size()};
+}
+
 inline ruvia::task<certificate_work> load_work(service::background::task_context& context,
     const certificate_task& task) {
     const auto rows = co_await context.db().query(
@@ -50,7 +130,8 @@ inline ruvia::task<certificate_work> load_work(service::background::task_context
         "sys_dns_zone zone ON zone.tenant_id = certificate.tenant_id AND zone.id = "
         "certificate.dns_zone_id INNER JOIN sys_provider dns_provider ON "
         "dns_provider.tenant_id = zone.tenant_id AND dns_provider.id = zone.provider_id AND "
-        "dns_provider.kind = 'dns' WHERE certificate.id = $1 AND certificate.issuance_revision = "
+        "dns_provider.kind = 'dns' "
+        "WHERE certificate.id = $1 AND certificate.issuance_revision = "
         "$2 AND certificate.tenant_id = $3 AND certificate.deleted_at IS NULL AND "
         "provider.deleted_at IS NULL AND zone.deleted_at IS "
         "NULL AND dns_provider.deleted_at IS NULL LIMIT 1",

@@ -34,7 +34,21 @@ inline ruvia::task<void> reconcile(service::background::task_context& context) {
         service::background::queued_work work;
         auto transaction = co_await context.db().begin_transaction();
         const auto provider_id = std::string(row[2].value().value_or(""));
-        co_await service::provider_verification::mark_current(transaction, tenant_id, provider_id, work);
+        const auto locked = co_await transaction.query(
+            "SELECT verification_generation FROM sys_provider WHERE tenant_id = $1 AND id = $2 "
+            "AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
+            tenant_id, provider_id);
+        if (locked.empty()) {
+            co_await transaction.commit();
+            continue;
+        }
+        const auto generation = locked.front()[0].as<std::int64_t>().value_or(1);
+        if (!co_await service::sync_runtime::marker_version_exists(transaction, tenant_id,
+                service::sync_runtime::marker_resource_type::provider, provider_id, generation)) {
+            (void)co_await service::sync_runtime::upsert_marker(transaction, tenant_id,
+                service::sync_runtime::marker_resource_type::provider, provider_id,
+                service::sync_runtime::marker_operation::verify, generation, work);
+        }
         co_await service::sync_runtime::commit_work(transaction, context, tenant_id, work);
     }
     co_return;
@@ -115,8 +129,7 @@ inline ruvia::task<void> complete_verification(service::background::task_context
             co_await service::dns_sync::mark_provider_zones_dirty(transaction, task.tenant_id_,
                 task.provider_id_, work);
         }
-        result_transition = co_await service::sync_runtime::complete_running_and_record_event(
-            transaction, lease, detail);
+        result_transition = co_await service::sync_runtime::record_running_result(transaction, lease, service::sync_runtime::attempt_result::completed(), detail);
         if (!result_transition.marker_transitioned_) {
             throw std::runtime_error("供应商检测标记 lease 已失效");
         }
@@ -134,8 +147,8 @@ inline ruvia::task<void> fail_verification(service::background::task_context& co
         task.tenant_id_, task.id_, task.generation_, context.lease_owner(), task.claimed_at_,
         service::sync_runtime::marker_resource_type::provider, task.provider_id_);
     auto transaction = co_await context.db().begin_transaction();
-    const auto result_transition = co_await service::sync_runtime::fail_running_and_record_event(
-        transaction, lease, message, detail);
+    const auto result_transition = co_await service::sync_runtime::record_running_result(
+        transaction, lease, permanent ? service::sync_runtime::attempt_result::failed(message) : service::sync_runtime::attempt_result::retry(message), detail);
     if (result_transition.marker_transitioned_) {
         (void)co_await transaction.execute(
             "UPDATE sys_provider SET status = CASE WHEN $1::BOOLEAN THEN 'invalid' ELSE status "

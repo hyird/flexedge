@@ -65,14 +65,11 @@ export function PageHeader({
  * `DetailHeader` as the first child instead. */
 export function Page({
   children,
-  width = 'default',
   fit = false,
   title,
   ...header
 }: {
   children: ReactNode
-  /** `default` caps content at 1400px; `full` uses the whole workspace width. */
-  width?: 'default' | 'full'
   /** Keep the page inside the viewport; its content owns scrolling. */
   fit?: boolean
   title?: ReactNode
@@ -85,8 +82,7 @@ export function Page({
         'mx-auto flex w-full min-w-0 flex-col gap-6 px-4 pt-6 pb-10 sm:px-6',
         fit
           ? 'h-[calc(100dvh-var(--workspace-content-offset))] min-h-0 overflow-hidden'
-          : 'min-h-[calc(100dvh-var(--workspace-content-offset))]',
-        width === 'default' && 'max-w-[1400px]'
+          : 'min-h-[calc(100dvh-var(--workspace-content-offset))]'
       )}
     >
       {title !== undefined && <PageHeader title={title} {...header} />}

@@ -1,6 +1,6 @@
 import type { DnsLine } from '@/features/dns-zones/types'
 
-type DnsLineTreeNode = {
+export type DnsLineTreeNode = {
   key: string
   label: string
   path: string[]
@@ -79,10 +79,13 @@ export function flattenDnsLineTree(
 }
 
 export type DnsLineIndex = {
+  tree: DnsLineTreeNode[]
   /** Selectable lines in hierarchy order. */
   options: DnsLineTreeOption[]
   /** Line code → readable path (`中国地区 / 电信 / 北京`). */
   labels: Map<string, string>
+  /** Line code → most specific name (`北京`). */
+  names: Map<string, string>
 }
 
 // One index per line snapshot: live zone patches keep `runtime.lines` by
@@ -93,11 +96,16 @@ const lineIndexes = new WeakMap<DnsLine[], DnsLineIndex>()
 export function dnsLineIndex(lines: DnsLine[]): DnsLineIndex {
   let index = lineIndexes.get(lines)
   if (!index) {
-    const options = flattenDnsLineTree(buildDnsLineTree(lines))
+    const tree = buildDnsLineTree(lines)
+    const options = flattenDnsLineTree(tree)
     index = {
+      tree,
       options,
       labels: new Map(
         options.map(({ line, path }) => [line.code, path.join(' / ')])
+      ),
+      names: new Map(
+        options.map(({ line, path }) => [line.code, path.at(-1) ?? line.code])
       ),
     }
     lineIndexes.set(lines, index)
@@ -107,4 +115,11 @@ export function dnsLineIndex(lines: DnsLine[]): DnsLineIndex {
 
 export function dnsLinePath(lines: DnsLine[], code: string) {
   return dnsLineIndex(lines).labels.get(code) ?? code
+}
+
+export function dnsLineName(lines: DnsLine[], code: string) {
+  return (
+    dnsLineIndex(lines).names.get(code) ??
+    (code === 'default' ? '默认线路' : code)
+  )
 }

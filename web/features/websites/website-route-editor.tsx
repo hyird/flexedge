@@ -10,6 +10,7 @@ import { conflictingRouteIndexes } from './route-conflicts'
 import { routeTabs, type RouteEditorView } from './route-tabs'
 import { CheckOption, FieldNotice, IconAction } from './settings-controls'
 import { routeMethods } from './types'
+import { originGroupName } from './website-display'
 import { routeRuleToForm, type WebsiteRouteRuleForm } from './website-form'
 import { routeRuleErrors, type WebsiteFormErrors } from './website-sections'
 
@@ -435,7 +436,10 @@ function RuleEditor({
                     label='源站组'
                     value={rule.origin_group}
                     onChange={(origin_group) => update({ origin_group })}
-                    items={groups.map((group) => ({ id: group, label: group }))}
+                    items={groups.map((group) => ({
+                      id: group,
+                      label: originGroupName(group),
+                    }))}
                     error={error('origin_group')}
                   />
                 )}

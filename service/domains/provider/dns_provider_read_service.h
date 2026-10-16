@@ -21,26 +21,24 @@ namespace service::provider {
 
 class dns_provider_read_service final {
 public:
+    ruvia::task<ruvia::array<dns_provider_dto>> options(auto& c, const std::string& tenant_id, const std::optional<std::string>& keyword, const std::optional<std::string>& status) const {
+        ruvia::db_query query(c.pool());
+        filter_query(query, tenant_id, keyword, status);
+        project(query);
+        const auto rows = co_await c.db().query(query);
+        ruvia::array<dns_provider_dto> items({.resource_ = c.pool()});
+        for (const auto& row : rows) {
+            fill(items.emplace_back(ruvia::model_options{.resource_ = c.pool()}), parse_row(c, row));
+        }
+        co_return items;
+    }
+
     ruvia::task<dns_provider_page_data_dto> list(auto& c, const std::string& tenant_id,
         std::int64_t page, std::int64_t page_size,
         std::int64_t skip,
         const std::optional<std::string>& keyword,
         const std::optional<std::string>& status) const {
-        std::optional<std::string> pattern;
-        if (keyword) {
-            pattern = "%" + service::common::escape_like_pattern(*keyword) + "%";
-        }
-        const auto filter = [&](ruvia::db_query& query) {
-            source(query, tenant_id);
-            if (status) {
-                query.and_where(query.sql({"provider.status = ", ""}, {query.value(*status)}));
-            }
-            if (pattern) {
-                const auto value = query.value(*pattern);
-                query.and_where(query.sql(
-                    {"provider.name ILIKE ", " OR provider.account_id ILIKE ", ""}, {value, value}));
-            }
-        };
+        const auto filter = [&](ruvia::db_query& query) { filter_query(query, tenant_id, keyword, status); };
         const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
         const auto total = page_rows.total_;
 
@@ -73,6 +71,22 @@ public:
     }
 
 private:
+    static void filter_query(ruvia::db_query& query, const std::string& tenant_id, const std::optional<std::string>& keyword, const std::optional<std::string>& status) {
+        std::optional<std::string> pattern;
+        if (keyword) {
+            pattern = "%" + service::common::escape_like_pattern(*keyword) + "%";
+        }
+        source(query, tenant_id);
+        if (status) {
+            query.and_where(query.sql({"provider.status = ", ""}, {query.value(*status)}));
+        }
+        if (pattern) {
+            const auto value = query.value(*pattern);
+            query.and_where(query.sql(
+                {"provider.name ILIKE ", " OR provider.account_id ILIKE ", ""}, {value, value}));
+        }
+    }
+
     struct stored_provider final {
         std::string id_;
         std::string provider_;

@@ -40,7 +40,7 @@ public:
     using stream = asio::ssl::stream<asio::ip::tcp::socket>;
 
     tls_handshake(asio::ip::tcp::socket socket, const http_session_context& context,
-        std::shared_ptr<const tls_context_set> contexts, std::uint64_t sequence,
+        std::shared_ptr<tls_context_set> contexts, std::uint64_t sequence,
         std::shared_ptr<edge_connection> connection)
         : stream_(std::move(socket), contexts->default_context()),
           context_(context),
@@ -89,7 +89,7 @@ private:
         }
         try {
             release_tls_client_fingerprint(stream_.native_handle());
-            connection_->retain(contexts_);
+            connection_->retain_tls_context(contexts_);
             auto session = std::make_shared<basic_http_session<stream>>(std::move(stream_), context_,
                 sequence_, connection_, true, std::move(tls_fingerprint_));
             try {
@@ -104,7 +104,7 @@ private:
 
     stream stream_;
     http_session_context context_;
-    std::shared_ptr<const tls_context_set> contexts_;
+    std::shared_ptr<tls_context_set> contexts_;
     asio::steady_timer timer_;
     std::uint64_t sequence_{};
     std::string tls_fingerprint_;
@@ -246,8 +246,16 @@ private:
         return tls_contexts_ == nullptr ? "edge HTTP" : "edge HTTPS";
     }
 
-    // Socket cancellation and accept initiation must stay on the owning loop.
+public:
+    // Owner loop. Retired listeners remain owned until their last callback has returned.
+    [[nodiscard]] bool stopped() const noexcept {
+        return stopping_ && pending_operations_ == 0 && active_connections_ == 0;
+    }
+
     ruvia::task<void> stop_and_wait() {
+        if (!owner_.is_current()) {
+            throw std::logic_error("listener cleanup must run on its owner loop");
+        }
         {
             std::lock_guard lock(lifecycle_mutex_);
             stop();
@@ -259,6 +267,7 @@ private:
         loop_stop_complete_ = true;
     }
 
+private:
     void stop() noexcept {
         stopping_ = true;
         std::error_code ignored;
@@ -324,7 +333,7 @@ private:
 
     // A connection that cannot be admitted is closed with its socket.
     void admit(asio::ip::tcp::socket socket) noexcept {
-        std::shared_ptr<const tls_context_set> contexts;
+        std::shared_ptr<tls_context_set> contexts;
         if (tls_contexts_ != nullptr) {
             contexts = tls_contexts_->current();
             if (!contexts || contexts->empty()) {

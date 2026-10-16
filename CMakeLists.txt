@@ -386,6 +386,16 @@ if(BUILD_TESTING)
         SOURCES tests/config_activation.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto
     )
+    flexedge_add_test(data_worker BIG_OBJECT
+        SOURCES tests/data_worker.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto
+    )
+    set_tests_properties(flexedge_data_worker PROPERTIES TIMEOUT 30)
+    flexedge_add_test(data_plane_transaction BIG_OBJECT
+        SOURCES tests/data_plane_transaction.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto
+    )
+    set_tests_properties(flexedge_data_plane_transaction PROPERTIES TIMEOUT 30)
     flexedge_add_test(node_release
         SOURCES tests/node_release.cpp
         LIBRARIES OpenSSL::Crypto Threads::Threads
@@ -398,13 +408,29 @@ if(BUILD_TESTING)
         SOURCES tests/control_channel.cpp
         LIBRARIES flexedge_node_protocol flexedge_node_version flexedge_route_policy ruvia::web OpenSSL::SSL OpenSSL::Crypto
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_library(flexedge_test_dns_resolver SHARED tests/support/dns_resolver_stub.cpp)
+        target_link_libraries(flexedge_test_dns_resolver PRIVATE ${CMAKE_DL_LIBS})
+        flexedge_add_test(dns_reconnect BIG_OBJECT
+            SOURCES tests/dns_reconnect.cpp
+            LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto
+        )
+        add_dependencies(flexedge_dns_reconnect_test flexedge_test_dns_resolver)
+        add_dependencies(flexedge_control_channel_test flexedge_test_dns_resolver)
+        set_tests_properties(flexedge_dns_reconnect PROPERTIES TIMEOUT 30
+            ENVIRONMENT "LD_PRELOAD=$<TARGET_FILE:flexedge_test_dns_resolver>")
+        add_test(NAME flexedge_control_dns COMMAND ${CMAKE_COMMAND} -E env
+            "LD_PRELOAD=$<TARGET_FILE:flexedge_test_dns_resolver>"
+            "$<TARGET_FILE:flexedge_control_channel_test>" --dns-reconnect)
+        set_tests_properties(flexedge_control_dns PROPERTIES TIMEOUT 30)
+    endif()
     flexedge_add_test(agent_protocol
         SOURCES tests/agent_protocol.cpp
         LIBRARIES flexedge_node_protocol OpenSSL::Crypto ruvia::web
     )
     flexedge_add_test(log_ingest
         SOURCES tests/log_ingest.cpp
-        LIBRARIES flexedge_log_ingest_protocol
+        LIBRARIES flexedge_log_ingest_protocol ruvia::web
     )
     flexedge_add_test(log_fanout
         SOURCES tests/log_fanout.cpp
@@ -490,6 +516,21 @@ if(BUILD_TESTING)
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto ZLIB::ZLIB
     )
     set_tests_properties(flexedge_task_center PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    flexedge_add_test(sync_runtime BIG_OBJECT
+        SOURCES tests/sync_runtime.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto
+    )
+    set_tests_properties(flexedge_sync_runtime PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    flexedge_add_test(certificate_dependency BIG_OBJECT
+        SOURCES tests/certificate_dependency.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto
+    )
+    set_tests_properties(flexedge_certificate_dependency PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    flexedge_add_test(log_ingest_migration
+        SOURCES tests/log_ingest_migration.cpp
+        LIBRARIES ruvia::web
+    )
+    set_tests_properties(flexedge_log_ingest_migration PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
     flexedge_add_test(attempt_trace_redaction
         SOURCES tests/attempt_trace_redaction.cpp
         LIBRARIES ruvia::web OpenSSL::Crypto

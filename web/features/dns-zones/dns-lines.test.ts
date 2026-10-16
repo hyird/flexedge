@@ -3,6 +3,7 @@ import type { DnsLine } from '@/features/dns-zones/types'
 import {
   buildDnsLineTree,
   dnsLineIndex,
+  dnsLineName,
   dnsLinePath,
   flattenDnsLineTree,
 } from './dns-lines'
@@ -37,6 +38,15 @@ describe('DNS line tree', () => {
     expect(dnsLinePath(lines, 'unknown')).toBe('unknown')
   })
 
+  it('shows only the most specific line name without changing picker paths', () => {
+    expect(dnsLineName(lines, 'cn_mobile_beijing')).toBe('北京')
+    expect(dnsLineName(lines, 'cn_mobile')).toBe('中国移动')
+    expect(dnsLineName(lines, 'default')).toBe('默认')
+    expect(dnsLineName([], 'default')).toBe('默认线路')
+    expect(dnsLineName(lines, 'unknown')).toBe('unknown')
+    expect(dnsLinePath(lines, 'cn_mobile_beijing')).toBe('中国移动 / 北京')
+  })
+
   it('builds one index per line snapshot, whatever the number of lookups', () => {
     // An Aliyun-sized list: label lookups for every row and option of the
     // records tab must not rebuild the tree (it was O(rows × lines²)).
@@ -48,6 +58,7 @@ describe('DNS line tree', () => {
     }))
     const index = dnsLineIndex(many)
     expect(index.options).toHaveLength(500)
+    expect(flattenDnsLineTree(index.tree)).toEqual(index.options)
     for (let lookup = 0; lookup < 300 * 500; lookup++)
       dnsLinePath(many, `line_${lookup % 500}`)
     expect(dnsLineIndex(many)).toBe(index)

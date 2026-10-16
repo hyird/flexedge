@@ -3,7 +3,7 @@ import { ApiProtocolError } from '@/lib/api-response'
 
 export type LogEntry = { id: string; occurred_at: string }
 /** Records a live tail keeps, newest first. */
-export const liveLogCapacity = 1000
+export const liveLogCapacity = 10_000
 
 /** Parses the records of one `logs` frame (its envelope data). */
 export function createLogEventParser<T>(entry: z.ZodType<T>) {

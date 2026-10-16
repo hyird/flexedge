@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode } from 'react'
+import { type CSSProperties, type ReactNode, useMemo } from 'react'
 import { DataGrid, type DataGridColumn } from '@heroui-pro/react'
 import { Skeleton, Table } from '@heroui/react'
 import { cn } from '@/lib/utils'
@@ -13,7 +13,7 @@ type DataTableEmpty = {
 // Native secondary tables provide a flat body. Standalone lists add one
 // surface to the root; embedded lists share their Section or Widget surface.
 const tableClassName =
-  '[&_thead_th]:rounded-none [&_thead_th]:border-b [&_thead_th]:border-separator [&_thead_th]:bg-surface'
+  '[&_.table__column]:rounded-none [&_.table__column]:border-b [&_.table__column]:border-separator [&_.table__column]:bg-surface'
 
 function defaultRowId(item: object) {
   if (
@@ -80,10 +80,12 @@ export function DataTable<T extends object>({
   onRetry,
   empty,
   getRowId = defaultRowId,
+  getChildren,
   minWidth = 760,
   footer,
   variant = 'primary',
   fit = false,
+  virtualized = false,
 }: {
   /** Accessible table name, also used in loading announcements. */
   label: string
@@ -100,6 +102,8 @@ export function DataTable<T extends object>({
   empty: DataTableEmpty
   /** Defaults to the row's `id`. */
   getRowId?: (item: T) => string | number
+  /** Hierarchical rows use the first row-header column for expansion. */
+  getChildren?: (item: T) => T[] | undefined
   /** Minimum table width before horizontal scrolling starts (px). */
   minWidth?: number
   /** Usually a `TablePagination`. */
@@ -108,7 +112,10 @@ export function DataTable<T extends object>({
   variant?: 'primary' | 'secondary'
   /** Fill the parent's remaining height, scrolling only the table body. */
   fit?: boolean
+  /** Render only visible rows, using the shared fixed row and header heights. */
+  virtualized?: boolean
 }) {
+  const tableColumns = useMemo(() => columns.map(withEnforcedWidth), [columns])
   // Tailwind cannot see runtime widths, so the class reads a CSS variable.
   const widthVariable = {
     '--data-table-min-width': `${minWidth}px`,
@@ -207,8 +214,17 @@ export function DataTable<T extends object>({
         <DataGrid
           aria-label={label}
           data={data}
-          columns={columns.map(withEnforcedWidth)}
+          columns={tableColumns}
           getRowId={getRowId}
+          getChildren={getChildren}
+          virtualized={virtualized}
+          rowHeight={44}
+          headingHeight={40}
+          scrollContainerClassName={
+            virtualized && fit
+              ? '[@media(max-height:700px)]:max-h-64'
+              : undefined
+          }
           variant='secondary'
           className={cn(
             'min-w-0',

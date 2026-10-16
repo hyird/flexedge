@@ -28,35 +28,24 @@ namespace service::certificate {
 
 class certificate_read_service final {
 public:
+    ruvia::task<ruvia::array<certificate_dto>> options(auto& c, const std::string& tenant_id, const std::optional<std::string>& keyword, std::optional<std::string_view> status, std::optional<bool> usable) const {
+        ruvia::db_query query(c.pool());
+        filter_query(query, tenant_id, keyword, status, usable, false, false);
+        project(query);
+        const auto rows = co_await c.db().query(query);
+        ruvia::array<certificate_dto> items({.resource_ = c.pool()});
+        for (const auto& row : rows) {
+            fill_certificate(c, items.emplace_back(ruvia::model_options{.resource_ = c.pool()}), row);
+        }
+        co_return items;
+    }
+
     ruvia::task<certificate_page_data_dto>
     list(auto& c, const std::string& tenant_id, std::int64_t page, std::int64_t page_size,
         std::int64_t skip, const std::optional<std::string>& keyword,
         std::optional<std::string_view> status, std::optional<bool> usable, bool expiring,
         bool abnormal) const {
-        std::optional<std::string> pattern;
-        if (keyword) {
-            pattern = "%" + service::common::escape_like_pattern(*keyword) + "%";
-        }
-        const auto filter = [&](ruvia::db_query& query) {
-            source(query, tenant_id);
-            if (pattern) {
-                query.and_where(query.sql({"cert.domain ILIKE ", ""}, {query.value(*pattern)}));
-            }
-            if (status && !status->empty()) {
-                query.and_where(query.sql({"cert.status = ", ""}, {query.value(*status)}));
-            }
-            if (usable) {
-                query.and_where(query.sql(
-                    {"COALESCE(cert.issued_revision > 0 AND cert.expires_at > NOW(), FALSE) = ", ""},
-                    {query.value(*usable)}));
-            }
-            if (expiring) {
-                query.and_where(certificate_expiring_predicate(query, "cert"));
-            }
-            if (abnormal) {
-                query.and_where(certificate_abnormal_predicate(query, "cert"));
-            }
-        };
+        const auto filter = [&](ruvia::db_query& query) { filter_query(query, tenant_id, keyword, status, usable, expiring, abnormal); };
         const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
         const auto total = page_rows.total_;
         certificate_page_data_dto result({.resource_ = c.pool()});
@@ -124,6 +113,31 @@ public:
     }
 
 private:
+    static void filter_query(ruvia::db_query& query, const std::string& tenant_id, const std::optional<std::string>& keyword, std::optional<std::string_view> status, std::optional<bool> usable, bool expiring, bool abnormal) {
+        std::optional<std::string> pattern;
+        if (keyword) {
+            pattern = "%" + service::common::escape_like_pattern(*keyword) + "%";
+        }
+        source(query, tenant_id);
+        if (pattern) {
+            query.and_where(query.sql({"cert.domain ILIKE ", ""}, {query.value(*pattern)}));
+        }
+        if (status && !status->empty()) {
+            query.and_where(query.sql({"cert.status = ", ""}, {query.value(*status)}));
+        }
+        if (usable) {
+            query.and_where(query.sql(
+                {"COALESCE(cert.issued_revision > 0 AND cert.expires_at > NOW(), FALSE) = ", ""},
+                {query.value(*usable)}));
+        }
+        if (expiring) {
+            query.and_where(certificate_expiring_predicate(query, "cert"));
+        }
+        if (abnormal) {
+            query.and_where(certificate_abnormal_predicate(query, "cert"));
+        }
+    }
+
     static void source(ruvia::db_query& query, const std::string& tenant_id) {
         ruvia::db_query latest_task(query.resource());
         latest_task
@@ -131,6 +145,7 @@ private:
                 latest_task.alias(
                     latest_task.sql("CASE WHEN task.lease_until IS NOT NULL THEN 'running' WHEN "
                                     "task.is_done AND task.is_ok THEN 'completed' WHEN "
+                                    "task.is_done AND NOT task.is_ok THEN 'failed' WHEN "
                                     "task.count_fails > 0 THEN 'retry' ELSE 'pending' END"),
                     "sync_status"),
                 latest_task.alias(latest_task.sql("task.count_fails"), "sync_count_fails")})

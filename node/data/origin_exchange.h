@@ -68,6 +68,10 @@ public:
         return response_;
     }
 
+    void enter_tunnel() noexcept {
+        transport_->enter_tunnel();
+    }
+
     // Pools the transport when its response completed with a reusable framing; closes it
     // otherwise. Ends the exchange.
     void release() noexcept {
@@ -130,7 +134,7 @@ private:
     origin_connection_key key_;
     std::string request_;
     origin_response_codec response_;
-    std::unique_ptr<origin_transport> transport_;
+    pooled_origin_connection transport_{};
     std::array<char, 16384> buffer_{};
     bool pooled_{};
     bool closed_{};

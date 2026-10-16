@@ -65,6 +65,10 @@ export function originAddress(
   return `${origin.protocol}://${origin.host}:${origin.port}`
 }
 
+export function originGroupName(group: string) {
+  return group === 'default' ? '默认' : group
+}
+
 /** Origin groups in configuration order. */
 export function originGroups(website: Pick<Website, 'config'>) {
   return [...new Set(website.config.origins.map((origin) => origin.group))]

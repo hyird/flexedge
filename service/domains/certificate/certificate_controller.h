@@ -88,23 +88,12 @@ private:
         co_return service::common::ok<certificate_detail_response>(r, std::move(data));
     }
 
-    // Every certificate matching the option filters, read page by page.
     ruvia::task<ruvia::http_response> options(ruvia::context& c) {
         auto keyword = service::common::require_keyword(c.req().query("keyword"));
         auto status = require_status(c);
         auto usable = require_usable(c);
         const auto& tenant = service::middleware::current_tenant_id(c);
-        ruvia::array<certificate_dto> data({.resource_ = c.pool()});
-        for (std::int64_t page_number = 1;; ++page_number) {
-            auto page = co_await get_certificate_read_service().list(c, tenant, page_number, 1000,
-                (page_number - 1) * 1000, keyword, status, usable, false, false);
-            for (auto& item : page.template ensure<"list">()) {
-                data.push_back(std::move(item));
-            }
-            if (page_number >= page.template get<"total_pages">().value_) {
-                break;
-            }
-        }
+        auto data = co_await get_certificate_read_service().options(c, tenant, keyword, status, usable);
         co_return c.json(service::common::ok<certificate_options_response>(c, std::move(data)));
     }
     ruvia::task<ruvia::http_response> list(ruvia::context& c) {

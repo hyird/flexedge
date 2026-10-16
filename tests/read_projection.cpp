@@ -28,6 +28,7 @@
 #include "service/domains/overview/overview_service.h"
 #include "service/domains/overview/overview_traffic_service.h"
 #include "service/domains/provider/certificate_provider_read_service.h"
+#include "service/domains/provider/dns_provider_read_service.h"
 #include "service/domains/website/website_dashboard_service.h"
 #include "service/domains/website/website_filter.h"
 #include "service/domains/website/website_read_service.h"
@@ -46,8 +47,10 @@ namespace {
 // a copy of the handle, so the transaction is exposed through a copyable view.
 struct transaction_db final {
     ruvia::db_transaction* transaction_;
+    std::size_t* query_count_;
     template <typename... args_type>
     auto query(args_type&&... args) const {
+        ++*query_count_;
         return transaction_->query(std::forward<args_type>(args)...);
     }
 };
@@ -55,8 +58,9 @@ struct transaction_db final {
 struct read_context final {
     ruvia::db_transaction* transaction_;
     std::pmr::memory_resource* resource_;
-    transaction_db db() const {
-        return {transaction_};
+    std::size_t query_count_{};
+    transaction_db db() {
+        return {transaction_, &query_count_};
     }
     std::pmr::memory_resource* pool() const {
         return resource_;
@@ -136,6 +140,8 @@ ruvia::task<void> insert_fixture(ruvia::db_transaction& tx) {
             s + "', '" + tenant +
             "', 'certificate', 'letsencrypt', NULL, NULL, 'verified')");
     }
+    co_await exec(R"sql(UPDATE sys_provider SET config =
+        '{"credential":{"envelope":"qa-opaque","hint":"****qa"}}' WHERE kind = 'dns')sql");
     const std::string runtime =
         R"('{"records_imported":false,"lines":[],"record_states":[],"conflicts":[]}')";
     co_await exec(
@@ -783,6 +789,87 @@ ruvia::task<void> verify_dashboard_console_days(read_context& c, ruvia::db_trans
     REQUIRE(integer(summary.get<"today_unique_ips">()) == 1);
 }
 
+// Options use exactly the list projection, with no count or page boundary.
+ruvia::task<void> verify_options(read_context& c, ruvia::db_transaction& tx) {
+    const auto& clusters = service::cluster::get_cluster_read_service();
+    const auto& certificates = service::certificate::get_certificate_read_service();
+    const auto& dns = service::provider::get_dns_provider_read_service();
+    const auto& issuers = service::provider::get_certificate_provider_read_service();
+    for (const auto identity : {tenant_a, tenant_b, tenant_c}) {
+        const std::string tenant(identity);
+        auto before = c.query_count_;
+        const auto cluster_options = co_await clusters.options(c, tenant, std::nullopt);
+        REQUIRE(c.query_count_ == before + 1);
+        const auto cluster_page = co_await clusters.list(c, tenant, 1, 10000, 0, std::nullopt, std::nullopt, std::nullopt);
+        REQUIRE(std::string(ruvia::to_json(cluster_options)) == std::string(ruvia::to_json(cluster_page.get<"list">())));
+        before = c.query_count_;
+        const auto certificate_options = co_await certificates.options(c, tenant, std::nullopt, std::nullopt, std::nullopt);
+        REQUIRE(c.query_count_ == before + 1);
+        const auto certificate_page = co_await certificates.list(c, tenant, 1, 10000, 0, std::nullopt, std::nullopt, std::nullopt, false, false);
+        REQUIRE(std::string(ruvia::to_json(certificate_options)) == std::string(ruvia::to_json(certificate_page.get<"list">())));
+        before = c.query_count_;
+        const auto dns_options = co_await dns.options(c, tenant, std::nullopt, std::nullopt);
+        REQUIRE(c.query_count_ == before + 1);
+        const auto dns_page = co_await dns.list(c, tenant, 1, 10000, 0, std::nullopt, std::nullopt);
+        REQUIRE(std::string(ruvia::to_json(dns_options)) == std::string(ruvia::to_json(dns_page.get<"list">())));
+        before = c.query_count_;
+        const auto issuer_options = co_await issuers.options(c, tenant, std::nullopt);
+        REQUIRE(c.query_count_ == before + 1);
+        const auto issuer_page = co_await issuers.list(c, tenant, 1, 10000, 0, std::nullopt);
+        REQUIRE(std::string(ruvia::to_json(issuer_options)) == std::string(ruvia::to_json(issuer_page.get<"list">())));
+    }
+    for (const auto& keyword : {std::string("%"), std::string("missing")}) {
+        const auto options = co_await issuers.options(c, std::string(tenant_a), keyword);
+        const auto page = co_await issuers.list(c, std::string(tenant_a), 1, 100, 0, keyword);
+        REQUIRE(std::string(ruvia::to_json(options)) == std::string(ruvia::to_json(page.get<"list">())));
+    }
+    (void)co_await tx.execute("SAVEPOINT option_boundaries");
+    (void)co_await tx.execute(
+        "INSERT INTO sys_sync_task (tenant_id, resource_type, certificate_id, operation, version, processed_version, is_done, is_ok, count_fails, error) "
+        "SELECT tenant_id, 'certificate', id, 'issue', issuance_revision, issuance_revision, true, false, 1, 'permanent failure' "
+        "FROM sys_certificate WHERE id = $1",
+        cert_expiring);
+    const auto terminal = co_await certificates.get(c, std::string(tenant_a), std::string(cert_expiring));
+    REQUIRE(terminal.get<"sync_status">()->view() == "failed");
+    const std::string tenant(tenant_a);
+    for (const auto end : {1000, 1001}) {
+        const int begin = end == 1000 ? 1 : 1001;
+        (void)co_await tx.execute(
+            "INSERT INTO sys_cluster (tenant_id, dns_zone_id, name, hostname_prefix) "
+            "SELECT $1, '00000000-0000-4000-8000-0000000000b1', 'option-boundary-' || n, 'option-' || n "
+            "FROM generate_series($2::int, $3::int) n",
+            tenant, begin, end);
+        (void)co_await tx.execute(
+            "INSERT INTO sys_provider (tenant_id, kind, provider, name, account_id, status, config) "
+            "SELECT $1, 'dns', 'cloudflare', 'option-boundary-' || n, 'option-' || n, 'verified', "
+            "'{\"credential\":{\"envelope\":\"qa-opaque\",\"hint\":\"****qa\"}}'::jsonb "
+            "FROM generate_series($2::int, $3::int) n",
+            tenant, begin, end);
+        (void)co_await tx.execute(
+            "INSERT INTO sys_certificate (tenant_id, dns_zone_id, provider_id, domain) "
+            "SELECT $1, '00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-0000000000fa', "
+            "'option-boundary-' || n || '.example' FROM generate_series($2::int, $3::int) n",
+            tenant, begin, end);
+        auto before = c.query_count_;
+        const auto cluster_options = co_await clusters.options(c, tenant, std::string("option-boundary-"));
+        REQUIRE(c.query_count_ == before + 1 && cluster_options.size() == static_cast<std::size_t>(end));
+        const auto cluster_page = co_await clusters.list(c, tenant, 1, 10000, 0, std::string("option-boundary-"), std::nullopt, std::nullopt);
+        REQUIRE(std::string(ruvia::to_json(cluster_options)) == std::string(ruvia::to_json(cluster_page.get<"list">())));
+        before = c.query_count_;
+        const auto dns_options = co_await dns.options(c, tenant, std::string("option-boundary-"), std::string("verified"));
+        REQUIRE(c.query_count_ == before + 1 && dns_options.size() == static_cast<std::size_t>(end));
+        const auto dns_page = co_await dns.list(c, tenant, 1, 10000, 0, std::string("option-boundary-"), std::string("verified"));
+        REQUIRE(std::string(ruvia::to_json(dns_options)) == std::string(ruvia::to_json(dns_page.get<"list">())));
+        before = c.query_count_;
+        const auto certificate_options = co_await certificates.options(c, tenant, std::string("option-boundary-"), std::string_view("pending"), false);
+        REQUIRE(c.query_count_ == before + 1 && certificate_options.size() == static_cast<std::size_t>(end));
+        const auto certificate_page = co_await certificates.list(c, tenant, 1, 10000, 0, std::string("option-boundary-"), std::string_view("pending"), false, false, false);
+        REQUIRE(std::string(ruvia::to_json(certificate_options)) == std::string(ruvia::to_json(certificate_page.get<"list">())));
+    }
+    (void)co_await tx.execute("ROLLBACK TO SAVEPOINT option_boundaries");
+    (void)co_await tx.execute("RELEASE SAVEPOINT option_boundaries");
+}
+
 ruvia::task<void> verify(ruvia::db_client& client) {
     verify_filter_parsing();
     co_await client.connect();
@@ -802,6 +889,7 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     }
     co_await verify_dashboard_console_days(c, tx);
     co_await verify_dashboard_asns(c, tx);
+    co_await verify_options(c, tx);
     co_await tx.rollback();
 }
 

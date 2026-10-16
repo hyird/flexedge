@@ -30,6 +30,7 @@
 #include "node/proto/control_reply.h"
 #include "node/proto/edge_control.pb.h"
 #include "node/runtime/config_activation.h"
+#include "node/runtime/dns_resolution.h"
 #include "node/runtime/log_producer.h"
 #include "node/runtime/node_credentials.h"
 #include "node/runtime/runtime_metrics.h"
@@ -44,6 +45,7 @@ struct control_channel_config final {
     ruvia::websocket_client_config web_socket_;
     ruvia::stop_token stop_token_;
     std::string agent_version_{std::string(node_version)};
+    std::chrono::steady_clock::duration dns_check_interval_{dns_check_interval};
 };
 
 class control_channel final {
@@ -100,10 +102,18 @@ private:
                 } catch (...) {
                     failure = std::current_exception();
                 }
-                co_await client.shutdown();
+                try {
+                    co_await client.shutdown();
+                } catch (...) {
+                    if (!failure) {
+                        failure = std::current_exception();
+                    }
+                }
                 if (failure) {
                     std::rethrow_exception(failure);
                 }
+            } catch (const data_plane_unavailable&) {
+                throw;
             } catch (const control_stream_ended&) {
                 if (!config_.stop_token_.stop_requested()) {
                     last_error_ = "control plane closed the connection";
@@ -354,7 +364,7 @@ private:
         result->set_node_spec_revision(contents->node_spec_.revision());
         result->set_release_id(release.release_id());
         result->set_manifest_digest(desired.release().digest_sha256());
-        const auto failure = apply_desired_config(store_, data_plane_, desired, objects, trace, *result);
+        const auto failure = co_await apply_desired_config(store_, data_plane_, desired, objects, trace, *result);
         if (!failure) {
             last_error_.clear();
         }
@@ -445,18 +455,18 @@ private:
 
     // Serves the last applied state while the control plane is unreachable. Local state this
     // build cannot use is moved aside so the session still connects and fetches desired state.
-    persistent_state restore_persisted_state() {
+    ruvia::task<persistent_state> restore_persisted_state() {
         try {
             auto persistent = store_.load();
             if (persistent.active_.has_node_spec()) {
-                activate_persisted_config(data_plane_, persistent.active_, persistent.objects_);
+                co_await activate_persisted_config(data_plane_, persistent.active_, persistent.objects_);
             }
-            return persistent;
+            co_return persistent;
         } catch (const stored_state_unusable& error) {
             store_.discard_active();
             report_discarded_state(error.what());
         }
-        return {};
+        co_return persistent_state{};
     }
 
     // A cached object that fails verification is requested again; objects from the control
@@ -474,10 +484,13 @@ private:
     }
 
     ruvia::task<void> run_session(ruvia::websocket_client& client) {
-        auto persistent = restore_persisted_state();
+        auto persistent = co_await restore_persisted_state();
         if (config_.stop_token_.stop_requested()) {
             co_return;
         }
+        const auto port = config_.web_socket_.port_.value_or(
+            config_.web_socket_.scheme_ == ruvia::websocket_scheme::wss ? 443 : 80);
+        auto addresses = co_await resolve_dns(loop_, config_.web_socket_.host_, port, config_.stop_token_);
         co_await connect_control_transport(client, config_.stop_token_);
         if (client.subprotocol() != control_subprotocol) {
             throw std::runtime_error("control plane did not select the required subprotocol");
@@ -504,6 +517,7 @@ private:
         try {
             auto initial = stream.expect("authenticate");
             stream.start();
+            stream.spawn_owned(watch_control_dns(client, stream, std::move(addresses), port));
             if (differs(runtime_.applied_node_spec_revision(), runtime_.active_release_id(),
                     runtime_.active_manifest_digest(), welcome.desired_node_spec_revision(),
                     welcome.desired_release_id(), welcome.desired_manifest_digest())) {
@@ -515,9 +529,35 @@ private:
         } catch (...) {
             failure = std::current_exception();
         }
-        co_await stream.shutdown();
+        try {
+            co_await stream.shutdown();
+        } catch (...) {
+            if (!failure) {
+                failure = std::current_exception();
+            }
+        }
         if (failure) {
             std::rethrow_exception(failure);
+        }
+    }
+
+    ruvia::task<void> watch_control_dns(ruvia::websocket_client& client, control_stream& stream,
+        std::optional<dns_addresses> previous, std::uint16_t port) {
+        const auto stop = stream.get_stop_token();
+        while (!stop.stop_requested()) {
+            if (co_await ruvia::sleep_for(stream.worker(), config_.dns_check_interval_, stop) == ruvia::timer_sleep_result::stop_requested) {
+                co_return;
+            }
+            auto next = co_await resolve_dns(loop_, config_.web_socket_.host_, port, stop);
+            if (!next) {
+                continue;
+            }
+            if (previous && *previous != *next) {
+                logs_.node("info", "control", "control DNS addresses changed; reconnecting");
+                client.abort();
+                co_return;
+            }
+            previous = std::move(next);
         }
     }
 

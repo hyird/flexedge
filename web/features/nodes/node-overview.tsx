@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import { ListView } from '@heroui-pro/react'
@@ -12,7 +13,7 @@ import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { clusterOptionsQuery } from '@/features/clusters/data'
 import { dnsZoneLinesQuery } from '@/features/dns-zones/data'
-import { dnsLinePath } from '@/features/dns-zones/dns-lines'
+import { dnsLineName } from '@/features/dns-zones/dns-lines'
 import { nodeQuery } from './data'
 import { NodeConnectionChip } from './node-connection-chip'
 import {
@@ -95,12 +96,18 @@ function Endpoints({ node }: { node: Node }) {
     (cluster) => cluster.id === node.cluster_id
   )?.dns_zone_id
   const lines = useQuery(dnsZoneLinesQuery(zoneId))
+  // ListView caches dynamic collection items by identity; include the line
+  // label in each item so an asynchronously loaded zone refreshes its text.
+  const endpoints = useMemo(
+    () =>
+      node.config.endpoints.map((endpoint) => ({
+        ...endpoint,
+        line_name: dnsLineName(lines.data ?? [], endpoint.line_code),
+      })),
+    [node.config.endpoints, lines.data]
+  )
   return (
-    <ListView
-      aria-label='服务端点'
-      variant='secondary'
-      items={node.config.endpoints}
-    >
+    <ListView aria-label='服务端点' variant='secondary' items={endpoints}>
       {(endpoint) => (
         <ListView.Item
           id={endpoint.id}
@@ -113,11 +120,7 @@ function Endpoints({ node }: { node: Node }) {
             </ListView.Title>
           </ListView.ItemContent>
           <ListView.ItemAction className='min-w-0 truncate text-[13px] text-muted'>
-            {lines.data
-              ? dnsLinePath(lines.data, endpoint.line_code)
-              : endpoint.line_code === 'default'
-                ? '默认线路'
-                : endpoint.line_code}
+            {endpoint.line_name}
           </ListView.ItemAction>
         </ListView.Item>
       )}

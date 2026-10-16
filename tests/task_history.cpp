@@ -109,7 +109,6 @@ constexpr std::string_view summary_marker = "00000000-0000-4000-8000-00000000007
 
 using read_context = test_support::read_context<ruvia::db_handle>;
 
-
 std::int64_t integer(const ruvia::db_rows& rows, std::size_t column = 0) {
     return rows.front()[column].as<std::int64_t>().value_or(-1);
 }
@@ -264,9 +263,9 @@ ruvia::task<service::sync_runtime::running_result_transition> record_attempt(ruv
     std::string_view error = "qa failure") {
     co_await lease(db, running.marker_.marker_id_);
     auto transaction = co_await db.begin_transaction();
-    const auto transition =
-        completed ? co_await service::sync_runtime::complete_running_and_record_event(transaction, running, detail)
-                  : co_await service::sync_runtime::fail_running_and_record_event(transaction, running, error, detail);
+    const auto transition = co_await service::sync_runtime::record_running_result(transaction, running,
+        completed ? service::sync_runtime::attempt_result::completed() : service::sync_runtime::attempt_result::retry(error),
+        detail);
     co_await transaction.commit();
     co_return transition;
 }
@@ -686,8 +685,8 @@ ruvia::task<void> verify_live_history(ruvia::db_handle& db, read_context& contex
         std::chrono::steady_clock::now());
     co_await lease(db, dns_marker);
     auto transaction = co_await db.begin_transaction();
-    const auto transition = co_await service::sync_runtime::fail_running_and_record_event(transaction,
-        running_lease, "live failure", service::sync_runtime::detail_none_json);
+    const auto transition = co_await service::sync_runtime::record_running_result(transaction,
+        running_lease, service::sync_runtime::attempt_result::retry("live failure"), service::sync_runtime::detail_none_json);
     service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::dns_sync, "dns-sync",
         std::chrono::steady_clock::now());
     co_await service::sync_runtime::commit_and_publish_result_event(transaction, worker, running_lease, transition,

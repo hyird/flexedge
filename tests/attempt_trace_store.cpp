@@ -58,7 +58,6 @@ std::vector<std::string> canaries;
 
 using read_context = test_support::read_context<ruvia::db_handle>;
 
-
 std::int64_t integer(const ruvia::db_rows& rows, std::size_t column = 0) {
     return rows.front()[column].as<std::int64_t>().value_or(-1);
 }
@@ -148,7 +147,7 @@ ruvia::task<std::optional<std::int64_t>> record_attempt(ruvia::db_handle& db, st
     const auto lease = service::sync_runtime::make_running_lease(tenant, marker, 1, worker, started,
         service::sync_runtime::marker_resource_type::dns_zone, zone);
     auto transaction = co_await db.begin_transaction();
-    const auto transition = co_await service::sync_runtime::fail_running_and_record_event(transaction, lease, error,
+    const auto transition = co_await service::sync_runtime::record_running_result(transaction, lease, service::sync_runtime::attempt_result::retry(error),
         R"({"kind":"dns_sync","truncated":false})");
     test_support::recorded_notifications worker{.handle_ = db};
     co_await service::sync_runtime::commit_and_publish_result_event(transaction, worker, lease, transition, trace);

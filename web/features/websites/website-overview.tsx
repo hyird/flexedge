@@ -28,6 +28,7 @@ import {
   domainResolutionReserve,
   domainResolutionStatuses,
   originAddress,
+  originGroupName,
   originGroups,
   originHealth,
   originHealthReserve,
@@ -151,7 +152,7 @@ export function WebsiteOverview() {
         )
         return (
           <span className={cn('block truncate', !item && 'text-muted')}>
-            {item ? item.group : '已删除的源站'}
+            {item ? originGroupName(item.group) : '已删除的源站'}
           </span>
         )
       },
@@ -390,7 +391,7 @@ export function WebsiteOverview() {
                 label: '默认源站',
                 value: origin ? (
                   <span className='flex flex-col gap-0.5'>
-                    {origin.group}
+                    {originGroupName(origin.group)}
                     <Mono className='text-muted'>{originAddress(origin)}</Mono>
                   </span>
                 ) : (

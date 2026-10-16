@@ -1,439 +1,129 @@
 #pragma once
 
 #include <ruvia/core/task.h>
-#include <ruvia/core/timer.h>
-#include <ruvia/web/context.h>
-#include <ruvia/web/db/db.h>
-#include <ruvia/web/redis/redis.h>
-#include <ruvia/web/web_worker.h>
+#include <ruvia/web/db/db_repository.h>
 
 #include <algorithm>
-#include <array>
-#include <chrono>
 #include <cstdint>
-#include <exception>
-#include <optional>
-#include <stdexcept>
+#include <span>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "service/features/background/stream_consumers.h"
-#include "service/features/background/work_available.h"
-#include "service/features/live_resource/notification_outbox.h"
-#include "service/features/live_resource/redis_snapshot_cache.h"
-#include "service/features/log_ingest/envelope.h"
-#include "service/features/log_ingest/notifications.h"
-#include "service/features/log_ingest/queue.h"
-#include "service/features/logging/logger.h"
+#include "service/common/uuid.h"
+#include "service/features/log_ingest/log_mapper.h"
+#include "service/features/log_ingest/notification_relay.h"
 
 namespace service::log_ingest {
 
-class invalid_delivery final : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
-
-// The work type of the log ingest claim loop.
-inline constexpr std::string_view work_type{"log-ingest"};
-
-// Rows of outbox kind "log" carry log notifications of committed log rows.
-struct log_relay final {
-    static constexpr std::string_view kind{"log"};
-
-    static ruvia::task<void> publish(ruvia::redis_handle redis, std::string_view id, std::string_view payload) {
-        namespace live = service::live_resource;
-        live::outbox::publication output{.stream_ = notifications::stream_key, .max_entries_ = notifications::max_entries};
-        output.fields_ = live::outbox::unpack(payload);
-        std::string_view tenant, type, resource_id;
-        for (const auto& [name, value] : output.fields_) {
-            if (name == "tenant_id") {
-                tenant = value;
-            }
-            if (name == "resource_type") {
-                type = value;
-            }
-            if (name == "resource_id") {
-                resource_id = value;
-            }
-        }
-        if (tenant.empty() || resource_id.empty() || (type != "access" && type != "node")) {
-            throw std::runtime_error("invalid log outbox notification");
-        }
-        if (type == "access") {
-            output.invalidations_ = live::redis_snapshot_cache::invalidation_scopes(tenant, live::resource::access_history, resource_id);
-            output.invalidations_.push_back(live::redis_snapshot_cache::resource_scope(tenant, live::resource::overview_traffic));
-        }
-        co_await live::outbox::publish(redis, id, std::move(output));
+// The node lock serializes this lookup with every log writer for the same
+// node. Its own READ COMMITTED statement sees the preceding writer's commit.
+// Event identity is independent of the corrected timestamp and of the Redis
+// entry used for a retry or dead-letter replay. Each entity is a distinct kind.
+template <typename entity_type>
+ruvia::task<void> exclude_stored_events(ruvia::db_transaction& transaction,
+    std::string_view tenant, std::string_view node, std::vector<entity_type>& rows) {
+    if (rows.empty()) {
+        co_return;
     }
-};
-
-template <typename transaction_type>
-ruvia::task<void> enqueue_log(transaction_type& transaction, std::string_view type,
-    std::string_view tenant_id, std::string_view resource_id) {
-    if (type != "access" && type != "node") {
-        throw std::invalid_argument("unsupported outbox log resource");
+    for (auto& row : rows) {
+        const auto id = service::common::parse_uuid(std::string_view(row.template get<"id">()));
+        if (!id) {
+            throw invalid_delivery("invalid log event identity");
+        }
+        row.template set<"id">(*id);
     }
-    const std::vector<std::pair<std::string, std::string>> fields{
-        {"tenant_id", std::string(tenant_id)}, {"resource_type", std::string(type)}, {"resource_id", std::string(resource_id)}};
-    (void)co_await service::live_resource::outbox::insert(transaction, log_relay::kind,
-        service::live_resource::outbox::pack(fields));
+    std::unordered_set<std::string> seen;
+    seen.reserve(rows.size());
+    std::vector<std::string> ids;
+    ids.reserve(rows.size());
+    for (const auto& row : rows) {
+        if (seen.emplace(row.template get<"id">()).second) {
+            ids.emplace_back(row.template get<"id">());
+        }
+    }
+    const auto matches = entity_type::template column<"tenant_id">() == tenant &&
+                         entity_type::template column<"node_id">() == node &&
+                         entity_type::template column<"id">().in(std::span<const std::string>(ids));
+    ruvia::db_query expressions;
+    auto query = transaction.template get_repository<entity_type>().create_query_builder();
+    query.select({{"id", {}}}).where(matches.expression(expressions));
+    const auto stored = co_await query.template get_many<stored_log_identity>();
+    seen.clear();
+    for (const auto& row : stored) {
+        seen.emplace(row.template get<"id">());
+    }
+    std::vector<entity_type> fresh;
+    fresh.reserve(rows.size());
+    for (auto& row : rows) {
+        if (seen.emplace(row.template get<"id">()).second) {
+            fresh.push_back(std::move(row));
+        }
+    }
+    rows.swap(fresh);
 }
 
-inline bool is_permanent_database_failure(const ruvia::db_error& error) {
-    const auto state = error.sql_state();
-    return state && (state->starts_with("22") || state->starts_with("23"));
-}
-
-inline std::int64_t bounded_occurred_ms(std::uint64_t value, std::int64_t received_unix_ms) {
-    const auto maximum = static_cast<std::uint64_t>(received_unix_ms + 5 * 60 * 1000);
-    if (value == 0 || value > maximum) {
-        return received_unix_ms;
-    }
-    return static_cast<std::int64_t>(value);
-}
-
-// The enqueuing Worker (the node connection's Worker) wakes its own log
-// ingest loop; other Workers find the delivery at their next bounded scan.
+// Ownership checks, idempotent bulk inserts and notification outbox rows share
+// one transaction. Redis confirmation remains the claiming Worker's next step.
 template <typename context_type>
-void wake_own_ingest(context_type& context) {
-    static constexpr std::array work{work_type};
-    service::background::work_available::wake_own_claims(context, work);
-}
-
-inline ruvia::task<bool> enqueue(ruvia::context& c, std::string_view tenant_id,
-    std::string_view node_id, std::string_view agent_id,
-    const flexedge::node::v2::LogDelivery& delivery) {
-    try {
-        if (!valid_delivery(delivery, node_id)) {
-            co_return false;
-        }
-        const auto payload = serialize_envelope(tenant_id, agent_id, delivery);
-        if (!(co_await queue::push(c.redis(), payload))) {
-            co_return false;
-        }
-        wake_own_ingest(c);
-        co_return true;
-    } catch (const std::exception& error) {
-        service::logging::error("Log enqueue failed: " + std::string(error.what()));
-        co_return false;
-    } catch (...) {
-        service::logging::error("Log enqueue failed with unknown exception");
-        co_return false;
-    }
-}
-
-template <typename context_t_type>
-inline ruvia::task<void> insert_envelope(context_t_type& context,
+ruvia::task<void> insert_envelope(context_type& context,
     const v2::QueuedLogDelivery& envelope, std::int64_t received_unix_ms) {
-    if (!valid_envelope(envelope)) {
-        throw invalid_delivery("invalid queued log delivery");
-    }
-    const auto& delivery = envelope.delivery();
-    const std::string_view tenant_id{envelope.tenant_id()};
-    const std::string_view node_id{delivery.node_id()};
-    const std::string_view agent_id{envelope.agent_id()};
-    auto db = context.db();
-    auto transaction = co_await db.begin_transaction();
-    const auto node_rows = co_await transaction.query(
-        "SELECT cluster_id FROM sys_node WHERE tenant_id = $1 AND id = $2 AND agent_id = $3 AND "
-        "registration_status = 'registered' AND deleted_at IS NULL LIMIT 1 FOR SHARE",
-        tenant_id, node_id, agent_id);
-    if (node_rows.empty()) {
+    auto rows = to_log_rows(envelope, received_unix_ms);
+    const std::string_view tenant{envelope.tenant_id()};
+    const std::string_view node{envelope.delivery().node_id()};
+    const std::string_view agent{envelope.agent_id()};
+    auto transaction = co_await context.db().begin_transaction(
+        {.isolation_ = ruvia::db_transaction_isolation::read_committed});
+    const auto owner = co_await transaction.template get_repository<log_node_entity>().find_one(
+        {.where_ = log_node_entity::column<"tenant_id">() == tenant &&
+                   log_node_entity::column<"id">() == node &&
+                   log_node_entity::column<"agent_id">() == agent &&
+                   log_node_entity::column<"registration_status">() == "registered" &&
+                   log_node_entity::column<"deleted_at">().is_null(),
+            .lock_ = ruvia::db_lock_options{.mode_ = ruvia::db_row_lock::no_key_update}});
+    if (!owner) {
         throw invalid_delivery("log delivery node is no longer registered in tenant scope");
     }
-    const auto cluster_id = std::string(node_rows.front()[0].value().value_or(""));
-    std::vector<ruvia::db_value> access_params;
-    std::vector<ruvia::db_value> node_params;
-    access_params.reserve(static_cast<std::size_t>(delivery.events_size()) * 22);
-    node_params.reserve(static_cast<std::size_t>(delivery.events_size()) * 8);
-    std::vector<std::string> access_website_ids;
-    access_website_ids.reserve(static_cast<std::size_t>(delivery.events_size()));
-    std::string access_sql =
-        "INSERT INTO sys_website_access_log (tenant_id, occurred_at, id, node_id, website_id, "
-        "client_ip, protocol, method, host, target, status_code, request_bytes, response_bytes, "
-        "duration_ms, "
-        "user_agent, referer, request_headers, request_body, request_body_truncated, "
-        "tls_fingerprint, response_headers, query_string, cookies, created_at) VALUES ";
-    std::string node_sql =
-        "INSERT INTO sys_node_log (tenant_id, occurred_at, id, node_id, level, category, message, "
-        "created_at) VALUES ";
-    const auto append_param = [](std::string& sql, std::vector<ruvia::db_value>& params,
-                                  ruvia::db_value value) {
-        sql += "$" + std::to_string(params.size() + 1);
-        params.push_back(std::move(value));
-    };
-    const auto append_text = [&](std::string& sql, std::vector<ruvia::db_value>& params,
-                                 std::string_view value) {
-        append_param(sql, params, ruvia::db_value{value});
-    };
-    std::size_t access_count{};
-    std::size_t node_count{};
-    for (const auto& event : delivery.events()) {
-        if (event.has_access_log()) {
-            const auto& access = event.access_log();
-            if (access_count++ > 0) {
-                access_sql += ", ";
-            }
-            access_sql += "(";
-            append_text(access_sql, access_params, tenant_id);
-            access_sql += ", TO_TIMESTAMP(";
-            append_param(access_sql, access_params,
-                ruvia::db_value{bounded_occurred_ms(access.occurred_unix_ms(), received_unix_ms)});
-            access_sql += "::double precision / 1000.0), ";
-            append_text(access_sql, access_params, access.id());
-            access_sql += ", ";
-            append_text(access_sql, access_params, node_id);
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.website_id());
-            access_website_ids.emplace_back(access.website_id());
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.client_ip());
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.protocol());
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.method());
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.host());
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.target());
-            access_sql += ", ";
-            append_param(access_sql, access_params,
-                ruvia::db_value{static_cast<std::int64_t>(access.status_code())});
-            access_sql += ", ";
-            append_param(access_sql, access_params,
-                ruvia::db_value{static_cast<std::int64_t>(access.request_bytes())});
-            access_sql += ", ";
-            append_param(access_sql, access_params,
-                ruvia::db_value{static_cast<std::int64_t>(access.response_bytes())});
-            access_sql += ", ";
-            append_param(access_sql, access_params,
-                ruvia::db_value{static_cast<std::int64_t>(access.duration_ms())});
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.user_agent());
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.referer());
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.request_headers());
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.request_body());
-            access_sql += ", ";
-            append_param(access_sql, access_params, ruvia::db_value{access.request_body_truncated()});
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.tls_fingerprint());
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.response_headers());
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.query_string());
-            access_sql += ", ";
-            append_text(access_sql, access_params, access.cookies());
-            access_sql += ", NOW())";
-            continue;
-        }
-
-        const auto& item = event.node_log();
-        if (node_count++ > 0) {
-            node_sql += ", ";
-        }
-        node_sql += "(";
-        append_text(node_sql, node_params, tenant_id);
-        node_sql += ", TO_TIMESTAMP(";
-        append_param(node_sql, node_params,
-            ruvia::db_value{bounded_occurred_ms(item.occurred_unix_ms(), received_unix_ms)});
-        node_sql += "::double precision / 1000.0), ";
-        append_text(node_sql, node_params, item.id());
-        node_sql += ", ";
-        append_text(node_sql, node_params, node_id);
-        node_sql += ", ";
-        append_text(node_sql, node_params, item.level());
-        node_sql += ", ";
-        append_text(node_sql, node_params, item.category());
-        node_sql += ", ";
-        append_text(node_sql, node_params, item.message());
-        node_sql += ", NOW())";
-    }
-    std::sort(access_website_ids.begin(), access_website_ids.end());
-    access_website_ids.erase(std::unique(access_website_ids.begin(), access_website_ids.end()),
-        access_website_ids.end());
-    if (!access_website_ids.empty()) {
-        std::vector<ruvia::db_value> website_params;
-        website_params.reserve(access_website_ids.size() + 2);
-        website_params.emplace_back(tenant_id);
-        website_params.emplace_back(cluster_id);
-        std::string placeholders;
-        for (const auto& website_id : access_website_ids) {
-            if (!placeholders.empty()) {
-                placeholders += ", ";
-            }
-            placeholders += "$" + std::to_string(website_params.size() + 1);
-            website_params.emplace_back(website_id);
-        }
-        const auto website_rows = co_await transaction.query(
-            "SELECT id FROM sys_website WHERE tenant_id = $1 AND cluster_id = $2 AND "
-            "deleted_at IS NULL AND id IN (" +
-                placeholders + ") FOR SHARE",
-            website_params);
-        if (website_rows.size() != access_website_ids.size()) {
+    if (!rows.websites_.empty()) {
+        const auto websites = co_await transaction.template get_repository<log_website_entity>().find(
+            {.where_ = log_website_entity::column<"tenant_id">() == tenant &&
+                       log_website_entity::column<"cluster_id">() == std::string_view(owner->template get<"cluster_id">()) &&
+                       log_website_entity::column<"deleted_at">().is_null() &&
+                       log_website_entity::column<"id">().in(std::span<const std::string>(rows.websites_)),
+                .lock_ = ruvia::db_lock_options{.mode_ = ruvia::db_row_lock::share}});
+        if (websites.size() != rows.websites_.size()) {
             throw invalid_delivery("log delivery references a website outside the node cluster");
         }
     }
-    std::vector<std::string> inserted_website_ids;
-    if (access_count > 0) {
-        access_sql += " ON CONFLICT DO NOTHING RETURNING website_id";
-        const auto inserted = co_await transaction.query(access_sql, access_params);
-        inserted_website_ids.reserve(inserted.size());
+    co_await exclude_stored_events(transaction, tenant, node, rows.access_);
+    co_await exclude_stored_events(transaction, tenant, node, rows.node_);
+    const ruvia::db_upsert_options duplicate{.do_nothing_ = true};
+    std::vector<std::string> inserted_websites;
+    if (!rows.access_.empty()) {
+        const auto inserted = co_await transaction.template get_repository<access_log_entity>()
+                                  .template upsert_returning<inserted_access_log>(std::span<const access_log_entity>(rows.access_), duplicate);
         for (const auto& row : inserted) {
-            inserted_website_ids.emplace_back(row[0].value().value_or(""));
+            inserted_websites.emplace_back(row.template get<"website_id">());
         }
-        std::sort(inserted_website_ids.begin(), inserted_website_ids.end());
-        inserted_website_ids.erase(std::unique(inserted_website_ids.begin(), inserted_website_ids.end()),
-            inserted_website_ids.end());
+        std::sort(inserted_websites.begin(), inserted_websites.end());
+        inserted_websites.erase(std::unique(inserted_websites.begin(), inserted_websites.end()), inserted_websites.end());
     }
     bool node_inserted{};
-    if (node_count > 0) {
-        node_sql += " ON CONFLICT DO NOTHING";
-        const auto inserted = co_await transaction.execute(node_sql, node_params);
+    if (!rows.node_.empty()) {
+        const auto inserted = co_await transaction.template get_repository<node_log_entity>()
+                                  .upsert(std::span<const node_log_entity>(rows.node_), duplicate);
         node_inserted = inserted.affected_rows() > 0;
     }
-    for (const auto& website_id : inserted_website_ids) {
-        co_await enqueue_log(transaction, "access", tenant_id, website_id);
+    for (const auto& website : inserted_websites) {
+        co_await enqueue_log(transaction, "access", tenant, website);
     }
     if (node_inserted) {
-        co_await enqueue_log(transaction, "node", tenant_id, node_id);
+        co_await enqueue_log(transaction, "node", tenant, node);
     }
     co_await transaction.commit();
-    // The ingesting Worker relays the log notifications it committed.
     service::live_resource::wake_own_outbox(context);
-}
-
-template <typename context_t_type>
-inline ruvia::task<std::size_t> process(context_t_type& context, std::string_view consumer,
-    std::vector<queue::entry> entries) {
-    std::size_t processed{};
-    for (const auto& entry : entries) {
-        const auto envelope = entry.valid_ ? parse_envelope(entry.payload_) : std::nullopt;
-        bool insert_failed{};
-        std::string permanent_failure;
-        if (!envelope) {
-            permanent_failure = "invalid_log_envelope";
-        } else {
-            try {
-                const auto separator = entry.id_.find('-');
-                const auto received_unix_ms = queue::parse_integer(std::string_view(entry.id_).substr(0, separator));
-                co_await insert_envelope(context, *envelope, received_unix_ms);
-            } catch (const invalid_delivery& error) {
-                permanent_failure = error.what();
-            } catch (const ruvia::db_error& error) {
-                if (is_permanent_database_failure(error)) {
-                    permanent_failure = "database_invalid_log_data:" + std::string(*error.sql_state());
-                } else {
-                    insert_failed = true;
-                }
-            } catch (...) {
-                insert_failed = true;
-            }
-        }
-        if (!permanent_failure.empty()) {
-            const auto result = co_await queue::fail(context.redis(), consumer, entry, permanent_failure);
-            if (result != queue::failure_result::full) {
-                if (result == queue::failure_result::archived) {
-                    service::logging::error("Log delivery archived for replay: " + permanent_failure);
-                }
-                continue;
-            }
-            insert_failed = true;
-            service::logging::error("Log failure archive is full; original delivery retained");
-        }
-        if (insert_failed) {
-            const auto delay = co_await queue::schedule_retry(context.redis(), consumer, entry);
-            if (delay.count() > 0) {
-                service::logging::error("Log delivery retained; retry scheduled in " +
-                                        std::to_string(delay.count()) + "ms");
-            }
-            continue;
-        }
-        co_await queue::finish(context.redis(), consumer, entry);
-        ++processed;
-    }
-    co_return processed;
-}
-
-template <typename context_t_type>
-inline ruvia::task<void> recover_stale(context_t_type& context, std::string_view consumer) {
-    auto claimed = co_await queue::reclaim_stale(context.redis(), consumer);
-    if (!claimed.empty()) {
-        (void)co_await process(context, consumer, std::move(claimed));
-    }
-}
-
-template <typename context_t_type>
-inline ruvia::task<void> run_worker(context_t_type& context, std::string consumer) {
-    if (consumer.empty()) {
-        throw std::invalid_argument("log ingest consumer name cannot be empty");
-    }
-    // Subscribe before the first claim: deliveries this worker enqueues later
-    // wake it at once.
-    const auto own = service::background::work_available::subscribe(context, work_type);
-    bool initialized{};
-    auto next_recovery = std::chrono::steady_clock::now();
-    auto next_consumer_cleanup = next_recovery;
-    while (!context.get_stop_token().stop_requested()) {
-        bool failed{};
-        try {
-            if (!initialized) {
-                co_await queue::initialize(context.redis());
-                initialized = true;
-            }
-            const auto now = std::chrono::steady_clock::now();
-            if (now >= next_consumer_cleanup) {
-                (void)co_await service::background::stream_consumers::remove_idle(
-                    context.redis(), queue::stream_key, queue::consumer_group, consumer);
-                next_consumer_cleanup = now + service::background::stream_consumers::cleanup_interval;
-            }
-            if (now >= next_recovery) {
-                co_await recover_stale(context, consumer);
-                next_recovery = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            }
-            auto retries = co_await queue::claim_retries(context.redis(), consumer);
-            if (!retries.empty()) {
-                (void)co_await process(context, consumer, std::move(retries));
-            }
-            auto entries = co_await queue::read(context.redis(), consumer);
-            if (!entries.empty()) {
-                (void)co_await process(context, consumer, std::move(entries));
-                continue;
-            }
-            (void)co_await service::background::stream_consumers::remove_empty(
-                context.redis(), queue::stream_key, queue::consumer_group, consumer);
-            // Only a wait deadline is local; Redis retains every retry record.
-            // New deliveries wake immediately, retries use their real deadline,
-            // and abandoned claims retain the existing recovery cadence.
-            const auto recovery_wait = std::chrono::duration_cast<std::chrono::milliseconds>(
-                next_recovery - std::chrono::steady_clock::now());
-            const auto wait = co_await queue::retry_wait(context.redis(), recovery_wait);
-            (void)co_await own.receive_for(wait, context.get_stop_token());
-        } catch (const std::exception& error) {
-            if (context.get_stop_token().stop_requested()) {
-                co_return;
-            }
-            initialized = false;
-            failed = true;
-            service::logging::error("Log ingest worker failure: " + std::string(error.what()));
-        } catch (...) {
-            if (context.get_stop_token().stop_requested()) {
-                co_return;
-            }
-            initialized = false;
-            failed = true;
-            service::logging::error("Log ingest worker failure with unknown exception");
-        }
-        if (failed && co_await ruvia::sleep_for(context.worker(), std::chrono::seconds(1),
-                          context.get_stop_token()) ==
-                          ruvia::timer_sleep_result::stop_requested) {
-            co_return;
-        }
-    }
 }
 
 }  // namespace service::log_ingest

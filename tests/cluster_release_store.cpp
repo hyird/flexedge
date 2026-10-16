@@ -1,3 +1,4 @@
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -47,6 +48,28 @@ ruvia::task<void> verify(ruvia::db_client& client) {
         require((co_await tx.query("SELECT id FROM sys_cluster_release")).empty());
     }
     (void)co_await tx.execute("UPDATE sys_dns_zone SET deleted_at=NULL");
+    // A wide caller value must be rejected before narrowing to the physical
+    // int32 schema_version or object position; it must not wrap to a valid id.
+    for (const auto invalid : {(std::numeric_limits<std::int64_t>::min)(), (std::numeric_limits<std::int64_t>::max)()}) {
+        bool version_rejected{};
+        try {
+            (void)co_await service::node_dispatch::allocate_cluster_release(tx, "t", "c", invalid);
+        } catch (const std::out_of_range&) {
+            version_rejected = true;
+        }
+        require(version_rejected);
+        bool position_rejected{};
+        try {
+            co_await service::node_dispatch::link_release_object(tx, "t", "unused", invalid, "digest");
+        } catch (const std::out_of_range&) {
+            position_rejected = true;
+        }
+        require(position_rejected);
+        const auto unchanged = co_await tx.query("SELECT release_generation FROM sys_cluster WHERE id='c'");
+        require(unchanged[0][0].as<int>() == 0);
+        require((co_await tx.query("SELECT id FROM sys_cluster_release")).empty());
+        require((co_await tx.query("SELECT release_id FROM sys_cluster_release_object")).empty());
+    }
     for (std::int64_t generation = 1; generation <= 2; ++generation) {
         const auto allocated = co_await service::node_dispatch::allocate_cluster_release(tx, "t", "c", 5);
         require(allocated.generation_ == generation && allocated.access_domain_ == "edge.example.com" && allocated.enabled_);

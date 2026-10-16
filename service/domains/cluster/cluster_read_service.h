@@ -20,32 +20,25 @@ namespace service::cluster {
 
 class cluster_read_service final {
 public:
+    ruvia::task<ruvia::array<cluster_dto>> options(auto& c, const std::string& tenant_id, const std::optional<std::string>& keyword) const {
+        ruvia::db_query query(c.pool());
+        filter_query(query, tenant_id, keyword, std::nullopt, std::nullopt);
+        project(query);
+        const auto rows = co_await c.db().query(query);
+        ruvia::array<cluster_dto> items({.resource_ = c.pool()});
+        for (const auto& row : rows) {
+            fill_cluster(items.emplace_back(ruvia::model_options{.resource_ = c.pool()}), row);
+        }
+        co_return items;
+    }
+
     ruvia::task<cluster_page_data_dto> list(auto& c, const std::string& tenant_id,
         std::int64_t page, std::int64_t page_size,
         std::int64_t skip,
         const std::optional<std::string>& keyword,
         const std::optional<std::string>& dns_zone_id,
         const std::optional<std::string>& status) const {
-        std::optional<std::string> keyword_pattern;
-        if (keyword) {
-            keyword_pattern = "%" + service::common::escape_like_pattern(*keyword) + "%";
-        }
-        const auto filter = [&](ruvia::db_query& query) {
-            source(query, tenant_id);
-            if (keyword_pattern) {
-                const auto pattern = query.value(*keyword_pattern);
-                query.and_where(query.sql({"cluster.name ILIKE ",
-                                              " OR (cluster.hostname_prefix || '.' || zone.domain) ILIKE ",
-                                              ""},
-                    {pattern, pattern}));
-            }
-            if (dns_zone_id) {
-                query.and_where(query.sql({"cluster.dns_zone_id = ", ""}, {query.value(*dns_zone_id)}));
-            }
-            if (status) {
-                query.and_where(query.sql({"cluster.status = ", ""}, {query.value(*status)}));
-            }
-        };
+        const auto filter = [&](ruvia::db_query& query) { filter_query(query, tenant_id, keyword, dns_zone_id, status); };
         const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
         const auto total = page_rows.total_;
 
@@ -79,6 +72,27 @@ public:
     }
 
 private:
+    static void filter_query(ruvia::db_query& query, const std::string& tenant_id, const std::optional<std::string>& keyword, const std::optional<std::string>& dns_zone_id, const std::optional<std::string>& status) {
+        std::optional<std::string> keyword_pattern;
+        if (keyword) {
+            keyword_pattern = "%" + service::common::escape_like_pattern(*keyword) + "%";
+        }
+        source(query, tenant_id);
+        if (keyword_pattern) {
+            const auto pattern = query.value(*keyword_pattern);
+            query.and_where(query.sql({"cluster.name ILIKE ",
+                                          " OR (cluster.hostname_prefix || '.' || zone.domain) ILIKE ",
+                                          ""},
+                {pattern, pattern}));
+        }
+        if (dns_zone_id) {
+            query.and_where(query.sql({"cluster.dns_zone_id = ", ""}, {query.value(*dns_zone_id)}));
+        }
+        if (status) {
+            query.and_where(query.sql({"cluster.status = ", ""}, {query.value(*status)}));
+        }
+    }
+
     static void source(ruvia::db_query& query, const std::string& tenant_id) {
         query.from("sys_cluster", "cluster")
             .join(ruvia::db_join_type::inner, "sys_dns_zone",

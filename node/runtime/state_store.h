@@ -122,17 +122,29 @@ public:
         write_encrypted(directory_ / "staged" / "state.pb", serialize_artifact(active));
     }
 
-    void activate_staged() const {
+    std::optional<std::string> activate_staged() const {
         const auto staged = read_secure_file(directory_ / "staged" / "state.pb");
         if (!staged) {
             throw std::runtime_error("staged node state does not exist");
         }
-        if (const auto active = read_secure_file(directory_ / "active" / "state.pb"); active) {
+        auto active = read_secure_file(directory_ / "active" / "state.pb");
+        if (active) {
             write_secure_file_atomic(directory_ / "previous" / "state.pb", *active);
         }
         write_secure_file_atomic(directory_ / "active" / "state.pb", *staged);
         std::error_code ignored;
         std::filesystem::remove(directory_ / "staged" / "state.pb", ignored);
+        return active;
+    }
+
+    // The previous encrypted bytes are retained by the control-loop activation until all
+    // data workers confirm the transaction. An initial activation rolls back to no state.
+    void rollback_active(const std::optional<std::string>& previous) const {
+        if (previous) {
+            write_secure_file_atomic(directory_ / "active" / "state.pb", *previous);
+        } else {
+            std::filesystem::remove(directory_ / "active" / "state.pb");
+        }
     }
 
 private:

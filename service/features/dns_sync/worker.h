@@ -28,7 +28,7 @@ inline ruvia::task<void> process_task(service::background::task_context& context
     } catch (...) {
         exception = std::current_exception();
     }
-    if (exception) {
+    if (!context.get_stop_token().stop_requested() && exception) {
         const auto failure = service::outbound_http::classify_attempt_failure(exception, "同步任务发生未知错误");
         trace.mark_failure(failure.message_);
         auto step = trace.begin_step(service::attempt_trace::step_code::record_failure);

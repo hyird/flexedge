@@ -45,26 +45,21 @@ bool healthy(const origin_health_state& state, origin_health_key_view key) {
 int main() {
     origin_health_state health_state;
     {
-        auto next = health_state.prepare(keys_of(origin_key));
-        REQUIRE(next.snapshot()->find("website", "origin") != nullptr);
+        auto next = health_state.prepare(keys_of(origin_key), {});
         REQUIRE(health_state.snapshot()->find("website", "origin") == nullptr);
         health_state.activate(std::move(next));
     }
     const auto id = id_of(health_state, origin_key);
     REQUIRE(healthy(health_state, origin_key));
-    // A healthy origin whose last outcome succeeded is settled for successes only.
-    REQUIRE(health_state.snapshot()->find("website", "origin")->settled(true));
-    REQUIRE(!health_state.snapshot()->find("website", "origin")->settled(false));
     REQUIRE(!health_state.record(origin_key, id, true, 2));
 
-    // Consecutive outcomes cross the threshold; the direction change is visible before it.
-    REQUIRE(health_state.record(origin_key, id, false, 2));
+    // Consecutive outcomes cross the threshold; partial streaks do not change the snapshot.
+    REQUIRE(!health_state.record(origin_key, id, false, 2));
     REQUIRE(healthy(health_state, origin_key));
     REQUIRE(health_state.record(origin_key, id, false, 2));
     REQUIRE(!healthy(health_state, origin_key));
-    REQUIRE(health_state.snapshot()->find("website", "origin")->settled(false));
     REQUIRE(!health_state.snapshot()->all_healthy());
-    REQUIRE(health_state.record(origin_key, id, true, 2));
+    REQUIRE(!health_state.record(origin_key, id, true, 2));
     REQUIRE(!healthy(health_state, origin_key));
     REQUIRE(health_state.record(origin_key, id, true, 2));
     REQUIRE(healthy(health_state, origin_key));
@@ -74,12 +69,12 @@ int main() {
     // next configuration is pending.
     REQUIRE(health_state.record(origin_key, id, false, 1));
     {
-        auto pending_removal = health_state.prepare({});
+        auto pending_removal = health_state.prepare({}, {});
         REQUIRE(!healthy(health_state, origin_key));
         (void)pending_removal;
     }
     {
-        auto pending_retention = health_state.prepare(keys_of(origin_key));
+        auto pending_retention = health_state.prepare(keys_of(origin_key), {});
         REQUIRE(health_state.record(origin_key, id, true, 1));
         health_state.activate(std::move(pending_retention));
     }
@@ -88,7 +83,7 @@ int main() {
 
     // A retired origin ignores late outcomes and probe results and is not probed.
     const auto retired_probe = health_state.probe_target(origin_key);
-    health_state.activate(health_state.prepare({}));
+    health_state.activate(health_state.prepare({}, {}));
     REQUIRE(health_state.snapshot()->find("website", "origin") == nullptr);
     REQUIRE(healthy(health_state, origin_key));
     REQUIRE(!health_state.record(origin_key, id, false, 1));
@@ -98,7 +93,7 @@ int main() {
     REQUIRE(health_state.snapshot()->reports().empty());
 
     // Re-adding it is a new membership: outcomes of the old one stay discarded.
-    health_state.activate(health_state.prepare(keys_of(origin_key)));
+    health_state.activate(health_state.prepare(keys_of(origin_key), {}));
     const auto readded_id = id_of(health_state, origin_key);
     REQUIRE(readded_id != id);
     REQUIRE(!health_state.record(origin_key, id, false, 1));

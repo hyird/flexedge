@@ -83,17 +83,7 @@ private:
     ruvia::task<ruvia::http_response> options(ruvia::context& c) {
         const auto keyword = service::common::require_keyword(c.req().query("keyword"));
         const auto& tenant = service::middleware::current_tenant_id(c);
-        ruvia::array<cluster_dto> data({.resource_ = c.pool()});
-        for (std::int64_t page_number = 1;; ++page_number) {
-            auto page = co_await get_cluster_read_service().list(c, tenant, page_number, 1000,
-                (page_number - 1) * 1000, keyword, std::nullopt, std::nullopt);
-            for (auto& item : page.template ensure<"list">()) {
-                data.push_back(std::move(item));
-            }
-            if (page_number >= page.template get<"total_pages">().value_) {
-                break;
-            }
-        }
+        auto data = co_await get_cluster_read_service().options(c, tenant, keyword);
         co_return c.json(service::common::ok<cluster_options_response>(c, std::move(data)));
     }
 

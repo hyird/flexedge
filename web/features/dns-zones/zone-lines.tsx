@@ -1,60 +1,51 @@
 import type { DataGridColumn } from '@heroui-pro/react'
 import { formatDate } from '@/lib/format'
-import { pageLocally, useListState } from '@/lib/list-search'
 import { describeStatus } from '@/lib/status'
 import { DataTable } from '@/components/data-table'
 import { Mono } from '@/components/mono'
 import { Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
-import { TablePagination } from '@/components/table-pagination'
-import { type DnsLineTreeOption, dnsLineIndex } from './dns-lines'
+import { type DnsLineTreeNode, dnsLineIndex } from './dns-lines'
 import { lineStatuses, lineStatusReserve } from './dns-zone-display'
 import { useZoneDetail } from './use-zone-detail'
 
-const columns: DataGridColumn<DnsLineTreeOption>[] = [
+const columns: DataGridColumn<DnsLineTreeNode>[] = [
   {
-    id: 'path',
+    id: 'name',
     header: '线路',
     isRowHeader: true,
     minWidth: 240,
-    cell: ({ path }) => (
-      <span>
-        {path.slice(0, -1).map((segment) => (
-          <span key={segment} className='text-muted'>
-            {segment} /{' '}
-          </span>
-        ))}
-        {path.at(-1)}
-      </span>
-    ),
+    cell: ({ label }) => <span>{label}</span>,
   },
   {
     id: 'code',
     header: '线路代码',
     minWidth: 160,
-    cell: ({ line }) => <Mono>{line.code}</Mono>,
+    cell: ({ line }) =>
+      line ? <Mono>{line.code}</Mono> : <span className='text-muted'>—</span>,
   },
   {
     id: 'status',
     header: '状态',
     minWidth: 110,
-    cell: ({ line }) => (
-      <StatusChip
-        {...describeStatus(lineStatuses, line.status)}
-        reserve={lineStatusReserve}
-      />
-    ),
+    cell: ({ line }) =>
+      line ? (
+        <StatusChip
+          {...describeStatus(lineStatuses, line.status)}
+          reserve={lineStatusReserve}
+        />
+      ) : (
+        <span className='text-muted'>—</span>
+      ),
   },
 ]
 
-/** Provider lines from the zone snapshot's shared line index, paged on the
- * client (Aliyun lists hundreds); page and page size are component state. */
+/** Expandable provider hierarchy from the zone snapshot's shared index.
+ * Group rows remain with their children instead of splitting across pages. */
 export function ZoneLines() {
   const zone = useZoneDetail().data
-  const list = useListState()
   if (!zone) return null
-  const { options } = dnsLineIndex(zone.runtime.lines)
-  const page = pageLocally(options, list.page, list.pageSize)
+  const { tree, options } = dnsLineIndex(zone.runtime.lines)
   return (
     <Section
       title={`解析线路 · ${options.length}`}
@@ -64,23 +55,15 @@ export function ZoneLines() {
         label='解析线路'
         variant='secondary'
         columns={columns}
-        data={page.list}
+        data={tree}
         isLoading={false}
-        getRowId={({ line }) => line.code}
+        getRowId={({ key }) => key}
+        getChildren={({ children }) => children}
         minWidth={560}
         empty={{
           title: '暂无解析线路',
           description: '执行一次同步后会从服务商读取可用线路。',
         }}
-        footer={
-          <TablePagination
-            page={list.page}
-            pageSize={list.pageSize}
-            total={page.total}
-            onPageChange={list.setPage}
-            onPageSizeChange={list.setPageSize}
-          />
-        }
       />
     </Section>
   )

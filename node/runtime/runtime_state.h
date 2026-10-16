@@ -11,6 +11,16 @@
 
 namespace flexedge::node {
 
+// RE2 maintains matching caches even behind its const API. Compile those objects on each
+// data worker; immutable configuration shared between loops contains only their source.
+inline std::shared_ptr<const route_patterns> compile_route_patterns(const compiled_config& config) {
+    auto patterns = std::make_shared<route_patterns>();
+    for (const auto* website : config.websites()) {
+        validate_route_rules(*website, patterns.get());
+    }
+    return patterns;
+}
+
 class runtime_state final {
 public:
     void validate_next(const compiled_config& config) const {
@@ -35,8 +45,14 @@ public:
         }
     }
 
-    void publish(std::shared_ptr<const compiled_config> config) noexcept {
+    void publish(std::shared_ptr<const compiled_config> config, std::shared_ptr<const route_patterns> patterns) noexcept {
+        patterns_ = std::move(patterns);
         config_.store(std::move(config), std::memory_order_release);
+    }
+
+    // Owner loop only. A session pins its worker's patterns alongside its configuration.
+    [[nodiscard]] std::shared_ptr<const route_patterns> patterns() const noexcept {
+        return patterns_;
     }
 
     [[nodiscard]] std::shared_ptr<const compiled_config> config() const noexcept {
@@ -60,6 +76,7 @@ public:
 
 private:
     std::atomic<std::shared_ptr<const compiled_config>> config_;
+    std::shared_ptr<const route_patterns> patterns_;
 };
 
 }  // namespace flexedge::node

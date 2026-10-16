@@ -1,5 +1,7 @@
 #pragma once
+
 #include <ruvia/core/task.h>
+#include <ruvia/web/db/db_repository.h>
 #include <ruvia/web/db/db_transaction.h>
 
 #include <cstdint>
@@ -7,144 +9,221 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "service/features/background/queued_work.h"
+#include "service/features/node_dispatch/dispatch_entity.h"
 
 namespace service::node_dispatch {
+
+namespace release_store_detail {
+
+inline ruvia::db_expression equal(ruvia::db_query& query, std::string_view column,
+    std::string_view value, std::string_view alias = {}) {
+    return query.binary(query.column(column, alias), ruvia::db_binary_operator::equal, query.value(value));
+}
+
+inline ruvia::db_expression same(ruvia::db_query& query, std::string_view column,
+    std::string_view left, std::string_view right) {
+    return query.binary(query.column(column, left), ruvia::db_binary_operator::equal, query.column(column, right));
+}
+
+// Disabled registered nodes keep the desired release so re-enabling does not
+// require another publication; only enabled nodes receive an active target.
+inline ruvia::db_expression registered_node(ruvia::db_query& query, std::string_view tenant,
+    std::string_view cluster, std::string_view alias) {
+    auto predicate = query.binary(equal(query, "tenant_id", tenant, alias), ruvia::db_binary_operator::and_value,
+        equal(query, "cluster_id", cluster, alias));
+    predicate = query.binary(predicate, ruvia::db_binary_operator::and_value,
+        equal(query, "registration_status", "registered", alias));
+    for (const auto column : {"agent_id", "node_secret_hash", "node_secret_envelope"}) {
+        predicate = query.binary(predicate, ruvia::db_binary_operator::and_value,
+            query.unary(ruvia::db_unary_operator::is_not_null, query.column(column, alias)));
+    }
+    return query.binary(predicate, ruvia::db_binary_operator::and_value,
+        query.unary(ruvia::db_unary_operator::is_null, query.column("deleted_at", alias)));
+}
+
+}  // namespace release_store_detail
+
 struct release_allocation {
     std::string id_;
-    std::int64_t generation_;
+    std::int64_t generation_{};
     std::string access_domain_;
-    bool enabled_;
+    bool enabled_{};
 };
+
 inline ruvia::task<release_allocation> allocate_cluster_release(ruvia::db_transaction& transaction,
     std::string_view tenant_id, std::string_view cluster_id, std::int64_t schema_version) {
-    const auto cluster_rows = co_await transaction.query(
-        "UPDATE sys_cluster cluster SET release_generation = release_generation + 1, updated_at = "
-        "NOW() FROM sys_dns_zone zone WHERE cluster.tenant_id = $1 AND cluster.id = $2 AND "
-        "cluster.deleted_at IS NULL AND zone.tenant_id = cluster.tenant_id AND zone.id = "
-        "cluster.dns_zone_id AND zone.deleted_at IS NULL RETURNING cluster.release_generation, "
-        "cluster.hostname_prefix || '.' || zone.domain, cluster.status = 'enabled'",
-        tenant_id, cluster_id);
-    if (cluster_rows.empty()) {
+    if (!std::in_range<std::int32_t>(schema_version)) {
+        throw std::out_of_range("cluster release schema version is out of range");
+    }
+    using namespace release_store_detail;
+    ruvia::db_query expressions;
+    auto allocation = transaction.get_repository<dispatch_cluster_entity>().create_update_builder("cluster");
+    const auto access_domain = expressions.binary(expressions.binary(expressions.column("hostname_prefix", "cluster"),
+                                                      ruvia::db_binary_operator::concat, expressions.value(".")),
+        ruvia::db_binary_operator::concat,
+        expressions.column("domain", "zone"));
+    allocation.set("release_generation", expressions.binary(expressions.column("release_generation", "cluster"),
+                                             ruvia::db_binary_operator::add, expressions.value(1)))
+        .set("updated_at", expressions.call("now"))
+        .update_from<dispatch_zone_entity>("zone")
+        .where(equal(expressions, "tenant_id", tenant_id, "cluster"))
+        .and_where(equal(expressions, "id", cluster_id, "cluster"))
+        .and_where(expressions.unary(ruvia::db_unary_operator::is_null, expressions.column("deleted_at", "cluster")))
+        .and_where(same(expressions, "tenant_id", "zone", "cluster"))
+        .and_where(expressions.binary(expressions.column("id", "zone"), ruvia::db_binary_operator::equal,
+            expressions.column("dns_zone_id", "cluster")))
+        .and_where(expressions.unary(ruvia::db_unary_operator::is_null, expressions.column("deleted_at", "zone")))
+        .returning({{"generation", expressions.column("release_generation", "cluster")},
+            {"access_domain", access_domain}, {"enabled", equal(expressions, "status", "enabled", "cluster")}});
+    const auto clusters = co_await allocation.get_many<allocated_cluster>();
+    if (clusters.empty()) {
         throw std::runtime_error("cluster release target does not exist");
     }
-    const auto generation = cluster_rows.front()[0].as<std::int64_t>().value();
-    const auto release_rows = co_await transaction.query(
-        "INSERT INTO sys_cluster_release (tenant_id, cluster_id, generation, schema_version, "
-        "status, created_at) VALUES ($1, $2, $3, $4, 'building', NOW()) RETURNING id",
-        tenant_id, cluster_id, generation,
-        schema_version);
-    if (release_rows.empty()) {
+    const auto& cluster = clusters[0];
+    dispatch_release_entity release;
+    release.set<"tenant_id">(tenant_id);
+    release.set<"cluster_id">(cluster_id);
+    release.set<"generation">(cluster.get<"generation">());
+    release.set<"schema_version">(static_cast<std::int32_t>(schema_version));
+    release.set<"status">("building");
+    auto insert = transaction.get_repository<dispatch_release_entity>().create_insert_builder(release);
+    insert.returning({{"id", {}}});
+    const auto releases = co_await insert.get_many<release_identity>();
+    if (releases.empty()) {
         throw std::runtime_error("cluster release identity could not be allocated");
     }
-    const auto release_id = std::string(release_rows.front()[0].value().value());
-    co_return release_allocation{release_id, generation,
-        std::string(cluster_rows.front()[1].value().value()),
-        cluster_rows.front()[2].as<bool>().value()};
+    co_return release_allocation{.id_ = std::string(releases[0].get<"id">()),
+        .generation_ = cluster.get<"generation">(),
+        .access_domain_ = std::string(cluster.get<"access_domain">()),
+        .enabled_ = cluster.get<"enabled">()};
 }
 
 inline ruvia::task<void> link_release_object(ruvia::db_transaction& transaction,
     std::string_view tenant_id, std::string_view release_id, std::int64_t position, std::string_view digest) {
-    (void)co_await transaction.execute(
-        "INSERT INTO sys_cluster_release_object (tenant_id, release_id, position, "
-        "object_digest) VALUES ($1, $2, $3, $4)",
-        tenant_id, release_id, position, digest);
-    co_return;
+    if (!std::in_range<std::int32_t>(position)) {
+        throw std::out_of_range("cluster release object position is out of range");
+    }
+    dispatch_mapping_entity mapping;
+    mapping.set<"tenant_id">(tenant_id);
+    mapping.set<"release_id">(release_id);
+    mapping.set<"position">(static_cast<std::int32_t>(position));
+    mapping.set<"object_digest">(digest);
+    (void)co_await transaction.get_repository<dispatch_mapping_entity>().insert(mapping);
 }
 
-// Activates a built release: one pending target per eligible node. The node
-// task of every new target and of every node whose pending or failed target
-// of an earlier release is superseded changes.
+// The caller holds the cluster lock from allocation through activation and
+// commits the release, node targets and resulting task notifications together.
 inline ruvia::task<void> activate_cluster_release(ruvia::db_transaction& transaction,
     std::string_view tenant_id, std::string_view cluster_id, std::string_view release_id,
     std::string_view manifest_digest, std::string_view manifest_envelope, service::background::queued_work& work) {
-    const auto targets = co_await transaction.query(
-        "INSERT INTO sys_node_release_target (tenant_id, release_id, node_id, status, updated_at) "
-        "SELECT node.tenant_id, $3, node.id, 'pending', NOW() FROM sys_node node WHERE "
-        "node.tenant_id = $1 AND node.cluster_id = $2 AND node.registration_status = 'registered' "
-        "AND node.status = 'enabled' AND node.agent_id IS NOT NULL AND "
-        "node.node_secret_hash IS NOT NULL AND node.node_secret_envelope IS NOT NULL AND "
-        "node.deleted_at IS NULL RETURNING node_id::text",
-        tenant_id, cluster_id, release_id);
-    const auto target_count = static_cast<std::int64_t>(targets.size());
-    for (const auto& row : targets) {
-        work.changed(row[0].value().value_or(""));
+    using namespace release_store_detail;
+    ruvia::db_query expressions;
+    auto eligible = transaction.get_repository<dispatch_node_entity>().create_query_builder("node");
+    eligible.select({{"tenant_id", expressions.column("tenant_id", "node")}, {"release_id", expressions.value(release_id)},
+                        {"node_id", expressions.column("id", "node")}, {"status", expressions.value("pending")},
+                        {"updated_at", expressions.call("now")}})
+        .where(registered_node(expressions, tenant_id, cluster_id, "node"))
+        .and_where(equal(expressions, "status", "enabled", "node"));
+    auto insert = transaction.get_repository<dispatch_target_entity>().create_insert_builder();
+    insert.insert_from({"tenant_id", "release_id", "node_id", "status", "updated_at"}, eligible)
+        .returning({{"node_id", {}}});
+    const auto targets = co_await insert.get_many<target_node_identity>();
+    for (const auto& target : targets) {
+        work.changed(target.get<"node_id">());
     }
-    const auto superseded = co_await transaction.query(
-        "SELECT DISTINCT target.node_id::text FROM sys_node_release_target target INNER JOIN sys_cluster_release "
-        "release ON release.tenant_id = target.tenant_id AND release.id = target.release_id WHERE "
-        "target.tenant_id = $1 AND release.cluster_id = $2 AND release.id <> $3 AND target.status IN "
-        "('pending', 'failed')",
-        tenant_id, cluster_id, release_id);
-    for (const auto& row : superseded) {
-        work.changed(row[0].value().value_or(""));
+    auto previous = transaction.get_repository<dispatch_target_entity>().create_query_builder("target");
+    previous.select({{"node_id", expressions.column("node_id", "target")}})
+        .join<dispatch_release_entity>(ruvia::db_join_type::inner, "release",
+            expressions.binary(same(expressions, "tenant_id", "release", "target"), ruvia::db_binary_operator::and_value,
+                expressions.binary(expressions.column("id", "release"), ruvia::db_binary_operator::equal,
+                    expressions.column("release_id", "target"))))
+        .where(equal(expressions, "tenant_id", tenant_id, "target"))
+        .and_where(equal(expressions, "cluster_id", cluster_id, "release"))
+        .and_where(expressions.binary(expressions.column("id", "release"), ruvia::db_binary_operator::not_equal,
+            expressions.value(release_id)))
+        .and_where(expressions.binary(expressions.column("status", "target"), ruvia::db_binary_operator::in,
+            expressions.list({expressions.value("pending"), expressions.value("failed")})))
+        .distinct();
+    const auto superseded = co_await previous.get_many<target_node_identity>();
+    for (const auto& target : superseded) {
+        work.changed(target.get<"node_id">());
     }
-    (void)co_await transaction.execute(
-        "UPDATE sys_cluster_release SET manifest_digest = $3, manifest_envelope = $4, status = "
-        "'active', target_node_count = $5, activated_at = NOW() WHERE tenant_id = $1 AND id = $2 "
-        "AND status = 'building'",
-        tenant_id, release_id, manifest_digest, std::string_view(manifest_envelope),
-        target_count);
-    (void)co_await transaction.execute(
-        "UPDATE sys_cluster_release SET status = 'superseded' WHERE tenant_id = $1 AND cluster_id "
-        "= $2 AND id <> $3 AND status = 'active'",
-        tenant_id, cluster_id, release_id);
-    (void)co_await transaction.execute(
-        "UPDATE sys_cluster SET current_release_id = $3, updated_at = NOW() WHERE tenant_id = $1 "
-        "AND id = $2",
-        tenant_id, cluster_id, release_id);
-    (void)co_await transaction.execute(
-        "UPDATE sys_node SET desired_release_id = $3, updated_at = NOW() WHERE tenant_id = $1 AND "
-        "cluster_id = $2 AND registration_status = 'registered' AND agent_id IS NOT NULL AND "
-        "node_secret_hash IS NOT NULL AND node_secret_envelope IS NOT NULL AND deleted_at IS NULL",
-        tenant_id, cluster_id, release_id);
-
-    co_return;
+    auto activate = transaction.get_repository<dispatch_release_entity>().create_update_builder();
+    activate.set("manifest_digest", expressions.value(manifest_digest)).set("manifest_envelope", expressions.value(manifest_envelope)).set("status", expressions.value("active")).set("target_node_count", expressions.value(static_cast<std::int64_t>(targets.size()))).set("activated_at", expressions.call("now")).where(equal(expressions, "tenant_id", tenant_id)).and_where(equal(expressions, "id", release_id)).and_where(equal(expressions, "status", "building"));
+    (void)co_await activate.execute();
+    auto supersede = transaction.get_repository<dispatch_release_entity>().create_update_builder();
+    supersede.set("status", expressions.value("superseded")).where(equal(expressions, "tenant_id", tenant_id)).and_where(equal(expressions, "cluster_id", cluster_id)).and_where(equal(expressions, "status", "active")).and_where(expressions.binary(expressions.column("id"), ruvia::db_binary_operator::not_equal, expressions.value(release_id)));
+    (void)co_await supersede.execute();
+    auto update_cluster = transaction.get_repository<dispatch_cluster_entity>().create_update_builder();
+    update_cluster.set("current_release_id", expressions.value(release_id)).set("updated_at", expressions.call("now")).where(equal(expressions, "tenant_id", tenant_id)).and_where(equal(expressions, "id", cluster_id));
+    (void)co_await update_cluster.execute();
+    auto update_nodes = transaction.get_repository<dispatch_node_entity>().create_update_builder("node");
+    update_nodes.set("desired_release_id", expressions.value(release_id)).set("updated_at", expressions.call("now")).where(registered_node(expressions, tenant_id, cluster_id, "node"));
+    (void)co_await update_nodes.execute();
 }
 
-// The release a cluster's nodes are directed to.
 struct current_release {
     std::string id_;
-    std::optional<std::int64_t> schema_version_;
+    std::optional<std::int64_t> schema_version_{};
 };
 
-// Locks the cluster FOR UPDATE; `std::nullopt` while it has no release.
 inline ruvia::task<std::optional<current_release>> lock_current_release(
     ruvia::db_transaction& transaction, std::string_view tenant_id, std::string_view cluster_id) {
-    const auto rows = co_await transaction.query(
-        "SELECT cluster.current_release_id, release.schema_version FROM sys_cluster cluster LEFT "
-        "JOIN sys_cluster_release release ON release.tenant_id = cluster.tenant_id AND release.id "
-        "= cluster.current_release_id WHERE cluster.tenant_id = $1 AND cluster.id = $2 AND "
-        "cluster.deleted_at IS NULL LIMIT 1 FOR UPDATE OF cluster",
-        tenant_id, cluster_id);
-    if (rows.empty()) {
+    using namespace release_store_detail;
+    ruvia::db_query expressions;
+    auto query = transaction.get_repository<dispatch_cluster_entity>().create_query_builder("cluster");
+    query.select({{"id", expressions.column("current_release_id", "cluster")},
+                     {"schema_version", expressions.column("schema_version", "release")}})
+        .join<dispatch_release_entity>(ruvia::db_join_type::left, "release",
+            expressions.binary(same(expressions, "tenant_id", "release", "cluster"), ruvia::db_binary_operator::and_value,
+                expressions.binary(expressions.column("id", "release"), ruvia::db_binary_operator::equal,
+                    expressions.column("current_release_id", "cluster"))))
+        .where(equal(expressions, "tenant_id", tenant_id, "cluster"))
+        .and_where(equal(expressions, "id", cluster_id, "cluster"))
+        .and_where(expressions.unary(ruvia::db_unary_operator::is_null, expressions.column("deleted_at", "cluster")))
+        .take(1)
+        .set_lock({.mode_ = ruvia::db_row_lock::update, .tables_ = {"cluster"}});
+    const auto release = co_await query.get_one<locked_release>();
+    if (!release) {
         throw std::runtime_error("cluster release target does not exist");
     }
-    const auto id = rows.front()[0].value();
-    if (!id) {
+    if (release->is_null<"id">()) {
         co_return std::nullopt;
     }
-    co_return current_release{std::string(*id), rows.front()[1].as<std::int64_t>()};
+    co_return current_release{.id_ = std::string(release->get<"id">()),
+        .schema_version_ = release->is_null<"schema_version">() ? std::nullopt : std::optional<std::int64_t>{release->get<"schema_version">()}};
 }
 
 inline ruvia::task<std::vector<std::string>> find_certificate_consumer_clusters(
     ruvia::db_transaction& transaction, std::string_view tenant_id, std::string_view certificate_id) {
-    const auto rows = co_await transaction.query(
-        "SELECT DISTINCT website.cluster_id FROM sys_certificate certificate INNER JOIN "
-        "sys_website_certificate_binding binding ON binding.tenant_id = certificate.tenant_id AND "
-        "binding.certificate_id = certificate.id INNER JOIN sys_website website ON "
-        "website.tenant_id = binding.tenant_id AND website.id = binding.website_id WHERE "
-        "certificate.tenant_id = $1 AND certificate.id = $2 AND website.deleted_at IS NULL ORDER "
-        "BY website.cluster_id",
-        tenant_id, certificate_id);
-    std::vector<std::string> ids;
-    ids.reserve(rows.size());
-    for (const auto& row : rows) {
-        ids.emplace_back(row[0].value().value());
+    using namespace release_store_detail;
+    ruvia::db_query expressions;
+    auto query = transaction.get_repository<dispatch_certificate_entity>().create_query_builder("certificate");
+    query.select({{"cluster_id", expressions.column("cluster_id", "website")}})
+        .join<dispatch_binding_entity>(ruvia::db_join_type::inner, "binding",
+            expressions.binary(same(expressions, "tenant_id", "binding", "certificate"), ruvia::db_binary_operator::and_value,
+                expressions.binary(expressions.column("certificate_id", "binding"), ruvia::db_binary_operator::equal,
+                    expressions.column("id", "certificate"))))
+        .join<dispatch_website_entity>(ruvia::db_join_type::inner, "website",
+            expressions.binary(same(expressions, "tenant_id", "website", "binding"), ruvia::db_binary_operator::and_value,
+                expressions.binary(expressions.column("id", "website"), ruvia::db_binary_operator::equal,
+                    expressions.column("website_id", "binding"))))
+        .where(equal(expressions, "tenant_id", tenant_id, "certificate"))
+        .and_where(equal(expressions, "id", certificate_id, "certificate"))
+        .and_where(expressions.unary(ruvia::db_unary_operator::is_null, expressions.column("deleted_at", "website")))
+        .order_by(expressions.column("cluster_id", "website"))
+        .distinct();
+    const auto clusters = co_await query.get_many<consumer_cluster_identity>();
+    std::vector<std::string> result;
+    result.reserve(clusters.size());
+    for (const auto& cluster : clusters) {
+        result.emplace_back(cluster.get<"cluster_id">());
     }
-    co_return ids;
+    co_return result;
 }
 
 }  // namespace service::node_dispatch

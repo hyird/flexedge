@@ -17,6 +17,7 @@
 #include <asio/write.hpp>
 
 #include "node/data/origin_tls.h"
+#include "node/runtime/dns_resolution.h"
 
 namespace flexedge::node {
 
@@ -66,6 +67,9 @@ public:
     void reset() noexcept {
         ++generation_;
         connected_ = false;
+        reusable_ = true;
+        tunnel_ = false;
+        addresses_.clear();
         resolver_.cancel();
         std::error_code ignored;
         if (tls_stream_) {
@@ -77,6 +81,9 @@ public:
     }
 
     void close() noexcept {
+        // A DNS/connect completion already queued before cancellation must not reopen the
+        // socket or start a TLS handshake after its owner has stopped the exchange/probe.
+        ++generation_;
         connected_ = false;
         resolver_.cancel();
         std::error_code ignored;
@@ -87,7 +94,23 @@ public:
     }
 
     [[nodiscard]] bool connected() const noexcept {
-        return connected_;
+        return connected_ && reusable_;
+    }
+
+    [[nodiscard]] const dns_addresses& addresses() const noexcept {
+        return addresses_;
+    }
+    void invalidate_dns() noexcept {
+        reusable_ = false;
+        if (tunnel_) {
+            close();
+        }
+    }
+    void enter_tunnel() noexcept {
+        tunnel_ = true;
+        if (!reusable_) {
+            close();
+        }
     }
 
 private:
@@ -103,6 +126,12 @@ private:
         }
         if (error) {
             (*completion)(error);
+            return;
+        }
+        try {
+            addresses_ = resolved_addresses(endpoints);
+        } catch (...) {
+            (*completion)(std::make_error_code(std::errc::not_enough_memory));
             return;
         }
         asio::async_connect(
@@ -186,6 +215,9 @@ private:
     std::optional<origin_tls_context::stream> tls_stream_;
     std::uint64_t generation_{};
     bool connected_{};
+    bool reusable_{true};
+    bool tunnel_{};
+    dns_addresses addresses_{};
 };
 
 }  // namespace flexedge::node

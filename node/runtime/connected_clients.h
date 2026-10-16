@@ -11,7 +11,7 @@
 namespace flexedge::node {
 
 // Open data-plane connections per client IP address on one worker. Only the owning worker loop
-// opens, closes and copies it; other loops receive immutable copies (collect_worker_load).
+// opens, closes and copies it; other loops receive immutable data_worker snapshots.
 class connected_clients final {
 public:
     // IPv6 form of the address: an IPv4 client and its IPv4-mapped spelling on a dual-stack

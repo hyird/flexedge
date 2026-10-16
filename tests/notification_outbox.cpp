@@ -18,7 +18,7 @@
 #include <vector>
 
 #include "service/config/schema.h"
-#include "service/features/log_ingest/ingest.h"
+#include "service/features/log_ingest/notification_relay.h"
 #include "service/features/node_presence/notification_relay.h"
 #include "support/postgres_test.h"
 #include "support/redis_test.h"

@@ -36,6 +36,9 @@
 #include "node/runtime/state_cipher.h"
 #include "node/runtime/version.h"
 #include "tests/support/config_fixture.h"
+#ifdef __linux__
+#include "tests/support/dns_answers.h"
+#endif
 
 #define REQUIRE(condition)                                                             \
     do {                                                                               \
@@ -138,12 +141,13 @@ enum class session_behavior {
 class channel_origin final {
 public:
     channel_origin(flexedge::node::v2::ActiveState active, std::string binary_digest,
-        std::vector<session_behavior> sessions)
+        std::vector<session_behavior> sessions,
+        asio::ip::tcp::endpoint endpoint = {asio::ip::address_v4::loopback(), 0})
         : active_(std::move(active)),
           contents_(flexedge::node::open_state(active_).value()),
           binary_digest_(std::move(binary_digest)),
           sessions_(std::move(sessions)),
-          acceptor_(io_, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0)),
+          acceptor_(io_, endpoint),
           thread_([this] { serve(); }) {}
 
     ~channel_origin() {
@@ -996,7 +1000,55 @@ bool rejects_as_unusable(function_type&& function) {
 
 }  // namespace
 
-int main() {
+#ifdef __linux__
+void verify_control_dns(const std::filesystem::path& root) {
+    using namespace flexedge::node;
+    flexedge::testing::dns_answers answers(root / "dns-answer");
+    write_secure_file_atomic(root / "credentials", "node_id=" + std::string(node_id) + "\nsecret=" + std::string(node_secret) + "\n");
+    write_secure_file_atomic(root / "node", "synthetic node binary");
+    auto config = offline_config();
+    config.node_spec.set_node_id(node_id);
+    config.finalize();
+    state_store store(root / "dns-state", node_secret);
+    store.stage(config.active, config.objects);
+    store.activate_staged();
+    const auto digest = flexedge::crypto::file_sha256(root / "node");
+    channel_origin first(config.active, digest, {});
+    channel_origin second(config.active, digest, {}, {asio::ip::make_address("127.0.0.2"), first.port()});
+    auto credentials = node_credentials::load(root / "credentials");
+    ruvia::event_loop_pool workers({.loop_count_ = 2});
+    ruvia::event_loop_pool control({.loop_count_ = 1});
+    const auto loop = control.loop(0);
+    auto [data_sender, data_receiver] = make_log_channel(loop, 62);
+    auto [control_sender, control_receiver] = make_log_channel(loop);
+    log_producer logs(loop, std::move(control_sender));
+    runtime_state runtime;
+    data_plane plane(workers, loop, runtime, data_sender);
+    self_updater updater({.binary_path_ = root / "node", .current_version_ = std::string(node_version), .upgrade_record_path_ = root / "pending-upgrade", .node_log_ = {}, .request_restart_ = [] {}});
+    ruvia::stop_source stop;
+    control_channel channel(loop, {.web_socket_ = control_transport_config("ws://flexedge-dns.test:" + std::to_string(first.port())), .stop_token_ = stop.token(), .dns_check_interval_ = std::chrono::milliseconds(20)},
+        store, credentials, runtime, plane, logs, updater, std::move(data_receiver), std::move(control_receiver));
+    loop_shutdown shutdown(workers, control);
+    workers.start();
+    control.start();
+    auto running = loop.start(channel.run());
+    REQUIRE(first.wait_until([&] { return first.heartbeats_ >= 1; }, std::chrono::seconds(5)));
+    answers.update("error");
+    REQUIRE(first.wait_until([&] { return first.heartbeats_ >= 2; }, std::chrono::seconds(3)));
+    REQUIRE(first.connections_ == 1 && second.connections_ == 0);
+    answers.update("127.0.0.2");
+    REQUIRE(second.wait_until([&] { return second.heartbeats_ >= 1; }, std::chrono::seconds(5)));
+    REQUIRE(first.connections_ == 1 && second.connections_ == 1);
+    stop.request_stop();
+    running.get();
+    shutdown.stop_and_join();
+    first.stop();
+    second.stop();
+    REQUIRE(!first.failure_ && !second.failure_);
+}
+#endif
+
+int main(int argc, char* argv[]) {
     const auto root = std::filesystem::temp_directory_path() /
                       ("flexedge-control-channel-" +
                           std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -1009,6 +1061,15 @@ int main() {
     } cleanup{root};
 
     try {
+#ifdef __linux__
+        if (argc == 2 && std::string_view(argv[1]) == "--dns-reconnect") {
+            verify_control_dns(root);
+            return 0;
+        }
+#else
+        (void)argc;
+        (void)argv;
+#endif
         verify_channel_log_policy();
         // A usable persisted state is served before the control plane is reached.
         {

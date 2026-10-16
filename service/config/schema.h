@@ -1,18 +1,21 @@
 #pragma once
 
 #include <ruvia/web/db/db_migration.h>
+#include <ruvia/web/db/db_schema.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace service::config {
 
 // Fresh-install baseline only. Future schema changes append migrations after this one.
 // One PostgreSQL statement keeps all DDL and required seed rows in the migration transaction.
-inline const std::vector<ruvia::db_migration> schema_migrations{
-    ruvia::db_migration{{
-        .id_ = "0001_initial",
-        .sql_ = std::string{R"sql(DO $flexedge_initial$
+inline const std::vector<ruvia::db_migration> schema_migrations = [] {
+    std::vector<ruvia::db_migration> migrations{
+        ruvia::db_migration{{
+            .id_ = "0001_initial",
+            .sql_ = std::string{R"sql(DO $flexedge_initial$
 BEGIN
 
 CREATE EXTENSION IF NOT EXISTS timescaledb WITH SCHEMA public;
@@ -590,7 +593,21 @@ INSERT INTO public.sys_scheduled_job (name) VALUES ('sync_event_retention');
 
 END;
 $flexedge_initial$)sql"},
-    }},
-};
+        }},
+    };
+    // Log timestamps may be corrected on receipt. Stable event identity lookups
+    // must not scan a node's entire history or depend on that timestamp.
+    ruvia::db_schema log_indexes({.driver_ = ruvia::db_driver::postgresql});
+    log_indexes.create_index({.name_ = "idx_website_access_log_event",
+        .table_ = "public.sys_website_access_log",
+        .keys_ = {{.column_ = "tenant_id"}, {.column_ = "node_id"}, {.column_ = "id"}}});
+    log_indexes.create_index({.name_ = "idx_node_log_event",
+        .table_ = "public.sys_node_log",
+        .keys_ = {{.column_ = "tenant_id"}, {.column_ = "node_id"}, {.column_ = "id"}}});
+    for (auto& migration : log_indexes.compile("0002_log_event_lookup")) {
+        migrations.push_back(std::move(migration));
+    }
+    return migrations;
+}();
 
 }  // namespace service::config

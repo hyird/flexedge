@@ -2,6 +2,7 @@
 
 #include <exception>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -14,7 +15,7 @@ namespace flexedge::node {
 
 // A persisted state that no longer compiles is an unusable local cache; listener and
 // activation failures keep their original errors.
-inline void activate_persisted_config(data_plane& data_plane, const v2::ActiveState& active,
+inline ruvia::task<void> activate_persisted_config(data_plane& data_plane, const v2::ActiveState& active,
     const std::vector<v2::DeliveryObject>& objects) {
     std::shared_ptr<const compiled_config> compiled;
     try {
@@ -23,14 +24,45 @@ inline void activate_persisted_config(data_plane& data_plane, const v2::ActiveSt
         throw stored_state_unusable(std::string("stored active state does not compile: ") +
                                     error.what());
     }
-    auto reload = data_plane.prepare(compiled);
-    data_plane.prime(reload);
-    data_plane.activate(std::move(reload));
+    auto reload = co_await data_plane.prepare(compiled);
+    co_await data_plane.activate(reload);
+}
+
+// Disk and worker activation form one transaction. Worker rollback finishes before the
+// previous encrypted state is restored, and no failed attempt is reported as applied.
+inline ruvia::task<void> activate_staged_config(state_store& store, data_plane& data_plane,
+    prepared_data_plane_reload reload) {
+    std::optional<std::string> previous;
+    bool persisted{};
+    std::exception_ptr failure;
+    try {
+        previous = store.activate_staged();
+        persisted = true;
+        co_await data_plane.activate(reload);
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    if (failure) {
+        try {
+            co_await data_plane.rollback(reload);
+        } catch (...) {
+            failure = std::current_exception();
+        }
+        try {
+            if (persisted) {
+                store.rollback_active(previous);
+            }
+        } catch (...) {
+            data_plane.request_stop_accepting();
+            throw data_plane_unavailable("persisted configuration rollback failed");
+        }
+        std::rethrow_exception(failure);
+    }
 }
 
 // Stages, validates, prepares and activates `desired`, recording each step in `trace`. `phase`
 // is the ApplyPhase reached, reported as failed_phase when a step throws.
-inline void activate_desired_config(state_store& store, data_plane& data_plane, const v2::DesiredState& desired, const std::vector<v2::DeliveryObject>& objects,
+inline ruvia::task<void> activate_desired_config(state_store& store, data_plane& data_plane, const v2::DesiredState& desired, const std::vector<v2::DeliveryObject>& objects,
     v2::ApplyPhase& phase, apply_trace& trace) {
     v2::ActiveState active;
     *active.mutable_node_spec() = desired.node_spec();
@@ -45,35 +77,30 @@ inline void activate_desired_config(state_store& store, data_plane& data_plane, 
         "compiled the configuration: " + std::to_string(compiled->websites().size()) +
             " websites, " + std::to_string(compiled->endpoints().size()) + " endpoints" +
             (compiled->enabled() ? "" : ", node disabled"));
-    auto reload = trace.run_step("prepare_listeners", [&] { return data_plane.prepare(compiled); });
+    auto reload = co_await trace.run_async_step("prepare_listeners", [&] { return data_plane.prepare(compiled); });
     trace.log(apply_log_level::info,
         "prepared listeners: " + std::to_string(reload.added_listeners()) + " new, " +
             std::to_string(reload.retired_listeners()) + " retired");
     phase = v2::APPLY_PHASE_ACTIVATE;
-    trace.run_step("activate", [&] {
-        data_plane.prime(reload);
-        try {
-            store.activate_staged();
-        } catch (...) {
-            data_plane.abort(reload);
-            throw;
-        }
-        data_plane.activate(std::move(reload));
-    });
+    co_await trace.run_async_step("activate", [&] { return activate_staged_config(store, data_plane, std::move(reload)); });
     trace.log(apply_log_level::info, "activated the configuration");
 }
 
 // Applies `desired` and fills `result` with the outcome, the steps and the log lines in
 // `trace`. Returns the failure, rethrown once the control plane has confirmed the result.
-inline std::exception_ptr apply_desired_config(state_store& store, data_plane& data_plane,
+inline ruvia::task<std::exception_ptr> apply_desired_config(state_store& store, data_plane& data_plane,
     const v2::DesiredState& desired, const std::vector<v2::DeliveryObject>& objects,
     apply_trace& trace, v2::ApplyResult& result) {
     v2::ApplyPhase phase = v2::APPLY_PHASE_STAGE;
     std::exception_ptr failure;
     try {
-        activate_desired_config(store, data_plane, desired, objects, phase, trace);
+        co_await activate_desired_config(store, data_plane, desired, objects, phase, trace);
         result.set_applied(true);
         result.set_failed_phase(v2::APPLY_PHASE_UNSPECIFIED);
+    } catch (const data_plane_unavailable&) {
+        // Assembly must join the failed data plane; reconnecting cannot repair an exited
+        // worker. The staged activation already restored its durable state before this.
+        throw;
     } catch (const std::exception& error) {
         result.set_applied(false);
         result.set_failed_phase(phase);
@@ -84,7 +111,7 @@ inline std::exception_ptr apply_desired_config(state_store& store, data_plane& d
         failure = std::current_exception();
     }
     trace.write_to(result);
-    return failure;
+    co_return failure;
 }
 
 }  // namespace flexedge::node

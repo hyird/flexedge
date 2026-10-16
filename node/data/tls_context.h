@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -63,7 +62,7 @@ public:
         return contexts_.empty();
     }
 
-    [[nodiscard]] asio::ssl::context& default_context() const {
+    [[nodiscard]] asio::ssl::context& default_context() {
         if (contexts_.empty()) {
             throw std::logic_error("TLS context set is empty");
         }
@@ -123,16 +122,17 @@ private:
 
 class tls_context_registry final {
 public:
-    void publish(std::shared_ptr<const tls_context_set> contexts) noexcept {
-        contexts_.store(std::move(contexts), std::memory_order_release);
+    void publish(std::shared_ptr<tls_context_set> contexts) noexcept {
+        contexts_ = std::move(contexts);
     }
 
-    [[nodiscard]] std::shared_ptr<const tls_context_set> current() const noexcept {
-        return contexts_.load(std::memory_order_acquire);
+    [[nodiscard]] std::shared_ptr<tls_context_set> current() noexcept {
+        return contexts_;
     }
 
 private:
-    std::atomic<std::shared_ptr<const tls_context_set>> contexts_;
+    // Worker-local OpenSSL runtime. Only compiled certificate material crosses loops.
+    std::shared_ptr<tls_context_set> contexts_;
 };
 
 }  // namespace flexedge::node

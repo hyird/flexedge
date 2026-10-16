@@ -211,7 +211,8 @@ service::attempt_trace::trace_kind trace_kind_of(marker_resource_type type) {
 // records one attempt through the production result transition.
 ruvia::task<service::sync_runtime::running_result_transition> run(ruvia::db_handle& db, recorder& worker,
     marker_resource_type type, std::string_view id, bool ok,
-    std::string_view detail = service::sync_runtime::detail_none_json, std::string_view error = "QA 同步失败") {
+    std::string_view detail = service::sync_runtime::detail_none_json, std::string_view error = "QA 同步失败",
+    bool terminal = false) {
     const auto marker = co_await db.query(
         "UPDATE sys_sync_task SET lease_owner = $4, lease_until = NOW() + INTERVAL '60 seconds' WHERE tenant_id = $1 "
         "AND resource_type = $2 AND resource_id = $3 RETURNING id::text, version",
@@ -221,9 +222,11 @@ ruvia::task<service::sync_runtime::running_result_transition> run(ruvia::db_hand
     const auto lease = service::sync_runtime::make_running_lease(tenant, marker_id, integer(marker, 1), worker_name,
         std::chrono::steady_clock::now() - std::chrono::milliseconds(20), type, id);
     auto transaction = co_await db.begin_transaction();
-    const auto transition =
-        ok ? co_await service::sync_runtime::complete_running_and_record_event(transaction, lease, detail)
-           : co_await service::sync_runtime::fail_running_and_record_event(transaction, lease, error, detail);
+    const auto transition = co_await service::sync_runtime::record_running_result(transaction, lease,
+        ok         ? service::sync_runtime::attempt_result::completed()
+        : terminal ? service::sync_runtime::attempt_result::failed(error)
+                   : service::sync_runtime::attempt_result::retry(error),
+        detail);
     service::attempt_trace::recorder trace(trace_kind_of(type), service::sync_runtime::describe(type).work_type_,
         std::chrono::steady_clock::now());
     co_await service::sync_runtime::commit_and_publish_result_event(transaction, worker, lease, transition, trace);
@@ -322,6 +325,57 @@ ruvia::task<void> verify_marker_task(ruvia::db_handle& db, read_context& context
         co_await service::sync_runtime::commit_work(transaction, worker, tenant, work);
     }
     require(co_await task_missing(context, tenant, "dns_zone", zone(4)), "a removed marker's task disappears");
+}
+
+ruvia::task<void> verify_terminal_failure(ruvia::db_handle& db, read_context& context) {
+    recorder worker{.handle_ = db};
+    co_await initiate(db, worker, marker_resource_type::dns_zone, zone(5), marker_operation::sync, 2);
+    (void)co_await run(db, worker, marker_resource_type::dns_zone, zone(5), false,
+        service::sync_runtime::detail_none_json, "永久配置错误", true);
+    const auto failed = co_await task_of(context, "dns_zone", zone(5));
+    require(failed.get<"status">().view() == "failed" && failed.get<"error">().view() == "永久配置错误" &&
+                failed.get<"next_attempt_at">().view().empty() && failed.get<"warning">().view().empty() &&
+                failed.get<"attempt_count">().value_ == 1 && failed.get<"failure_count">().value_ == 1,
+        "a terminal marker is failed with its error and no retry schedule");
+    const auto active = co_await list(context, "active", "dns_zone");
+    const auto failures = co_await list(context, "failed", "dns_zone");
+    const auto attention = co_await list(context, "attention", "dns_zone");
+    require(!listed(active, zone(5)) && listed(failures, zone(5)) && listed(attention, zone(5)) &&
+                failures.get<"failed">().value_ >= 1,
+        "terminal failure participates in failed totals and attention, not active tasks");
+    const auto history = co_await history_of(context, "dns_zone", zone(5));
+    require(history.get<"list">().size() == 1 && history.get<"list">()[0].get<"outcome">().view() == "failed" &&
+                history.get<"list">()[0].get<"next_attempt_at">().view().empty() &&
+                history.get<"summary">().get<"failure_count">().value_ == 1,
+        "terminal failure retains a failed attempt without a retry time");
+    co_await initiate(db, worker, marker_resource_type::dns_zone, zone(5), marker_operation::sync, 3);
+    const auto restarted = co_await task_of(context, "dns_zone", zone(5));
+    require(restarted.get<"status">().view() == "queued" && restarted.get<"error">().view().empty() &&
+                restarted.get<"failure_count">().value_ == 0 && restarted.get<"attempt_count">().value_ == 1,
+        "re-initiation resets the same terminal task and keeps its history");
+}
+
+ruvia::task<void> verify_query_pagination(read_context& context) {
+    auto& tasks = service::task::get_task_service();
+    const service::task::list_filter filter{};
+    const auto first = co_await tasks.list(context, std::string(tenant), 1, 2, 0, filter);
+    const auto second = co_await tasks.list(context, std::string(tenant), 2, 2, 2, filter);
+    require(first.get<"list">().size() == 2 && second.get<"list">().size() == 2 &&
+                first.get<"total">().value_ == second.get<"total">().value_ &&
+                first.get<"active">().value_ == second.get<"active">().value_ &&
+                first.get<"failed">().value_ == second.get<"failed">().value_,
+        "pagination preserves tenant-wide totals and counts");
+    for (const auto& task : first.get<"list">()) {
+        require(!listed(second, task.get<"resource_id">().view()), "ordered pages do not overlap");
+    }
+    const auto empty = co_await tasks.list(context, std::string(tenant), 1000, 2, 1998, filter);
+    require(empty.get<"list">().empty() && empty.get<"total">().value_ == first.get<"total">().value_ &&
+                empty.get<"total_pages">().value_ == first.get<"total_pages">().value_,
+        "a page past the end keeps its count");
+    const auto keyword = co_await list(context, "", "dns_zone", "Z1.EXAMPLE.COM");
+    require(keyword.get<"total">().value_ == 1 && listed(keyword, zone(1)), "keyword matching is case insensitive");
+    const auto literal = co_await list(context, "", "", "' OR TRUE --");
+    require(literal.get<"total">().value_ == 0, "keyword text remains a bound value");
 }
 
 // (f) Completed work that needs attention.
@@ -552,6 +606,8 @@ ruvia::task<void> verify_tasks(ruvia::db_client& client) {
     co_await verify_marker_task(db, context);
     co_await verify_warnings(db, context);
     co_await verify_node_task(db, context);
+    co_await verify_terminal_failure(db, context);
+    co_await verify_query_pagination(context);
 }
 
 }  // namespace

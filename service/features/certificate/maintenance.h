@@ -61,7 +61,8 @@ reconcile_missing_issuance_markers(service::background::task_context& context) {
             "SELECT issued_revision FROM sys_certificate WHERE tenant_id = $1 AND id = $2 AND "
             "issuance_revision = $3 AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
             tenant_id, row[1].value().value_or(""), revision);
-        if (locked.empty()) {
+        if (locked.empty() || co_await service::sync_runtime::marker_version_exists(transaction, tenant_id,
+                                  service::sync_runtime::marker_resource_type::certificate, row[1].value().value_or(""), revision)) {
             co_await transaction.commit();
             continue;
         }
@@ -102,7 +103,7 @@ inline ruvia::task<void> schedule_auto_renewals(service::background::task_contex
         }
         const auto active = co_await transaction.query(
             "SELECT id FROM sys_sync_task WHERE resource_type = 'certificate' AND tenant_id = $1 "
-            "AND resource_id = $2 AND NOT is_done LIMIT 1",
+            "AND resource_id = $2 AND (NOT is_done OR NOT is_ok) LIMIT 1",
             tenant_id, certificate_id);
         if (!active.empty()) {
             co_await transaction.commit();

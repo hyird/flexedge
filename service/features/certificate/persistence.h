@@ -82,17 +82,63 @@ inline ruvia::task<void> publish_challenges(service::background::task_context& c
     if (!zone) {
         throw acme_error("DNS-01 托管域名不存在", false);
     }
+    auto waiting_progress = progress;
+    waiting_progress.dns_revision_ = zone->desired_revision_;
+    // The first write took the certificate lock before the zone lock. Commit
+    // the actual returned DNS revision with the published records and wait.
+    if (!co_await store_progress(transaction, context, task, lease, waiting_progress)) {
+        throw std::runtime_error("证书签发版本已变化");
+    }
     trace.link_task({.resource_type_ = "dns_zone", .resource_id_ = work.dns_zone_id_, .label_ = "DNS 同步"});
     trace.log(service::attempt_trace::log_level::info,
         "已写入 " + std::to_string(records.size()) + " 条 _acme-challenge TXT 记录，DNS 同步完成后继续验证");
-    const auto result_transition = co_await service::sync_runtime::park_running_and_record_event(transaction, lease,
-        zone->task_id_, zone->desired_revision_, attempt.to_json(context.pool()));
+    const auto result_transition = co_await service::sync_runtime::record_running_result(transaction, lease,
+        service::sync_runtime::attempt_result::waiting(zone->task_id_, zone->desired_revision_), attempt.to_json(context.pool()));
     if (!result_transition.marker_transitioned_) {
         throw std::runtime_error("证书同步标记 lease 已失效");
     }
     step.complete();
     co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease, result_transition,
         trace, false, &work_queue);
+}
+
+// A resumed task must verify actual publication before any ACME operation.
+// A manual DNS retry may have replaced a failed result with queued work of the
+// same revision: keep that order parked until that work resolves.
+inline ruvia::task<bool> await_challenge_dns(service::background::task_context& context,
+    service::attempt_trace::recorder& trace, const certificate_task& task,
+    const service::sync_runtime::running_marker_lease& lease, const certificate_work& work,
+    certificate_attempt& attempt) {
+    if (!work.progress_ || work.progress_->phase_ != issuance_phase::validation) {
+        co_return true;
+    }
+    auto transaction = co_await context.db().begin_transaction({.isolation_ = ruvia::db_transaction_isolation::read_committed});
+    const auto dns = co_await load_challenge_dns(transaction, task, work, context.pool());
+    if (dns.synced_revision_ >= work.progress_->dns_revision_ && dns.challenge_records_synced_) {
+        co_await transaction.commit();
+        co_return true;
+    }
+    attempt.stage_ = certificate_stage::dns_challenge;
+    auto step = trace.begin_step(service::attempt_trace::step_code::dns_challenge, work.zone_domain_);
+    if (dns.task_id_.empty() || dns.version_ < work.progress_->dns_revision_) {
+        throw acme_error("DNS-01 同步任务缺失，请重新发起证书签发", true);
+    }
+    if (dns.done_) {
+        throw acme_error(dns.ok_ ? "DNS-01 记录尚未应用，请处理 DNS 同步结果后重新签发证书"
+                                 : "DNS-01 记录同步永久失败，请修复 DNS 配置后重新签发证书",
+            true);
+    }
+    trace.link_task({.resource_type_ = "dns_zone", .resource_id_ = work.dns_zone_id_, .label_ = "DNS 同步"});
+    trace.log(service::attempt_trace::log_level::info, "DNS-01 记录尚未同步，继续等待 DNS 任务");
+    const auto transition = co_await service::sync_runtime::record_running_result(transaction, lease,
+        service::sync_runtime::attempt_result::waiting(dns.task_id_, work.progress_->dns_revision_),
+        attempt.to_json(context.pool()));
+    if (!transition.marker_transitioned_) {
+        throw std::runtime_error("证书同步标记 lease 已失效");
+    }
+    step.complete();
+    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease, transition, trace);
+    co_return false;
 }
 
 // The authorizations are valid: retires the challenge records and stores the
@@ -158,8 +204,7 @@ persist_issued_certificate(service::background::task_context& context, service::
         }
         co_await service::node_dispatch::enqueue_certificate_consumers(transaction, task.tenant_id_,
             task.certificate_id_, work);
-        result_transition = co_await service::sync_runtime::complete_running_and_record_event(
-            transaction, lease, detail);
+        result_transition = co_await service::sync_runtime::record_running_result(transaction, lease, service::sync_runtime::attempt_result::completed(), detail);
         if (!result_transition.marker_transitioned_) {
             throw std::runtime_error("证书同步标记 lease 已失效");
         }
@@ -186,8 +231,8 @@ inline ruvia::task<void> fail_certificate_task(service::background::task_context
     const auto certificate = co_await transaction.query(
         "SELECT dns_zone_id FROM sys_certificate WHERE tenant_id = $1 AND id = $2 LIMIT 1 FOR UPDATE",
         task.tenant_id_, task.certificate_id_);
-    const auto result_transition = co_await service::sync_runtime::fail_running_and_record_event(
-        transaction, lease, message, detail);
+    const auto result_transition = co_await service::sync_runtime::record_running_result(
+        transaction, lease, permanent ? service::sync_runtime::attempt_result::failed(message) : service::sync_runtime::attempt_result::retry(message), detail);
     // Expired material leaves the consumers.
     service::background::queued_work work;
     if (result_transition.marker_transitioned_) {
