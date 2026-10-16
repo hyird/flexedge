@@ -200,6 +200,17 @@ ruvia::task<void> verify_retry_and_fences(task_context& first, task_context& sec
     require(!(co_await finish(second, current_lease, sync::attempt_result::completed())).marker_transitioned_, "an expired lease cannot commit a result");
     require(co_await event_count(db) == before, "rejected owners and versions create no history");
     co_await sync::recover_stale_running(first, sync::marker_resource_type::dns_zone);
+    require(co_await event_count(db) == before + 1, "lease recovery records its failed attempt exactly once");
+    const auto timed_out = co_await db.query(
+        "SELECT outcome, error, started_at IS NULL, duration_ms FROM sys_sync_event "
+        "WHERE task_id = $1 ORDER BY id DESC LIMIT 1",
+        id);
+    require(timed_out.front()[0].value() == "failed" &&
+                timed_out.front()[1].value() == sync::lease_recovery_retry_error &&
+                timed_out.front()[2].as<bool>().value() && timed_out.front()[3].as<std::int64_t>() == 0,
+        "recovery records the timeout without inventing an unknown start time");
+    co_await sync::recover_stale_running(second, sync::marker_resource_type::dns_zone);
+    require(co_await event_count(db) == before + 1, "another recovery does not duplicate the failed attempt");
     (void)co_await db.execute("UPDATE sys_sync_task SET next_attempt_at = NOW() - INTERVAL '1 second' WHERE id = $1", id);
     const auto recovered = co_await sync::claim_marker(first, sync::marker_resource_type::dns_zone);
     require(recovered.has_value(), "the expired lease is recovered by the ordinary claim path");

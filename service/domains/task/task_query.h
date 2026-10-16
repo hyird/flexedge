@@ -188,26 +188,20 @@ private:
             equal(column(table, "id"), column("marker", "resource_id"))});
     }
 
-    auto event_statistics(expression current_failure, std::string_view type_table,
-        std::string_view type_column, expression resource_type) {
+    auto event_statistics(std::string_view type_table, std::string_view type_column, expression resource_type) {
         auto query = source<event_entity>("event");
         query.where(all({equal(column("event", "tenant_id"), value(tenant_)),
                         equal(column("event", "resource_type"), resource_type),
                         equal(column("event", "resource_id"), column(type_table, type_column))}))
-            .select({{"attempt_count", count()},
-                {"failure_count", filtered_count(all({equal(column("event", "outcome"), value("failed")),
-                                      current_failure}))},
-                {"last_at", expressions_.aggregate("max", {column("event", "emitted_at")})},
-                {"last_success_at", expressions_.filter(
-                                        expressions_.aggregate("max", {column("event", "emitted_at")}),
-                                        equal(column("event", "outcome"), value("completed")))}});
+            .select({{"attempt_count", count()}, {"last_success_at", expressions_.filter(
+                                                                         expressions_.aggregate("max", {column("event", "emitted_at")}),
+                                                                         equal(column("event", "outcome"), value("completed")))}});
         return query;
     }
 
     auto marker_tasks() {
         const auto successful = all({column("marker", "is_done"), column("marker", "is_ok")});
-        auto statistics = event_statistics(value(false),
-            "marker", "resource_id", column("marker", "resource_type"));
+        auto statistics = event_statistics("marker", "resource_id", column("marker", "resource_type"));
         const auto status = expressions_.case_when({{all({column("marker", "is_done"), expressions_.unary(ruvia::db_unary_operator::not_value,
                                                                                            column("marker", "is_ok"))}),
                                                         value("failed")},
@@ -250,31 +244,31 @@ private:
                 equal(column("release_target", "node_id"), column("node", "id"))}))
             .select({{"release_id", column("release_target", "release_id")}, {"status", column("release_target", "status")},
                 {"retryable", column("release_target", "retryable")}, {"last_error", column("release_target", "last_error")},
+                {"count_fails", column("release_target", "count_fails")},
                 {"updated_at", column("release_target", "updated_at")}})
             .order_by(column("release", "generation"), ruvia::db_order_direction::desc)
             .take(1);
-        auto statistics = event_statistics(either({all({equal(column("event", "operation"), value("publish")), equal(column("event", "task_id"), column("target", "release_id"))}),
-                                               all({equal(column("event", "operation"), value("configure")), equal(column("event", "version"), column("node", "node_spec_revision"))})}),
-            "node", "id", value("node"));
-        auto configure = source<event_entity>("event");
-        configure.where(all({equal(column("event", "tenant_id"), value(tenant_)),
-                            equal(column("event", "resource_type"), value("node")), equal(column("event", "resource_id"), column("node", "id")),
-                            equal(column("event", "operation"), value("configure")), equal(column("event", "version"), column("node", "node_spec_revision"))}))
-            .select({{"outcome", column("event", "outcome")}, {"error", column("event", "error")}, {"detail", column("event", "detail")}})
-            .order_by(column("event", "id"), ruvia::db_order_direction::desc)
-            .take(1);
+        auto statistics = event_statistics("node", "id", value("node"));
         const auto spec_pending = expressions_.binary(column("node", "node_spec_revision"), ruvia::db_binary_operator::greater,
             column("node", "applied_node_spec_revision"));
+        const auto current_spec = equal(column("node", "config_task_revision"), column("node", "node_spec_revision"));
         const auto release_status = expressions_.case_when({{equal(column("target", "status"), value("pending")), value("queued")},
                                                                {equal(column("target", "status"), value("failed")), expressions_.case_when({{expressions_.unary(ruvia::db_unary_operator::is_false, column("target", "retryable")), value("failed")}}, value("retrying"))}},
             value("completed"));
         const auto spec_status = expressions_.case_when({{expressions_.unary(ruvia::db_unary_operator::not_value, spec_pending), value("completed")},
-                                                            {equal(column("configure", "outcome"), value("failed")), expressions_.case_when({{equal(json(column("configure", "detail"), "retryable"), expressions_.cast(value("false"), ruvia::db_data_type::jsonb)), value("failed")}}, value("retrying"))}},
+                                                            {all({current_spec, expressions_.binary(column("node", "config_task_failures"), ruvia::db_binary_operator::greater, value(std::int64_t{0}))}), expressions_.case_when({{expressions_.unary(ruvia::db_unary_operator::is_false, column("node", "config_task_retryable")), value("failed")}}, value("retrying"))}},
             value("queued"));
-        const auto status = expressions_.case_when({{either({equal(release_status, value("failed")), equal(spec_status, value("failed"))}), value("failed")},
-                                                       {either({equal(release_status, value("retrying")), equal(spec_status, value("retrying"))}), value("retrying")},
-                                                       {either({equal(release_status, value("queued")), equal(spec_status, value("queued"))}), value("queued")}},
-            value("completed"));
+        const auto rank = [&](expression status) {
+            return expressions_.case_when({{equal(status, value("failed")), value(std::int64_t{3})},
+                                              {equal(status, value("retrying")), value(std::int64_t{2})},
+                                              {equal(status, value("queued")), value(std::int64_t{1})}},
+                value(std::int64_t{0}));
+        };
+        // Pick one current operation, then derive all its fields together.
+        // Retained history contributes totals only, never scheduling state.
+        const auto use_spec = all({spec_pending, expressions_.binary(rank(spec_status),
+                                                     ruvia::db_binary_operator::greater_equal, rank(release_status))});
+        const auto status = expressions_.case_when({{use_spec, spec_status}}, release_status);
         const std::array interval_args{ruvia::db_named_argument{"secs", value(service::node::online_window_seconds)}};
         const auto recent = expressions_.coalesce({expressions_.binary(column("node", "last_heartbeat_at"),
                                                        ruvia::db_binary_operator::greater_equal, expressions_.binary(expressions_.call("now"), ruvia::db_binary_operator::subtract, expressions_.call("make_interval", {}, interval_args))),
@@ -282,26 +276,27 @@ private:
         auto query = source<node_entity>("node");
         query.join(ruvia::db_join_type::left, target, "target", value(true), {.lateral_ = true})
             .join(ruvia::db_join_type::cross, statistics, "attempts", {}, {.lateral_ = true})
-            .join(ruvia::db_join_type::left, configure, "configure", value(true), {.lateral_ = true})
             .where(all({equal(column("node", "tenant_id"), value(tenant_)),
                 equal(column("node", "registration_status"), value("registered")),
                 expressions_.unary(ruvia::db_unary_operator::is_null, column("node", "deleted_at"))}))
             .select({{"resource_type", value("node")}, {"resource_id", column("node", "id")}, {"resource_kind", value("")},
-                {"name", column("node", "name")}, {"operation", expressions_.case_when({{spec_pending, value("configure")}}, value("publish"))},
+                {"name", column("node", "name")}, {"operation", expressions_.case_when({{use_spec, value("configure")}}, value("publish"))},
                 {"status", status},
-                {"error", expressions_.case_when({{one_of(status, {"failed", "retrying"}), expressions_.case_when({{equal(status, release_status), expressions_.coalesce({column("target", "last_error"), value("")})}},
-                                                                                               expressions_.coalesce({column("configure", "error"), value("")}))}},
+                {"error", expressions_.case_when({{one_of(status, {"failed", "retrying"}), expressions_.case_when({{use_spec, column("node", "config_task_error")}},
+                                                                                               expressions_.coalesce({column("target", "last_error"), value("")}))}},
                               value(""))},
                 {"next_attempt_at", null_time()},
-                {"updated_at", expressions_.greatest({column("target", "updated_at"), column("attempts", "last_at"),
-                                   expressions_.case_when({{all({spec_pending, expressions_.unary(ruvia::db_unary_operator::is_null,
-                                                                                   column("configure", "outcome"))}),
+                {"updated_at", expressions_.greatest({column("target", "updated_at"),
+                                   expressions_.case_when({{current_spec, column("node", "config_task_updated_at")}}, null_time()),
+                                   expressions_.case_when({{all({spec_pending, expressions_.unary(ruvia::db_unary_operator::not_value, current_spec)}),
                                                               column("node", "updated_at")}},
                                        null_time()),
                                    expressions_.coalesce({column("node", "registered_at"), column("node", "created_at")})})},
                 {"last_success_at", column("attempts", "last_success_at")},
                 {"attempt_count", column("attempts", "attempt_count")},
-                {"failure_count", expressions_.case_when({{equal(status, value("completed")), value(std::int64_t{0})}}, column("attempts", "failure_count"))},
+                {"failure_count", expressions_.case_when({{equal(status, value("completed")), value(std::int64_t{0})},
+                                                             {use_spec, expressions_.case_when({{current_spec, column("node", "config_task_failures")}}, value(std::int64_t{0}))}},
+                                      expressions_.coalesce({column("target", "count_fails"), value(std::int64_t{0})}))},
                 {"node_offline", all({expressions_.unary(ruvia::db_unary_operator::not_value, recent), different(status, value("completed"))})}});
         return query;
     }

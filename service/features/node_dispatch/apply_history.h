@@ -159,6 +159,24 @@ inline ruvia::task<std::optional<recorded_node_attempt>> record_node_apply_attem
 inline ruvia::task<std::optional<recorded_node_attempt>> record_node_config_attempt(
     ruvia::db_transaction& transaction, const node_apply_attempt& attempt, std::int64_t revision,
     std::pmr::memory_resource* resource) {
+    // The node owns the current configure result independently of retained
+    // execution history. The caller's transaction owns the node row lock.
+    ruvia::db_query snapshot;
+    const auto current = snapshot.binary(snapshot.column("config_task_revision"),
+        ruvia::db_binary_operator::equal, snapshot.value(revision));
+    snapshot.update("sys_node")
+        .set("config_task_revision", snapshot.value(revision))
+        .set("config_task_error", snapshot.value(attempt.applied_ ? std::string_view{} : attempt.error_))
+        .set("config_task_retryable", attempt.applied_ ? snapshot.null_value() : snapshot.value(attempt.retryable_))
+        .set("config_task_failures", attempt.applied_ ? snapshot.value(std::int64_t{0})
+                                                      : snapshot.binary(snapshot.case_when({{current, snapshot.column("config_task_failures")}},
+                                                                            snapshot.value(std::int64_t{0})),
+                                                            ruvia::db_binary_operator::add, snapshot.value(std::int64_t{1})))
+        .set("config_task_updated_at", snapshot.call("now"))
+        .where(snapshot.binary(snapshot.column("tenant_id"), ruvia::db_binary_operator::equal, snapshot.value(attempt.tenant_id_)))
+        .and_where(snapshot.binary(snapshot.column("id"), ruvia::db_binary_operator::equal, snapshot.value(attempt.node_id_)))
+        .and_where(snapshot.binary(snapshot.column("node_spec_revision"), ruvia::db_binary_operator::equal, snapshot.value(revision)));
+    (void)co_await transaction.execute(snapshot);
     const auto detail_json = attempt.to_json(resource);
     ruvia::db_query source;
     const auto node = [&](std::string_view column) { return source.column(column, "node"); };

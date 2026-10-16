@@ -45,6 +45,7 @@ export function groupAttempts(list: readonly TaskAttempt[]): AttemptGroup[] {
       run?.outcome === 'failed' &&
       attempt.outcome === 'failed' &&
       attempt.operation === run.operation &&
+      group?.attempts.at(-1)?.attempt === attempt.attempt + 1 &&
       attempt.error !== '' &&
       attempt.error === run.error
     if (group && repeatsFailure) {

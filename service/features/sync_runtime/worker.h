@@ -188,12 +188,30 @@ template <typename context_type>
 inline ruvia::task<void> recover_stale_running(context_type& context, marker_resource_type resource_type) {
     auto transaction = co_await context.db().begin_transaction();
     const auto rows = co_await transaction.query(
-        "UPDATE sys_sync_task task SET is_done = FALSE, is_ok = FALSE, count_fails = count_fails + 1, "
-        "error = $2, next_attempt_at = NOW() + CAST($3 AS BIGINT) * INTERVAL '1 second', "
-        "lease_owner = NULL, lease_until = NULL, updated_at = NOW() WHERE resource_type = $1 "
-        "AND lease_until IS NOT NULL AND lease_until <= NOW() RETURNING tenant_id, resource_id",
-        describe(resource_type).name_, std::string_view{lease_recovery_retry_error}, retry_delay_seconds);
-    co_await detail::commit_marker_changes(transaction, context, resource_type, rows);
+        "SELECT tenant_id, id, resource_id, version, lease_owner FROM sys_sync_task "
+        "WHERE resource_type = $1 AND lease_until <= NOW() "
+        "ORDER BY lease_until, id LIMIT 32 FOR UPDATE SKIP LOCKED",
+        describe(resource_type).name_);
+    std::vector<service::live_resource::notifications::resource_notification> notifications;
+    for (const auto& row : rows) {
+        const auto lease = make_running_lease(row[0].value().value(), row[1].value().value(),
+            row[3].template as<std::int64_t>().value(), row[4].value().value(), {},
+            resource_type, row[2].value().value());
+        (void)co_await transaction.execute(
+            "UPDATE sys_sync_task SET is_done = FALSE, is_ok = FALSE, count_fails = count_fails + 1, "
+            "error = $2, next_attempt_at = NOW() + CAST($3 AS BIGINT) * INTERVAL '1 second', "
+            "lease_owner = NULL, lease_until = NULL, updated_at = NOW() WHERE id = $1",
+            lease.marker_.marker_id_, std::string_view{lease_recovery_retry_error}, retry_delay_seconds);
+        const auto event_id = co_await record_running_result_event(transaction, lease,
+            attempt_outcome::retryable_failure, detail_none_json);
+        if (!event_id) {
+            throw std::runtime_error("recovered sync marker result was not recorded");
+        }
+        auto& notification = detail::tenant_notification(notifications, lease.marker_.tenant_id_);
+        detail::marker_changed(notification, resource_type, lease.marker_.resource_id_);
+        notification.task_attempt(lease.marker_.resource_id_, *event_id);
+    }
+    co_await detail::commit_tenant_changes(transaction, context, std::move(notifications));
 }
 
 // Waiters of `resource_type` whose awaited task is gone or already processed

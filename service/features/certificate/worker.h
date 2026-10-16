@@ -1,6 +1,8 @@
 #pragma once
 
 #include <ruvia/core/task.h>
+#include <ruvia/core/task_scope.h>
+#include <ruvia/core/timer.h>
 
 #include <chrono>
 #include <exception>
@@ -34,6 +36,8 @@ namespace worker_detail {
 // One attempt polls the ACME server for at most this long after its claim,
 // well inside the lease; a still-pending order resumes on the next attempt.
 inline constexpr std::chrono::seconds polling_window{40};
+inline constexpr auto lease_renewal_interval = service::sync_runtime::lease_duration / 3;
+inline constexpr std::chrono::seconds lease_renewal_timeout{10};
 
 // Issuance runs in phases across attempts, each resumed from the progress
 // stored with the certificate:
@@ -276,14 +280,47 @@ inline ruvia::task<void> process_task(service::background::task_context& context
         .domains_ = {},
         .stage_ = certificate_stage::prepare,
         .issued_ = std::nullopt};
+    const auto lease = service::sync_runtime::make_running_lease(task.tenant_id_, task.id_, task.version_,
+        context.lease_owner(), task.claimed_at_, service::sync_runtime::marker_resource_type::certificate,
+        task.certificate_id_);
+    ruvia::task_scope operations(context.worker(), {.resource_ = context.pool()});
+    service::background::task_context owned(context, operations.get_stop_token());
+    bool lease_lost{};
+    // Renewal belongs to this attempt on the same Web Worker. A bounded
+    // renewal failure cancels its quota waits, HTTP requests and database IO.
+    auto maintain_lease = [&]() -> ruvia::task<void> {
+        while (co_await ruvia::sleep_for(context.worker(), lease_renewal_interval,
+                   owned.get_stop_token()) != ruvia::timer_sleep_result::stop_requested) {
+            try {
+                auto database = owned.db().with_options({.timeout_ = lease_renewal_timeout});
+                if (co_await service::sync_runtime::renew_running_lease(database, lease)) {
+                    continue;
+                }
+            } catch (...) {
+                if (owned.get_stop_token().stop_requested()) {
+                    co_return;
+                }
+            }
+            lease_lost = true;
+            operations.request_stop();
+            co_return;
+        }
+    };
     std::exception_ptr exception;
     try {
-        issuance flow(context, trace, task, attempt);
+        auto database = owned.db().with_options({.timeout_ = lease_renewal_timeout});
+        if (!co_await service::sync_runtime::renew_running_lease(database, lease)) {
+            co_return;
+        }
+        operations.spawn(maintain_lease());
+        issuance flow(owned, trace, task, attempt);
         co_await flow.run();
     } catch (...) {
         exception = std::current_exception();
     }
-    if (!context.get_stop_token().stop_requested() && exception) {
+    operations.request_stop();
+    co_await operations.join();
+    if (!context.get_stop_token().stop_requested() && !lease_lost && exception) {
         const auto failure = service::outbound_http::classify_attempt_failure(exception, "证书任务发生未知错误");
         const bool keep_progress = !failure.permanent_ && keeps_progress(exception);
         trace.mark_failure(failure.message_);

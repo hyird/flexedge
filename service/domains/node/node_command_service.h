@@ -123,6 +123,8 @@ public:
                 "UPDATE sys_node SET cluster_id = $1, name = $2, status = $3, config = "
                 "$4::jsonb, revision = revision + 1, node_spec_revision = node_spec_revision + 1, "
                 "node_spec_digest = NULL, desired_release_id = $7, "
+                "config_task_revision = node_spec_revision + 1, config_task_error = '', "
+                "config_task_retryable = NULL, config_task_failures = 0, config_task_updated_at = NOW(), "
                 "updated_at = NOW() WHERE id = $5 AND tenant_id = $6 RETURNING revision",
                 service::common::db_params(
                     ruvia::db_value{cluster_id}, ruvia::db_value{name}, ruvia::db_value{status},
@@ -208,6 +210,8 @@ public:
             "active_release_id = NULL, active_manifest_digest = NULL, "
             "last_apply_phase = NULL, last_apply_error_code = NULL, last_apply_error = NULL, "
             "last_apply_retryable = NULL, "
+            "config_task_revision = 0, config_task_error = '', config_task_retryable = NULL, "
+            "config_task_failures = 0, config_task_updated_at = NULL, "
             "runtime = '{}'::jsonb, revision = "
             "revision + 1, updated_at = "
             "NOW() WHERE id = $1 AND "

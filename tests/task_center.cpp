@@ -25,6 +25,7 @@
 #include "service/features/node_dispatch/target_store.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/sync_runtime/work_commit.h"
+#include "service/features/sync_runtime/worker.h"
 #include "service/features/website_dns/attempt_detail.h"
 #include "service/utils/secret.h"
 #include "support/postgres_test.h"
@@ -555,6 +556,51 @@ ruvia::task<void> verify_node_task(ruvia::db_handle& db, read_context& context) 
     require(changes_task(worker.sent_.back(), node_offline), "the exclusion notifies the node task");
 }
 
+ruvia::task<void> verify_node_snapshot(ruvia::db_handle& db, read_context& context) {
+    recorder worker{.handle_ = db};
+    const auto revision = integer(co_await db.query(
+        "UPDATE sys_node SET node_spec_revision = node_spec_revision + 1 WHERE id = $1 RETURNING node_spec_revision",
+        node_online));
+    co_await report_config(db, node_online, revision, false, false);
+    const auto before = co_await task_of(context, "node", node_online);
+    (void)co_await db.execute(
+        "UPDATE sys_sync_event SET emitted_at = NOW() - INTERVAL '8 days' WHERE resource_id = $1", node_online);
+    (void)co_await db.execute("UPDATE sys_scheduled_job SET next_run_at = NOW() - INTERVAL '1 hour' WHERE name = $1",
+        service::sync_runtime::retention_job);
+    co_await service::sync_runtime::prune_result_events(worker);
+    const auto after = co_await task_of(context, "node", node_online);
+    require(after.get<"status">().view() == "failed" && after.get<"failure_count">().value_ == 1 &&
+                after.get<"error">().view() == before.get<"error">().view() &&
+                after.get<"updated_at">().view() == before.get<"updated_at">().view() &&
+                after.get<"attempt_count">().value_ == 0,
+        "history retention never changes the current node task result or timestamp");
+
+    (void)co_await db.execute("UPDATE sys_node SET node_spec_revision = node_spec_revision + 1 WHERE id = $1", node_online);
+    const auto queued = co_await task_of(context, "node", node_online);
+    require(queued.get<"status">().view() == "queued" && queued.get<"failure_count">().value_ == 0 && queued.get<"error">().empty(),
+        "a new node spec does not reuse a previous revision's failure");
+    co_await report_config(db, node_online, revision + 1, false, true);
+    const auto release = co_await publish(db, worker);
+    co_await report_release(db, release, node_online, false, false);
+    const auto publish_failed = co_await task_of(context, "node", node_online);
+    require(publish_failed.get<"operation">().view() == "publish" && publish_failed.get<"status">().view() == "failed" &&
+                publish_failed.get<"error">().view() == "磁盘已满" && publish_failed.get<"failure_count">().value_ == 1,
+        "operation, status, error and failure count describe the same selected work");
+    co_await report_config(db, node_online, revision + 1, false, false);
+    const auto configure_failed = co_await task_of(context, "node", node_online);
+    require(configure_failed.get<"operation">().view() == "configure" &&
+                configure_failed.get<"error">().view() == "节点配置校验失败" && configure_failed.get<"failure_count">().value_ == 2,
+        "equal severity selects the pending spec with its own error and counter");
+    co_await report_release(db, release, node_online, true);
+    const auto still_failed = co_await task_of(context, "node", node_online);
+    require(still_failed.get<"failure_count">().value_ == 2,
+        "a successful release does not erase the separate configure failure");
+    co_await report_config(db, node_online, revision + 1, true);
+    const auto finished = co_await task_of(context, "node", node_online);
+    require(finished.get<"failure_count">().value_ == 0,
+        "the current configure success clears its failures");
+}
+
 ruvia::task<void> verify_tasks(ruvia::db_client& client) {
     co_await client.connect();
     auto db = client.handle();
@@ -566,6 +612,7 @@ ruvia::task<void> verify_tasks(ruvia::db_client& client) {
     co_await verify_node_task(db, context);
     co_await verify_terminal_failure(db, context);
     co_await verify_query_pagination(context);
+    co_await verify_node_snapshot(db, context);
 }
 
 }  // namespace

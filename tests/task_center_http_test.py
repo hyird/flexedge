@@ -264,6 +264,33 @@ assert provider["name"] == provider_name + " renamed" and provider["revision"] =
 write(f"/api/providers/dns/{provider_id}", method="DELETE", revision=2)
 snapshot(f"/api/providers/dns/{provider_id}/stream", expected_code=16101)
 
+# An actual node edit re-initiates its current task. The existing detail
+# connection must deliver the reset snapshot, without a second subscription.
+node = read(f"/api/nodes/{N3}")
+stream_request = urllib.request.Request(base + f"/api/tasks/node/{N3}/stream",
+    headers={"Accept": "text/event-stream", "Cookie": cookie})
+with urllib.request.urlopen(stream_request, timeout=10) as response:
+    def task_snapshots():
+        event, data = None, None
+        for raw in response:
+            line = raw.decode().rstrip("\r\n")
+            if line.startswith("event: "): event = line[7:]
+            elif line.startswith("data: "): data = line[6:]
+            elif not line and event:
+                if event == "snapshot":
+                    yield json.loads(data)["data"]
+                event, data = None, None
+
+    snapshots = task_snapshots()
+    assert next(snapshots)["status"] == "retrying"
+    renamed = "QA node 3 live reset"
+    result = request(f"/api/nodes/{N3}", body={"name": renamed, "cluster_id": node["cluster_id"],
+        "status": node["status"], "config": node["config"]}, method="PUT", revision=node["revision"])
+    assert result["code"] == 0, result
+    reset = next(snapshots)
+    assert (reset["status"], reset["operation"], reset["name"], reset["failure_count"], reset["error"]) == \
+        ("queued", "configure", renamed, 0, ""), reset
+
 print("Task HTTP/SSE integration passed: authentication, pagination, filters, validation, GET/stream parity, "
       "marker and node statuses, current-work failure counts, history, GET-only attempt traces, tenant isolation, "
-      "removed /api/operations, writes without background work create no task.")
+      "removed /api/operations, writes without background work create no task, node reset on the existing detail stream.")

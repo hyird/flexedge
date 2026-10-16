@@ -62,7 +62,7 @@ inline ruvia::task<bool> mark_node_target_applied(ruvia::db_transaction& transac
     std::string_view tenant_id, std::string_view release_id, std::string_view node_id) {
     ruvia::db_query expressions;
     auto update = transaction.get_repository<dispatch_target_entity>().create_update_builder();
-    update.set("status", expressions.value("applied")).set("failed_phase", expressions.null_value()).set("error_code", expressions.null_value()).set("last_error", expressions.null_value()).set("retryable", expressions.null_value()).set("applied_at", expressions.call("now")).set("updated_at", expressions.call("now")).where(target_store_detail::pending_target(expressions, tenant_id, node_id)).and_where(expressions.binary(expressions.column("release_id"), ruvia::db_binary_operator::equal, expressions.value(release_id)));
+    update.set("status", expressions.value("applied")).set("failed_phase", expressions.null_value()).set("error_code", expressions.null_value()).set("last_error", expressions.null_value()).set("retryable", expressions.null_value()).set("count_fails", expressions.value(std::int32_t{0})).set("applied_at", expressions.call("now")).set("updated_at", expressions.call("now")).where(target_store_detail::pending_target(expressions, tenant_id, node_id)).and_where(expressions.binary(expressions.column("release_id"), ruvia::db_binary_operator::equal, expressions.value(release_id)));
     co_return (co_await update.execute()).affected_rows() != 0;
 }
 
@@ -78,7 +78,7 @@ inline ruvia::task<bool> mark_node_target_failed(ruvia::db_transaction& transact
     std::string_view cluster_id, const target_failure& failure) {
     ruvia::db_query expressions;
     auto update = transaction.get_repository<dispatch_target_entity>().create_update_builder("target");
-    update.set("status", expressions.value("failed")).set("failed_phase", expressions.value(failure.phase_)).set("error_code", expressions.value(failure.error_code_)).set("last_error", expressions.value(failure.error_)).set("retryable", expressions.value(failure.retryable_)).set("updated_at", expressions.call("now")).update_from<dispatch_release_entity>("release").where(target_store_detail::pending_target(expressions, tenant_id, node_id, "target")).and_where(expressions.binary(expressions.column("release_id", "target"), ruvia::db_binary_operator::equal, expressions.value(release_id))).and_where(target_store_detail::release_scope(expressions, cluster_id));
+    update.set("status", expressions.value("failed")).set("failed_phase", expressions.value(failure.phase_)).set("error_code", expressions.value(failure.error_code_)).set("last_error", expressions.value(failure.error_)).set("retryable", expressions.value(failure.retryable_)).set("count_fails", expressions.binary(expressions.column("count_fails", "target"), ruvia::db_binary_operator::add, expressions.value(std::int32_t{1}))).set("updated_at", expressions.call("now")).update_from<dispatch_release_entity>("release").where(target_store_detail::pending_target(expressions, tenant_id, node_id, "target")).and_where(expressions.binary(expressions.column("release_id", "target"), ruvia::db_binary_operator::equal, expressions.value(release_id))).and_where(target_store_detail::release_scope(expressions, cluster_id));
     co_return (co_await update.execute()).affected_rows() != 0;
 }
 

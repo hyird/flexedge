@@ -64,6 +64,7 @@ using dispatch_target_entity = ruvia::db_entity<"sys_node_release_target",
     ruvia::db_column<"error_code", std::pmr::string, ruvia::db_column_options{.data_type_ = ruvia::db_data_type::varchar, .nullable_ = true, .length_ = 64}>,
     ruvia::db_column<"last_error", std::pmr::string, ruvia::db_column_options{.data_type_ = ruvia::db_data_type::varchar, .nullable_ = true, .length_ = 1000}>,
     ruvia::db_column<"retryable", bool, ruvia::db_column_options{.nullable_ = true}>,
+    ruvia::db_column<"count_fails", std::int32_t>,
     ruvia::db_column<"applied_at", std::pmr::string, ruvia::db_column_options{.data_type_ = ruvia::db_data_type::timestamp_tz, .nullable_ = true}>,
     ruvia::db_column<"updated_at", std::pmr::string, ruvia::db_column_options{.data_type_ = ruvia::db_data_type::timestamp_tz}>>;
 

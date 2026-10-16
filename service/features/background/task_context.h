@@ -21,6 +21,13 @@ public:
           stop_token_(ruvia::combine_stop_tokens(context.get_stop_token(), std::move(stop))),
           lease_owner_(service::utils::random_token()) {}
 
+    // A structured child operation keeps the claim identity and Worker,
+    // while adding cancellation for its owned operations.
+    task_context(task_context& parent, ruvia::stop_token stop)
+        : context_(parent.context_),
+          stop_token_(ruvia::combine_stop_tokens(parent.stop_token_, std::move(stop))),
+          lease_owner_(parent.lease_owner_) {}
+
     task_context(const task_context&) = delete;
     task_context& operator=(const task_context&) = delete;
     task_context(task_context&&) = delete;

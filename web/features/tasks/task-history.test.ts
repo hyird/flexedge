@@ -69,6 +69,20 @@ test('failures without an error text and successes never collapse', () => {
   expect(runs([])).toEqual([])
 })
 
+test('identical errors never fold across a restarted attempt sequence', () => {
+  expect(
+    runs([
+      { ...attempt(1, 'failed', 'timeout'), id: '101' },
+      { ...attempt(3, 'failed', 'timeout'), id: '100' },
+      { ...attempt(2, 'failed', 'timeout'), id: '99' },
+      { ...attempt(1, 'failed', 'timeout'), id: '98' },
+    ])
+  ).toEqual([[1], [3, 2, 1]])
+  expect(
+    runs([attempt(5, 'failed', 'timeout'), attempt(3, 'failed', 'timeout')])
+  ).toEqual([[5], [3]])
+})
+
 test('durations are compact and unknown for records without a start time', () => {
   const at = (duration_ms: number, started_at = '2026-10-14T00:00:00Z') =>
     formatAttemptDuration({ started_at, duration_ms })

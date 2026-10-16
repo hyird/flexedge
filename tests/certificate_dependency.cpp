@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <exception>
 #include <iostream>
 #include <mutex>
@@ -80,6 +81,7 @@ public:
 
     ~acme_origin() {
         thread_.request_stop();
+        release();
         thread_.join();
     }
 
@@ -93,6 +95,23 @@ public:
             std::rethrow_exception(failure_);
         }
         return target.empty() ? targets_.size() : std::ranges::count(targets_, target);
+    }
+
+    void hold(std::string_view target) {
+        std::lock_guard lock(mutex_);
+        held_target_ = target;
+        waiting_ = false;
+    }
+
+    bool waiting() const {
+        std::lock_guard lock(mutex_);
+        return waiting_;
+    }
+
+    void release() {
+        std::lock_guard lock(mutex_);
+        held_target_.clear();
+        released_.notify_all();
     }
 
 private:
@@ -113,8 +132,13 @@ private:
             asio::read(socket, input, asio::transfer_exactly(content_length - input.size()));
         }
         {
-            std::lock_guard lock(mutex_);
+            std::unique_lock lock(mutex_);
             targets_.push_back(target);
+            if (held_target_ == target) {
+                waiting_ = true;
+                released_.wait(lock, [&] { return held_target_.empty(); });
+                waiting_ = false;
+            }
         }
         std::string body, location;
         int status = 200;
@@ -136,12 +160,19 @@ private:
         }
         const auto response = "HTTP/1.1 " + std::to_string(status) + " QA\r\nContent-Type: application/json\r\nReplay-Nonce: qa-nonce\r\n" +
                               location + "Connection: close\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
-        asio::write(socket, asio::buffer(response));
+        asio::error_code error;
+        asio::write(socket, asio::buffer(response), error);
+        if (error && error != asio::error::broken_pipe && error != asio::error::connection_reset) {
+            throw asio::system_error(error);
+        }
     }
 
     asio::io_context io_;
     asio::ip::tcp::acceptor acceptor_;
     mutable std::mutex mutex_;
+    std::condition_variable released_;
+    std::string held_target_;
+    bool waiting_{};
     std::vector<std::string> targets_;
     std::exception_ptr failure_;
     std::jthread thread_;
@@ -353,7 +384,77 @@ ruvia::task<void> verify_result_during_gate(ruvia::web_worker_context& web, task
     require(waiter.front()[0].as<bool>().value(), "the certificate never parks after its dependency already completed");
 }
 
-ruvia::task<void> verify(ruvia::web_worker_context& web, const acme_origin& origin) {
+ruvia::task<void> verify_running_lease(ruvia::web_worker_context& web, task_context& context,
+    acme_origin& origin, bool lose_lease) {
+    co_await reset(context, true);
+    auto marker = co_await sync::claim_marker(context, sync::marker_resource_type::certificate);
+    require(marker.has_value(), "lease regression claims the certificate");
+    origin.hold("/orders");
+    ruvia::task_scope tasks(web.worker());
+    task_context running(context, tasks.get_stop_token());
+    bool completed{};
+    std::exception_ptr run_failure, check_failure;
+    auto run = [&]() -> ruvia::task<void> {
+        try {
+            co_await issuance::worker_detail::process_task(running, *marker);
+        } catch (...) {
+            run_failure = std::current_exception();
+        }
+        completed = true;
+    };
+    tasks.spawn(run());
+    try {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!origin.waiting() && !completed && std::chrono::steady_clock::now() < deadline) {
+            (void)co_await ruvia::sleep_for(web.worker(), std::chrono::milliseconds(10));
+        }
+        require(origin.waiting(), "the production ACME request is held in flight");
+        const auto held = co_await context.db().query("SELECT lease_until::text FROM sys_sync_task WHERE id=$1", marker->id_);
+        const std::string initial(held.front()[0].value().value());
+        if (lose_lease) {
+            (void)co_await context.db().execute("UPDATE sys_sync_task SET lease_owner='replacement' WHERE id=$1", marker->id_);
+        }
+        deadline = std::chrono::steady_clock::now() + std::chrono::seconds(25);
+        bool renewed{};
+        while (!completed && !renewed && std::chrono::steady_clock::now() < deadline) {
+            (void)co_await ruvia::sleep_for(web.worker(), std::chrono::milliseconds(100));
+            if (!lose_lease) {
+                const auto rows = co_await context.db().query(
+                    "SELECT lease_until > $2::timestamptz + INTERVAL '10 seconds' FROM sys_sync_task WHERE id=$1",
+                    marker->id_, initial);
+                renewed = rows.front()[0].as<bool>().value();
+            }
+        }
+        if (lose_lease) {
+            require(completed, "losing the lease cancels a blocked ACME request before its response");
+            const auto rows = co_await context.db().query(
+                "SELECT lease_owner='replacement', (SELECT count(*) FROM sys_sync_event WHERE task_id=$1) FROM sys_sync_task WHERE id=$1",
+                marker->id_);
+            require(rows.front()[0].as<bool>().value() && rows.front()[1].as<int>() == 0,
+                "a former owner cannot clear the new lease or persist a result");
+        } else {
+            require(renewed && !completed, "an in-flight ACME request renews its owning task lease");
+            co_await sync::recover_stale_running(context, sync::marker_resource_type::certificate);
+            const auto rows = co_await context.db().query("SELECT count(*) FROM sys_sync_event WHERE task_id=$1", marker->id_);
+            require(rows.front()[0].as<int>() == 0, "a live renewed attempt cannot be recovered by another claimer");
+        }
+    } catch (...) {
+        check_failure = std::current_exception();
+    }
+    origin.release();
+    if (check_failure) {
+        tasks.request_stop();
+    }
+    co_await tasks.join();
+    if (check_failure) {
+        std::rethrow_exception(check_failure);
+    }
+    if (run_failure) {
+        std::rethrow_exception(run_failure);
+    }
+}
+
+ruvia::task<void> verify(ruvia::web_worker_context& web, acme_origin& origin) {
     task_context context(web);
     co_await prepare(context.db());
     co_await reset(context);
@@ -445,6 +546,8 @@ ruvia::task<void> verify(ruvia::web_worker_context& web, const acme_origin& orig
         "legacy progress lacking a required revision rebuilds its order without validating stale challenges");
     const auto legacy = co_await context.db().query("SELECT (certificate.issuance_state->>'dns_revision')::bigint=zone.desired_revision AND task.wait_version=zone.desired_revision FROM sys_certificate certificate JOIN sys_dns_zone zone ON zone.id=certificate.dns_zone_id JOIN sys_sync_task task ON task.certificate_id=certificate.id");
     require(legacy.front()[0].as<bool>().value(), "legacy replacement persists a fresh DNS dependency");
+    co_await verify_running_lease(web, context, origin, false);
+    co_await verify_running_lease(web, context, origin, true);
 }
 
 }  // namespace

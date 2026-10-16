@@ -58,6 +58,11 @@ INSERT INTO sys_dns_zone(id,tenant_id,provider_id,domain,sync_status,deleted_at)
 SELECT ('00000000-0000-4000-8000-00000000020'||i)::uuid, :'qa_tenant', '{P1}', 'qa-'||i||'.example.com',
     CASE i WHEN 3 THEN 'failed' WHEN 4 THEN 'synced' ELSE 'pending' END, NOW()
 FROM generate_series(1,4) i;
+-- One live zone allows the final node-edit/SSE regression. Its provider
+-- remains deleted, so no fixture can reach an external DNS API.
+UPDATE sys_dns_zone SET deleted_at=NULL,
+    runtime='{"lines":[{"code":"default","name":"Default","display_name":"Default","status":"enabled"}],"record_states":[],"challenge_records":[]}',
+    next_check_at=NOW()+INTERVAL '1 day' WHERE id='{Z1}';
 INSERT INTO sys_cluster(id,tenant_id,dns_zone_id,name,hostname_prefix)
 VALUES ('{C1}', :'qa_tenant', '{Z1}', 'QA cluster', 'qa');
 -- N1 healthy, N2 failed publish (offline), N3 retrying configure (never seen),
@@ -75,15 +80,25 @@ FROM (VALUES
 (5, '{N5}', 'QA node 5', 'pending', 0, NULL, 1, 0, NULL),
 (6, '{N6}', 'QA node 6', 'registered', 1, NULL, 1, 0, NOW())
 ) AS n(i, id, name, registration, registered, heartbeat, spec, applied, deleted);
+UPDATE sys_node SET config_task_revision=3, config_task_error='QA: node rejected config',
+    config_task_retryable=true, config_task_failures=1, config_task_updated_at=NOW()-INTERVAL '15 minutes'
+    WHERE id='{N3}';
+UPDATE sys_node SET config='{"endpoints":[{"id":"00000000-0000-4000-8000-000000000801","ip_address":"192.0.2.3","line_code":"default"}]}'
+    WHERE id='{N3}';
+UPDATE sys_node SET config_task_revision=2, config_task_error='QA: node apply failed',
+    config_task_retryable=false, config_task_failures=1, config_task_updated_at=NOW()-INTERVAL '100 minutes'
+    WHERE id='{N4}';
 INSERT INTO sys_cluster_release(id,tenant_id,cluster_id,generation,status,manifest_digest,manifest_envelope,schema_version)
 VALUES ('{R1}', :'qa_tenant', '{C1}', 1, 'superseded', repeat('a',64), 'qa-only', 6),
        ('{R2}', :'qa_tenant', '{C1}', 2, 'active', repeat('a',64), 'qa-only', 6);
+UPDATE sys_cluster SET release_generation=2 WHERE id='{C1}';
 INSERT INTO sys_node_release_target(tenant_id,release_id,node_id,status,retryable,last_error,applied_at,updated_at) VALUES
 (:'qa_tenant', '{R1}', '{N1}', 'failed', true, 'stale failure', NULL, NOW()-INTERVAL '6 hours'),
 (:'qa_tenant', '{R2}', '{N1}', 'applied', true, NULL, NOW()-INTERVAL '70 minutes', NOW()-INTERVAL '70 minutes'),
 (:'qa_tenant', '{R2}', '{N2}', 'failed', false, 'QA deployment error', NULL, NOW()-INTERVAL '80 minutes'),
 (:'qa_tenant', '{R1}', '{N3}', 'failed', false, 'superseded failure', NULL, NOW()-INTERVAL '95 minutes'),
 (:'qa_tenant', '{R2}', '{N3}', 'pending', NULL, NULL, NULL, NOW()-INTERVAL '90 minutes');
+UPDATE sys_node_release_target SET count_fails=1 WHERE status='failed';
 
 -- Retries and leases lie a day ahead so the running server never claims them.
 INSERT INTO sys_sync_task(tenant_id,resource_type,dns_zone_id,provider_id,operation,version,processed_version,is_done,

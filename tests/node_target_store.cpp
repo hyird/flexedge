@@ -16,7 +16,7 @@ ruvia::task<void> verify(ruvia::db_client& client) {
     auto db = client.handle();
     auto tx = co_await db.begin_transaction();
     (void)co_await tx.execute("CREATE TEMP TABLE sys_cluster_release (tenant_id text,id text,cluster_id text) ON COMMIT DROP");
-    (void)co_await tx.execute("CREATE TEMP TABLE sys_node_release_target (fixture_id int GENERATED ALWAYS AS IDENTITY,tenant_id text,release_id text,node_id text,status text,updated_at timestamptz,failed_phase text DEFAULT 'qa',error_code text DEFAULT 'qa',last_error text DEFAULT 'qa',retryable boolean DEFAULT true,applied_at timestamptz) ON COMMIT DROP");
+    (void)co_await tx.execute("CREATE TEMP TABLE sys_node_release_target (fixture_id int GENERATED ALWAYS AS IDENTITY,tenant_id text,release_id text,node_id text,status text,updated_at timestamptz,failed_phase text DEFAULT 'qa',error_code text DEFAULT 'qa',last_error text DEFAULT 'qa',retryable boolean DEFAULT true,count_fails integer DEFAULT 0,applied_at timestamptz) ON COMMIT DROP");
     for (const auto* tenant : {"t1", "t2"}) {
         for (const auto* release : {"r1", "r2"}) {
             (void)co_await tx.execute("INSERT INTO sys_cluster_release VALUES ($1,$2,$2)", tenant, release);

@@ -69,8 +69,8 @@ ruvia::task<void> insert_logs(ruvia::db_client& client) {
         "($2,$3,$4,'QA two',repeat('c',32),repeat('d',64),'qa-only')",
         node, peer_node, tenant, cluster);
     (void)co_await db.execute("INSERT INTO sys_website(id,tenant_id,cluster_id,config) VALUES($1,$2,$3,'{}')", website, tenant, cluster);
-    // Existing databases may already contain repeats with distinct normalized
-    // timestamps. The new nonunique indexes must preserve those rows verbatim.
+    // Nonunique identity indexes accept repeated events at distinct normalized
+    // timestamps; rerunning the baseline must preserve all rows verbatim.
     for (const auto days : {30, 16, 0}) {
         const auto owner = days == 0 ? peer_node : node;
         (void)co_await db.execute(
@@ -83,7 +83,7 @@ ruvia::task<void> insert_logs(ruvia::db_client& client) {
             tenant, event, owner, days);
     }
     preserved_logs = co_await log_fingerprint(db);
-    require(!preserved_logs.empty(), "pre-upgrade logs exist in multiple time chunks");
+    require(!preserved_logs.empty(), "logs exist in multiple time chunks");
 }
 
 ruvia::task<void> verify_indexes(ruvia::db_client& client) {
@@ -116,14 +116,24 @@ ruvia::task<void> verify_indexes(ruvia::db_client& client) {
         "AND hypertable_name IN ('sys_node_log','sys_website_access_log') "
         "AND column_name='occurred_at' AND time_interval=INTERVAL '7 days'");
     require(hypertables[0][0].as<int>() == 2, "hypertables keep their original time dimension and interval");
-    const auto records = co_await db.query("SELECT count(*) FROM schema_migrations WHERE migration_id='0002_log_event_lookup'");
-    require(records[0][0].as<int>() == 1, "the appended migration is recorded exactly once");
+    const auto records = co_await db.query("SELECT count(*) FROM schema_migrations WHERE migration_id='0001_initial'");
+    require(records[0][0].as<int>() == 1, "the installation baseline is recorded exactly once");
+    const auto shape = co_await db.query(
+        "SELECT (SELECT count(*) FROM information_schema.columns WHERE table_schema='public' "
+        "AND table_name='sys_dns_zone' AND column_name='next_check_at'), "
+        "(SELECT count(*) FROM information_schema.columns WHERE table_schema='public' "
+        "AND table_name='sys_sync_event' AND column_name='next_attempt_at'), "
+        "(SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='ck_sync_task_operation')");
+    require(shape[0][0].as<int>() == 1 && shape[0][1].as<int>() == 0 &&
+                shape[0][2].value().value().find("sync_local") == std::string_view::npos &&
+                shape[0][2].value().value().find("sync_remote") == std::string_view::npos,
+        "the baseline directly creates the final task and DNS schema");
 }
 
 ruvia::task<void> verify_preserved(ruvia::db_client& client) {
     co_await client.connect();
     auto db = client.handle();
-    require(co_await log_fingerprint(db) == preserved_logs, "upgrade preserves all existing log fields and timestamps");
+    require(co_await log_fingerprint(db) == preserved_logs, "rerunning the baseline preserves log fields and timestamps");
     const auto chunks = co_await db.query(
         "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_schema='public' "
         "AND hypertable_name IN ('sys_node_log','sys_website_access_log')");
@@ -138,7 +148,9 @@ ruvia::task<void> verify_preserved(ruvia::db_client& client) {
 
 ruvia::task<void> create_conflict(ruvia::db_client& client) {
     co_await client.connect();
-    (void)co_await client.handle().execute("CREATE INDEX idx_node_log_event ON sys_tenant(name)");
+    (void)co_await client.handle().execute("CREATE TABLE qa_existing (value text)");
+    (void)co_await client.handle().execute("INSERT INTO qa_existing VALUES ('preserve me')");
+    (void)co_await client.handle().execute("CREATE INDEX idx_node_log_event ON qa_existing(value)");
 }
 
 ruvia::task<void> verify_rollback(ruvia::db_client& client) {
@@ -146,11 +158,13 @@ ruvia::task<void> verify_rollback(ruvia::db_client& client) {
     auto db = client.handle();
     const auto state = co_await db.query(
         "SELECT to_regclass('public.idx_website_access_log_event') IS NULL,"
-        "(SELECT indrelid='sys_tenant'::regclass FROM pg_index WHERE indexrelid='idx_node_log_event'::regclass),"
-        "(SELECT count(*) FROM schema_migrations WHERE migration_id='0002_log_event_lookup')");
+        "(SELECT indrelid='qa_existing'::regclass FROM pg_index WHERE indexrelid='idx_node_log_event'::regclass),"
+        "(SELECT count(*) FROM schema_migrations WHERE migration_id='0001_initial'),"
+        "to_regclass('public.sys_tenant') IS NULL, (SELECT value FROM qa_existing)");
     require(state[0][0].as<bool>() == true && state[0][1].as<bool>() == true && state[0][2].as<int>() == 0,
-        "second index conflict rolls back the first index and migration receipt, preserving conflicting objects");
-    require(co_await log_fingerprint(db) == preserved_logs, "failed migration preserves all installed log data");
+        "index conflict rolls back the initial schema and its migration receipt");
+    require(state[0][3].as<bool>() == true && state[0][4].value() == "preserve me",
+        "failed baseline leaves the preexisting object and its data unchanged");
     (void)co_await db.execute("DROP INDEX idx_node_log_event");
 }
 
@@ -163,33 +177,24 @@ int main() {
             return 77;
         }
         const auto& migrations = service::config::schema_migrations;
-        require(migrations.size() >= 2 && migrations[0].id() == "0001_initial" &&
-                    migrations[1].id() == "0002_log_event_lookup",
-            "the log index migration follows the installation baseline");
-        const auto baseline = std::span<const ruvia::db_migration>(migrations).first(1);
-        const test_support::postgres_test_database fresh(*config), upgrade(*config), conflict(*config);
+        require(migrations.size() == 1 && migrations[0].id() == "0001_initial",
+            "fresh installations have one final-schema baseline");
+        const test_support::postgres_test_database fresh(*config), conflict(*config);
         migrate(fresh, migrations, migrations.size());
         require(fresh.run(verify_indexes) == 0, "fresh install");
         require(fresh.run(insert_logs) == 0 && fresh.run(verify_preserved) == 0,
             "chunks created after installation inherit the identity indexes");
         migrate(fresh, migrations, 0);
-        require(fresh.run(verify_indexes) == 0, "repeat installation");
-        migrate(upgrade, baseline, 1);
-        require(upgrade.run(insert_logs) == 0, "prepare existing baseline with logs");
-        migrate(upgrade, migrations, migrations.size() - baseline.size());
-        require(upgrade.run(verify_indexes) == 0 && upgrade.run(verify_preserved) == 0, "upgrade an existing installation");
-        migrate(upgrade, migrations, 0);
-        require(upgrade.run(verify_preserved) == 0, "repeat upgrade preserves data");
-        migrate(conflict, baseline, 1);
-        require(conflict.run(insert_logs) == 0 && conflict.run(create_conflict) == 0, "prepare schema drift");
+        require(fresh.run(verify_indexes) == 0 && fresh.run(verify_preserved) == 0, "repeat installation preserves data");
+        require(conflict.run(create_conflict) == 0, "prepare an isolated conflicting object");
         require_rejected(conflict, migrations);
-        require(conflict.run(verify_rollback) == 0, "failed upgrade rolls back atomically");
-        migrate(conflict, migrations, migrations.size() - baseline.size());
-        require(conflict.run(verify_indexes) == 0 && conflict.run(verify_preserved) == 0, "retry original migration after removing conflict");
+        require(conflict.run(verify_rollback) == 0, "failed installation rolls back atomically");
+        migrate(conflict, migrations, 1);
+        require(conflict.run(verify_indexes) == 0, "retry the same baseline after removing conflict");
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
     }
-    std::cout << "Log lookup indexes: fresh install, upgrade, repeat, drift rejection and rollback passed\n";
+    std::cout << "Final installation baseline: log indexes, task schema, repeat, conflict rejection and rollback passed\n";
     return 0;
 }
