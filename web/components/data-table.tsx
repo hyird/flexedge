@@ -10,6 +10,11 @@ type DataTableEmpty = {
   action?: ReactNode
 }
 
+// Embedded grids share the existing card's surface. Keep the sticky header
+// opaque, but use a separator instead of a second rounded gray panel.
+const embeddedTableClassName =
+  '[&_thead_th]:rounded-none [&_thead_th]:border-b [&_thead_th]:border-separator [&_thead_th]:bg-surface'
+
 function defaultRowId(item: object) {
   if (
     'id' in item &&
@@ -113,7 +118,13 @@ export function DataTable<T extends object>({
       />
       {isLoading && !data?.length ? (
         <div role='status' aria-label={`正在加载${label}`}>
-          <Table variant={variant} className='data-grid'>
+          <Table
+            variant={variant}
+            className={cn(
+              'data-grid',
+              variant === 'secondary' && embeddedTableClassName
+            )}
+          >
             <Table.ScrollContainer>
               <Table.Content
                 aria-label={`${label}加载中`}
@@ -156,7 +167,10 @@ export function DataTable<T extends object>({
           columns={columns.map(withEnforcedWidth)}
           getRowId={getRowId}
           variant={variant}
-          className='min-w-0'
+          className={cn(
+            'min-w-0',
+            variant === 'secondary' && embeddedTableClassName
+          )}
           contentClassName='min-w-(--data-table-min-width)'
           renderEmptyState={() => (
             <EmptyState

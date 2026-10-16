@@ -325,11 +325,11 @@ export function TopWebsitesPanel({ query }: { query: TrafficQuery }) {
   const traffic = query.data
   const state = traffic ? coverageState(traffic) : undefined
   return (
-    <Widget className='min-w-0 lg:col-span-7'>
+    <Widget className='min-w-0 overflow-hidden bg-surface shadow-surface lg:col-span-7'>
       <Widget.Header>
         <Widget.Title>流量 Top 网站</Widget.Title>
       </Widget.Header>
-      <Widget.Content className='p-0'>
+      <Widget.Content className='m-0 rounded-none bg-transparent p-0 shadow-none'>
         <DataTable
           label='流量 Top 网站'
           variant='secondary'

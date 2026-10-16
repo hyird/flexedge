@@ -542,11 +542,11 @@ function NodeHealthPanel({
   nodes?: Node[]
 }) {
   return (
-    <Widget className='min-w-0'>
+    <Widget className='min-w-0 overflow-hidden bg-surface shadow-surface'>
       <Widget.Header>
         <Widget.Title>节点健康</Widget.Title>
       </Widget.Header>
-      <Widget.Content className='p-0'>
+      <Widget.Content className='m-0 rounded-none bg-transparent p-0 shadow-none'>
         <DataTable
           label='节点健康'
           variant='secondary'
@@ -626,11 +626,11 @@ function RecentTasksPanel({
   }
 }) {
   return (
-    <Widget className='min-w-0'>
+    <Widget className='min-w-0 overflow-hidden bg-surface shadow-surface'>
       <Widget.Header>
         <Widget.Title>最近任务</Widget.Title>
       </Widget.Header>
-      <Widget.Content className='p-0'>
+      <Widget.Content className='m-0 rounded-none bg-transparent p-0 shadow-none'>
         <DataTable
           label='最近任务'
           variant='secondary'
