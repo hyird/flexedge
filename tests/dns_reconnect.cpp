@@ -116,9 +116,19 @@ public:
 };
 
 void verify_dns_reconnect() {
-    const auto path = std::filesystem::temp_directory_path() /
+    const auto parent = std::filesystem::temp_directory_path();
+    const auto parent_permissions = std::filesystem::status(parent).permissions();
+    const auto path = parent /
                       ("flexedge-dns-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    flexedge::testing::dns_answers answers(path);
+    struct directory_cleanup final {
+        std::filesystem::path path_;
+        ~directory_cleanup() {
+            std::error_code ignored;
+            std::filesystem::remove(path_, ignored);
+        }
+    } cleanup{path};
+    flexedge::testing::dns_answers answers(path / "answers");
+    FLEXEDGE_REQUIRE(std::filesystem::status(parent).permissions() == parent_permissions);
     origin_server first("127.0.0.1");
     origin_server second("127.0.0.2", first.port());
     ruvia::event_loop_pool workers({.loop_count_ = 1});
