@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ruvia/http/http1_server_request_parser.h>
 #include <ruvia/http/http2_connection.h>
 
 #include <array>
@@ -11,11 +12,11 @@
 #include <optional>
 #include <variant>
 
+#include <asio/ip/tcp.hpp>
 #include <asio/post.hpp>
 #include <asio/ssl/stream.hpp>
 #include <asio/write.hpp>
 
-#include "node/data/http1_request_reader.h"
 #include "node/data/origin_request_codec.h"
 
 namespace flexedge::node {
@@ -45,35 +46,60 @@ public:
             complete(std::move(handler), asio::error::operation_aborted, 0);
             return;
         }
-        http1_request_reader reader(2 * 1024 * 1024);
-        std::string input(bytes);
-        if (reader.consume(input) != http1_request_read_status::complete) {
+        // Callers supply one complete, already normalized internal HTTP/1 wire
+        // (request writer or health probe), never client chunk framing.
+        if (bytes.size() > 2 * 1024 * 1024) {
             complete(std::move(handler), asio::error::invalid_argument, 0);
             return;
         }
-        const auto& head = reader.request();
-        method_ = head.method();
-        body_ = std::string(reader.body().value_or(""));
+        ruvia::http1_server_request_parse_state parsed;
+        ruvia::http1_server_request_parser{}.parse_head(bytes, parsed);
+        const auto* ready = parsed.head_ready();
+        const auto* known = parsed.body_plan_.known_length();
+        if (ready == nullptr ||
+            parsed.body_plan_.chunked() != nullptr ||
+            bytes.size() - ready->header_bytes() != (known ? known->content_length() : 0)) {
+            complete(std::move(handler), asio::error::invalid_argument, 0);
+            return;
+        }
+        const auto& head = parsed.request_;
+        request_is_head_ = head.method() == "HEAD";
+        body_.assign(bytes.substr(ready->header_bytes()));
         body_offset_ = 0;
-        std::vector<std::pair<std::string, std::string>> owned_headers;
+        std::size_t name_bytes{};
         for (const auto& field : head.headers()) {
             if (!request_hop_by_hop_header(field.name())) {
-                std::string name(field.name());
-                std::ranges::transform(name, name.begin(), [](unsigned char value) { return flexedge::route_policy::lower_ascii(value); });
-                owned_headers.emplace_back(std::move(name), field.value());
+                name_bytes += field.name().size();
             }
         }
-        std::vector<ruvia::http_header_view> headers;
-        for (const auto& [name, value] : owned_headers) {
-            headers.emplace_back(name, value);
+        std::array<char, 512> name_scratch;
+        std::unique_ptr<char[]> large_names;
+        char* names = name_scratch.data();
+        if (name_bytes > name_scratch.size()) {
+            large_names = std::make_unique_for_overwrite<char[]>(name_bytes);
+            names = large_names.get();
+        }
+        std::array<ruvia::http_header_view, ruvia::max_http_header_fields> headers;
+        std::size_t header_count{};
+        std::size_t name_offset{};
+        for (const auto& field : head.headers()) {
+            if (request_hop_by_hop_header(field.name())) {
+                continue;
+            }
+            const auto offset = name_offset;
+            for (const unsigned char ch : field.name()) {
+                names[name_offset++] = flexedge::route_policy::lower_ascii(ch);
+            }
+            headers[header_count++] = ruvia::http_header_view(
+                std::string_view(names + offset, field.name().size()), field.value());
         }
         const auto authority = head.header("Host").value_or("");
-        const auto submitted = protocol_.submit_request_head({.method_ = std::string_view(method_),
+        const auto submitted = protocol_.submit_request_head({.method_ = head.method(),
             .scheme_ = secure_ ? "https" : "http",
             .authority_ = authority,
             .target_ = head.target(),
-            .headers_ = headers,
-            .content_ = reader.has_body() ? ruvia::http2_request_content::known_length(body_.size()) : ruvia::http2_request_content::none()});
+            .headers_ = std::span(headers).first(header_count),
+            .content_ = known ? ruvia::http2_request_content::known_length(body_.size()) : ruvia::http2_request_content::none()});
         if (!submitted.submitted()) {
             complete(std::move(handler), asio::error::fault, 0);
             close();
@@ -109,7 +135,7 @@ public:
         }
         closed_ = true;
         upload_pending_ = false;
-        body_.clear();
+        std::string().swap(body_);
         std::visit([](auto& stream) { std::error_code ignored;stream.lowest_layer().close(ignored); }, stream_);
         auto write = std::move(write_handler_), read = std::move(read_handler_);
         try {
@@ -180,7 +206,7 @@ private:
                     length = length || flexedge::route_policy::ascii_equal(field.name(), "Content-Length");
                     wire.append(field.name()).append(": ").append(field.value()).append("\r\n");
                 }
-                chunked_ = !length && method_ != "HEAD" && status != 204 && status != 304;
+                chunked_ = !length && !request_is_head_ && status != 204 && status != 304;
                 if (chunked_) {
                     wire.append("Transfer-Encoding: chunked\r\n");
                 }
@@ -220,7 +246,7 @@ private:
                 // END_STREAM already made the response valid. A later reset
                 // terminates only the remaining upload, not the queued response.
                 upload_pending_ = false;
-                body_.clear();
+                std::string().swap(body_);
             } else if (event->goaway()) {
                 goaway_ = true;
             } else if (event->request_unprocessed()) {
@@ -251,7 +277,7 @@ private:
         read_network();
         if (upload_pending_ && body_offset_ == body_.size() && !writing_ && !protocol_.wants_write() && !protocol_.has_queued_data(stream_id_)) {
             upload_pending_ = false;
-            body_.clear();
+            std::string().swap(body_);
         }
     }
     void flush() {
@@ -307,7 +333,7 @@ private:
     bool secure_{};
     ruvia::http2_connection protocol_;
     std::uint32_t stream_id_{};
-    std::string method_, body_;
+    std::string body_;
     std::size_t body_offset_{}, write_size_{};
     std::array<char, 16384> input_{};
     std::pmr::string output_;
@@ -316,5 +342,6 @@ private:
     asio::mutable_buffer read_buffer_;
     completion read_handler_, write_handler_;
     bool reading_{}, writing_{}, closed_{}, goaway_{}, chunked_{}, upload_pending_{}, response_complete_{true};
+    bool request_is_head_{};
 };
 }  // namespace flexedge::node

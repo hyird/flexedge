@@ -1,5 +1,8 @@
+#include <ruvia/http/http1_chunked_body_decoder.h>
+#include <ruvia/http/http1_client_response_parser.h>
 #include <ruvia/http/http_content_codec.h>
 
+#include <cstdint>
 #include <deque>
 #include <fstream>
 #include <iostream>
@@ -24,6 +27,13 @@
     } while (false)
 using namespace flexedge::node;
 namespace {
+constexpr std::uint64_t checksum_initial = 0xcbf29ce484222325ULL;
+std::uint64_t update_checksum(std::uint64_t value, std::string_view bytes) {
+    for (const unsigned char byte : bytes) {
+        value = (value ^ byte) * 0x100000001b3ULL;
+    }
+    return value;
+}
 class origin_connection final : public std::enable_shared_from_this<origin_connection> {
 public:
     using tls_stream = asio::ssl::stream<asio::ip::tcp::socket>;
@@ -58,6 +68,11 @@ private:
                         auto& request = self->requests_[id];
                         request.path_ = head->request().target();
                         request.head_.emplace(std::move(*head));
+                        if (request.path_ == "/binary") {
+                            const auto name = "x-" + std::string(600, 'a');
+                            request.checksum_ = update_checksum(
+                                request.checksum_, request.head_->request().header(name).value_or(""));
+                        }
                         request.early_ = request.path_ == "/early-reset" || request.path_ == "/early-no-reset" || request.path_ == "/early-large";
                         if (request.early_) {
                             ruvia::http_response response;
@@ -72,6 +87,9 @@ private:
                     } else if (auto* body = event->message_body_chunk()) {
                         auto& request = self->requests_.at(body->stream_id());
                         request.bytes_ += body->bytes().size();
+                        if (request.path_ == "/binary") {
+                            request.checksum_ = update_checksum(request.checksum_, body->bytes());
+                        }
                         if (request.early_) {
                             // Keep exact DATA credit: the upload must exhaust the
                             // real peer window while its response remains readable.
@@ -87,8 +105,10 @@ private:
                             response.header("Cache-Control", "public, max-age=600");
                             response.header("Content-Type", "text/plain");
                             response.header("X-Origin-Protocol", "h2");
-                            response.body(path == "/large" ? std::string(512 * 1024, 'x') : path == "/upload" ? std::to_string(request.bytes_)
-                                                                                                              : path);
+                            response.body(path == "/large"    ? std::string(512 * 1024, 'x')
+                                          : path == "/upload" ? std::to_string(request.bytes_)
+                                          : path == "/binary" ? std::to_string(request.checksum_)
+                                                              : path);
                             FLEXEDGE_REQUIRE(self->protocol_.submit_buffered_response(id, response) == ruvia::http2_submit_status::accepted);
                         }
                         (void)self->protocol_.release(std::move(*request.head_));
@@ -122,6 +142,7 @@ private:
     struct request final {
         std::string path_{};
         std::size_t bytes_{};
+        std::uint64_t checksum_{checksum_initial};
         std::optional<ruvia::http2_request_head_event> head_{};
         std::deque<ruvia::http2_received_data_credit> credits_{};
         bool early_{};
@@ -239,12 +260,10 @@ std::vector<received> requests(stream_type& socket, const std::vector<std::strin
     }
     return responses;
 }
-std::string early_http1(std::uint16_t port, std::string_view path, std::string_view body) {
+std::string exchange_http1(std::uint16_t port, std::string_view wire) {
     asio::io_context context;
     asio::ip::tcp::socket socket(context);
     socket.connect({asio::ip::address_v4::loopback(), port});
-    const auto wire = "POST " + std::string(path) + " HTTP/1.1\r\nHost: www.example.com\r\nContent-Length: " +
-                      std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + std::string(body);
     asio::write(socket, asio::buffer(wire));
     socket.non_blocking(true);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
@@ -424,13 +443,70 @@ void verify(std::string_view storage) {
         FLEXEDGE_REQUIRE(result[0].continues_ == 1);
         FLEXEDGE_REQUIRE(result[0].status_ == 200 && result[0].body_ == std::to_string(body.size()));
     }
+    {
+        std::string binary(4 * 16384 + 7, '\0');
+        for (std::size_t index = 0; index < binary.size(); ++index) {
+            binary[index] = static_cast<char>((index * 29 + index / 16384) % 251);
+        }
+        const auto name = "X-" + std::string(600, 'A');
+        const std::string value(20000, 'v');
+        const auto checksum = std::to_string(update_checksum(
+            update_checksum(checksum_initial, value), binary));
+        const auto request = prepare_origin_request(
+            {.method_ = "POST", .target_ = "/binary", .headers_ = {}, .body_ = {}},
+            *site, "www.example.com", "127.0.0.1", false, false, true);
+        FLEXEDGE_REQUIRE(request);
+        const auto verify_integrity = [&](std::string_view response) {
+            ruvia::http1_client_response_parser parser(request->make_exchange_state());
+            const auto parsed = parser.parse(response);
+            FLEXEDGE_REQUIRE(parsed.parsed() && parsed.parsed()->head().status().value() == 200);
+            auto body = response.substr(parsed.parsed()->consumed_bytes());
+            std::string decoded;
+            if (parsed.parsed()->plan().chunked()) {
+                ruvia::http1_chunked_body_decoder decoder;
+                for (;;) {
+                    const auto step = decoder.decode(body);
+                    if (const auto* chunk = step.body_chunk()) {
+                        decoded.append(chunk->bytes());
+                        body.remove_prefix(chunk->consumed_bytes());
+                    } else {
+                        FLEXEDGE_REQUIRE(step.complete() && step.complete()->consumed_bytes() == body.size());
+                        break;
+                    }
+                }
+            } else {
+                const auto* known = parsed.parsed()->plan().known_length();
+                FLEXEDGE_REQUIRE(known ? known->content_length() == body.size()
+                                       : parsed.parsed()->plan().close_delimited() != nullptr);
+                decoded.assign(body);
+            }
+            FLEXEDGE_REQUIRE(decoded == checksum);
+        };
+        verify_integrity(flexedge::testing::request(port, "www.example.com",
+            name + ": " + value + "\r\nContent-Type: application/octet-stream\r\n",
+            "/binary", "POST", binary));
+        std::string wire =
+            "POST /binary HTTP/1.1\r\nHost: www.example.com\r\n"
+            "Content-Type: application/octet-stream\r\n" +
+            name + ": " + value +
+            "\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+        wire.reserve(wire.size() + binary.size() + 256);
+        std::size_t offset{};
+        for (; offset + 4096 <= binary.size(); offset += 4096) {
+            wire.append("1000\r\n").append(binary, offset, 4096).append("\r\n");
+        }
+        wire.append("7\r\n").append(binary, offset, 7).append("\r\n0\r\n\r\n");
+        verify_integrity(exchange_http1(port, wire));
+    }
     for (const std::string path : {"/early-reset", "/early-no-reset", "/early-large"}) {
         // Ruvia advertises a 1 MiB request window. Exceed it without returning
         // origin DATA credit, rather than relying on a mock or an empty upload.
         const std::string upload(1536 * 1024, 'p');
         const std::string expected = path == "/early-large" ? std::string(256 * 1024, 'e') : std::string{};
         auto before = plain.count();
-        const auto result = early_http1(port, path, upload);
+        const auto wire = "POST " + path + " HTTP/1.1\r\nHost: www.example.com\r\nContent-Length: " +
+                          std::to_string(upload.size()) + "\r\nConnection: close\r\n\r\n" + upload;
+        const auto result = exchange_http1(port, wire);
         FLEXEDGE_REQUIRE(result.starts_with("HTTP/1.1 413 "));
         const auto head_end = result.find("\r\n\r\n");
         FLEXEDGE_REQUIRE(head_end != std::string::npos && result.substr(head_end + 4) == expected);
