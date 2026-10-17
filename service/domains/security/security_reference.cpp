@@ -8,7 +8,11 @@ ruvia::task<void> validate_website_reference(ruvia::db_transaction& db, const st
     if (id.empty()) {
         co_return;
     }
-    if (!service::common::parse_uuid(id) || !(co_await find_policy(db, tenant, id))) {
+    if (!service::common::parse_uuid(id)) {
+        service::common::throw_app_error(21002, "安全规则集不存在", 422);
+    }
+    const auto policy = co_await find_policy(db, tenant, id);
+    if (!policy) {
         service::common::throw_app_error(21002, "安全规则集不存在", 422);
     }
 }
