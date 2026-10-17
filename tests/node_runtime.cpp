@@ -2581,7 +2581,6 @@ int main(int argc, char* argv[]) {
             }
             upgrade_headers_preserved =
                 handshake.find("Upgrade: websocket\r\n") != std::string::npos &&
-                handshake.find("Connection: keep-alive, Upgrade\r\n") != std::string::npos &&
                 handshake.find("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n") != std::string::npos;
             constexpr std::string_view switching_protocols =
                 "HTTP/1.1 101 Switching Protocols\r\n"

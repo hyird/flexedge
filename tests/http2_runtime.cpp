@@ -153,6 +153,7 @@ private:
 struct received final {
     unsigned status_{};
     std::string body_;
+    std::vector<std::pair<std::string, std::string>> headers_{};
 };
 template <class stream_type>
 std::vector<received> requests(stream_type& socket, const std::vector<std::string>& paths, bool cancel = false, std::string_view authority = "www.example.com", std::string_view upload = {}) {
@@ -184,6 +185,9 @@ std::vector<received> requests(stream_type& socket, const std::vector<std::strin
         while (auto event = client.next_event()) {
             if (const auto* head = event->response_head()) {
                 responses[ids.at(head->stream_id())].status_ = head->head().status().value();
+                for (const auto& field : head->head().headers()) {
+                    responses[ids.at(head->stream_id())].headers_.emplace_back(field.name(), field.value());
+                }
             } else if (auto* body = event->message_body_chunk()) {
                 responses[ids.at(body->stream_id())].body_.append(body->bytes());
             } else if (event->message_end()) {
@@ -321,7 +325,12 @@ void verify(std::string_view storage) {
             source.accept(accepted);
             std::array<char, 4096> request{};
             accepted.read_some(asio::buffer(request));
-            const std::string response = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nclose-delimited";
+            const std::string response =
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n"
+                "Set-Cookie: session=abc; Path=/\r\n"
+                "Set-Cookie: theme=dark; Path=/\r\n"
+                "Vary: Accept-Encoding\r\n"
+                "Vary: Accept-Language\r\n\r\nclose-delimited";
             asio::write(accepted, asio::buffer(response));
         });
         site->set_revision(site->revision() + 1);
@@ -336,6 +345,30 @@ void verify(std::string_view storage) {
         socket.connect({asio::ip::address_v4::loopback(), port});
         const auto result = requests(socket, {"/close"});
         FLEXEDGE_REQUIRE(result[0].status_ == 200 && result[0].body_ == "close-delimited");
+        const auto values = [&](std::string_view name) {
+            std::vector<std::string> selected;
+            for (const auto& [field, value] : result[0].headers_) {
+                if (flexedge::route_policy::ascii_equal(field, name)) {
+                    selected.push_back(value);
+                }
+            }
+            return selected;
+        };
+        FLEXEDGE_REQUIRE((values("Set-Cookie") ==
+                          std::vector<std::string>{"session=abc; Path=/", "theme=dark; Path=/"}));
+        std::vector<std::string> vary;
+        for (const auto& value : values("Vary")) {
+            std::string_view remaining = value;
+            while (!remaining.empty()) {
+                const auto comma = remaining.find(',');
+                const auto token = flexedge::route_policy::trim_ows(remaining.substr(0, comma));
+                if (!token.empty()) {
+                    vary.emplace_back(token);
+                }
+                remaining = comma == std::string_view::npos ? std::string_view{} : remaining.substr(comma + 1);
+            }
+        }
+        FLEXEDGE_REQUIRE((vary == std::vector<std::string>{"Accept-Encoding", "Accept-Language"}));
     }
     shutdown.stop_and_join();
 #ifdef _WIN32

@@ -100,6 +100,49 @@ void verify_overrides_and_filtering() {
     REQUIRE(values(prepared->bytes_, "Upgrade").empty());
 }
 
+void verify_connection_options() {
+    const auto site = website();
+    const std::array<ruvia::http_header_view, 10> fields{{
+        {"Connection", "close,\tX-Hop , x-other, ,"},
+        {"cOnNeCtIoN", "keep-alive, X-Second, Upgrade"},
+        {"X-Hop", "first"},
+        {"x-hop", "second"},
+        {"X-Other", "third"},
+        {"X-Second", "fourth"},
+        {"Upgrade", "websocket"},
+        {"Sec-WebSocket-Key", "handshake-key"},
+        {"X-End-To-End", "retained"},
+        {"Content-Length", "0"},
+    }};
+    const origin_request_view incoming{
+        .method_ = "GET", .target_ = "/upgrade", .headers_ = fields, .body_ = {}, .has_body_ = false};
+    for (const bool upgrade : {false, true}) {
+        const auto prepared = prepare_origin_request(
+            incoming, site, "www.example.com", "198.51.100.1", false, upgrade, false);
+        REQUIRE(prepared);
+        REQUIRE(values(prepared->bytes_, "X-Hop").empty());
+        REQUIRE(values(prepared->bytes_, "X-Other").empty());
+        REQUIRE(values(prepared->bytes_, "X-Second").empty());
+        REQUIRE(values(prepared->bytes_, "X-End-To-End") == std::vector<std::string>{"retained"});
+        REQUIRE(values(prepared->bytes_, "Sec-WebSocket-Key") == std::vector<std::string>{"handshake-key"});
+        REQUIRE(values(prepared->bytes_, "Connection") ==
+                (upgrade ? std::vector<std::string>{"Upgrade"} : std::vector<std::string>{}));
+        REQUIRE(values(prepared->bytes_, "Upgrade") ==
+                (upgrade ? std::vector<std::string>{"websocket"} : std::vector<std::string>{}));
+    }
+    const std::array<ruvia::http_header_view, 3> single{{
+        {"Connection", " \tX-Hop\t "},
+        {"x-hop", "connection-only"},
+        {"X-End-To-End", "retained"},
+    }};
+    const auto prepared = prepare_origin_request(
+        {.method_ = "GET", .target_ = "/", .headers_ = single, .body_ = {}, .has_body_ = false},
+        site, "www.example.com", "198.51.100.1", false, false, false);
+    REQUIRE(prepared);
+    REQUIRE(values(prepared->bytes_, "X-Hop").empty());
+    REQUIRE(values(prepared->bytes_, "X-End-To-End") == std::vector<std::string>{"retained"});
+}
+
 void verify_field_capacity_after_replacement() {
     auto site = website();
     std::vector<std::string> names;
@@ -157,6 +200,7 @@ void verify_large_heads_and_owned_body() {
 int main() {
     try {
         verify_overrides_and_filtering();
+        verify_connection_options();
         verify_field_capacity_after_replacement();
         verify_large_heads_and_owned_body();
         return 0;

@@ -94,6 +94,40 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
             : website.origin_host_header();
     const auto mutations =
         route == nullptr ? std::span<const route_header_view>{} : route->request_headers();
+    // Keep borrowed Connection values on the stack; ordinary requests need no
+    // allocation and each field only scans the actual connection options.
+    std::array<const ruvia::http_header_view*, ruvia::max_http_header_fields> connections;
+    std::size_t connection_count{};
+    for (const auto& header : incoming.headers_) {
+        if (flexedge::route_policy::ascii_equal(header.name(), "Connection")) {
+            if (connection_count == connections.size()) {
+                return std::nullopt;
+            }
+            connections[connection_count++] = &header;
+        }
+    }
+    const auto single_connection = connection_count == 1
+                                       ? flexedge::route_policy::trim_ows(connections[0]->value())
+                                       : std::string_view{};
+    const bool single_option =
+        connection_count == 1 && single_connection.find(',') == std::string_view::npos;
+    const auto connection_field = [&](std::string_view name) {
+        if (single_option) {
+            return flexedge::route_policy::ascii_equal(name, single_connection);
+        }
+        for (const auto* connection : std::span(connections).first(connection_count)) {
+            auto value = connection->value();
+            while (!value.empty()) {
+                const auto comma = value.find(',');
+                const auto option = flexedge::route_policy::trim_ows(value.substr(0, comma));
+                if (flexedge::route_policy::ascii_equal(name, option)) {
+                    return true;
+                }
+                value = comma == std::string_view::npos ? std::string_view{} : value.substr(comma + 1);
+            }
+        }
+        return false;
+    };
     // Apply replacement filtering before the writer's field limit: a large
     // incoming set can shrink when a route replaces repeated field names.
     std::array<ruvia::http_header_view, ruvia::max_http_header_fields> headers;
@@ -112,18 +146,22 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
     };
     for (const auto& header : incoming.headers_) {
         const auto upgrade_header =
-            upgrade_requested && (flexedge::route_policy::ascii_equal(header.name(), "Connection") ||
-                                     flexedge::route_policy::ascii_equal(header.name(), "Upgrade"));
+            upgrade_requested && flexedge::route_policy::ascii_equal(header.name(), "Upgrade");
         const auto encoding_header =
             force_identity_encoding &&
             flexedge::route_policy::ascii_equal(header.name(), "Accept-Encoding");
-        if ((upgrade_header || !request_hop_by_hop_header(header.name())) && !encoding_header &&
+        if ((upgrade_header ||
+                (!request_hop_by_hop_header(header.name()) && !connection_field(header.name()))) &&
+            !encoding_header &&
             !(website.pass_client_ip() &&
                 flexedge::route_policy::ascii_equal(header.name(), "X-Forwarded-For"))) {
             if (!append(header.name(), header.value())) {
                 return std::nullopt;
             }
         }
+    }
+    if (upgrade_requested && !append("Connection", "Upgrade")) {
+        return std::nullopt;
     }
     if (force_identity_encoding && !append("Accept-Encoding", "identity")) {
         return std::nullopt;

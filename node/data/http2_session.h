@@ -479,7 +479,10 @@ inline void http2_stream_state::pump() {
                     if (request_hop_by_hop_header(field.name()) && !flexedge::route_policy::ascii_equal(field.name(), "Content-Length")) {
                         continue;
                     }
-                    response.header(field.name(), field.value());
+                    const auto mode = response.header(field.name())
+                                          ? ruvia::http_response_header_mode::append
+                                          : ruvia::http_response_header_mode::replace;
+                    response.header(field.name(), field.value(), {.mode_ = mode});
                 }
                 if (protocol.submit_streaming_response_head(id_, std::move(response)) != ruvia::http2_submit_status::accepted) {
                     abort();
