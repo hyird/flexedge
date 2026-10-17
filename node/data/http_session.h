@@ -948,7 +948,6 @@ private:
         }
         if (cache_ticket_ && cache_rule_) {
             response.set_cache_rule(*cache_rule_);
-            response.set_browser_cache_ttl(cache_rule_->browser_ttl_seconds_, cache_rule_->status_codes_);
         }
         if (website_->has_response_cache()) {
             response.set_cache_status(access_log_.cache_status() == "miss" ? "MISS" : "BYPASS");

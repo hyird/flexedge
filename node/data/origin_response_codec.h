@@ -18,7 +18,6 @@
 #include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 #include "common/route_policy.h"
 #include "node/data/cache_response_head.h"
@@ -76,15 +75,13 @@ public:
     [[nodiscard]] std::string take_cache_output() {
         return std::exchange(capture_output_, {});
     }
-    void set_browser_cache_ttl(std::int64_t seconds, const std::vector<std::int64_t>& statuses) {
-        browser_cache_ttl_ = seconds;
-        browser_cache_statuses_ = statuses;
-    }
     void set_cache_status(std::string value) {
         cache_status_ = std::move(value);
     }
+    // The immutable rule must outlive this codec.
     void set_cache_rule(const flexedge::cache::rule& rule) noexcept {
         cache_rule_ = &rule;
+        browser_cache_ttl_ = rule.browser_ttl_seconds_;
     }
     [[nodiscard]] std::string_view cache_bypass_reason() const noexcept {
         return cache_bypass_reason_;
@@ -194,9 +191,9 @@ private:
                 }
                 const auto control = cache_header(headers, "Cache-Control");
                 if (cache_has_directive(control, "private") || cache_has_directive(control, "no-store") ||
-                    (cache_has_directive(control, "no-cache") && (!cache_rule_ || cache_rule_->skip_no_cache_)) ||
+                    (cache_has_directive(control, "no-cache") && cache_rule_->skip_no_cache_) ||
                     !cache_header(headers, "Set-Cookie").empty() ||
-                    std::ranges::find(browser_cache_statuses_, *status_code_) == browser_cache_statuses_.end() ||
+                    std::ranges::find(cache_rule_->status_codes_, *status_code_) == cache_rule_->status_codes_.end() ||
                     (route_ && std::ranges::any_of(route_->response_headers(), [](const auto& field) { return flexedge::route_policy::ascii_equal(field.name(), "Cache-Control"); }))) {
                     browser_cache_ttl_ = 0;
                 }
@@ -708,7 +705,6 @@ private:
     std::string capture_output_{};
     bool capture_enabled_{};
     std::int64_t browser_cache_ttl_{};
-    std::vector<std::int64_t> browser_cache_statuses_{};
     std::string cache_status_;
     const flexedge::cache::rule* cache_rule_{};
     std::string_view cache_bypass_reason_{};

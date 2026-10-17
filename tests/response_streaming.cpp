@@ -209,13 +209,12 @@ void cache_validation_headers() {
 }
 void independent_cache_directives() {
     auto site = policy("gzip");
-    flexedge::cache::rule rule;
+    flexedge::cache::rule rule{.browser_ttl_seconds_ = 120};
     for (const auto control : {"no-cache, max-age=600", "private", "no-store"}) {
         rule.skip_no_cache_ = false;
         origin_response_codec codec(exchange(site), false, nullptr);
         codec.set_cache_rule(rule);
         codec.set_cache_status("MISS");
-        codec.set_browser_cache_ttl(120, {200});
         codec.capture_for_cache();
         const auto wire = std::string("HTTP/1.1 200 OK\r\nCache-Control: ") + control + "\r\nContent-Length: 0\r\n\r\n";
         FLEXEDGE_REQUIRE(codec.consume_head(wire) == origin_response_head_status::ready);
@@ -236,16 +235,38 @@ void independent_cache_directives() {
     codec.capture_for_cache();
     FLEXEDGE_REQUIRE(codec.consume_head("HTTP/1.1 200 OK\r\nCache-Control: no-cache\r\nContent-Length: 0\r\n\r\n") == origin_response_head_status::ready);
     FLEXEDGE_REQUIRE(!codec.cache_head() && codec.cache_bypass_reason() == "origin_no_cache");
+    const flexedge::cache::rule selected{.status_codes_ = {201, 404}, .browser_ttl_seconds_ = 120};
+    for (const auto status : {200, 201, 404, 500}) {
+        origin_response_codec response(exchange(site), false, nullptr);
+        response.set_cache_rule(selected);
+        response.set_cache_status("MISS");
+        response.capture_for_cache();
+        const auto wire = "HTTP/1.1 " + std::to_string(status) +
+                          " Result\r\nContent-Length: 2\r\nCache-Control: public, max-age=60\r\n\r\nok";
+        FLEXEDGE_REQUIRE(response.consume_head(wire) == origin_response_head_status::ready);
+        const auto outgoing = response.take_output();
+        if (status == 201 || status == 404) {
+            FLEXEDGE_REQUIRE(outgoing.find("Cache-Control: public, max-age=120") != std::string::npos);
+            FLEXEDGE_REQUIRE(response.cache_head() && response.cache_head()->status_ == status);
+            FLEXEDGE_REQUIRE(cache_header(response.cache_head()->headers_, "Cache-Control") == "public, max-age=60");
+            FLEXEDGE_REQUIRE(response.take_cache_output() == "ok");
+        } else {
+            FLEXEDGE_REQUIRE(outgoing.find("Cache-Control: public, max-age=60") != std::string::npos);
+            FLEXEDGE_REQUIRE(!response.cache_head() && response.cache_bypass_reason() == "origin_status");
+            FLEXEDGE_REQUIRE(outgoing.find("X-Cache: BYPASS") != std::string::npos);
+        }
+    }
 }
 void response_side_sse() {
     for (const bool compression : {false, true}) {
         auto site = policy("gzip");
+        const flexedge::cache::rule rule{.browser_ttl_seconds_ = 600};
         origin_response_codec codec(exchange(site), false, nullptr);
         if (compression) {
             codec.set_compression(site, "/file.txt", "gzip", {});
         }
         codec.capture_for_cache();
-        codec.set_browser_cache_ttl(600, {200});
+        codec.set_cache_rule(rule);
         FLEXEDGE_REQUIRE(codec.consume_head("HTTP/1.1 200 OK\r\nContent-Type: Text/Event-Stream; charset=utf-8\r\n"
                                             "Transfer-Encoding: chunked\r\n\r\n") == origin_response_head_status::ready);
         const auto head = codec.take_output();
@@ -259,6 +280,7 @@ void response_side_sse() {
 }
 void informational_progress() {
     const auto site = policy("gzip");
+    const flexedge::cache::rule rule{.browser_ttl_seconds_ = 120};
     const std::string informational =
         "HTTP/1.1 103 Early Hints\r\n"
         "Link: </a.css>; rel=preload\r\n"
@@ -279,7 +301,7 @@ void informational_progress() {
             origin_response_codec codec(exchange(site), true, nullptr);
             codec.set_forward_informational(forward);
             codec.set_cache_status("MISS");
-            codec.set_browser_cache_ttl(120, {200});
+            codec.set_cache_rule(rule);
             codec.capture_for_cache();
             ruvia::http1_client_response_parser downstream(exchange(site));
             std::size_t interim_count{};
