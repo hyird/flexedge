@@ -1020,7 +1020,12 @@ private:
                     reply(ruvia::http_status::content_too_large);
                     return;
                 case http1_request_read_status::need_more:
-                    read();
+                    if (!continue_sent_ && request_reader_.expects_continue()) {
+                        continue_sent_ = true;
+                        send_continue();
+                    } else {
+                        read();
+                    }
                     return;
             }
         } catch (const std::exception& error) {
@@ -1030,6 +1035,21 @@ private:
             log("request handling failed with unknown exception", "error");
             close();
         }
+    }
+
+    void send_continue() {
+        static constexpr std::string_view bytes = "HTTP/1.1 100 Continue\r\n\r\n";
+        const auto self = this->shared_from_this();
+        // No read or final write overlaps this interim response.
+        asio::async_write(stream_, asio::buffer(bytes),
+            [self](const std::error_code& error, std::size_t size) {
+                self->context_.metrics_.traffic_out(size);
+                if (error) {
+                    self->close();
+                } else {
+                    self->read();
+                }
+            });
     }
 
     void read() {
@@ -1125,6 +1145,7 @@ private:
     bool tunnel_{};
     bool hsts_enabled_{};
     bool closed_{};
+    bool continue_sent_{};
     bool response_pending_{};
 };
 

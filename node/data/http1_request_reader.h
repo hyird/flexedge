@@ -52,6 +52,15 @@ public:
         return known_length_.has_value() || chunked_;
     }
 
+    [[nodiscard]] bool expects_continue() const noexcept {
+        if (header_bytes_ == 0) {
+            return false;
+        }
+        const auto plan = state_.body_plan_.expectation_plan(
+            ruvia::http_unsupported_expectation_policy::ignore);
+        return plan.send_continue() != nullptr;
+    }
+
     // The framed content; empty without a body. A chunked body whose decoded size exceeds
     // max_request_bytes is framed but not usable, which is reported as std::nullopt.
     [[nodiscard]] std::optional<std::string_view> body() const noexcept {

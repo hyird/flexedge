@@ -1990,6 +1990,50 @@ int main(int argc, char* argv[]) {
             REQUIRE(pipelined.find("HTTP/1.1 ", 1) == std::string::npos);
             REQUIRE(response_body(pipelined) == "hello");
             REQUIRE(echoed_count() == 4);
+
+            const auto waiting_upload = [&](std::string_view framing, std::string_view body) {
+                asio::ip::tcp::socket socket(echo_context);
+                socket.connect({asio::ip::address_v4::loopback(), port});
+                const auto headers = head +
+                                     "Expect: , 100-CONTINUE,\r\nExpect: 100-continue\r\n" +
+                                     std::string(framing) + "\r\n";
+                asio::write(socket, asio::buffer(headers));
+                std::string interim;
+                std::array<char, 1024> buffer;
+                REQUIRE(waitUntil([&] {
+                    std::error_code error;
+                    if (socket.available(error) != 0) {
+                        const auto size = socket.read_some(asio::buffer(buffer), error);
+                        interim.append(buffer.data(), size);
+                    }
+                    if (error) {
+                        throw std::system_error(error);
+                    }
+                    return interim.find("\r\n\r\n") != std::string::npos;
+                },
+                    std::chrono::seconds(3)));
+                REQUIRE(interim.starts_with("HTTP/1.1 100 "));
+                asio::write(socket, asio::buffer(body.substr(0, body.size() / 2)));
+                asio::write(socket, asio::buffer(body.substr(body.size() / 2)));
+                std::string final;
+                std::error_code error;
+                while (!error) {
+                    const auto size = socket.read_some(asio::buffer(buffer), error);
+                    final.append(buffer.data(), size);
+                }
+                REQUIRE(error == asio::error::eof);
+                REQUIRE(final.starts_with("HTTP/1.1 200 "));
+                REQUIRE(response_body(final) == "hello");
+            };
+            waiting_upload("Content-Length: 5\r\n", "hello");
+            waiting_upload("Transfer-Encoding: chunked\r\n", "2\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n");
+            const auto http10 = exchange_raw(port, {"POST /echo HTTP/1.0\r\nHost: www.example.com\r\n"
+                                                    "Expect: 100-continue\r\nContent-Length: 5\r\n\r\nhello"});
+            REQUIRE(http10.starts_with("HTTP/1.1 200 "));
+            REQUIRE(response_body(http10) == "hello");
+            const auto empty_expect = exchange_raw(port, {head + "Expect: 100-continue\r\nContent-Length: 0\r\n\r\n"});
+            REQUIRE(empty_expect.starts_with("HTTP/1.1 200 "));
+            REQUIRE(response_body(empty_expect).empty());
             echo_origin.request_stop();
         }
 

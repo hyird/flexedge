@@ -154,19 +154,20 @@ struct received final {
     unsigned status_{};
     std::string body_;
     std::vector<std::pair<std::string, std::string>> headers_{};
+    unsigned continues_{};
 };
 template <class stream_type>
-std::vector<received> requests(stream_type& socket, const std::vector<std::string>& paths, bool cancel = false, std::string_view authority = "www.example.com", std::string_view upload = {}) {
+std::vector<received> requests(stream_type& socket, const std::vector<std::string>& paths, bool cancel = false, std::string_view authority = "www.example.com", std::string_view upload = {}, bool expect_continue = false) {
     auto client = ruvia::http2_connection::client();
     std::map<std::uint32_t, std::size_t> ids;
     std::vector<received> responses(paths.size());
     std::size_t ended{};
     for (std::size_t i = 0; i < paths.size(); ++i) {
         const auto submitted = client.submit_request_head(ruvia::http2_regular_request_head_view{
-            .method_ = upload.empty() ? "GET" : "POST", .authority_ = authority, .target_ = std::string_view(paths[i]), .content_ = upload.empty() ? ruvia::http2_request_content::none() : ruvia::http2_request_content::known_length(upload.size())});
+            .method_ = upload.empty() ? "GET" : "POST", .authority_ = authority, .target_ = std::string_view(paths[i]), .content_ = upload.empty() ? ruvia::http2_request_content::none() : ruvia::http2_request_content::known_length(upload.size()), .expectation_ = expect_continue ? ruvia::http_client_request_expectation::continue_value : ruvia::http_client_request_expectation::none});
         FLEXEDGE_REQUIRE(submitted.submitted());
         ids[submitted.submitted()->stream_id()] = i;
-        if (!upload.empty()) {
+        if (!upload.empty() && !expect_continue) {
             const auto result = client.submit_data(submitted.submitted()->stream_id(), upload, ruvia::http2_end_stream::end_stream);
             FLEXEDGE_REQUIRE(result == ruvia::http2_data_submit_status::accepted || result == ruvia::http2_data_submit_status::queued);
         }
@@ -180,10 +181,20 @@ std::vector<received> requests(stream_type& socket, const std::vector<std::strin
     flush();
     std::array<char, 16384> input{};
     while (ended < paths.size()) {
+        if (expect_continue) {
+            FLEXEDGE_REQUIRE(flexedge::testing::waitUntil(
+                [&] { return socket.lowest_layer().available() != 0; }, std::chrono::seconds(3)));
+        }
         const auto size = socket.read_some(asio::buffer(input));
         FLEXEDGE_REQUIRE(client.feed(std::string_view(input.data(), size)) != ruvia::http2_feed_result::protocol_failure);
         while (auto event = client.next_event()) {
-            if (const auto* head = event->response_head()) {
+            if (const auto* interim = event->informational_head()) {
+                if (interim->head().status().value() == 100 && expect_continue) {
+                    FLEXEDGE_REQUIRE(++responses[ids.at(interim->stream_id())].continues_ == 1);
+                    const auto result = client.submit_data(interim->stream_id(), upload, ruvia::http2_end_stream::end_stream);
+                    FLEXEDGE_REQUIRE(result == ruvia::http2_data_submit_status::accepted || result == ruvia::http2_data_submit_status::queued);
+                }
+            } else if (const auto* head = event->response_head()) {
                 responses[ids.at(head->stream_id())].status_ = head->head().status().value();
                 for (const auto& field : head->head().headers()) {
                     responses[ids.at(head->stream_id())].headers_.emplace_back(field.name(), field.value());
@@ -281,6 +292,14 @@ void verify(std::string_view storage) {
         socket.connect({asio::ip::address_v4::loopback(), port});
         const std::string body(256 * 1024, 'p');
         const auto result = requests(socket, {"/upload"}, false, "www.example.com", body);
+        FLEXEDGE_REQUIRE(result[0].status_ == 200 && result[0].body_ == std::to_string(body.size()));
+    }
+    {
+        asio::ip::tcp::socket socket(clients);
+        socket.connect({asio::ip::address_v4::loopback(), port});
+        const std::string body(256 * 1024, 'e');
+        const auto result = requests(socket, {"/upload"}, false, "www.example.com", body, true);
+        FLEXEDGE_REQUIRE(result[0].continues_ == 1);
         FLEXEDGE_REQUIRE(result[0].status_ == 200 && result[0].body_ == std::to_string(body.size()));
     }
     {
