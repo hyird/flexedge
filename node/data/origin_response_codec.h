@@ -41,8 +41,8 @@ enum class origin_response_body_status { accepted,
 // A streaming codec emits the rewritten head through take_output(); the caller relays
 // every later body byte verbatim, so Transfer-Encoding and Content-Length pass through
 // and the codec only tracks where the message ends. A buffering codec decodes the body
-// into take_response() for response compression, and frame() re-frames it with
-// Content-Length, dropping the transfer coding and its trailers.
+// into take_response() for response compression, and frame() re-frames content-bearing
+// responses with Content-Length, dropping the transfer coding and its trailers.
 class origin_response_codec final {
 public:
     // `route` and the immutable route program backing its header views must outlive
@@ -203,7 +203,6 @@ public:
     // Serializes a buffered response for the client. Fails when the response budget
     // cannot also hold the framed copy; on success the reservation covers `wire` only.
     [[nodiscard]] bool frame(buffered_proxy_response& response, std::string& wire) const {
-        const auto length = std::to_string(response.body_.size());
         append_status_line(wire, response.status_);
         for (const auto& [name, value] : response.headers_) {
             if (!replaced(name)) {
@@ -211,7 +210,11 @@ public:
             }
         }
         append_route_headers(wire);
-        append_field(wire, "Content-Length", length);
+        // HEAD/304 representation length is unknown after transformation; omit it.
+        // Content-Length is forbidden for 204, even when its value would be zero.
+        if (body_kind_ != body_kind::none) {
+            append_field(wire, "Content-Length", std::to_string(response.body_.size()));
+        }
         append_closing_headers(wire);
         const auto retained_bytes = response.reservation_.bytes();
         if (!response.reservation_.try_grow(wire.size() + response.body_.size())) {

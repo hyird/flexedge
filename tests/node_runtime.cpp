@@ -1023,9 +1023,9 @@ int main(int argc, char* argv[]) {
                 std::string::npos);
         REQUIRE(streaming_origin_request->bytes_.find("Accept-Encoding: gzip\r\n") ==
                 std::string::npos);
-        auto origin_exchange_state = [&] {
+        auto origin_exchange_state = [&](std::string_view method = "GET") {
             auto prepared = flexedge::node::prepare_origin_request(
-                {.method_ = "GET", .target_ = "/", .headers_ = {}, .body_ = {}, .has_body_ = false},
+                {.method_ = method, .target_ = "/", .headers_ = {}, .body_ = {}, .has_body_ = false},
                 streaming_config.website(), "www.example.com", "198.51.100.1", true, false, false);
             REQUIRE(prepared);
             return prepared->make_exchange_state();
@@ -1086,6 +1086,35 @@ int main(int argc, char* argv[]) {
         REQUIRE(codec_budget.used_bytes() == buffered_wire.size());
         buffered_response.reservation_ = {};
         REQUIRE(codec_budget.used_bytes() == 0);
+
+        struct no_content_response final {
+            std::string_view method_{};
+            std::string_view head_{};
+            std::uint16_t status_{};
+        };
+        for (const auto& test : std::array{
+                 no_content_response{"HEAD", "HTTP/1.1 200 OK\r\nContent-Length: 123\r\n\r\n", 200},
+                 no_content_response{"GET", "HTTP/1.1 304 Not Modified\r\nContent-Length: 123\r\n\r\n", 304},
+                 no_content_response{"GET", "HTTP/1.1 204 No Content\r\n\r\n", 204}}) {
+            flexedge::node::origin_response_codec codec(origin_exchange_state(test.method_), false,
+                nullptr, codec_budget.lease());
+            REQUIRE(codec.consume_head(test.head_) == flexedge::node::origin_response_head_status::ready);
+            REQUIRE(codec.complete());
+            auto response = codec.take_response();
+            std::string wire;
+            REQUIRE(codec.frame(response, wire));
+            ruvia::http1_client_response_parser parser(origin_exchange_state(test.method_));
+            const auto result = parser.parse(wire);
+            REQUIRE(result.parsed());
+            REQUIRE(result.parsed()->head().status().value() == test.status_);
+            REQUIRE(result.parsed()->consumed_bytes() == wire.size());
+            for (const auto& field : result.parsed()->head().headers()) {
+                if (flexedge::route_policy::ascii_equal(field.name(), "Content-Length")) {
+                    REQUIRE(test.status_ != 204);
+                    REQUIRE(field.value() == "123");
+                }
+            }
+        }
 
         flexedge::node::origin_response_codec malformed(origin_exchange_state(), false, nullptr);
         REQUIRE(malformed.consume_head("HTTP/1.1 20x Bad Status\r\n\r\n") ==
