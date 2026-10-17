@@ -44,6 +44,15 @@ inline service::node_runtime::node_runtime_dto get_node_runtime_dto(auto& c,
     if (input.memory_usage_) {
         output.set<"memory_usage">(*input.memory_usage_);
     }
+    if (input.cpu_count_) {
+        output.set<"cpu_count">(*input.cpu_count_);
+    }
+    if (input.memory_total_bytes_) {
+        output.set<"memory_total_bytes">(*input.memory_total_bytes_);
+    }
+    if (input.disk_total_bytes_) {
+        output.set<"disk_total_bytes">(*input.disk_total_bytes_);
+    }
     if (input.traffic_out_bps_) {
         output.set<"traffic_out_bps">(*input.traffic_out_bps_);
     }

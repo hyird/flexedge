@@ -1609,6 +1609,9 @@ int main(int argc, char* argv[]) {
         REQUIRE(observed_metrics.traffic_out_bps_ > 0);
         REQUIRE(observed_metrics.cpu_usage_ >= 0 && observed_metrics.cpu_usage_ <= 1);
         REQUIRE(observed_metrics.memory_usage_ >= 0 && observed_metrics.memory_usage_ <= 1);
+        REQUIRE(observed_metrics.cpu_count_ && *observed_metrics.cpu_count_ > 0);
+        REQUIRE(observed_metrics.memory_total_bytes_ && *observed_metrics.memory_total_bytes_ > 0);
+        REQUIRE(observed_metrics.disk_total_bytes_ && *observed_metrics.disk_total_bytes_ > 0);
         // Without a collected load no traffic rate is reported.
         REQUIRE(metrics_sampler.sample(std::nullopt).traffic_out_bps_ == 0);
 

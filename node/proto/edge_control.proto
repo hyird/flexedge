@@ -78,6 +78,11 @@ message Heartbeat {
     // Distinct client IP addresses with an open data-plane connection. Absent when the node
     // could not count them and from nodes before 0.4.1, so readers can tell it apart from 0.
     optional int64 connected_ip_count = 16;
+    // Host capacity; absent on older nodes or when a measurement is unavailable.
+    // CPU count is logical processors; disk is the node working-directory filesystem.
+    optional uint32 cpu_count = 17;
+    optional uint64 memory_total_bytes = 18;
+    optional uint64 disk_total_bytes = 19;
 }
 
 message OriginHealth {

@@ -54,6 +54,23 @@ int main() {
         REQUIRE(report.origin_health_.size() == 1 && report.origin_health_[0].latency_millis_ == 17);
         // Nodes before 0.4.1 never send connected_ip_count: absent stays absent, 0 stays 0.
         REQUIRE(!report.connected_ip_count_.has_value());
+        REQUIRE(!report.cpu_count_ && !report.memory_total_bytes_ && !report.disk_total_bytes_);
+        heartbeat.set_cpu_count(4);
+        heartbeat.set_memory_total_bytes(8ULL << 30);
+        heartbeat.set_disk_total_bytes(100ULL << 30);
+        REQUIRE(service::node_channel::valid_heartbeat(heartbeat));
+        const auto capacity = service::node_channel::to_heartbeat_report(heartbeat);
+        REQUIRE(capacity.cpu_count_ == 4 && capacity.memory_total_bytes_ == (8LL << 30) &&
+                capacity.disk_total_bytes_ == (100LL << 30));
+        heartbeat.set_cpu_count(0);
+        REQUIRE(!service::node_channel::valid_heartbeat(heartbeat));
+        heartbeat.clear_cpu_count();
+        heartbeat.set_memory_total_bytes(0);
+        REQUIRE(!service::node_channel::valid_heartbeat(heartbeat));
+        heartbeat.clear_memory_total_bytes();
+        heartbeat.set_disk_total_bytes((std::numeric_limits<std::uint64_t>::max)());
+        REQUIRE(!service::node_channel::valid_heartbeat(heartbeat));
+        heartbeat.clear_disk_total_bytes();
         heartbeat.set_connection_count(2);
         heartbeat.set_connected_ip_count(0);
         REQUIRE(service::node_channel::valid_heartbeat(heartbeat));

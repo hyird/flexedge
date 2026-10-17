@@ -24,6 +24,7 @@ struct heartbeat_report final {
     std::int64_t applied_node_spec_revision_{};
     std::string active_release_id_, active_manifest_digest_, agent_version_;
     double cpu_usage_{}, memory_usage_{};
+    std::optional<std::int64_t> cpu_count_{}, memory_total_bytes_{}, disk_total_bytes_{};
     std::int64_t traffic_out_bps_{}, connection_count_{};
     // Absent from nodes before 0.4.1 and when the node could not count.
     std::optional<std::int64_t> connected_ip_count_{};

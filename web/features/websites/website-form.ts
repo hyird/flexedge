@@ -631,7 +631,7 @@ export function defaultWebsiteConfig(): WebsiteConfig {
     pass_client_ip: true,
     health_check_enabled: true,
     health_check_path: '/',
-    health_check_interval_seconds: 10,
+    health_check_interval_seconds: 60,
     health_check_timeout_seconds: 3,
     health_check_expected_status: 200,
     healthy_threshold: 2,

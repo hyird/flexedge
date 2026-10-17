@@ -82,3 +82,23 @@ export function originHealth(website: Pick<Website, 'runtime'>) {
     healthy: states.filter((state) => state.status === 'healthy').length,
   }
 }
+
+/** Stable presentation order across initial snapshots and per-node SSE reports. */
+export function sortedOriginStates(
+  website: Pick<Website, 'runtime' | 'config'>
+) {
+  const compare = new Intl.Collator('zh-CN', { numeric: true }).compare
+  const address = new Map(
+    website.config.origins.map((origin) => [origin.id, originAddress(origin)])
+  )
+  return [...website.runtime.origin_states].sort(
+    (left, right) =>
+      compare(left.node_name, right.node_name) ||
+      compare(
+        address.get(left.origin_id) ?? left.origin_id,
+        address.get(right.origin_id) ?? right.origin_id
+      ) ||
+      compare(left.node_id, right.node_id) ||
+      compare(left.origin_id, right.origin_id)
+  )
+}

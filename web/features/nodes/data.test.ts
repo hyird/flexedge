@@ -107,6 +107,9 @@ describe('node API contracts', () => {
               last_heartbeat_at: heartbeat,
               applied_node_spec_revision: 2,
               cpu_usage: cpu,
+              cpu_count: 4,
+              memory_total_bytes: 8 * 1024 ** 3,
+              disk_total_bytes: 100 * 1024 ** 3,
             },
           }),
         })
@@ -119,6 +122,11 @@ describe('node API contracts', () => {
       nodesQuery(params).queryKey
     )!
     expect(cached.list[0].runtime.cpu_usage).toBe(4)
+    expect(cached.list[0].runtime).toMatchObject({
+      cpu_count: 4,
+      memory_total_bytes: 8 * 1024 ** 3,
+      disk_total_bytes: 100 * 1024 ** 3,
+    })
     expect(cached.list[0].runtime.connection_status).toBe('offline')
     expect(cached.list[0].runtime.registration_status).toBe('registered')
     stop()

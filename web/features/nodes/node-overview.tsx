@@ -4,7 +4,7 @@ import { getRouteApi } from '@tanstack/react-router'
 import { ListView } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
 import { Alert, Skeleton } from '@heroui/react'
-import { formatNumber } from '@/lib/format'
+import { formatBytes, formatNumber } from '@/lib/format'
 import { describeStatus } from '@/lib/status'
 import { TruncatedText } from '@/components/data-table'
 import { KpiQuantity } from '@/components/kpi-quantity'
@@ -184,6 +184,21 @@ export function NodeOverview() {
           <DescriptionList
             columns={3}
             items={[
+              {
+                label: 'CPU 数量',
+                value:
+                  runtime.cpu_count === undefined
+                    ? '—'
+                    : `${formatNumber(runtime.cpu_count)} 核`,
+              },
+              {
+                label: '内存大小',
+                value: formatBytes(runtime.memory_total_bytes),
+              },
+              {
+                label: '磁盘大小',
+                value: formatBytes(runtime.disk_total_bytes),
+              },
               {
                 label: '在线状态',
                 value: <NodeConnectionChip runtime={runtime} />,

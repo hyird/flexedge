@@ -33,6 +33,7 @@ import {
   originHealth,
   originHealthReserve,
   originHealthStatuses,
+  sortedOriginStates,
 } from './website-display'
 
 type OriginState = Website['runtime']['origin_states'][number]
@@ -321,7 +322,7 @@ export function WebsiteOverview() {
           label='源站健康状态'
           variant='secondary'
           columns={originColumns}
-          data={runtime.origin_states}
+          data={sortedOriginStates(website)}
           getRowId={(state) => `${state.node_id}:${state.origin_id}`}
           isLoading={false}
           minWidth={900}

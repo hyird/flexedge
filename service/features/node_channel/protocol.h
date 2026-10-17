@@ -69,6 +69,11 @@ inline bool valid_heartbeat(const flexedge::node::v2::Heartbeat& value) {
            value.connection_count() >= 0 &&
            // Sampled apart from connection_count, so it is not bounded by it.
            (!value.has_connected_ip_count() || value.connected_ip_count() >= 0) &&
+           (!value.has_cpu_count() || value.cpu_count() > 0) &&
+           (!value.has_memory_total_bytes() || (value.memory_total_bytes() > 0 &&
+                                                   value.memory_total_bytes() <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))) &&
+           (!value.has_disk_total_bytes() || (value.disk_total_bytes() > 0 &&
+                                                 value.disk_total_bytes() <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))) &&
            std::isfinite(value.load_1m()) && value.load_1m() >= 0 &&
            value.queued_log_events() <=
                static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) &&

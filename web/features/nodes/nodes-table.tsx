@@ -3,7 +3,7 @@ import { Link } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button, Tooltip } from '@heroui/react'
-import { formatBitsPerSecond, formatNumber } from '@/lib/format'
+import { formatBitsPerSecond, formatBytes, formatNumber } from '@/lib/format'
 import { hasListFilters, type ListSearchState } from '@/lib/list-search'
 import { describeStatus, statusOptions } from '@/lib/status'
 import { DataTable } from '@/components/data-table'
@@ -123,10 +123,7 @@ export function NodesTable({
     queries: zoneIds.map((zoneId) => dnsZoneLinesQuery(zoneId)),
   })
   const linesByZoneId = new Map(
-    zoneIds.map((zoneId, index) => [
-      zoneId,
-      zoneLineResults[index]?.data ?? [],
-    ])
+    zoneIds.map((zoneId, index) => [zoneId, zoneLineResults[index]?.data ?? []])
   )
   const filterKeys = nodeFilterKeys.filter(
     (key) => clusterId === undefined || key !== 'cluster_id'
@@ -210,25 +207,51 @@ export function NodesTable({
     {
       id: 'cpu',
       header: 'CPU',
-      minWidth: 96,
+      minWidth: 128,
       cell: (node) => (
-        <MetricMeter
-          label={`${node.name} CPU`}
-          value={liveMetrics(node.runtime).cpu_usage}
-          className='w-16'
-        />
+        <div className='flex items-center gap-2'>
+          <span className='w-10 shrink-0 text-xs text-muted tabular-nums'>
+            {node.runtime.cpu_count === undefined
+              ? '—'
+              : `${formatNumber(node.runtime.cpu_count)} 核`}
+          </span>
+          <MetricMeter
+            label={`${node.name} CPU`}
+            value={liveMetrics(node.runtime).cpu_usage}
+            className='w-16'
+          />
+        </div>
       ),
     },
     {
       id: 'memory',
       header: '内存',
-      minWidth: 96,
+      minWidth: 160,
       cell: (node) => (
-        <MetricMeter
-          label={`${node.name} 内存`}
-          value={liveMetrics(node.runtime).memory_usage}
-          className='w-16'
-        />
+        <div className='flex items-center gap-2'>
+          <span className='w-16 shrink-0 text-xs text-muted tabular-nums'>
+            {formatBytes(node.runtime.memory_total_bytes)}
+          </span>
+          <MetricMeter
+            label={`${node.name} 内存`}
+            value={liveMetrics(node.runtime).memory_usage}
+            className='w-16'
+          />
+        </div>
+      ),
+    },
+    {
+      id: 'disk',
+      header: '磁盘',
+      minWidth: 100,
+      align: 'end',
+      cell: (node) => (
+        <span
+          className='text-sm tabular-nums'
+          title='节点工作目录所在文件系统的总容量'
+        >
+          {formatBytes(node.runtime.disk_total_bytes)}
+        </span>
       ),
     },
     {
@@ -360,7 +383,7 @@ export function NodesTable({
         isLoading={query.isPending}
         error={query.isError ? query.error : undefined}
         onRetry={() => void query.refetch()}
-        minWidth={clusterId === undefined ? 1224 : 1104}
+        minWidth={clusterId === undefined ? 1424 : 1304}
         empty={
           filtered
             ? {

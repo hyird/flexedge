@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <optional>
 #include <string>
@@ -25,6 +26,9 @@
 namespace flexedge::node {
 
 struct runtime_metrics_snapshot final {
+    std::optional<std::uint32_t> cpu_count_{};
+    std::optional<std::uint64_t> memory_total_bytes_{};
+    std::optional<std::uint64_t> disk_total_bytes_{};
     double cpu_usage_{};
     double memory_usage_{};
     std::int64_t traffic_out_bps_{};
@@ -40,6 +44,16 @@ public:
     // whole interval.
     [[nodiscard]] runtime_metrics_snapshot sample(std::optional<std::uint64_t> traffic_out_bytes) {
         runtime_metrics_snapshot result;
+        if (const auto count = std::thread::hardware_concurrency(); count > 0) {
+            result.cpu_count_ = count;
+        }
+        // The filesystem hosting the node's working directory, rather than the sum of
+        // mounts (which would count bind mounts and virtual filesystems more than once).
+        std::error_code disk_error;
+        const auto disk = std::filesystem::space(".", disk_error);
+        if (!disk_error && disk.capacity > 0) {
+            result.disk_total_bytes_ = disk.capacity;
+        }
         if (traffic_out_bytes) {
             const auto now = std::chrono::steady_clock::now();
             const auto elapsed = std::chrono::duration<double>(now - last_traffic_sample_).count();
@@ -88,6 +102,7 @@ private:
         }
         MEMORYSTATUSEX memory{.dwLength = sizeof(memory)};
         if (GlobalMemoryStatusEx(&memory)) {
+            result.memory_total_bytes_ = memory.ullTotalPhys;
             result.memory_usage_ = static_cast<double>(memory.dwMemoryLoad) / 100.0;
         }
         result.load1m_ = result.cpu_usage_ * (std::max)(1U, std::thread::hardware_concurrency());
@@ -112,7 +127,10 @@ private:
         mach_msg_type_number_t memory_count = HOST_VM_INFO64_COUNT;
         vm_size_t page_size{};
         if (::sysctlbyname("hw.memsize", &total_memory, &total_memory_size, nullptr, 0) == 0 &&
-            total_memory > 0 &&
+            total_memory > 0) {
+            result.memory_total_bytes_ = total_memory;
+        }
+        if (total_memory > 0 &&
             ::host_statistics64(::mach_host_self(), HOST_VM_INFO64,
                 reinterpret_cast<host_info64_t>(&memory), &memory_count) ==
                 KERN_SUCCESS &&
@@ -148,6 +166,7 @@ private:
         }
         struct sysinfo info{};
         if (::sysinfo(&info) == 0) {
+            result.memory_total_bytes_ = static_cast<std::uint64_t>(info.totalram) * info.mem_unit;
             const auto memory_unit = static_cast<double>(info.mem_unit);
             const auto total = static_cast<double>(info.totalram) * memory_unit;
             const auto free =

@@ -33,6 +33,15 @@ void set_reported_runtime(runtime_model& runtime, const heartbeat_report& report
     runtime.template set<"agent_version">(report.agent_version_);
     runtime.template set<"cpu_usage">(report.cpu_usage_);
     runtime.template set<"memory_usage">(report.memory_usage_);
+    if (report.cpu_count_) {
+        runtime.template set<"cpu_count">(*report.cpu_count_);
+    }
+    if (report.memory_total_bytes_) {
+        runtime.template set<"memory_total_bytes">(*report.memory_total_bytes_);
+    }
+    if (report.disk_total_bytes_) {
+        runtime.template set<"disk_total_bytes">(*report.disk_total_bytes_);
+    }
     runtime.template set<"traffic_out_bps">(report.traffic_out_bps_);
     runtime.template set<"connection_count">(report.connection_count_);
     if (report.connected_ip_count_) {
