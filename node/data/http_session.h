@@ -753,7 +753,7 @@ private:
                 .allow_http2_ = !upgrade_requested_ && website_->origin_http_version() != "http1",
                 .require_http2_ = !upgrade_requested_ && website_->origin_http_version() == "http2",
             },
-            prepared_request_->bytes_, std::move(response));
+            std::string_view(prepared_request_->bytes_), std::move(response));
         arm(connect_timeout_, attempt, timeout_action::failover);
         const auto self = this->shared_from_this();
         exchange_->send([self, attempt](const std::error_code& error) {

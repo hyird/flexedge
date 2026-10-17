@@ -3,7 +3,6 @@
 #include <array>
 #include <cstddef>
 #include <memory>
-#include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -21,13 +20,15 @@ namespace flexedge::node {
 // while idle, so the request is sent once more on a fresh connection. Every completion
 // holds the exchange, so the transport outlives the operations started on it. Timeouts and
 // the meaning of a failure belong to the caller.
+// Request wire bytes are borrowed and must remain immutable through send completion,
+// including reconnect and cancellation. The session's send handler retains their owner.
 class origin_exchange final : public std::enable_shared_from_this<origin_exchange> {
 public:
-    origin_exchange(origin_connection_pool& pool, origin_connection_key key, std::string request,
+    origin_exchange(origin_connection_pool& pool, origin_connection_key key, std::string_view request,
         origin_response_codec response)
         : pool_(pool),
           key_(std::move(key)),
-          request_(std::move(request)),
+          request_(request),
           response_(std::move(response)) {}
 
     origin_exchange(const origin_exchange&) = delete;
@@ -132,7 +133,7 @@ private:
 
     origin_connection_pool& pool_;
     origin_connection_key key_;
-    std::string request_;
+    std::string_view request_;
     origin_response_codec response_;
     pooled_origin_connection transport_{};
     std::array<char, 16384> buffer_{};
