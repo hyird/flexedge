@@ -15,8 +15,8 @@ inline std::optional<xdb_database>& xdb_database_storage() {
     static std::optional<xdb_database> database;
     return database;
 }
-inline std::optional<flexedge::node::v2::CountryDatabase>& country_snapshot_storage() {
-    static std::optional<flexedge::node::v2::CountryDatabase> countries;
+inline std::optional<country_snapshot_data>& country_snapshot_storage() {
+    static std::optional<country_snapshot_data> countries;
     return countries;
 }
 
@@ -40,7 +40,7 @@ inline void configure_xdb_database(const service::config::geoip_configuration& c
     }
     return *storage;
 }
-[[nodiscard]] inline const flexedge::node::v2::CountryDatabase& get_country_snapshot() {
+[[nodiscard]] inline const country_snapshot_data& get_country_snapshot() {
     const auto& snapshot = detail::country_snapshot_storage();
     if (!snapshot) {
         throw std::logic_error("country snapshot is not configured");

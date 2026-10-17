@@ -89,6 +89,17 @@ void require_without_asn(std::string_view json, std::string_view label) {
 
 void verify_with_xdb() {
     require(service::geoip::get_xdb_database().available(), "synthetic XDB did not load");
+    const auto& countries = service::geoip::get_country_snapshot();
+    require(countries.ipv4_.size() == 1 && countries.ipv4_.front().country_ == "中国",
+        "adjacent IPv4 XDB records must merge into one country range");
+    require(countries.ipv4_.front().first_ == std::string("\x01\x02\x03\x00", 4) &&
+                countries.ipv4_.front().last_ == std::string("\x01\x02\x05\xff", 4),
+        "country snapshot must preserve IPv4 network byte order and range bounds");
+    require(countries.ipv6_.size() == 1 && countries.ipv6_.front().country_ == "美国" &&
+                countries.ipv6_.front().first_.size() == 16 &&
+                static_cast<unsigned char>(countries.ipv6_.front().first_[0]) == 0x20 &&
+                static_cast<unsigned char>(countries.ipv6_.front().first_[1]) == 0x01,
+        "country snapshot must preserve IPv6 country and network byte order");
 
     const auto chinanet = map_to_json("1.2.3.4");
     require(contains(chinanet, "\"client_ip_asn\":\"AS4134\""), "IPv4 ASN missing: " + chinanet);
@@ -136,6 +147,8 @@ void verify_missing_xdb() {
     require(contains(details, "\"request_type\":\"websocket\""), "connection type is retained");
     require(contains(details, "\"end_reason\":\"origin_closed\""), "end reason is retained");
     require(!service::geoip::get_xdb_database().available(), "absent XDB paths loaded a database");
+    const auto& countries = service::geoip::get_country_snapshot();
+    require(countries.ipv4_.empty() && countries.ipv6_.empty(), "missing XDB files must produce an empty country snapshot");
     const auto json = map_to_json("1.2.3.4");
     require(contains(json, "\"cache_status\":\"hit_disk\""), "cache tier must be present independently of response headers");
     require(contains(json, "\"cache_reason\":\"fresh\""), "cache reason must be present independently of response headers");

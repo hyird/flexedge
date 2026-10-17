@@ -1,15 +1,25 @@
 #pragma once
-#include "node/proto/edge_control.pb.h"
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "service/features/geoip/xdb_database.h"
 
 namespace service::geoip {
-inline flexedge::node::v2::CountryDatabase country_snapshot(const xdb_database& database) {
-    flexedge::node::v2::CountryDatabase result;
+struct country_range final {
+    std::string first_{}, last_{}, country_{};
+};
+struct country_snapshot_data final {
+    std::vector<country_range> ipv4_{}, ipv6_{};
+};
+
+inline country_snapshot_data country_snapshot(const xdb_database& database) {
+    country_snapshot_data result;
     database.visit_countries([&](int version, std::string first, std::string last, const std::string& country) {
-        auto* ranges = version == 4 ? result.mutable_ipv4() : result.mutable_ipv6();
-        if (!ranges->empty()) {
-            auto* previous = ranges->Mutable(ranges->size() - 1);
-            auto after = previous->last();
+        auto& ranges = version == 4 ? result.ipv4_ : result.ipv6_;
+        if (!ranges.empty()) {
+            auto& previous = ranges.back();
+            auto after = previous.last_;
             bool overflow = true;
             for (std::size_t position = after.size(); position > 0; --position) {
                 auto& byte = after[position - 1];
@@ -20,15 +30,12 @@ inline flexedge::node::v2::CountryDatabase country_snapshot(const xdb_database& 
                     break;
                 }
             }
-            if (!overflow && previous->country() == country && after == first) {
-                previous->set_last(std::move(last));
+            if (!overflow && previous.country_ == country && after == first) {
+                previous.last_ = std::move(last);
                 return;
             }
         }
-        auto* range = ranges->Add();
-        range->set_first(std::move(first));
-        range->set_last(std::move(last));
-        range->set_country(country);
+        ranges.push_back({std::move(first), std::move(last), country});
     });
     return result;
 }

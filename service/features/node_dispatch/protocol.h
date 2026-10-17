@@ -280,7 +280,19 @@ inline cluster_release_artifact build_cluster_release(std::string_view release_i
         result.objects_.push_back(std::move(object));
     }
     if (needs_countries) {
-        *manifest.mutable_countries() = service::geoip::get_country_snapshot();
+        const auto& countries = service::geoip::get_country_snapshot();
+        for (const auto& range : countries.ipv4_) {
+            auto* output = manifest.mutable_countries()->add_ipv4();
+            output->set_first(range.first_);
+            output->set_last(range.last_);
+            output->set_country(range.country_);
+        }
+        for (const auto& range : countries.ipv6_) {
+            auto* output = manifest.mutable_countries()->add_ipv6();
+            output->set_first(range.first_);
+            output->set_last(range.last_);
+            output->set_country(range.country_);
+        }
     }
     result.manifest_ = flexedge::node::pack_artifact<flexedge::node::v2::ClusterReleaseManifest>(manifest);
     return result;
