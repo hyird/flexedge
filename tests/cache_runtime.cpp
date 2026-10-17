@@ -1,6 +1,7 @@
 #include <atomic>
 #include <iostream>
 #include <set>
+#include <string>
 #include <thread>
 
 #include <asio/read_until.hpp>
@@ -23,8 +24,9 @@ using namespace flexedge::node;
 namespace {
 class origin final {
 public:
-    origin()
-        : acceptor_(io_, {asio::ip::address_v4::loopback(), 0}) {
+    explicit origin(std::string body = "body")
+        : acceptor_(io_, {asio::ip::address_v4::loopback(), 0}),
+          body_(std::move(body)) {
         accept();
         thread_ = std::jthread([this] { io_.run(); });
     }
@@ -53,7 +55,8 @@ private:
                 }
                 ++hits_;
                 auto bytes = std::make_shared<std::string>(
-                    "HTTP/1.1 200 OK\r\nCache-Control: public, max-age=600\r\nETag: \"test\"\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody");
+                    "HTTP/1.1 200 OK\r\nCache-Control: public, max-age=600\r\nETag: \"test\"\r\nContent-Type: text/plain\r\nContent-Length: " +
+                    std::to_string(body_.size()) + "\r\nConnection: close\r\n\r\n" + body_);
                 asio::async_write(*peer, asio::buffer(*bytes), [peer, bytes](std::error_code, std::size_t) {std::error_code ignored;peer->close(ignored); });
             });
             accept();
@@ -61,6 +64,7 @@ private:
     }
     asio::io_context io_;
     asio::ip::tcp::acceptor acceptor_;
+    const std::string body_;
     std::jthread thread_;
     std::atomic<unsigned> hits_{};
 };
@@ -166,6 +170,28 @@ void verify() {
     for (const auto state : {"miss", "hit_memory", "hit_disk", "bypass"}) {
         FLEXEDGE_REQUIRE(std::ranges::find(states, state) != states.end());
     }
+    std::string large_body(3 * 65536 + 17, '\0');
+    for (std::size_t index = 0; index < large_body.size(); ++index) {
+        large_body[index] = static_cast<char>((index * 31 + index / 65536) % 251);
+    }
+    origin large_source(large_body);
+    site->mutable_origins(0)->set_port(large_source.port());
+    site->set_revision(site->revision() + 1);
+    config.setGeneration(11);
+    config.finalize();
+    control.loop(0).start(activate(plane, std::make_shared<const compiled_config>(config.active, config.objects))).get();
+    FLEXEDGE_REQUIRE(request({}, "GET", "/disk-large").find("X-Cache: MISS") != std::string::npos);
+    const auto replay = request({}, "GET", "/disk-large");
+    const auto head_end = replay.find("\r\n\r\n");
+    FLEXEDGE_REQUIRE(head_end != std::string::npos);
+    FLEXEDGE_REQUIRE(replay.substr(0, head_end).find("X-Cache: HIT") != std::string::npos);
+    FLEXEDGE_REQUIRE(replay.substr(head_end + 4) == large_body);
+    const auto disk_head = request({}, "HEAD", "/disk-large");
+    FLEXEDGE_REQUIRE(disk_head.substr(disk_head.find("\r\n\r\n") + 4).empty());
+    const auto disk_unchanged = request("If-None-Match: \"test\"\r\n", "GET", "/disk-large");
+    FLEXEDGE_REQUIRE(disk_unchanged.starts_with("HTTP/1.1 304"));
+    FLEXEDGE_REQUIRE(disk_unchanged.substr(disk_unchanged.find("\r\n\r\n") + 4).empty());
+    FLEXEDGE_REQUIRE(large_source.hits() == 1);
     shutdown.stop_and_join();
 }
 }  // namespace

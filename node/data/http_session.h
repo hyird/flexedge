@@ -202,6 +202,7 @@ public:
 
 private:
     static constexpr std::size_t max_request_bytes = 2 * 1024 * 1024;
+    using cached_file_buffer = std::array<char, 65536>;
 
     enum class timeout_action { close,
         failover };
@@ -622,6 +623,10 @@ private:
                 return;
             }
         }
+        if (!cached_head_only_ && !cached_response_->body_ && cached_response_->body_bytes_ != 0) {
+            // Allocate before committing headers; retain through every write callback.
+            cached_buffer_ = std::make_unique_for_overwrite<cached_file_buffer>();
+        }
         response_pending_ = true;
         const auto self = this->shared_from_this();
         asio::async_write(stream_, asio::buffer(response_bytes_), [self](const std::error_code& error, std::size_t bytes) {
@@ -651,13 +656,13 @@ private:
         if (cached_response_->body_) {
             bytes = asio::buffer(cached_response_->body_->data() + cached_offset_, remaining);
         } else {
-            const auto size = (std::min)(remaining, cached_buffer_.size());
-            cached_file_.read(cached_buffer_.data(), static_cast<std::streamsize>(size));
+            const auto size = (std::min)(remaining, cached_buffer_->size());
+            cached_file_.read(cached_buffer_->data(), static_cast<std::streamsize>(size));
             if (static_cast<std::size_t>(cached_file_.gcount()) != size) {
                 finish_cached(std::make_error_code(std::errc::io_error));
                 return;
             }
-            bytes = asio::buffer(cached_buffer_.data(), size);
+            bytes = asio::buffer(cached_buffer_->data(), size);
         }
         const auto self = this->shared_from_this();
         asio::async_write(stream_, bytes, [self](const std::error_code& error, std::size_t size) {
@@ -1111,7 +1116,7 @@ private:
     unsigned cache_waits_{};
     std::shared_ptr<const cached_response> cached_response_{};
     std::ifstream cached_file_{};
-    std::array<char, 65536> cached_buffer_{};
+    std::unique_ptr<cached_file_buffer> cached_buffer_;
     std::size_t cached_offset_{};
     std::uint32_t cached_status_{};
     bool cached_head_only_{};

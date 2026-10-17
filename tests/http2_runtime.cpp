@@ -198,7 +198,7 @@ ruvia::task<void> apply(data_plane& plane, const flexedge::testing::TestConfig& 
     auto pending = co_await config_activation::prepare(plane, std::make_shared<const compiled_config>(config.active, config.objects));
     co_await pending.commit();
 }
-void verify() {
+void verify(std::string_view storage) {
     auto identity = flexedge::testing::make_identity("localhost", 8);
     const auto ca = std::filesystem::current_path() / "http2-origin-ca.pem";
     {
@@ -239,6 +239,7 @@ void verify() {
     site->mutable_origins(0)->set_port(plain.port());
     flexedge::cache::policy policy;
     policy.id_ = "h2-cache";
+    policy.storage_ = storage;
     flexedge::cache::rule rule;
     rule.id_ = "all";
     rule.name_ = "all";
@@ -257,6 +258,20 @@ void verify() {
     const auto count = plain.count();
     FLEXEDGE_REQUIRE(flexedge::testing::request(port, "www.example.com", {}, "/first").find("X-Cache: HIT") != std::string::npos);
     FLEXEDGE_REQUIRE(plain.count() == count);
+    {
+        asio::ip::tcp::socket socket(clients);
+        socket.connect({asio::ip::address_v4::loopback(), port});
+        const auto replay = requests(socket, {"/large"});
+        FLEXEDGE_REQUIRE(replay[0].status_ == 200 && replay[0].body_ == std::string(512 * 1024, 'x'));
+        FLEXEDGE_REQUIRE(plain.count() == count);
+    }
+    {
+        asio::ip::tcp::socket socket(clients);
+        socket.connect({asio::ip::address_v4::loopback(), port});
+        const auto replay = requests(socket, {"/large", "/first"}, true);
+        FLEXEDGE_REQUIRE(replay[1].status_ == 200 && replay[1].body_ == "/first");
+        FLEXEDGE_REQUIRE(plain.count() == count);
+    }
     {
         asio::ip::tcp::socket socket(clients);
         socket.connect({asio::ip::address_v4::loopback(), port});
@@ -337,7 +352,8 @@ void verify() {
 }  // namespace
 int main() {
     try {
-        verify();
+        verify("tiered");
+        verify("disk");
         std::cout << "HTTP/2 ingress, origin and cache passed\n";
         return 0;
     } catch (const std::exception& error) {
