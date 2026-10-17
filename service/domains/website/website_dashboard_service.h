@@ -103,10 +103,9 @@ public:
         auto& daily = result.template ensure<"daily">();
         append_buckets(daily, daily_rows);
 
-        // Both rankings use every IP in the window before applying their own top 10.
+        // All IP-based rankings (countries, ASNs, client IPs by bytes/requests) use
+        // every IP in the window in a single pass before applying their own top 10.
         // Missing IPs or ASN metadata still contribute to the unknown ASN total.
-        auto& countries = result.template ensure<"countries">();
-        auto& asns = result.template ensure<"asns">();
         const auto& geo_database = service::geoip::get_xdb_database();
         const auto geographic_ip_rows = co_await c.db().query(
             "SELECT access.client_ip::text, COUNT(*)::bigint, "
@@ -115,62 +114,8 @@ public:
             "access.occurred_at >= $3::timestamptz - INTERVAL '24 hours' "
             "GROUP BY access.client_ip",
             tenant_id, id, as_of);
-        append_geographic_rankings(countries, asns, geographic_ip_rows, geo_database);
-        co_await append_ranking(
-            c, result.template ensure<"status_codes">(),
-            "SELECT access.status_code::text, COUNT(*)::bigint, "
-            "COALESCE(SUM(access.response_bytes), "
-            "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
-            "access.website_id = $2 AND access.occurred_at >= $3::timestamptz - INTERVAL '24 "
-            "hours' GROUP BY access.status_code ORDER BY COUNT(*) DESC, access.status_code ASC "
-            "LIMIT 10",
-            tenant_id, id, as_of);
-        co_await append_ranking(
-            c, result.template ensure<"methods">(),
-            "SELECT access.method, COUNT(*)::bigint, COALESCE(SUM(access.response_bytes), "
-            "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
-            "access.website_id = $2 AND access.occurred_at >= $3::timestamptz - INTERVAL '24 "
-            "hours' GROUP BY access.method ORDER BY COUNT(*) DESC, access.method ASC LIMIT 10",
-            tenant_id, id, as_of);
-        co_await append_ranking(
-            c, result.template ensure<"hosts">(),
-            "SELECT access.host, COUNT(*)::bigint, COALESCE(SUM(access.response_bytes), "
-            "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
-            "access.website_id = $2 AND access.occurred_at >= $3::timestamptz - INTERVAL '24 "
-            "hours' GROUP BY access.host ORDER BY COUNT(*) DESC, access.host ASC LIMIT 10",
-            tenant_id, id, as_of);
-        co_await append_ranking(
-            c, result.template ensure<"referers">(),
-            "SELECT COALESCE(NULLIF(access.referer, ''), '/'), COUNT(*)::bigint, "
-            "COALESCE(SUM(access.response_bytes), 0)::bigint FROM sys_website_access_log access "
-            "WHERE access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= "
-            "$3::timestamptz - INTERVAL '24 hours' GROUP BY 1 ORDER BY COUNT(*) DESC, 1 ASC "
-            "LIMIT 10",
-            tenant_id, id, as_of);
-        co_await append_ranking(
-            c, result.template ensure<"paths">(),
-            "SELECT split_part(access.target, '?', 1), COUNT(*)::bigint, "
-            "COALESCE(SUM(access.response_bytes), "
-            "0)::bigint FROM sys_website_access_log access WHERE access.tenant_id = $1 AND "
-            "access.website_id = $2 AND access.occurred_at >= $3::timestamptz - INTERVAL '24 "
-            "hours' GROUP BY 1 ORDER BY COUNT(*) DESC, 1 ASC LIMIT 10",
-            tenant_id, id, as_of);
-        co_await append_client_ip_ranking(
-            c, result.template ensure<"client_ips_by_bytes">(), geo_database,
-            "SELECT COALESCE(access.client_ip::text, '未知 IP'), COUNT(*)::bigint, "
-            "COALESCE(SUM(access.response_bytes), 0)::bigint FROM sys_website_access_log access "
-            "WHERE access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= "
-            "$3::timestamptz - INTERVAL '24 hours' GROUP BY 1 ORDER BY 3 DESC, 2 DESC, 1 ASC "
-            "LIMIT 10",
-            tenant_id, id, as_of);
-        co_await append_client_ip_ranking(
-            c, result.template ensure<"client_ips_by_requests">(), geo_database,
-            "SELECT COALESCE(access.client_ip::text, '未知 IP'), COUNT(*)::bigint, "
-            "COALESCE(SUM(access.response_bytes), 0)::bigint FROM sys_website_access_log access "
-            "WHERE access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= "
-            "$3::timestamptz - INTERVAL '24 hours' GROUP BY 1 ORDER BY 2 DESC, 3 DESC, 1 ASC "
-            "LIMIT 10",
-            tenant_id, id, as_of);
+        append_geographic_rankings(result, geographic_ip_rows, geo_database);
+        co_await append_dimension_rankings(c, result, tenant_id, id, as_of);
         co_return result;
     }
 
@@ -197,36 +142,34 @@ private:
     }
 
     template <typename output_type>
-    static ruvia::task<void> append_ranking(auto& c, output_type& output, std::string_view sql,
+    static ruvia::task<void> append_ranking(auto& c, output_type& output,
+        std::string_view label_sql, std::string_view group_order_sql,
         std::string_view tenant_id, std::string_view website_id, std::string_view as_of) {
+        const std::string sql = "SELECT " + std::string(label_sql) +
+                                ", COUNT(*)::bigint, COALESCE(SUM(access.response_bytes), "
+                                "0)::bigint FROM sys_website_access_log access WHERE "
+                                "access.tenant_id = $1 AND access.website_id = $2 AND "
+                                "access.occurred_at >= $3::timestamptz - INTERVAL '24 hours' "
+                                "GROUP BY " +
+                                std::string(group_order_sql) + " ORDER BY COUNT(*) DESC, " +
+                                std::string(group_order_sql) + " ASC LIMIT 10";
         const auto rows = co_await c.db().query(sql, tenant_id, website_id, as_of);
         append_rankings(output, rows);
         co_return;
     }
 
-    template <typename output_type>
-    static ruvia::task<void> append_client_ip_ranking(auto& c, output_type& output,
-        const service::geoip::xdb_database& geo_database,
-        std::string_view sql, std::string_view tenant_id, std::string_view website_id,
-        std::string_view as_of) {
-        const auto rows = co_await c.db().query(sql, tenant_id, website_id, as_of);
-        for (const auto& row : rows) {
-            std::string label{row[0].value().value_or("")};
-            const auto location = geo_database.lookup(label);
-            if (location) {
-                label += " · ";
-                label += location->display_;
-            } else if (label != "未知 IP") {
-                label += " · 未知地区";
-            }
-            auto& item = output.emplace_back();
-            item.template set<"label">(label);
-            item.template set<"request_count">(row[1].template as<std::int64_t>().value_or(0));
-            item.template set<"response_bytes">(row[2].template as<std::int64_t>().value_or(0));
-            item.template set<"asn">(location ? location->asn_ : "");
-            item.template set<"as_name">(location ? location->as_name_ : "");
-        }
-        co_return;
+    static ruvia::task<void> append_dimension_rankings(auto& c, website_dashboard_dto& result,
+        std::string_view tenant_id, std::string_view website_id, std::string_view as_of) {
+        co_await append_ranking(c, result.template ensure<"status_codes">(),
+            "access.status_code::text", "access.status_code", tenant_id, website_id, as_of);
+        co_await append_ranking(c, result.template ensure<"methods">(), "access.method",
+            "access.method", tenant_id, website_id, as_of);
+        co_await append_ranking(c, result.template ensure<"hosts">(), "access.host",
+            "access.host", tenant_id, website_id, as_of);
+        co_await append_ranking(c, result.template ensure<"referers">(),
+            "COALESCE(NULLIF(access.referer, ''), '/')", "1", tenant_id, website_id, as_of);
+        co_await append_ranking(c, result.template ensure<"paths">(),
+            "split_part(access.target, '?', 1)", "1", tenant_id, website_id, as_of);
     }
 
     struct ranking_total final {
@@ -256,16 +199,32 @@ private:
         }
     }
 
-    template <typename country_output_type, typename asn_output_type, typename rows_type>
-    static void append_geographic_rankings(country_output_type& countries_output,
-        asn_output_type& asns_output, const rows_type& rows,
+    template <typename rows_type>
+    static void append_geographic_rankings(website_dashboard_dto& result, const rows_type& rows,
         const service::geoip::xdb_database& geo_database) {
+        auto& countries_output = result.template ensure<"countries">();
+        auto& asns_output = result.template ensure<"asns">();
+        auto& ips_by_bytes_output = result.template ensure<"client_ips_by_bytes">();
+        auto& ips_by_requests_output = result.template ensure<"client_ips_by_requests">();
+
         struct asn_total final {
             ranking_total traffic_;
             std::string as_name_;
         };
+        struct client_ip_entry final {
+            std::string ip_text_;
+            std::string label_;
+            std::int64_t request_count_{};
+            std::int64_t response_bytes_{};
+            std::string asn_;
+            std::string as_name_;
+        };
+
         std::unordered_map<std::string, ranking_total> countries;
         std::unordered_map<std::string, asn_total> asns;
+        std::vector<client_ip_entry> client_ips;
+        client_ips.reserve(rows.size());
+
         for (const auto& row : rows) {
             const auto ip = row[0].value();
             const auto location = ip ? geo_database.lookup(*ip) : std::nullopt;
@@ -287,6 +246,18 @@ private:
                 (asn.as_name_.empty() || location->as_name_ < asn.as_name_)) {
                 asn.as_name_ = location->as_name_;
             }
+
+            std::string ip_text{ip.value_or("未知 IP")};
+            std::string label = ip ? ip_text + " · " + (location ? location->display_ : "未知地区")
+                                   : ip_text;
+            client_ips.push_back({
+                .ip_text_ = std::move(ip_text),
+                .label_ = std::move(label),
+                .request_count_ = request_count,
+                .response_bytes_ = response_bytes,
+                .asn_ = location ? location->asn_ : "",
+                .as_name_ = location ? location->as_name_ : "",
+            });
         }
 
         std::vector<std::pair<std::string, ranking_total>> country_totals;
@@ -303,6 +274,42 @@ private:
                 total.as_name_.empty() ? asn : asn + " " + total.as_name_, total.traffic_);
         }
         append_ordered_totals(asns_output, std::move(asn_totals));
+
+        const auto append_top_client_ips = [](auto& output,
+                                               const std::vector<client_ip_entry>& entries) {
+            const auto count = std::min<std::size_t>(entries.size(), 10);
+            for (std::size_t index = 0; index < count; ++index) {
+                const auto& entry = entries[index];
+                auto& item = output.emplace_back();
+                item.template set<"label">(entry.label_);
+                item.template set<"request_count">(entry.request_count_);
+                item.template set<"response_bytes">(entry.response_bytes_);
+                item.template set<"asn">(entry.asn_);
+                item.template set<"as_name">(entry.as_name_);
+            }
+        };
+
+        std::ranges::sort(client_ips, [](const auto& left, const auto& right) {
+            if (left.response_bytes_ != right.response_bytes_) {
+                return left.response_bytes_ > right.response_bytes_;
+            }
+            if (left.request_count_ != right.request_count_) {
+                return left.request_count_ > right.request_count_;
+            }
+            return left.ip_text_ < right.ip_text_;
+        });
+        append_top_client_ips(ips_by_bytes_output, client_ips);
+
+        std::ranges::sort(client_ips, [](const auto& left, const auto& right) {
+            if (left.request_count_ != right.request_count_) {
+                return left.request_count_ > right.request_count_;
+            }
+            if (left.response_bytes_ != right.response_bytes_) {
+                return left.response_bytes_ > right.response_bytes_;
+            }
+            return left.ip_text_ < right.ip_text_;
+        });
+        append_top_client_ips(ips_by_requests_output, client_ips);
     }
 };
 

@@ -120,6 +120,24 @@ export function removeWebsite(target: Pick<Website, 'id' | 'revision'>) {
   )
 }
 
+/** After a website create or update: snapshot lists, bound certificates,
+ * managed DNS zones, cluster counts and the website's own snapshot re-read. */
+export function afterWebsiteWrite(client: QueryClient, websiteId?: string) {
+  return Promise.all([
+    client.invalidateQueries({ queryKey: websitesSnapshotKey }),
+    client.invalidateQueries({ queryKey: queryKeys.certificates }),
+    client.invalidateQueries({ queryKey: queryKeys.dnsZones }),
+    client.invalidateQueries({ queryKey: queryKeys.clusters }),
+    ...(websiteId
+      ? [
+          client.invalidateQueries({
+            queryKey: [...websiteSnapshotKey, websiteId],
+          }),
+        ]
+      : []),
+  ])
+}
+
 /** After a confirmed delete: every read of the website (detail, snapshot,
  * access logs, dashboard: `[...websites, kind, id, ...]`) is dropped so it
  * never reports 404, and every other website read is refreshed. */

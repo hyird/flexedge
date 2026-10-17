@@ -57,13 +57,8 @@ public:
             }
         };
         const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
-        const auto total = page_rows.total_;
-
-        node_page_data_dto result(ruvia::model_options{.resource_ = c.pool()});
-        result.template set<"total">(total);
-        result.template set<"page">(page);
-        result.template set<"page_size">(page_size);
-        result.template set<"total_pages">(page_size > 0 ? (total + page_size - 1) / page_size : 0);
+        auto result = service::common::init_page_dto<node_page_data_dto>(
+            c.pool(), page_rows.total_, page, page_size);
         auto& items = result.template ensure<"list">();
         for (const auto& row : page_rows.rows_) {
             fill_node(c, items.emplace_back(ruvia::model_options{.resource_ = c.pool()}), row);
@@ -121,14 +116,7 @@ public:
                     "ingested_unix_micros")})
             .from("sys_node_log", "entry")
             .where(entries.sql("entry.tenant_id = node.tenant_id AND entry.node_id = node.id"));
-        if (after) {
-            entries.and_where(entries.sql({"(entry.created_at, entry.id) > (TIMESTAMPTZ 'epoch' + ",
-                                              "::bigint * INTERVAL '1 microsecond', ", "::uuid)"},
-                {entries.value(after->ingested_unix_micros_), entries.value(after->id_)}));
-        }
-        entries.order_by(entries.sql("entry.created_at"), ruvia::db_order_direction::desc)
-            .add_order_by(entries.sql("entry.id"), ruvia::db_order_direction::desc)
-            .limit(static_cast<std::uint64_t>(limit));
+        service::log_ingest::apply_tail_cursor_window(entries, "entry", limit, after);
         ruvia::db_query query(c.pool());
         query
             .select(service::common::sql_columns(query,

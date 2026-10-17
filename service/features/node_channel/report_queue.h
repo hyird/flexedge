@@ -23,6 +23,7 @@
 #include "service/features/node_channel/store.h"
 #include "service/features/node_channel/types.h"
 #include "service/utils/redis_reply.h"
+#include "service/utils/text.h"
 #include "service/utils/token.h"
 
 namespace service::node_channel {
@@ -136,8 +137,7 @@ inline std::string encode(const report& value) {
         value.trace_ ? std::string_view{value.trace_->trace_json_} : std::string_view{}, trace_bytes};
     std::string output;
     for (const auto field : fields) {
-        output += std::to_string(field.size()) + ":";
-        output += field;
+        service::utils::append_length_prefixed(output, field);
     }
     if (output.size() > max_payload_bytes) {
         throw std::invalid_argument("node report exceeds byte budget");
@@ -152,17 +152,11 @@ inline std::optional<report> decode(std::string_view payload) {
         }
         std::array<std::string_view, 12> fields;
         for (auto& field : fields) {
-            const auto colon = payload.find(':');
-            if (colon == std::string_view::npos) {
+            const auto parsed = service::utils::consume_length_prefixed(payload);
+            if (!parsed) {
                 return std::nullopt;
             }
-            const auto length = integer(payload.substr(0, colon));
-            payload.remove_prefix(colon + 1);
-            if (static_cast<std::size_t>(length) > payload.size()) {
-                return std::nullopt;
-            }
-            field = payload.substr(0, length);
-            payload.remove_prefix(length);
+            field = *parsed;
         }
         if (!payload.empty() || fields[0] != "1") {
             return std::nullopt;
@@ -301,18 +295,10 @@ inline ruvia::task<void> initialize(ruvia::redis_handle redis) {
 // A due retry first, then a report abandoned by a stopped claimant, then a
 // new report.
 inline ruvia::task<std::optional<entry>> claim(ruvia::redis_handle redis, std::string_view consumer) {
-    namespace reliable = service::background::reliable_stream;
-    auto claimed = co_await reliable::claim_due(redis, stream, consumer, 1);
-    if (claimed.empty()) {
-        claimed = co_await reliable::reclaim(redis, stream, consumer, 1);
+    if (auto claimed = co_await service::background::reliable_stream::claim_next(redis, stream, consumer)) {
+        co_return to_entry(std::move(*claimed));
     }
-    if (claimed.empty()) {
-        claimed = co_await reliable::read(redis, stream, consumer, 1);
-    }
-    if (claimed.empty()) {
-        co_return std::nullopt;
-    }
-    co_return to_entry(std::move(claimed.front()));
+    co_return std::nullopt;
 }
 
 inline ruvia::task<bool> owns(ruvia::redis_handle redis, std::string_view consumer, const entry& entry) {

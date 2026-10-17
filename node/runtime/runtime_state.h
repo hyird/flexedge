@@ -16,7 +16,19 @@ namespace flexedge::node {
 inline std::shared_ptr<const route_patterns> compile_route_patterns(const compiled_config& config) {
     auto patterns = std::make_shared<route_patterns>();
     for (const auto* website : config.websites()) {
-        validate_route_rules(*website, patterns.get());
+        if (!website->enabled()) {
+            continue;
+        }
+        for (const auto& rule : website->route_rules()) {
+            if (rule.match_type() != "regex") {
+                continue;
+            }
+            auto pattern = flexedge::route_policy::compile_pattern(rule.path());
+            if (!pattern) {
+                throw invalid_website("invalid route regex or capture template");
+            }
+            patterns->emplace(&rule, std::move(pattern));
+        }
     }
     return patterns;
 }

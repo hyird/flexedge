@@ -64,7 +64,6 @@ public:
             }
         };
         const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
-        const auto total = page_rows.total_;
         const auto& rows = page_rows.rows_;
         std::vector<std::string> website_ids;
         website_ids.reserve(rows.size());
@@ -73,7 +72,8 @@ public:
         }
         const auto certificates = co_await load_bound_certificates_by_website(c, tenant_id, website_ids);
 
-        website_page_data_dto result({.resource_ = c.pool()});
+        auto result = service::common::init_page_dto<website_page_data_dto>(
+            c.pool(), page_rows.total_, page, page_size);
         auto& items = result.template ensure<"list">();
         for (const auto& row : rows) {
             const auto config = parse_config(c, row[5].value().value_or("{}"));
@@ -81,10 +81,6 @@ public:
             fill_website(c, items.emplace_back(), row, config,
                 available == certificates.end() ? empty_certificates() : available->second);
         }
-        result.template set<"total">(total);
-        result.template set<"page">(page);
-        result.template set<"page_size">(page_size);
-        result.template set<"total_pages">(page_size > 0 ? (total + page_size - 1) / page_size : 0);
         co_return result;
     }
 

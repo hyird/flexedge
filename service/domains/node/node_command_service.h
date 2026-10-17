@@ -39,8 +39,8 @@ namespace service::node {
 class node_command_service final {
 public:
     ruvia::task<node_credentials_dto> create(ruvia::context& c, const std::string& tenant_id,
-        const ruvia::validated_json<node_save_input>& config) {
-        const auto normalized = normalize(config.value());
+        const node_save_input& config) {
+        const auto normalized = normalize(config);
         if (!normalized) {
             throw_corrupt_node_config();
         }
@@ -96,8 +96,8 @@ public:
 
     ruvia::task<std::int64_t> update(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, std::int64_t expected_revision,
-        const ruvia::validated_json<node_save_input>& config) {
-        const auto normalized = normalize(config.value());
+        const node_save_input& config) {
+        const auto normalized = normalize(config);
         if (!normalized) {
             throw_corrupt_node_config();
         }

@@ -165,6 +165,21 @@ if remaining > 0 then redis.call('SET',KEYS[4],remaining) else redis.call('DEL',
 return 1
 )lua"};
 
+inline ruvia::task<bool> has_live_report_entry(ruvia::redis_handle redis, std::string_view stream_entry_id,
+    std::string_view report_id) {
+    const auto source = co_await redis.command("XRANGE", report_queue::stream_key, stream_entry_id, stream_entry_id, "COUNT", "1");
+    service::utils::require_redis_success(source, "could not inspect node report stream entry");
+    for (const auto& source_entry : source.array()) {
+        const auto fields = source_entry.array()[1].array();
+        for (std::size_t index = 0; index + 1 < fields.size(); index += 2) {
+            if (fields[index].string() == "report_id" && fields[index + 1].string() == report_id) {
+                co_return true;
+            }
+        }
+    }
+    co_return false;
+}
+
 // Completion retains a budgeted Redis cleanup record until this transaction
 // commits. Process loss before or after either commit is safe to retry.
 template <typename context_type>
@@ -187,23 +202,12 @@ ruvia::task<std::size_t> clean_report_receipts(context_type& context) {
         }
         auto transaction = co_await context.db().begin_transaction();
         (void)co_await lock_report_node(transaction, std::string_view(metadata).substr(0, separator), std::string_view(metadata).substr(separator + 1, second_separator - separator - 1));
-        const auto source = co_await context.redis().command("XRANGE", report_queue::stream_key, id, id, "COUNT", "1");
-        service::utils::require_redis_success(source, "could not fence node report cleanup");
-        bool original_exists{};
         const auto report_id = std::string_view(metadata).substr(second_separator + 1);
-        for (const auto& source_entry : source.array()) {
-            const auto fields = source_entry.array()[1].array();
-            for (std::size_t index = 0; index + 1 < fields.size(); index += 2) {
-                if (fields[index].string() == "report_id" && fields[index + 1].string() == report_id) {
-                    original_exists = true;
-                }
-            }
-        }
-        if (original_exists) {
+        if (co_await has_live_report_entry(context.redis(), id, report_id)) {
             continue;
         }
         using entity = report_receipt_entity;
-        (void)co_await transaction.template get_repository<entity>().delete_by(entity::column<"id">() == std::string_view(metadata).substr(second_separator + 1));
+        (void)co_await transaction.template get_repository<entity>().delete_by(entity::column<"id">() == report_id);
         co_await transaction.commit();
         const std::array keys{report_queue::stream_key, report_queue::cleanup_key, report_queue::cleanup_identity_key, report_queue::bytes_key};
         const std::array<std::string_view, 3> args{id, metadata, report_id};
@@ -229,24 +233,13 @@ ruvia::task<std::size_t> clean_orphan_receipts(context_type& context, std::strin
     }
     for (const auto& candidate : candidates) {
         const std::string id(candidate.template get<"id">());
-        const std::string tenant(candidate.template get<"tenant_id">()), node(candidate.template get<"node_id">());
+        const std::string tenant_id(candidate.template get<"tenant_id">()), node_id(candidate.template get<"node_id">());
         auto transaction = co_await context.db().begin_transaction();
-        (void)co_await lock_report_node(transaction, tenant, node);
+        (void)co_await lock_report_node(transaction, tenant_id, node_id);
         const auto position = co_await context.redis().command("HGET", report_queue::positions_key, id);
         service::utils::require_redis_success(position, "could not verify orphan report receipt");
-        bool live{};
-        if (!position.null()) {
-            const auto source = co_await context.redis().command("XRANGE", report_queue::stream_key, position.string(), position.string(), "COUNT", "1");
-            service::utils::require_redis_success(source, "could not inspect orphan report source");
-            for (const auto& entry : source.array()) {
-                const auto fields = entry.array()[1].array();
-                for (std::size_t index = 0; index + 1 < fields.size(); index += 2) {
-                    if (fields[index].string() == "report_id" && fields[index + 1].string() == id) {
-                        live = true;
-                    }
-                }
-            }
-        }
+        const bool live = !position.null() &&
+                          co_await has_live_report_entry(context.redis(), position.string(), id);
         if (!live) {
             (void)co_await transaction.template get_repository<entity>().delete_by(entity::column<"id">() == std::string_view(id));
             ++removed;
@@ -259,50 +252,26 @@ ruvia::task<std::size_t> clean_orphan_receipts(context_type& context, std::strin
 
 template <typename context_type>
 ruvia::task<void> run_reports(context_type& context) {
-    const auto own = service::background::work_available::subscribe(context, report_work_type);
-    const auto consumer = service::utils::random_token();
+    const auto consumer_token = service::utils::random_token();
     std::string receipt_cursor;
     auto next_orphan_cleanup = std::chrono::steady_clock::now();
-    auto next_consumer_cleanup = next_orphan_cleanup;
-    bool initialized{};
-    while (!context.get_stop_token().stop_requested()) {
-        bool failed{};
-        try {
-            if (!initialized) {
-                co_await report_queue::initialize(context.redis());
-                initialized = true;
-            }
-            if (std::chrono::steady_clock::now() >= next_consumer_cleanup) {
-                (void)co_await service::background::stream_consumers::remove_idle(
-                    context.redis(), report_queue::stream_key, report_queue::group, consumer);
-                next_consumer_cleanup = std::chrono::steady_clock::now() +
-                                        service::background::stream_consumers::cleanup_interval;
-            }
+    co_await service::background::reliable_stream::run_consumer(
+        context, report_queue::stream, report_work_type, consumer_token,
+        [&]() -> ruvia::task<std::optional<std::chrono::milliseconds>> {
             (void)co_await clean_report_receipts(context);
             if (std::chrono::steady_clock::now() >= next_orphan_cleanup) {
                 (void)co_await clean_orphan_receipts(context, receipt_cursor);
                 next_orphan_cleanup = std::chrono::steady_clock::now() + std::chrono::seconds(15);
             }
-            if (auto entry = co_await report_queue::claim(context.redis(), consumer)) {
-                co_await persist_claim(context, consumer, *entry);
-                continue;
+            if (auto entry = co_await report_queue::claim(context.redis(), consumer_token)) {
+                co_await persist_claim(context, consumer_token, *entry);
+                co_return std::nullopt;
             }
-            (void)co_await service::background::stream_consumers::remove_empty(
-                context.redis(), report_queue::stream_key, report_queue::group, consumer);
-            const auto duration = co_await report_queue::idle_wait(context.redis());
-            (void)co_await own.receive_for(duration, context.get_stop_token());
-        } catch (const std::exception&) {
-            if (context.get_stop_token().stop_requested()) {
-                co_return;
-            }
+            co_return std::chrono::seconds(15);
+        },
+        [] {
             service::logging::error("Node report persistence interrupted; durable reports retained");
-            initialized = false;
-            failed = true;
-        }
-        if (failed) {
-            (void)co_await ruvia::sleep_for(context.worker(), std::chrono::seconds(1), context.get_stop_token());
-        }
-    }
+        });
 }
 
 }  // namespace service::node_channel

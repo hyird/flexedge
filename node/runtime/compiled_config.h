@@ -88,23 +88,25 @@ private:
         if (!state.has_node_spec() || !state.has_release()) {
             throw std::runtime_error("node active state is incomplete");
         }
-        auto spec = open_artifact<v2::NodeSpecContent>(state.node_spec().digest_sha256(),
-            state.node_spec().content());
-        if (!spec || spec->node_id().empty() || spec->schema_version() != node_spec_schema_version ||
-            spec->revision() <= 0) {
+        auto opened = flexedge::node::open_state(state);
+        if (!opened) {
+            throw std::runtime_error("invalid node active state");
+        }
+        auto& [spec, release] = *opened;
+        if (spec.node_id().empty() || spec.schema_version() != node_spec_schema_version ||
+            spec.revision() <= 0) {
             throw std::runtime_error("invalid node spec");
         }
-        auto release = open_artifact<v2::ClusterReleaseContent>(state.release().digest_sha256(),
-            state.release().content());
-        if (!release || release->cluster_id().empty() || release->release_id().empty() ||
-            release->generation() <= 0 || !supported_cluster_release_schema(release->schema_version()) ||
-            release->access_domain().empty()) {
+        if (release.cluster_id().empty() || release.release_id().empty() ||
+            release.generation() <= 0 ||
+            !supported_cluster_release_schema(release.schema_version()) ||
+            release.access_domain().empty()) {
             throw std::runtime_error("invalid cluster release manifest");
         }
         node_spec_digest_ = state.node_spec().digest_sha256();
-        node_spec_ = std::move(*spec);
+        node_spec_ = std::move(spec);
         release_digest_ = state.release().digest_sha256();
-        release_ = std::move(*release);
+        release_ = std::move(release);
     }
 
     void index_objects(const std::vector<v2::DeliveryObject>& objects) {

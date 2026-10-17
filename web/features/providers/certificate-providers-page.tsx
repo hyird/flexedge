@@ -1,10 +1,13 @@
-import { useEffect, useEffectEvent } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
 import { Button, Tooltip } from '@heroui/react'
-import { hasListFilters, useListSearch } from '@/lib/list-search'
+import {
+  hasListFilters,
+  useListSearch,
+  useListSheetTarget,
+} from '@/lib/list-search'
 import { describeStatus } from '@/lib/status'
 import { DataTable } from '@/components/data-table'
 import { ListToolbar } from '@/components/list-toolbar'
@@ -36,16 +39,7 @@ export function CertificateProvidersPage() {
     }),
     placeholderData: keepPreviousData,
   })
-  const editing = sheet.editing
-    ? query.data?.list.find((item) => item.id === sheet.editing)
-    : undefined
-  // A missing edit id closes the sheet only after the requested page arrives.
-  const editMissing =
-    !!sheet.editing && query.isSuccess && !query.isPlaceholderData && !editing
-  const closeMissing = useEffectEvent(() => void sheet.close())
-  useEffect(() => {
-    if (editMissing) closeMissing()
-  }, [editMissing])
+  const editing = useListSheetTarget(sheet, query)
   const filtered = hasListFilters(list.search, [])
   const columns: DataGridColumn<CertificateProvider>[] = [
     {

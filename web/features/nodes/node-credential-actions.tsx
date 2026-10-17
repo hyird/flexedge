@@ -1,8 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowRotateRight, Key } from '@gravity-ui/icons'
-import { Button, toast } from '@heroui/react'
-import { apiErrorMessage } from '@/lib/api'
+import { Button } from '@heroui/react'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Section } from '@/components/section'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
@@ -24,7 +23,6 @@ export function NodeCredentialActions({ node }: { node: Node }) {
   const reveal = useMutation({
     mutationFn: () => getNodeCredentials(node.id),
     onSuccess: setCredentials,
-    onError: (error) => toast.danger(apiErrorMessage(error)),
   })
   return (
     <>

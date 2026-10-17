@@ -59,7 +59,7 @@ const tabItems = [
  * One live stream per page: the overview and settings tabs subscribe to the
  * website detail stream and the header reuses it; traffic and logs keep
  * their own stream, so the header reads the detail once (or reuses the last
- * live frame) and re-reads it after writes via `useRefreshWebsite`. Only the
+ * live frame) and `afterWebsiteWrite` invalidates it after writes. Only the
  * selected tab is mounted, so leaving a tab closes its stream. */
 export function WebsiteDetailLayout() {
   const { websiteId } = route.useParams()
@@ -90,9 +90,6 @@ export function WebsiteDetailLayout() {
   const [deleted, setDeleted] = useState(false)
   const website = query.data
   useBreadcrumbLabel(website ? websiteName(website) : undefined)
-  const refresh = () => {
-    if (!liveTab) void snapshot.refetch()
-  }
 
   if (!deleted && query.isError && isWebsiteNotFound(query.error))
     return (
@@ -137,7 +134,6 @@ export function WebsiteDetailLayout() {
     <WebsiteContext
       value={{
         website,
-        refresh,
         openTab,
         markDeleted: () => setDeleted(true),
       }}

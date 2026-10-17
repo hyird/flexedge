@@ -14,6 +14,7 @@
 #include "service/domains/provider/certificate_provider_read_service.h"
 #include "service/domains/provider/certificate_provider_schema.h"
 #include "service/domains/provider/certificate_provider_service.h"
+#include "service/domains/provider/dns_provider_read_service.h"
 #include "service/domains/provider/dns_provider_schema.h"
 #include "service/domains/provider/dns_provider_service.h"
 #include "service/features/live_resource/fanout.h"
@@ -122,10 +123,8 @@ private:
             service::live_resource::query_key("dns-list", q.page_, q.size_, q.keyword_.value_or(""),
                 q.status_));
         co_await service::live_resource::stream_snapshot(
-            c, std::move(sub), [tenant, q](auto& r) -> ruvia::task<std::string> {
-                auto response = co_await read_dns_list(r, tenant, q);
-                auto json = ruvia::to_json(response, {.resource_ = r.pool()});
-                co_return std::string(json.data(), json.size());
+            c, std::move(sub), [tenant, q](auto& r) -> ruvia::task<dns_provider_page_response> {
+                co_return co_await read_dns_list(r, tenant, q);
             });
     }
     ruvia::task<ruvia::http_response> get_dns(ruvia::context& c) {
@@ -139,10 +138,8 @@ private:
             c.worker(), tenant, service::live_resource::resource::providers, id,
             service::live_resource::query_key("dns-detail"));
         co_await service::live_resource::stream_snapshot(
-            c, std::move(sub), [tenant, id](auto& r) -> ruvia::task<std::string> {
-                auto response = co_await read_dns_detail(r, tenant, id);
-                auto json = ruvia::to_json(response, {.resource_ = r.pool()});
-                co_return std::string(json.data(), json.size());
+            c, std::move(sub), [tenant, id](auto& r) -> ruvia::task<dns_provider_detail_response> {
+                co_return co_await read_dns_detail(r, tenant, id);
             });
     }
     ruvia::task<ruvia::http_response> options_certificates(ruvia::context& c) {
@@ -164,10 +161,9 @@ private:
             service::live_resource::query_key("certificate-list", q.page_, q.size_,
                 q.keyword_.value_or("")));
         co_await service::live_resource::stream_snapshot(
-            c, std::move(sub), [tenant, q](auto& r) -> ruvia::task<std::string> {
-                auto response = co_await read_certificate_list(r, tenant, q);
-                auto json = ruvia::to_json(response, {.resource_ = r.pool()});
-                co_return std::string(json.data(), json.size());
+            c, std::move(sub),
+            [tenant, q](auto& r) -> ruvia::task<certificate_provider_page_response> {
+                co_return co_await read_certificate_list(r, tenant, q);
             });
     }
     ruvia::task<ruvia::http_response> create_dns(ruvia::context& c) {

@@ -1,9 +1,11 @@
 import { type FormEvent, useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
 import { apiErrorMessage } from '@/lib/api'
 import { fieldErrors } from '@/lib/form-errors'
+import { useRevisionDraft } from '@/lib/revision-draft'
 import { FormSheet } from '@/components/form-sheet'
 import { Choice, Field } from '@/components/forms'
+import { RevisionConflictAlert } from '@/components/revision-conflict-alert'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { afterProviderWrite, saveDnsProvider } from './data'
 import {
@@ -17,6 +19,15 @@ import {
 } from './provider-sheet-sections'
 import type { DnsProvider } from './types'
 
+function toFormValues(provider?: DnsProvider): DnsProviderFormValues {
+  return {
+    name: provider?.name ?? '',
+    provider: provider?.provider ?? 'cloudflare',
+    account_id: provider?.account_id ?? '',
+    api_token: '',
+  }
+}
+
 /** Create (no `provider`) or edit a DNS account. Platform and account id are
  * fixed after creation; an empty secret keeps the stored credential. */
 export function DnsProviderSheet({
@@ -27,29 +38,42 @@ export function DnsProviderSheet({
   onClose: () => void
 }) {
   const client = useQueryClient()
-  const [initial] = useState<DnsProviderFormValues>(() => ({
-    name: provider?.name ?? '',
-    provider: provider?.provider ?? 'cloudflare',
-    account_id: provider?.account_id ?? '',
-    api_token: '',
-  }))
-  const [values, setValues] = useState(initial)
-  const isDirty = (
-    Object.keys(initial) as (keyof DnsProviderFormValues)[]
-  ).some((key) => values[key] !== initial[key])
+  const [edits, setEdits] = useState<DnsProviderFormValues>()
   const [errors, setErrors] = useState<Record<string, string>>({})
-  const update = (name: keyof DnsProviderFormValues, value: string) =>
-    setValues((current) => ({ ...current, [name]: value }))
-  const mutation = useMutation({
-    meta: { inlineError: true },
-    mutationFn: (input: DnsProviderFormValues) =>
-      saveDnsProvider(input, provider),
-    onSuccess: (response) => {
+  const draft = useRevisionDraft({
+    server: provider,
+    save: (input: DnsProviderFormValues, revision) =>
+      saveDnsProvider(
+        input,
+        provider && {
+          ...provider,
+          revision: revision ?? provider.revision,
+        }
+      ),
+    onSaved: (response) => {
       toastWriteSuccess(response.message || '已保存')
       void afterProviderWrite(client, 'dns')
       onClose()
     },
+    load: () => {
+      setEdits(undefined)
+      setErrors({})
+    },
   })
+  const base = draft.base ?? provider
+  const clean = toFormValues(base)
+  const values = edits ?? clean
+  const isDirty = (
+    Object.keys(clean) as (keyof DnsProviderFormValues)[]
+  ).some((key) => values[key] !== clean[key])
+  const update = (name: keyof DnsProviderFormValues, value: string) => {
+    const next = { ...values, [name]: value }
+    const dirty = (
+      Object.keys(clean) as (keyof DnsProviderFormValues)[]
+    ).some((key) => next[key] !== clean[key])
+    setEdits(dirty ? next : undefined)
+    draft.track(dirty)
+  }
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const result = dnsProviderFormSchema(!!provider).safeParse(values)
@@ -58,7 +82,7 @@ export function DnsProviderSheet({
       return
     }
     setErrors({})
-    mutation.mutate(result.data)
+    draft.save(result.data)
   }
   const aliyun = values.provider === 'aliyun'
   return (
@@ -73,16 +97,21 @@ export function DnsProviderSheet({
       }
       onSubmit={submit}
       submitLabel={provider ? '保存' : '添加账号'}
-      isSubmitting={mutation.isPending}
-      error={mutation.isError ? apiErrorMessage(mutation.error) : undefined}
+      isSubmitting={draft.isSaving}
+      error={
+        draft.error && !draft.conflict
+          ? apiErrorMessage(draft.error)
+          : undefined
+      }
     >
+      {provider && <RevisionConflictAlert draft={draft} />}
       <Field
         label='账号名称'
         value={values.name}
         onChange={(value) => update('name', value)}
         required
         error={errors.name}
-        disabled={mutation.isPending}
+        disabled={draft.isSaving}
       />
       <Choice
         label='平台'
@@ -92,7 +121,7 @@ export function DnsProviderSheet({
           { id: 'cloudflare', label: 'Cloudflare' },
           { id: 'aliyun', label: '阿里云' },
         ]}
-        disabled={!!provider || mutation.isPending}
+        disabled={!!provider || draft.isSaving}
       />
       <Field
         label={aliyun ? 'AccessKey ID' : '账户标识'}
@@ -100,7 +129,7 @@ export function DnsProviderSheet({
         onChange={(value) => update('account_id', value)}
         required
         error={errors.account_id}
-        disabled={!!provider || mutation.isPending}
+        disabled={!!provider || draft.isSaving}
         autoComplete='off'
       />
       <Field
@@ -110,7 +139,7 @@ export function DnsProviderSheet({
         onChange={(value) => update('api_token', value)}
         required={!provider}
         error={errors.api_token}
-        disabled={mutation.isPending}
+        disabled={draft.isSaving}
         hint={
           provider
             ? `留空保留当前凭据（${provider.token_hint || '已保存'}）。`
@@ -131,7 +160,7 @@ export function DnsProviderSheet({
             label='删除账号'
             title={`删除 DNS 账号 ${provider.name}？`}
             description='删除后将无法再用该账号同步解析记录。仍有托管域名时，删除会被拒绝。'
-            isDisabled={mutation.isPending}
+            isDisabled={draft.isSaving}
             onRemoved={onClose}
           />
         </>

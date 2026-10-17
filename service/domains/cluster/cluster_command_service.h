@@ -5,8 +5,6 @@
 #include <ruvia/web/db/db.h>
 #include <ruvia/web/db/db_transaction.h>
 
-#include <algorithm>
-#include <cctype>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -28,6 +26,7 @@
 #include "service/features/node_dispatch/queue.h"
 #include "service/features/sync_runtime/work_commit.h"
 #include "service/features/website_dns/projection.h"
+#include "service/utils/text.h"
 
 namespace service::cluster {
 
@@ -40,9 +39,9 @@ public:
             service::common::throw_app_error(service::common::validation_error_code,
                 "集群配置不能为空", 400);
         }
-        const auto name = trim(normalized->name_);
+        const auto name = service::utils::trim_ascii(normalized->name_);
         const auto& dns_zone_id = normalized->dns_zone_id_;
-        const auto hostname_prefix = normalize_prefix(normalized->hostname_prefix_);
+        const auto hostname_prefix = service::utils::to_lower_ascii(normalized->hostname_prefix_);
         const auto& status = normalized->status_;
         try {
             auto transaction = co_await c.db().begin_transaction();
@@ -55,7 +54,7 @@ public:
                 "status, revision, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, 1, "
                 "NOW(), NOW()) RETURNING id, revision",
                 service::common::db_params(ruvia::db_value{tenant_id}, ruvia::db_value{dns_zone_id},
-                    ruvia::db_value{std::string_view(name)},
+                    ruvia::db_value{name},
                     ruvia::db_value{std::string_view(hostname_prefix)},
                     ruvia::db_value{status}));
             service::background::queued_work work;
@@ -82,9 +81,9 @@ public:
             service::common::throw_app_error(service::common::validation_error_code,
                 "集群配置不能为空", 400);
         }
-        const auto name = trim(normalized->name_);
+        const auto name = service::utils::trim_ascii(normalized->name_);
         const auto& dns_zone_id = normalized->dns_zone_id_;
-        const auto hostname_prefix = normalize_prefix(normalized->hostname_prefix_);
+        const auto hostname_prefix = service::utils::to_lower_ascii(normalized->hostname_prefix_);
         const auto& status = normalized->status_;
         try {
             auto transaction = co_await c.db().begin_transaction();
@@ -100,7 +99,7 @@ public:
                 "1, updated_at = NOW() FROM current WHERE cluster.id = current.id RETURNING "
                 "current.previous_dns_zone_id, cluster.dns_zone_id, cluster.revision",
                 service::common::db_params(
-                    ruvia::db_value{dns_zone_id}, ruvia::db_value{std::string_view(name)},
+                    ruvia::db_value{dns_zone_id}, ruvia::db_value{name},
                     ruvia::db_value{std::string_view(hostname_prefix)}, ruvia::db_value{status},
                     ruvia::db_value{id}, ruvia::db_value{tenant_id},
                     ruvia::db_value{expected_revision}));
@@ -174,22 +173,6 @@ private:
             service::common::throw_app_error(cluster_error::dns_zone_unavailable);
         }
         co_return std::move(zone->domain_);
-    }
-
-    static std::string trim(std::string_view input) {
-        const auto begin = std::find_if_not(input.begin(), input.end(),
-            [](unsigned char ch) { return std::isspace(ch) != 0; });
-        const auto end = std::find_if_not(input.rbegin(), input.rend(), [](unsigned char ch) {
-            return std::isspace(ch) != 0;
-        }).base();
-        return begin < end ? std::string(begin, end) : std::string{};
-    }
-
-    static std::string normalize_prefix(std::string_view input) {
-        std::string result(input);
-        std::transform(result.begin(), result.end(), result.begin(),
-            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        return result;
     }
 
     static bool is_identity_conflict(const ruvia::db_error& error) {

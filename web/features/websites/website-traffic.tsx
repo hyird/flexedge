@@ -1,5 +1,4 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRotateLeft } from '@gravity-ui/icons'
 import { ChartTooltip, TrendChip, Widget } from '@heroui-pro/react'
 import { AreaChart } from '@heroui-pro/react/area-chart'
 import { BarChart } from '@heroui-pro/react/bar-chart'
@@ -16,7 +15,7 @@ import {
 } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { KpiQuantity } from '@/components/kpi-quantity'
-import { EmptyState } from '@/components/page'
+import { EmptyState, QueryNotice } from '@/components/page'
 import { ClientIpTooltip } from './client-ip-tooltip'
 import { clientIpDisplay } from './client-location'
 import type {
@@ -66,24 +65,11 @@ export function WebsiteTraffic() {
           </Button>
         </Alert>
       )}
-      {dashboard.error && (
-        <Alert status='danger'>
-          <Alert.Indicator />
-          <Alert.Content>
-            <Alert.Title>统计连接异常</Alert.Title>
-            <Alert.Description>{dashboard.error.message}</Alert.Description>
-          </Alert.Content>
-          <Button
-            size='sm'
-            variant='tertiary'
-            className='shrink-0 self-center'
-            onPress={() => void dashboard.refetch()}
-          >
-            <ArrowRotateLeft />
-            重新连接
-          </Button>
-        </Alert>
-      )}
+      <QueryNotice
+        query={dashboard}
+        onRetry={() => void dashboard.refetch()}
+        title='统计连接异常'
+      />
       {data ? <TrafficContent data={data} /> : <TrafficSkeleton />}
     </div>
   )

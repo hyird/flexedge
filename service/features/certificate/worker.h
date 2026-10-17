@@ -109,10 +109,6 @@ public:
         }
         if (progress->phase_ == issuance_phase::validation) {
             co_await validate(client, *progress);
-            progress->phase_ = issuance_phase::finalize;
-            progress->authorizations_.clear();
-            progress->private_key_envelope_ =
-                service::utils::seal_secret(detail::private_key_pem(detail::generate_rsa_key().get()));
             if (!co_await finish_validation(work, *progress)) {
                 co_return;
             }
@@ -166,10 +162,7 @@ private:
         if (records.empty()) {
             trace_.begin_step(step_code::dns_challenge).skip("授权均已有效");
             trace_.begin_step(step_code::validation).skip("授权均已有效");
-            progress.phase_ = issuance_phase::finalize;
-            progress.private_key_envelope_ =
-                service::utils::seal_secret(detail::private_key_pem(detail::generate_rsa_key().get()));
-            if (!co_await enter_finalize(context_, task_, lease_, work, progress)) {
+            if (!co_await enter_finalize_phase(work, progress)) {
                 co_return std::nullopt;
             }
             co_return progress;
@@ -199,15 +192,23 @@ private:
     }
 
     // Retires the challenge records and stores the finalize progress.
-    ruvia::task<bool> finish_validation(const certificate_work& work, const issuance_state& progress) {
+    ruvia::task<bool> finish_validation(const certificate_work& work, issuance_state& progress) {
         attempt_.stage_ = certificate_stage::cleanup;
         auto cleanup_step = trace_.begin_step(service::attempt_trace::step_code::cleanup);
-        if (!co_await enter_finalize(context_, task_, lease_, work, progress)) {
+        if (!co_await enter_finalize_phase(work, progress)) {
             co_return false;
         }
         trace_.log(service::attempt_trace::log_level::info, "已移除 DNS 验证记录");
         cleanup_step.complete();
         co_return true;
+    }
+
+    ruvia::task<bool> enter_finalize_phase(const certificate_work& work, issuance_state& progress) {
+        progress.phase_ = issuance_phase::finalize;
+        progress.authorizations_.clear();
+        progress.private_key_envelope_ =
+            service::utils::seal_secret(detail::private_key_pem(detail::generate_rsa_key().get()));
+        co_return co_await enter_finalize(context_, task_, lease_, work, progress);
     }
 
     ruvia::task<void> finalize(acme_client& client, const certificate_work& work, const issuance_state& progress) {
@@ -323,13 +324,9 @@ inline ruvia::task<void> process_task(service::background::task_context& context
     if (!context.get_stop_token().stop_requested() && !lease_lost && exception) {
         const auto failure = service::outbound_http::classify_attempt_failure(exception, "证书任务发生未知错误");
         const bool keep_progress = !failure.permanent_ && keeps_progress(exception);
-        trace.mark_failure(failure.message_);
-        auto step = trace.begin_step(service::attempt_trace::step_code::record_failure);
-        trace.log(failure.permanent_ ? service::attempt_trace::log_level::error
-                                     : service::attempt_trace::log_level::warning,
-            failure.permanent_ ? "永久失败，不再自动重试"
-            : keep_progress    ? "将在 15 秒后自动重试并继续当前订单"
-                               : "将在 15 秒后自动重试");
+        auto step = service::sync_runtime::record_attempt_failure_step(trace, failure.message_,
+            failure.permanent_, "永久失败，不再自动重试",
+            keep_progress ? "将在 15 秒后自动重试并继续当前订单" : "将在 15 秒后自动重试");
         co_await fail_certificate_task(context, trace, task, failure.message_, failure.permanent_, keep_progress,
             attempt.to_json(context.pool()));
         step.complete();

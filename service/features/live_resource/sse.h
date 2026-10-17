@@ -267,10 +267,26 @@ inline ruvia::task<void> stream_snapshots(ruvia::context& c, hub::subscription s
 }
 
 template <typename fetch_type>
+inline snapshot_part make_snapshot_part(std::string_view event, fetch_type fetch) {
+    return snapshot_part{
+        .event_ = event,
+        .fetch_ = [fetch = std::move(fetch)](snapshot_read_scope& read) mutable -> ruvia::task<std::string> {
+            auto result = co_await fetch(read);
+            if constexpr (std::same_as<std::remove_cvref_t<decltype(result)>, std::string>) {
+                co_return result;
+            } else {
+                auto json = ruvia::to_json(result, {.resource_ = read.pool()});
+                co_return std::string(json.data(), json.size());
+            }
+        },
+    };
+}
+
+template <typename fetch_type>
 ruvia::task<void> stream_snapshot(ruvia::context& c, hub::subscription subscription, fetch_type fetch,
     std::string_view snapshot_event = "snapshot") {
     std::vector<snapshot_part> parts;
-    parts.push_back({snapshot_event, std::move(fetch)});
+    parts.push_back(make_snapshot_part(snapshot_event, std::move(fetch)));
     co_await stream_snapshots(c, std::move(subscription), std::move(parts));
 }
 

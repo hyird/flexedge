@@ -6,12 +6,14 @@
 
 #include "ruvia/web/model.h"
 
+#include "service/common/domain_name.h"
 #include "service/common/uuid.h"
+#include "service/utils/text.h"
 
 namespace service::cluster {
 
 inline bool has_non_whitespace(const ruvia::string& value) {
-    return value.view().find_first_not_of(" \\t\\r\\n\\f\\v") != std::string_view::npos;
+    return service::utils::has_non_whitespace_ascii(value.view());
 }
 
 inline bool is_valid_uuid(const ruvia::string& value) {
@@ -19,22 +21,7 @@ inline bool is_valid_uuid(const ruvia::string& value) {
 }
 
 inline bool is_valid_hostname_prefix(const ruvia::string& value) {
-    const auto text = value.view();
-    if (text.empty() || text.size() > 63 ||
-        !((text.front() >= 'A' && text.front() <= 'Z') ||
-            (text.front() >= 'a' && text.front() <= 'z') ||
-            (text.front() >= '0' && text.front() <= '9'))) {
-        return false;
-    }
-    for (const char ch : text) {
-        if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
-                (ch >= '0' && ch <= '9') || ch == '-')) {
-            return false;
-        }
-    }
-    return (text.back() >= 'A' && text.back() <= 'Z') ||
-           (text.back() >= 'a' && text.back() <= 'z') ||
-           (text.back() >= '0' && text.back() <= '9');
+    return service::common::is_valid_dns_label(value.view(), false);
 }
 
 RUVIA_MODEL(save_cluster_body, RUVIA_OPTIONAL_FIELD(name, ruvia::string),

@@ -305,7 +305,7 @@ int main() {
 
         // A port another process holds fails while binding the new listener, before activation.
         asio::ip::tcp::acceptor occupied(reservation_context,
-            asio::ip::tcp::endpoint(asio::ip::address_v4::any(), 0));
+            asio::ip::tcp::endpoint(asio::ip::address_v4::any(), 0), false);
         auto blocked = candidate;
         blocked.setGeneration(5);
         blocked.node_spec.mutable_endpoints(0)->set_http_port(

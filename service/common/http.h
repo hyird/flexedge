@@ -2,6 +2,7 @@
 
 #include <ruvia/web/context.h>
 #include <ruvia/web/error.h>
+#include <ruvia/web/validation.h>
 
 #include <algorithm>
 #include <cctype>
@@ -231,6 +232,56 @@ inline std::string require_uuid_param(ruvia::context& c, std::string_view name) 
     }
     return std::move(*value);
 }
+
+inline std::string require_uuid_query(ruvia::context& c, std::string_view name,
+    std::string_view message = {}) {
+    auto value = parse_uuid(c.req().query(name));
+    if (!value) {
+        throw_app_error(validation_error_code,
+            message.empty() ? std::string(name) + " 必须是 UUID" : std::string(message), 400);
+    }
+    return std::move(*value);
+}
+
+inline std::optional<std::string> optional_uuid_query(ruvia::context& c, std::string_view name,
+    std::string_view message = {}) {
+    const auto raw = c.req().query(name);
+    if (!raw) {
+        return std::nullopt;
+    }
+    auto value = parse_uuid(raw);
+    if (!value) {
+        throw_app_error(validation_error_code,
+            message.empty() ? std::string(name) + " 必须是 UUID" : std::string(message), 400);
+    }
+    return std::move(*value);
+}
+
+inline std::optional<bool> optional_bool_query(ruvia::context& c, std::string_view name,
+    std::string_view message = {}) {
+    const auto raw = c.req().query(name);
+    if (!raw) {
+        return std::nullopt;
+    }
+    const auto parsed = parse_boolean(raw);
+    if (!parsed) {
+        throw_app_error(validation_error_code,
+            message.empty() ? std::string(name) + " 必须是布尔值" : std::string(message), 400);
+    }
+    return *parsed;
+}
+
+template <typename body_type, auto validate_fn>
+class json_validator_middleware final {
+public:
+    ruvia::task<void> handle(ruvia::context& context, auto& next) {
+        const auto& body = context.req().validated_json<body_type>().value();
+        ruvia::validator validator({.resource_ = context.pool()});
+        validate_fn(body, validator);
+        validator.throw_if_invalid();
+        co_await next();
+    }
+};
 
 inline operation_response operation(ruvia::context& c, std::string_view message) {
     operation_response response({.resource_ = c.pool()});

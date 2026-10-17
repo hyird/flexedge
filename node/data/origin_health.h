@@ -263,8 +263,9 @@ public:
     }
 
     // Retained entries include outcomes recorded after preparation on this same worker.
-    void activate(prepared&& next) noexcept {
+    prepared activate(prepared next) noexcept {
         entries_.swap(next.entries_);
+        return next;
     }
 
     // Applies a request outcome for membership `id`. Returns whether the snapshot changed.

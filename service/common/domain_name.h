@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
-#include <regex>
+#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -18,13 +18,68 @@ inline std::string normalize_domain_name(std::string_view value) {
     return result;
 }
 
-inline bool is_hostname(std::string_view value, bool allow_wildcard = true) {
-    if (value.empty() || value.size() > 253 || (!allow_wildcard && value.starts_with("*."))) {
+[[nodiscard]] inline constexpr bool is_valid_dns_label(std::string_view label,
+    bool letters_only = false) noexcept {
+    if (label.empty() || label.size() > 63) {
         return false;
     }
-    static const std::regex pattern(
-        R"(^(?:\*\.)?([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$)");
-    return std::regex_match(value.begin(), value.end(), pattern);
+    const auto is_alpha = [](char ch) noexcept {
+        return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+    };
+    const auto is_alnum = [&](char ch) noexcept {
+        return is_alpha(ch) || (ch >= '0' && ch <= '9');
+    };
+    if (letters_only) {
+        if (label.size() < 2) {
+            return false;
+        }
+        for (const char ch : label) {
+            if (!is_alpha(ch)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (!is_alnum(label.front()) || !is_alnum(label.back())) {
+        return false;
+    }
+    for (const char ch : label) {
+        if (!is_alnum(ch) && ch != '-') {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] inline constexpr bool is_hostname(std::string_view value,
+    bool allow_wildcard = true) noexcept {
+    if (value.empty() || value.size() > 253) {
+        return false;
+    }
+    if (value.starts_with("*.")) {
+        if (!allow_wildcard) {
+            return false;
+        }
+        value.remove_prefix(2);
+    }
+    std::size_t label_count = 0;
+    while (!value.empty()) {
+        const auto dot = value.find('.');
+        const bool is_last = (dot == std::string_view::npos);
+        const auto label = value.substr(0, dot);
+        if (!is_valid_dns_label(label, is_last)) {
+            return false;
+        }
+        ++label_count;
+        if (is_last) {
+            return label_count >= 2;
+        }
+        value.remove_prefix(dot + 1);
+        if (value.empty()) {
+            return false;
+        }
+    }
+    return false;
 }
 
 inline bool certificate_covers_hostname(std::string_view certificate_domain,

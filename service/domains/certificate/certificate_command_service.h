@@ -5,8 +5,6 @@
 #include <ruvia/web/db/db.h>
 #include <ruvia/web/db/db_transaction.h>
 
-#include <algorithm>
-#include <cctype>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -26,6 +24,7 @@
 #include "service/features/live_resource/notification_outbox.h"
 #include "service/features/sync_runtime/state.h"
 #include "service/features/sync_runtime/work_commit.h"
+#include "service/utils/text.h"
 
 namespace service::certificate {
 
@@ -46,7 +45,7 @@ public:
             service::common::throw_app_error(service::common::validation_error_code, "证书配置不正确",
                 400);
         }
-        const auto domain = normalize_domain(domain_input->view());
+        const auto domain = service::utils::to_lower_ascii(domain_input->view());
         const auto provider_id = std::string(provider_id_input->view());
         const auto zone_id = std::string(zone_id_input->view());
         auto transaction = co_await c.db().begin_transaction();
@@ -99,21 +98,22 @@ public:
         service::background::queued_work work;
         (void)co_await service::certificate_issuance::enqueue_certificate_revision(
             transaction, tenant_id, certificate_id, 1, service::sync_runtime::marker_operation::issue, work);
-        co_await commit_changes(transaction, c, tenant_id, certificate_id, work);
+        co_await service::sync_runtime::commit_work(
+            transaction, c, tenant_id, service::live_resource::resource::certificates, certificate_id, work);
         co_return revision;
     }
 
     ruvia::task<std::int64_t> update(
         ruvia::context& c, const std::string& tenant_id, const std::string& id,
         std::int64_t expected_revision,
-        const ruvia::validated_json<service::certificate_issuance::certificate_config_input>& config) {
+        const service::certificate_issuance::certificate_config_input& config) {
         auto transaction = co_await c.db().begin_transaction();
         const auto certificates = co_await transaction.query(
             "SELECT revision FROM sys_certificate WHERE id = $1 AND tenant_id = $2 AND "
             "deleted_at IS NULL LIMIT 1 FOR UPDATE",
             id, tenant_id);
         service::common::require_current_revision(certificates, expected_revision, revision_errors_);
-        const auto normalized_config = service::certificate_issuance::normalize(config.value());
+        const auto normalized_config = service::certificate_issuance::normalize(config);
         if (!normalized_config) {
             service::common::throw_app_error(service::common::validation_error_code, "证书配置不正确",
                 400);
@@ -123,7 +123,8 @@ public:
             "UPDATE sys_certificate SET revision = revision + 1, config = $1::jsonb, updated_at = "
             "NOW() WHERE id = $2 AND tenant_id = $3 RETURNING revision",
             std::string_view(config_json), id, tenant_id);
-        co_await commit_changes(transaction, c, tenant_id, id, service::background::queued_work{});
+        co_await service::sync_runtime::commit_work(transaction, c, tenant_id,
+            service::live_resource::resource::certificates, id, service::background::queued_work{});
         co_return updated.front()[0].as<std::int64_t>().value_or(0);
     }
 
@@ -147,7 +148,8 @@ public:
         service::background::queued_work work;
         (void)co_await service::certificate_issuance::enqueue_certificate_revision(
             transaction, tenant_id, id, issuance_revision, service::sync_runtime::marker_operation::renew, work);
-        co_await commit_changes(transaction, c, tenant_id, id, work);
+        co_await service::sync_runtime::commit_work(
+            transaction, c, tenant_id, service::live_resource::resource::certificates, id, work);
         co_return expected_revision;
     }
 
@@ -174,20 +176,14 @@ public:
             work);
         co_await service::sync_runtime::remove_marker(
             transaction, tenant_id, service::sync_runtime::marker_resource_type::certificate, id, work);
-        co_await commit_changes(transaction, c, tenant_id, id, work);
+        co_await service::sync_runtime::commit_work(
+            transaction, c, tenant_id, service::live_resource::resource::certificates, id, work);
         co_return removed.front()[0].as<std::int64_t>().value_or(0);
     }
 
 private:
     static constexpr service::common::revision_errors revision_errors_{certificate_error::not_found,
         certificate_error::revision_conflict};
-
-    static ruvia::task<void> commit_changes(ruvia::db_transaction& transaction, ruvia::context& c, const std::string& tenant_id, const std::string& id,
-        const service::background::queued_work& work) {
-        service::live_resource::notifications::resource_notification notification(tenant_id);
-        notification.changed(service::live_resource::resource::certificates, id);
-        co_await service::sync_runtime::commit_work(transaction, c, std::move(notification), work);
-    }
 
     static std::string
     serialize_certificate_config(ruvia::context& c,
@@ -196,13 +192,6 @@ private:
             service::certificate_issuance::to_output(config, {.resource_ = c.pool()});
         const auto json = ruvia::to_json(output, {.resource_ = c.pool()});
         return std::string(json.data(), json.size());
-    }
-
-    static std::string normalize_domain(std::string_view input) {
-        std::string result(input);
-        std::transform(result.begin(), result.end(), result.begin(),
-            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        return result;
     }
 };
 

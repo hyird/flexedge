@@ -1,9 +1,7 @@
 #pragma once
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
-#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -19,6 +17,7 @@
 #include <openssl/rsa.h>
 
 #include "service/features/certificate/acme_types.h"
+#include "service/utils/base64.h"
 
 namespace service::certificate_issuance::detail {
 
@@ -28,51 +27,21 @@ using evp_md_context_ptr = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free
 using evp_pkey_context_ptr = std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)>;
 using evp_pkey_ptr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
 
-inline std::string base64_url(std::span<const unsigned char> input) {
-    if (input.empty()) {
-        return {};
-    }
-    if (input.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        throw acme_error("ACME 编码内容过大", true);
-    }
-    std::string output(4 * ((input.size() + 2) / 3), '\0');
-    const auto size = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(output.data()), input.data(),
-        static_cast<int>(input.size()));
-    if (size < 0) {
-        throw acme_error("ACME Base64URL 编码失败", true);
-    }
-    output.resize(static_cast<std::size_t>(size));
-    std::replace(output.begin(), output.end(), '+', '-');
-    std::replace(output.begin(), output.end(), '/', '_');
-    while (!output.empty() && output.back() == '=') {
-        output.pop_back();
-    }
-    return output;
-}
-
 inline std::string base64_url(std::string_view input) {
-    return base64_url(std::span<const unsigned char>(
-        reinterpret_cast<const unsigned char*>(input.data()), input.size()));
+    return service::utils::base64_url_encode(input);
 }
 
-inline std::vector<unsigned char> base64_url_decode(std::string_view input) {
-    std::string encoded(input);
-    std::replace(encoded.begin(), encoded.end(), '-', '+');
-    std::replace(encoded.begin(), encoded.end(), '_', '/');
-    const auto padding = (4 - encoded.size() % 4) % 4;
-    encoded.append(padding, '=');
-    if (encoded.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        throw acme_error("EAB HMAC Key 过大", true);
-    }
-    std::vector<unsigned char> output((encoded.size() / 4) * 3);
-    const auto size =
-        EVP_DecodeBlock(output.data(), reinterpret_cast<const unsigned char*>(encoded.data()),
-            static_cast<int>(encoded.size()));
-    if (size < 0 || static_cast<std::size_t>(size) < padding) {
+inline std::string base64_url(std::span<const unsigned char> input) {
+    return service::utils::base64_url_encode(
+        std::string_view(reinterpret_cast<const char*>(input.data()), input.size()));
+}
+
+inline std::string base64_url_decode(std::string_view input) {
+    auto decoded = service::utils::base64_url_decode(input);
+    if (!decoded || decoded->empty()) {
         throw acme_error("EAB HMAC Key 格式无效", true);
     }
-    output.resize(static_cast<std::size_t>(size) - padding);
-    return output;
+    return std::move(*decoded);
 }
 
 inline std::string hmac_sha256(std::string_view encoded_key, std::string_view input) {

@@ -3,7 +3,6 @@
 #include <ruvia/http/http_content_codec.h>
 
 #include <algorithm>
-#include <cctype>
 #include <charconv>
 #include <cstddef>
 #include <optional>
@@ -11,6 +10,7 @@
 #include <string>
 #include <string_view>
 
+#include "common/route_policy.h"
 #include "node/data/buffered_proxy_response.h"
 #include "node/data/origin_request_codec.h"
 #include "node/proto/edge_control.pb.h"
@@ -21,39 +21,23 @@ inline std::string_view response_header(const buffered_proxy_response& response,
     std::string_view name) noexcept {
     for (auto iterator = response.headers_.rbegin(); iterator != response.headers_.rend();
         ++iterator) {
-        if (http_header_name(iterator->first, name)) {
+        if (flexedge::route_policy::ascii_equal(iterator->first, name)) {
             return iterator->second;
         }
     }
     return {};
 }
 
-inline bool ascii_equal(std::string_view left, std::string_view right) noexcept {
-    return left.size() == right.size() &&
-           std::equal(left.begin(), left.end(), right.begin(),
-               [](unsigned char a, unsigned char b) {
-                   return static_cast<unsigned char>(std::tolower(a)) ==
-                          static_cast<unsigned char>(std::tolower(b));
-               });
-}
-
-inline bool ascii_starts_with(std::string_view value, std::string_view prefix) noexcept {
-    return value.size() >= prefix.size() && ascii_equal(value.substr(0, prefix.size()), prefix);
-}
-
 inline bool matches_compression_mime(const v2::Website& website, std::string_view value) noexcept {
     const auto semicolon = value.find(';');
-    value = value.substr(0, semicolon);
-    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) {
-        value.remove_suffix(1);
-    }
+    value = flexedge::route_policy::trim_ows(value.substr(0, semicolon));
     for (const auto& configured : website.response_compression_mime_types()) {
         const std::string_view pattern(configured);
         if (pattern.ends_with("/*")) {
-            if (ascii_starts_with(value, pattern.substr(0, pattern.size() - 1))) {
+            if (flexedge::route_policy::ascii_starts_with(value, pattern.substr(0, pattern.size() - 1))) {
                 return true;
             }
-        } else if (ascii_equal(value, pattern)) {
+        } else if (flexedge::route_policy::ascii_equal(value, pattern)) {
             return true;
         }
     }
@@ -73,7 +57,7 @@ inline std::string_view request_extension(std::string_view target) noexcept {
 inline bool matches_compression_extension(const auto& configured,
     std::string_view extension) noexcept {
     return std::ranges::any_of(configured, [extension](const auto& value) {
-        return ascii_equal(extension, std::string_view(value));
+        return flexedge::route_policy::ascii_equal(extension, std::string_view(value));
     });
 }
 
@@ -90,31 +74,21 @@ inline std::optional<ruvia::http_content_coding> configured_coding(std::string_v
     return std::nullopt;
 }
 
-inline std::string_view trim_encoding_whitespace(std::string_view value) noexcept {
-    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
-        value.remove_prefix(1);
-    }
-    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) {
-        value.remove_suffix(1);
-    }
-    return value;
-}
-
 struct encoding_quality_item final {
     std::string_view token_;
     double quality_{1};
 };
 
 inline encoding_quality_item parse_encoding_quality_item(std::string_view item) noexcept {
-    item = trim_encoding_whitespace(item);
+    item = flexedge::route_policy::trim_ows(item);
     const auto semicolon = item.find(';');
-    const auto token = trim_encoding_whitespace(item.substr(0, semicolon));
+    const auto token = flexedge::route_policy::trim_ows(item.substr(0, semicolon));
     double quality = 1;
     if (semicolon != std::string_view::npos) {
         const auto parameters = item.substr(semicolon + 1);
         const auto equal = parameters.find('=');
         if (equal != std::string_view::npos) {
-            const auto value = trim_encoding_whitespace(parameters.substr(equal + 1));
+            const auto value = flexedge::route_policy::trim_ows(parameters.substr(equal + 1));
             const auto parsed = std::from_chars(value.data(), value.data() + value.size(), quality);
             if (parsed.ec != std::errc{}) {
                 quality = 0;
@@ -129,11 +103,10 @@ inline double encoding_quality(std::string_view field, std::string_view wanted) 
     while (!field.empty()) {
         const auto comma = field.find(',');
         const auto parsed = parse_encoding_quality_item(field.substr(0, comma));
-        if (http_header_name(parsed.token_, wanted)) {
+        if (flexedge::route_policy::ascii_equal(parsed.token_, wanted)) {
             return parsed.quality_;
         }
         if (parsed.token_ == "*") {
-            wildcard = parsed.quality_;
         }
         if (comma == std::string_view::npos) {
             break;
@@ -184,7 +157,7 @@ inline void apply_response_compression(const v2::Website& website, std::string_v
     const auto original_size = response.body_.size();
     std::string_view plain_body = response.body_;
     const auto content_encoding = response_header(response, "Content-Encoding");
-    if (!content_encoding.empty() && !ascii_equal(content_encoding, "identity")) {
+    if (!content_encoding.empty() && !flexedge::route_policy::ascii_equal(content_encoding, "identity")) {
         return;
     }
     if (plain_body.size() < website.response_compression_min_bytes() ||
@@ -211,7 +184,8 @@ inline void apply_response_compression(const v2::Website& website, std::string_v
     response.reservation_.shrink(original_size - 1);
     response.headers_.erase(std::remove_if(response.headers_.begin(), response.headers_.end(),
                                 [](const auto& header) {
-                                    return http_header_name(header.first, "Content-Encoding");
+                                    return flexedge::route_policy::ascii_equal(
+                                        header.first, "Content-Encoding");
                                 }),
         response.headers_.end());
     response.headers_.emplace_back("Content-Encoding", ruvia::http_content_coding_token(coding));
@@ -221,7 +195,9 @@ inline void apply_response_compression(const v2::Website& website, std::string_v
     } else if (vary.find("Accept-Encoding") == std::string::npos) {
         response.headers_.erase(
             std::remove_if(response.headers_.begin(), response.headers_.end(),
-                [](const auto& header) { return http_header_name(header.first, "Vary"); }),
+                [](const auto& header) {
+                    return flexedge::route_policy::ascii_equal(header.first, "Vary");
+                }),
             response.headers_.end());
         response.headers_.emplace_back("Vary", vary + ", Accept-Encoding");
     }

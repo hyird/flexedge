@@ -11,6 +11,7 @@
 #include <memory_resource>
 #include <optional>
 #include <string>
+#include <span>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -59,6 +60,43 @@ inline std::vector<ruvia::db_expression> sql_columns(ruvia::db_query& query,
     return expressions;
 }
 
+inline constexpr std::string_view iso8601_micros_sql_format{"'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'"};
+
+inline ruvia::db_expression db_all(ruvia::db_query& query,
+    std::initializer_list<ruvia::db_expression> items) {
+    auto it = items.begin();
+    auto expression = *it++;
+    for (; it != items.end(); ++it) {
+        expression = query.binary(expression, ruvia::db_binary_operator::and_value, *it);
+    }
+    return expression;
+}
+
+inline ruvia::db_expression db_any(ruvia::db_query& query,
+    std::initializer_list<ruvia::db_expression> items) {
+    auto it = items.begin();
+    auto expression = *it++;
+    for (; it != items.end(); ++it) {
+        expression = query.binary(expression, ruvia::db_binary_operator::or_value, *it);
+    }
+    return expression;
+}
+
+inline ruvia::db_expression db_in(ruvia::db_query& query, ruvia::db_expression value,
+    std::initializer_list<std::string_view> items) {
+    std::vector<ruvia::db_expression> values;
+    values.reserve(items.size());
+    for (const auto item : items) {
+        values.push_back(query.value(item));
+    }
+    return query.binary(value, ruvia::db_binary_operator::in, query.list(values));
+}
+
+inline ruvia::db_expression db_json_text(ruvia::db_query& query, ruvia::db_expression value,
+    std::string_view key) {
+    return query.binary(value, ruvia::db_binary_operator::json_get_text, query.value(key));
+}
+
 struct page_rows final {
     std::int64_t total_{};
     ruvia::db_rows rows_;
@@ -84,6 +122,17 @@ ruvia::task<page_rows> query_page(context_type& c, filter_type filter, project_t
     page.limit(static_cast<std::uint64_t>(page_size)).offset(static_cast<std::uint64_t>(skip));
     auto rows = co_await c.db().query(page);
     co_return page_rows{total, std::move(rows)};
+}
+
+template <typename page_dto_type>
+inline page_dto_type init_page_dto(std::pmr::memory_resource* resource, std::int64_t total,
+    std::int64_t page, std::int64_t page_size) {
+    page_dto_type data(ruvia::model_options{.resource_ = resource});
+    data.template set<"total">(total);
+    data.template set<"page">(page);
+    data.template set<"page_size">(page_size);
+    data.template set<"total_pages">(total == 0 ? 0 : (total + page_size - 1) / page_size);
+    return data;
 }
 
 // The errors a revision-guarded write of one resource kind raises.

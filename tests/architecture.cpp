@@ -185,10 +185,10 @@ int run_architecture_tests() {
         final_header->set_value("new");
         auto result = flexedge::node::evaluate_route_rules(phased, "GET", "/old/item?v=1");
         REQUIRE(result && result->origin_group() == "last");
-        REQUIRE(flexedge::node::route_target("/old/item?v=1", &*result) == "/api/item?v=2");
-        REQUIRE(result->request_headers_size() == 2);
-        REQUIRE(result->request_headers(0).value() == "yes");
-        REQUIRE(result->request_headers(1).value() == "new");
+        REQUIRE(result->rewritten_target() == "/api/item?v=2");
+        REQUIRE(result->request_headers().size() == 2);
+        REQUIRE(result->request_headers()[0].value() == "yes");
+        REQUIRE(result->request_headers()[1].value() == "new");
         last->set_enabled(false);
         REQUIRE(flexedge::node::evaluate_route_rules(phased, "GET", "/old/item")->origin_group() == "first");
         auto* redirect = add("redirect", "/old");
@@ -203,7 +203,7 @@ int run_architecture_tests() {
         REQUIRE(result->redirect_status() == 307);
         REQUIRE(flexedge::node::evaluate_route_rules(phased, "GET", "/missing")->origin_group() == "default");
         result = flexedge::node::evaluate_route_rules(phased, "GET", "/missing?");
-        REQUIRE(result && flexedge::node::route_target("/missing?", &*result) == "/missing?");
+        REQUIRE(result && result->rewritten_target() == "/missing?");
     }
     using service::sync_runtime::marker_operation;
     using service::sync_runtime::marker_resource_type;
@@ -417,7 +417,6 @@ int run_architecture_tests() {
     route->set_path("/api");
     route->add_methods("GET");
     route->set_action("proxy");
-    route->set_rewrite_path("/internal");
     route->set_origin_group("api");
     auto* default_origin = route_website.add_origins();
     default_origin->set_id("origin-default");
@@ -444,21 +443,25 @@ int run_architecture_tests() {
     response_header->set_name("X-Edge-Route");
     response_header->set_value("api");
     flexedge::node::validate_route_rules(route_website);
-    // An earlier catch-all wins even over a longer path. Moving it below the
-    // specific rule changes selection without changing any match fields.
-    REQUIRE(flexedge::node::matched_route_rule(route_website, "GET", "/api/v1?q=1") == fallback_route);
-    route_website.mutable_route_rules()->SwapElements(0, 1);
-    const auto* matched = flexedge::node::matched_route_rule(route_website, "GET", "/api/v1?q=1");
-    REQUIRE(matched == route);
-    REQUIRE(flexedge::node::matched_route_rule(route_website, "GET", "/apix") == fallback_route);
-    REQUIRE(flexedge::node::route_target("/api/v1?q=1", matched) == "/internal?q=1");
-    const auto route_origins = flexedge::node::origin_candidates(route_website, 0, matched);
+    // Proxy policies merge in order, with the last matching rule choosing the group.
+    auto matched = flexedge::node::evaluate_route_rules(route_website, "GET", "/api/v1?q=1");
+    REQUIRE(matched && matched->id() == route->id());
+    const auto route_origins = flexedge::node::origin_candidates(route_website, 0, &*matched);
     REQUIRE(route_origins.size() == 1);
     REQUIRE(route_origins.front()->id() == "origin-route");
+    route_website.mutable_route_rules()->SwapElements(0, 1);
+    matched = flexedge::node::evaluate_route_rules(route_website, "GET", "/api/v1?q=1");
+    REQUIRE(matched && matched->id() == fallback_route->id());
+    route_website.mutable_route_rules()->SwapElements(0, 1);
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/apix")->id() == fallback_route->id());
+    route->set_rewrite_path("/internal");
+    const auto rewritten = flexedge::node::evaluate_route_rules(route_website, "GET", "/api/v1?q=1");
+    REQUIRE(rewritten && rewritten->rewritten_target() == "/internal?q=1");
+    route->clear_rewrite_path();
     const auto default_origins = flexedge::node::origin_candidates(route_website, 0);
     REQUIRE(default_origins.size() == 1);
     REQUIRE(default_origins.front()->id() == "origin-default");
-    REQUIRE(flexedge::node::matched_route_rule(route_website, "POST", "/api/v1") == fallback_route);
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "POST", "/api/v1")->id() == fallback_route->id());
     std::vector<std::pair<std::string, std::string>> route_headers{{"X-Route", "old"},
         {"Accept", "application/json"}};
     flexedge::node::apply_route_headers(route_headers, route->request_headers());
@@ -468,28 +471,28 @@ int run_architecture_tests() {
     REQUIRE(route_headers.back().second == "enabled");
     // A hostname mismatch skips the earlier rule and continues down the list.
     route->add_hostnames("API.Example.com");
-    REQUIRE(flexedge::node::matched_route_rule(route_website, "GET", "/api/v1", "api.example.com:443") == route);
-    REQUIRE(flexedge::node::matched_route_rule(route_website, "GET", "/api/v1", "www.example.com") == fallback_route);
-    REQUIRE(flexedge::node::matched_route_rule(route_website, "GET", "/apix", "api.example.com") == fallback_route);
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/api/v1", "api.example.com:443").value().id() == route->id());
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/api/v1", "www.example.com").value().id() == fallback_route->id());
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/apix", "api.example.com").value().id() == fallback_route->id());
     route->set_name("API rule");
     route->set_description("Route API traffic");
     route->set_rewrite_mode("replace_prefix");
     route->set_rewrite_path("/v2/");
-    REQUIRE(flexedge::node::route_target("/api/users?a=1", route) == "/v2/users?a=1");
-    REQUIRE(flexedge::node::route_target("/api?a=1", route) == "/v2/?a=1");
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/api/users?a=1", "api.example.com").value().rewritten_target() == "/v2/users?a=1");
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/api?a=1", "api.example.com").value().rewritten_target() == "/v2/?a=1");
     route->set_query_mode("drop");
-    REQUIRE(flexedge::node::route_target("/api/users?a=1", route) == "/v2/users");
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/api/users?a=1", "api.example.com").value().rewritten_target() == "/v2/users");
     route->set_query_mode("replace");
     route->set_query_string("b=2&c=%2F");
-    REQUIRE(flexedge::node::route_target("/api/users?a=1", route) == "/v2/users?b=2&c=%2F");
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/api/users?a=1", "api.example.com").value().rewritten_target() == "/v2/users?b=2&c=%2F");
     route->set_rewrite_mode("strip_prefix");
     route->clear_rewrite_path();
-    REQUIRE(flexedge::node::route_target("/api/users?a=1", route) == "/users?b=2&c=%2F");
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/api/users?a=1", "api.example.com").value().rewritten_target() == "/users?b=2&c=%2F");
     route->set_path("/api/");
-    REQUIRE(flexedge::node::route_target("/api/users?a=1", route) == "/users?b=2&c=%2F");
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/api/users?a=1", "api.example.com").value().rewritten_target() == "/users?b=2&c=%2F");
     route->set_path("/api");
     route->clear_query_string();
-    REQUIRE(flexedge::node::route_target("/api", route) == "/");
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/api", "api.example.com").value().rewritten_target() == "/");
     flexedge::node::validate_route_rules(route_website);
     route->set_query_string("bad\r\nheader=1");
     REQUIRE(throws_runtime_error([&] { flexedge::node::validate_route_rules(route_website); }));
@@ -503,12 +506,12 @@ int run_architecture_tests() {
     route->set_redirect_status(302);
     route->set_redirect_url("https://example.com/new?target=1#part");
     route->set_query_mode("preserve");
-    REQUIRE(flexedge::node::route_redirect_location("/old?source=1", *route) == "https://example.com/new?target=1#part");
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/api?source=1").value().redirect_url() == "https://example.com/new?target=1#part");
     route->set_query_mode("drop");
-    REQUIRE(flexedge::node::route_redirect_location("/old?source=1", *route) == "https://example.com/new#part");
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/api?source=1").value().redirect_url() == "https://example.com/new#part");
     route->set_query_mode("replace");
     route->set_query_string("replacement=1");
-    REQUIRE(flexedge::node::route_redirect_location("/old?source=1", *route) == "https://example.com/new?replacement=1#part");
+    REQUIRE(flexedge::node::evaluate_route_rules(route_website, "GET", "/api?source=1").value().redirect_url() == "https://example.com/new?replacement=1#part");
     flexedge::node::validate_route_rules(route_website);
 
     const auto rule_input = ruvia::from_json<service::website_config::website_route_rule_input>(R"json({
@@ -615,19 +618,19 @@ int run_architecture_tests() {
         flexedge::node::route_patterns compiled;
         flexedge::node::validate_route_rules(rich, &compiled);
         REQUIRE(compiled.size() == 2);
-        REQUIRE(flexedge::node::matched_route_rule(rich, "GET", "/old/a?tag=two", "", headers, &compiled) == regex);
-        REQUIRE(flexedge::node::matched_route_rule(rich, "GET", "/old/a?tag=one", "", headers, &compiled) == regex_later);
-        REQUIRE(flexedge::node::matched_route_rule(rich, "GET", "/old/a?tag=two", "", {}, &compiled) == regex_later);
-        REQUIRE(flexedge::node::matched_route_rule(rich, "GET", "/old/a.jpg", "", {}, &compiled) == regex_later);
-        REQUIRE(flexedge::node::matched_route_rule(rich, "GET", "/old/api/b.jpg", "", {}, &compiled) == regex_later);
-        REQUIRE(flexedge::node::matched_route_rule(rich, "GET", "/old/api/a.jpg", "", {}, &compiled) == regex_later);
+        REQUIRE(flexedge::node::evaluate_route_rules(rich, "GET", "/old/a?tag=two", "", headers, &compiled).value().id() == regex->id());
+        REQUIRE(flexedge::node::evaluate_route_rules(rich, "GET", "/old/a?tag=one", "", headers, &compiled).value().id() == regex_later->id());
+        REQUIRE(flexedge::node::evaluate_route_rules(rich, "GET", "/old/a?tag=two", "", {}, &compiled).value().id() == regex_later->id());
+        REQUIRE(flexedge::node::evaluate_route_rules(rich, "GET", "/old/a.jpg", "", {}, &compiled).value().id() == regex_later->id());
+        REQUIRE(flexedge::node::evaluate_route_rules(rich, "GET", "/old/api/b.jpg", "", {}, &compiled).value().id() == regex_later->id());
+        REQUIRE(flexedge::node::evaluate_route_rules(rich, "GET", "/old/api/a.jpg", "", {}, &compiled).value().id() == regex_later->id());
         regex_later->set_enabled(false);
-        REQUIRE(flexedge::node::matched_route_rule(rich, "GET", "/old/api/a.jpg", "", {}, &compiled) == suffix);
+        REQUIRE(flexedge::node::evaluate_route_rules(rich, "GET", "/old/api/a.jpg", "", {}, &compiled).value().id() == suffix->id());
         suffix->set_enabled(false);
-        REQUIRE(flexedge::node::matched_route_rule(rich, "GET", "/old/api/a.jpg", "", {}, &compiled) == prefix);
+        REQUIRE(flexedge::node::evaluate_route_rules(rich, "GET", "/old/api/a.jpg", "", {}, &compiled).value().id() == prefix->id());
         rich.mutable_route_rules()->SwapElements(3, 4);
-        REQUIRE(flexedge::node::matched_route_rule(rich, "GET", "/old/api/a.jpg", "", {}, &compiled) == exact);
-        REQUIRE(flexedge::node::route_redirect_location("/old/a%2Fb?tag=two", *regex, &compiled) == "/new/a%2Fb?v=2#section");
+        REQUIRE(flexedge::node::evaluate_route_rules(rich, "GET", "/old/api/a.jpg", "", {}, &compiled).value().id() == exact->id());
+        REQUIRE(flexedge::node::evaluate_route_rules(rich, "GET", "/old/a%2Fb?tag=two", "", headers, &compiled).value().redirect_url() == "/new/a%2Fb?v=2#section");
         regex->set_redirect_status(308);
         flexedge::node::validate_route_rules(rich);
         regex->set_redirect_status(303);

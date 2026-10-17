@@ -1,3 +1,4 @@
+import type { Website } from './types'
 import type { WebsiteFormValues } from './website-form'
 
 /** Settings editor groups in navigation order; the selected group is
@@ -118,6 +119,18 @@ export function websiteSectionForPath(path: string): WebsiteSectionId {
 }
 
 export type WebsiteFormErrors = Record<string, string>
+
+export type WebsiteSectionProps = {
+  values: WebsiteFormValues
+  errors: WebsiteFormErrors
+  update: <K extends keyof WebsiteFormValues>(
+    key: K,
+    value: WebsiteFormValues[K]
+  ) => void
+  replace: (change: (current: WebsiteFormValues) => WebsiteFormValues) => void
+  /** Saved website in edit mode; absent while creating. */
+  website?: Website
+}
 
 /** First message per dotted path, as rendered next to each field. */
 export function collectWebsiteFormErrors(

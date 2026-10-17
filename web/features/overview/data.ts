@@ -4,6 +4,7 @@ import { pageDataSchema, streamPath } from '@/lib/api'
 import { parseResponseData } from '@/lib/api-response'
 import { formatDate, ratioOf } from '@/lib/format'
 import { readLiveEvent } from '@/lib/live-query'
+import { queryKeys } from '@/lib/query-keys'
 import { applyNodeRuntimePagePatch } from '@/features/nodes/data'
 import { nodeSchema, type Node } from '@/features/nodes/types'
 
@@ -36,7 +37,7 @@ export type Overview = z.infer<typeof overviewSchema>
 const overviewStream = streamPath('/overview')
 
 export const overviewQuery = queryOptions({
-  queryKey: ['overview', 'summary'],
+  queryKey: [...queryKeys.overview, 'summary'],
   retry: false,
   // Rendered inline by QueryNotice / DataTable on the overview page.
   meta: { inlineError: true },
@@ -84,7 +85,7 @@ export const overviewTrafficSchema = z.object({
 export type OverviewTraffic = z.infer<typeof overviewTrafficSchema>
 
 export const overviewTrafficQuery = queryOptions({
-  queryKey: ['overview', 'traffic'],
+  queryKey: [...queryKeys.overview, 'traffic'],
   retry: false,
   meta: { inlineError: true },
   queryFn: ({ queryKey, signal }) =>
@@ -100,7 +101,7 @@ export const overviewNodePageSize = 100
 
 /** `nodes` event: first 100 nodes, kept current by `node-runtime` patches. */
 export const overviewNodesQuery = queryOptions({
-  queryKey: ['overview', 'nodes'],
+  queryKey: [...queryKeys.overview, 'nodes'],
   retry: false,
   meta: { inlineError: true },
   queryFn: ({ queryKey, signal }) =>

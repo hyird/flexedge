@@ -32,30 +32,16 @@ public:
     http1_request_reader(const http1_request_reader&) = delete;
     http1_request_reader& operator=(const http1_request_reader&) = delete;
 
-    // `buffer` holds every byte received for this request, including bytes from earlier
-    // calls. After complete, request() and body() borrow `buffer` until it changes.
-    [[nodiscard]] http1_request_read_status consume(std::string_view buffer) {
+    // `buffer` receives incremental bytes for this request; once the head is accepted its
+    // bytes are owned by `head_bytes_` and `buffer` retains only body or post-message bytes.
+    [[nodiscard]] http1_request_read_status consume(std::string& buffer) {
         if (header_bytes_ == 0) {
             const auto status = consume_head(buffer);
             if (status != http1_request_read_status::complete) {
                 return status;
             }
         }
-        const auto status = consume_body(buffer);
-        if (status == http1_request_read_status::complete) {
-            // Header views borrow the caller buffer, which may have moved since the head
-            // was first accepted. The head bytes are unchanged, so reparsing is stable.
-            parser_.parse_head(buffer, state_);
-            if (state_.head_ready() == nullptr) {
-                return http1_request_read_status::bad_request;
-            }
-            if (known_length_) {
-                body_ = buffer.substr(header_bytes_, *known_length_);
-            } else if (chunked_) {
-                body_ = decoded_body_;
-            }
-        }
-        return status;
+        return consume_body(buffer);
     }
 
     [[nodiscard]] const ruvia::http_request& request() const noexcept {
@@ -80,21 +66,29 @@ public:
         return message_bytes_;
     }
 
+    [[nodiscard]] std::string_view unconsumed_bytes() const noexcept {
+        return unconsumed_bytes_;
+    }
+
 private:
-    http1_request_read_status consume_head(std::string_view buffer) {
-        parser_.parse_head(buffer, state_, header_search_offset_);
+    http1_request_read_status consume_head(std::string& buffer) {
+        head_bytes_.append(buffer);
+        buffer.clear();
+        parser_.parse_head(head_bytes_, state_, header_search_offset_);
         if (state_.failure() != nullptr) {
             return http1_request_read_status::bad_request;
         }
         const auto* head = state_.head_ready();
         if (head == nullptr) {
-            if (buffer.size() >= max_request_bytes_) {
+            if (head_bytes_.size() >= max_request_bytes_) {
                 return http1_request_read_status::too_large;
             }
-            header_search_offset_ = buffer.size();
+            header_search_offset_ = head_bytes_.size();
             return http1_request_read_status::need_more;
         }
         header_bytes_ = head->header_bytes();
+        buffer.assign(std::string_view(head_bytes_).substr(header_bytes_));
+        head_bytes_.resize(header_bytes_);
         if (const auto* known = state_.body_plan_.known_length()) {
             const auto content_length = known->content_length();
             if (content_length > ruvia::default_max_buffered_body_bytes) {
@@ -115,36 +109,50 @@ private:
         return http1_request_read_status::complete;
     }
 
-    http1_request_read_status consume_body(std::string_view buffer) {
+    http1_request_read_status consume_body(std::string& buffer) {
         if (known_length_) {
-            if (buffer.size() - header_bytes_ < *known_length_) {
+            if (buffer.size() < *known_length_) {
                 return http1_request_read_status::need_more;
             }
+            body_ = std::string_view(buffer).substr(0, *known_length_);
+            unconsumed_bytes_ = std::string_view(buffer).substr(*known_length_);
             message_bytes_ = header_bytes_ + *known_length_;
             return http1_request_read_status::complete;
         }
         if (!chunked_) {
+            body_ = {};
+            unconsumed_bytes_ = buffer;
             message_bytes_ = header_bytes_;
             return http1_request_read_status::complete;
         }
+        std::size_t offset{};
         for (;;) {
-            const auto available = buffer.substr(header_bytes_ + chunked_bytes_);
+            const auto available = std::string_view(buffer).substr(offset);
             const auto step = decoder_->decode(available);
             if (const auto* chunk = step.body_chunk()) {
                 append_decoded(chunk->bytes());
+                offset += chunk->consumed_bytes();
                 chunked_bytes_ += chunk->consumed_bytes();
                 continue;
             }
             if (const auto* complete = step.complete()) {
+                offset += complete->consumed_bytes();
                 chunked_bytes_ += complete->consumed_bytes();
+                buffer.erase(0, offset);
+                body_ = decoded_body_;
+                unconsumed_bytes_ = buffer;
                 message_bytes_ = header_bytes_ + chunked_bytes_;
                 return http1_request_read_status::complete;
             }
             if (step.failure() != nullptr) {
+                buffer.erase(0, offset);
                 return http1_request_read_status::bad_request;
             }
-            chunked_bytes_ += step.need_more()->consumed_bytes();
-            if (buffer.size() >= max_request_bytes_) {
+            const auto consumed = step.need_more()->consumed_bytes();
+            offset += consumed;
+            chunked_bytes_ += consumed;
+            buffer.erase(0, offset);
+            if (header_bytes_ + chunked_bytes_ + buffer.size() >= max_request_bytes_) {
                 return http1_request_read_status::too_large;
             }
             return http1_request_read_status::need_more;
@@ -166,6 +174,7 @@ private:
     std::size_t max_request_bytes_;
     ruvia::http1_server_request_parser parser_;
     ruvia::http1_server_request_parse_state state_;
+    std::string head_bytes_;
     std::size_t header_search_offset_{};
     std::size_t header_bytes_{};
     std::optional<std::size_t> known_length_;
@@ -175,6 +184,7 @@ private:
     std::string decoded_body_;
     bool decoded_body_exceeded_{};
     std::string_view body_;
+    std::string_view unconsumed_bytes_;
     std::size_t message_bytes_{};
 };
 

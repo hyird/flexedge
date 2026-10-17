@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/route_policy.h"
 #include "node/data/buffered_proxy_response.h"
 #include "node/data/origin_request_codec.h"
 
@@ -45,14 +46,14 @@ class origin_response_codec final {
 public:
     // `route` belongs to the request and must outlive the codec.
     origin_response_codec(ruvia::http1_client_exchange_state response_exchange, bool hsts_enabled,
-        const v2::RouteRule* route)
+        const evaluated_route_policy* route)
         : parser_(std::make_unique<ruvia::http1_client_response_parser>(std::move(response_exchange))),
           hsts_enabled_(hsts_enabled),
           route_(route) {}
 
     // Buffers the response; every retained head and body byte is charged to `reservation`.
     origin_response_codec(ruvia::http1_client_exchange_state response_exchange, bool hsts_enabled,
-        const v2::RouteRule* route, buffered_bytes_lease reservation)
+        const evaluated_route_policy* route, buffered_bytes_lease reservation)
         : origin_response_codec(std::move(response_exchange), hsts_enabled, route) {
         buffered_.emplace();
         buffered_->reservation_ = std::move(reservation);
@@ -203,28 +204,25 @@ private:
         tunnel };
 
     static bool hop_by_hop(std::string_view name) noexcept {
-        return http_header_name(name, "Connection") || http_header_name(name, "Keep-Alive") ||
-               http_header_name(name, "Proxy-Connection") || http_header_name(name, "TE") ||
-               http_header_name(name, "Transfer-Encoding") || http_header_name(name, "Upgrade");
+        return flexedge::route_policy::ascii_equal(name, "Connection") ||
+               flexedge::route_policy::ascii_equal(name, "Keep-Alive") ||
+               flexedge::route_policy::ascii_equal(name, "Proxy-Connection") ||
+               flexedge::route_policy::ascii_equal(name, "TE") ||
+               flexedge::route_policy::ascii_equal(name, "Transfer-Encoding") ||
+               flexedge::route_policy::ascii_equal(name, "Upgrade");
     }
 
     // Field names listed by Connection; the views borrow `head`.
     static std::vector<std::string_view> connection_options(const ruvia::http_client_response_head& head) {
         std::vector<std::string_view> options;
         for (const auto& header : head.headers()) {
-            if (!http_header_name(header.name(), "Connection")) {
+            if (!flexedge::route_policy::ascii_equal(header.name(), "Connection")) {
                 continue;
             }
             std::string_view value = header.value();
             while (!value.empty()) {
                 const auto comma = value.find(',');
-                auto option = value.substr(0, comma);
-                while (!option.empty() && (option.front() == ' ' || option.front() == '\t')) {
-                    option.remove_prefix(1);
-                }
-                while (!option.empty() && (option.back() == ' ' || option.back() == '\t')) {
-                    option.remove_suffix(1);
-                }
+                const auto option = flexedge::route_policy::trim_ows(value.substr(0, comma));
                 if (!option.empty()) {
                     options.push_back(option);
                 }
@@ -240,17 +238,19 @@ private:
     static bool connection_option(const std::vector<std::string_view>& options,
         std::string_view name) noexcept {
         return std::ranges::any_of(options, [&](std::string_view option) {
-            return http_header_name(name, option);
+            return flexedge::route_policy::ascii_equal(name, option);
         });
     }
 
     // Fields the proxy sets itself.
     [[nodiscard]] bool replaced(std::string_view name) const noexcept {
-        return (hsts_enabled_ && http_header_name(name, "Strict-Transport-Security")) ||
-               (route_ != nullptr &&
-                   std::ranges::any_of(route_->response_headers(), [&](const auto& mutation) {
-                       return http_header_name(name, mutation.name());
-                   }));
+        if (hsts_enabled_ && flexedge::route_policy::ascii_equal(name, "Strict-Transport-Security")) {
+            return true;
+        }
+        return route_ != nullptr &&
+               std::ranges::any_of(route_->response_headers(), [&](const auto& mutation) {
+                   return flexedge::route_policy::ascii_equal(name, mutation.name());
+               });
     }
 
     static void append_field(std::string& output, std::string_view name, std::string_view value) {
@@ -295,8 +295,9 @@ private:
         for (const auto& header : head.headers()) {
             const auto name = header.name();
             const auto upgrade_field =
-                tunnel_ && (http_header_name(name, "Connection") || http_header_name(name, "Upgrade"));
-            const auto framing_field = http_header_name(name, "Transfer-Encoding");
+                tunnel_ && (flexedge::route_policy::ascii_equal(name, "Connection") ||
+                               flexedge::route_policy::ascii_equal(name, "Upgrade"));
+            const auto framing_field = flexedge::route_policy::ascii_equal(name, "Transfer-Encoding");
             if ((!upgrade_field && !framing_field &&
                     (hop_by_hop(name) || connection_option(options, name))) ||
                 replaced(name)) {
@@ -315,7 +316,8 @@ private:
         for (const auto& header : head.headers()) {
             const auto name = header.name();
             if (hop_by_hop(name) || connection_option(options, name) ||
-                http_header_name(name, "Content-Length") || http_header_name(name, "Trailer")) {
+                flexedge::route_policy::ascii_equal(name, "Content-Length") ||
+                flexedge::route_policy::ascii_equal(name, "Trailer")) {
                 continue;
             }
             buffered_->headers_.emplace_back(name, header.value());
@@ -448,7 +450,7 @@ private:
     std::string chunk_framing_;
     std::optional<std::uint16_t> status_code_;
     bool hsts_enabled_{};
-    const v2::RouteRule* route_{};
+    const evaluated_route_policy* route_{};
     bool tunnel_{};
     bool complete_{};
     bool origin_reusable_{};

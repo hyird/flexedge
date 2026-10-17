@@ -1,9 +1,11 @@
 import { type FormEvent, useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
 import { apiErrorMessage } from '@/lib/api'
 import { fieldErrors } from '@/lib/form-errors'
+import { useRevisionDraft } from '@/lib/revision-draft'
 import { FormSheet } from '@/components/form-sheet'
 import { Choice, Field } from '@/components/forms'
+import { RevisionConflictAlert } from '@/components/revision-conflict-alert'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import {
   certificateProviderFormSchema,
@@ -17,6 +19,17 @@ import {
 } from './provider-sheet-sections'
 import type { CertificateProvider } from './types'
 
+function toFormValues(
+  provider?: CertificateProvider
+): CertificateProviderFormValues {
+  return {
+    provider: provider?.provider ?? 'letsencrypt',
+    credential_mode: provider?.credential_mode ?? 'email',
+    account_email: provider?.account_email ?? '',
+    access_key: '',
+  }
+}
+
 /** Create (no `provider`) or edit certificate issuance credentials. The CA is
  * fixed after creation; Let's Encrypt only supports e-mail registration. */
 export function CertificateProviderSheet({
@@ -27,38 +40,51 @@ export function CertificateProviderSheet({
   onClose: () => void
 }) {
   const client = useQueryClient()
-  const [initial] = useState<CertificateProviderFormValues>(() => ({
-    provider: provider?.provider ?? 'letsencrypt',
-    credential_mode: provider?.credential_mode ?? 'email',
-    account_email: provider?.account_email ?? '',
-    access_key: '',
-  }))
-  const [values, setValues] = useState(initial)
-  const isDirty = (
-    Object.keys(initial) as (keyof CertificateProviderFormValues)[]
-  ).some((key) => values[key] !== initial[key])
+  const [edits, setEdits] = useState<CertificateProviderFormValues>()
   const [errors, setErrors] = useState<Record<string, string>>({})
-  const update = (patch: Partial<CertificateProviderFormValues>) =>
-    setValues((current) => ({ ...current, ...patch }))
-  const mutation = useMutation({
-    meta: { inlineError: true },
-    mutationFn: (input: CertificateProviderFormValues) =>
-      saveCertificateProvider(input, provider),
-    onSuccess: (response) => {
+  const draft = useRevisionDraft({
+    server: provider,
+    save: (input: CertificateProviderFormValues, revision) =>
+      saveCertificateProvider(
+        input,
+        provider && {
+          ...provider,
+          revision: revision ?? provider.revision,
+        }
+      ),
+    onSaved: (response) => {
       toastWriteSuccess(response.message || '已保存')
       void afterProviderWrite(client, 'certificate')
       onClose()
     },
+    load: () => {
+      setEdits(undefined)
+      setErrors({})
+    },
   })
+  const base = draft.base ?? provider
+  const clean = toFormValues(base)
+  const values = edits ?? clean
+  const isDirty = (
+    Object.keys(clean) as (keyof CertificateProviderFormValues)[]
+  ).some((key) => values[key] !== clean[key])
+  const update = (patch: Partial<CertificateProviderFormValues>) => {
+    const next = { ...values, ...patch }
+    const dirty = (
+      Object.keys(clean) as (keyof CertificateProviderFormValues)[]
+    ).some((key) => next[key] !== clean[key])
+    setEdits(dirty ? next : undefined)
+    draft.track(dirty)
+  }
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const result = certificateProviderFormSchema(provider).safeParse(values)
+    const result = certificateProviderFormSchema(base).safeParse(values)
     if (!result.success) {
       setErrors(fieldErrors(result.error.issues))
       return
     }
     setErrors({})
-    mutation.mutate(result.data)
+    draft.save(result.data)
   }
   return (
     <FormSheet
@@ -72,9 +98,14 @@ export function CertificateProviderSheet({
       description='用于 ACME 签发与续期证书；保存后在编辑中“验证凭据”，验证通过才能申请证书。'
       onSubmit={submit}
       submitLabel={provider ? '保存' : '添加服务商'}
-      isSubmitting={mutation.isPending}
-      error={mutation.isError ? apiErrorMessage(mutation.error) : undefined}
+      isSubmitting={draft.isSaving}
+      error={
+        draft.error && !draft.conflict
+          ? apiErrorMessage(draft.error)
+          : undefined
+      }
     >
+      {provider && <RevisionConflictAlert draft={draft} />}
       <Choice
         label='服务商'
         value={values.provider}
@@ -89,7 +120,7 @@ export function CertificateProviderSheet({
           { id: 'letsencrypt', label: "Let's Encrypt" },
           { id: 'zerossl', label: 'ZeroSSL' },
         ]}
-        disabled={!!provider || mutation.isPending}
+        disabled={!!provider || draft.isSaving}
       />
       <Choice
         label='接入方式'
@@ -108,7 +139,7 @@ export function CertificateProviderSheet({
               ]
         }
         error={errors.credential_mode}
-        disabled={mutation.isPending}
+        disabled={draft.isSaving}
       />
       {values.credential_mode === 'email' ? (
         <Field
@@ -118,7 +149,7 @@ export function CertificateProviderSheet({
           onChange={(account_email) => update({ account_email })}
           required
           error={errors.account_email}
-          disabled={mutation.isPending}
+          disabled={draft.isSaving}
           autoComplete='email'
         />
       ) : (
@@ -129,7 +160,7 @@ export function CertificateProviderSheet({
           onChange={(access_key) => update({ access_key })}
           required={provider?.credential_mode !== 'access_key'}
           error={errors.access_key}
-          disabled={mutation.isPending}
+          disabled={draft.isSaving}
           hint={
             provider?.credential_mode === 'access_key'
               ? `留空保留当前凭据（${provider.access_key_hint || '已保存'}）。`
@@ -151,7 +182,7 @@ export function CertificateProviderSheet({
             label='删除服务商'
             title={`删除证书服务商 ${providerLabel(provider.provider)}？`}
             description='删除后无法再用该凭据签发或续期证书。仍有证书使用它时，删除会被拒绝。'
-            isDisabled={mutation.isPending}
+            isDisabled={draft.isSaving}
             onRemoved={onClose}
           />
         </>

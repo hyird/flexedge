@@ -157,7 +157,7 @@ private:
 
     struct prepared_reload final {
         ~prepared_reload() {
-            if (!committed_) {
+            if (!activated_) {
                 for (const auto& listener : additions_) {
                     listener->request_stop();
                 }
@@ -172,7 +172,19 @@ private:
         listener_map listeners_{};
         std::vector<std::shared_ptr<edge_listener>> additions_{};
         std::vector<std::shared_ptr<edge_listener>> retired_{};
-        bool committed_{};
+        bool activated_{};
+        bool unchanged_{};
+    };
+
+    struct committed_reload final {
+        std::uint64_t sequence_{};
+        std::shared_ptr<const compiled_config> previous_config_{};
+        std::shared_ptr<const route_patterns> previous_patterns_{};
+        std::shared_ptr<tls_context_set> previous_tls_contexts_{};
+        std::optional<origin_health_state::prepared> previous_health_{};
+        listener_map previous_listeners_{};
+        std::vector<std::shared_ptr<edge_listener>> additions_{};
+        std::vector<std::shared_ptr<edge_listener>> retired_{};
         bool unchanged_{};
     };
 
@@ -292,32 +304,7 @@ private:
             }
         }
         if (!reload->unchanged_) {
-            std::unordered_map<origin_health_key, std::pair<const v2::Website*, const v2::Origin*>, origin_health_key_hash, origin_health_key_equal> previous;
-            if (active) {
-                for (const auto* website : active->websites()) {
-                    for (const auto& origin : website->origins()) {
-                        previous.emplace(origin_health_key{.website_id_ = website->id(), .origin_id_ = origin.id()}, std::pair{website, &origin});
-                    }
-                }
-            }
-            origin_health_key_set keys;
-            origin_health_key_set replaced;
-            for (const auto* website : reload->config_->websites()) {
-                for (const auto& origin : website->origins()) {
-                    origin_health_key key{.website_id_ = website->id(), .origin_id_ = origin.id()};
-                    if (const auto old = previous.find(key); old != previous.end()) {
-                        const auto& [old_website, old_origin] = old->second;
-                        if (website->enabled() != old_website->enabled() || origin.enabled() != old_origin->enabled() ||
-                            website->health_check_enabled() != old_website->health_check_enabled() ||
-                            website->health_check_interval_seconds() != old_website->health_check_interval_seconds() ||
-                            make_origin_probe_config(*website, origin) != make_origin_probe_config(*old_website, *old_origin)) {
-                            replaced.emplace(key);
-                        }
-                    }
-                    keys.emplace(std::move(key));
-                }
-            }
-            reload->health_ = health_->prepare(keys, replaced);
+            reload->health_ = health_->prepare(active.get(), *reload->config_);
         }
         for (const auto& listener : reload->additions_) {
             listener->request_start();
@@ -349,33 +336,32 @@ private:
         if (!pending_ || pending_->sequence_ != sequence) {
             throw std::logic_error("data worker reload is not prepared");
         }
-        if (pending_->unchanged_) {
+        auto pending = std::move(pending_);
+        pending->activated_ = true;
+        auto rollback_state = std::make_unique<committed_reload>();
+        rollback_state->sequence_ = pending->sequence_;
+        rollback_state->previous_config_ = runtime_.config();
+        rollback_state->previous_patterns_ = runtime_.patterns();
+        rollback_state->unchanged_ = pending->unchanged_;
+        if (pending->unchanged_) {
             // Reconnecting the control channel restores the same persisted configuration.
             // Keep in-flight probes, health streaks and TLS runtime for that exact state.
-            auto previous = runtime_.config();
-            auto previous_patterns = runtime_.patterns();
-            runtime_.publish(std::move(pending_->config_), std::move(pending_->patterns_));
-            pending_->config_ = std::move(previous);
-            pending_->patterns_ = std::move(previous_patterns);
-            pending_->committed_ = true;
-            committed_ = std::move(pending_);
+            runtime_.publish(std::move(pending->config_), std::move(pending->patterns_));
+            committed_ = std::move(rollback_state);
             return;
         }
-        health_->activate(std::move(*pending_->health_));
-        auto previous_tls = tls_contexts_.current();
-        tls_contexts_.publish(std::move(pending_->tls_contexts_));
-        pending_->tls_contexts_ = std::move(previous_tls);
-        auto previous = runtime_.config();
-        auto previous_patterns = runtime_.patterns();
-        runtime_.publish(std::move(pending_->config_), std::move(pending_->patterns_));
-        pending_->config_ = std::move(previous);
-        pending_->patterns_ = std::move(previous_patterns);
-        listeners_.swap(pending_->listeners_);
-        for (const auto& listener : pending_->additions_) {
+        rollback_state->previous_health_ = health_->activate(std::move(*pending->health_));
+        rollback_state->previous_tls_contexts_ = tls_contexts_.current();
+        tls_contexts_.publish(std::move(pending->tls_contexts_));
+        runtime_.publish(std::move(pending->config_), std::move(pending->patterns_));
+        rollback_state->previous_listeners_ =
+            std::exchange(listeners_, std::move(pending->listeners_));
+        rollback_state->additions_ = std::move(pending->additions_);
+        rollback_state->retired_ = std::move(pending->retired_);
+        for (const auto& listener : rollback_state->additions_) {
             listener->activate();
         }
-        pending_->committed_ = true;
-        committed_ = std::move(pending_);
+        committed_ = std::move(rollback_state);
     }
 
     void finalize(std::uint64_t sequence) noexcept {
@@ -399,14 +385,17 @@ private:
         if (!committed_ || committed_->sequence_ != sequence) {
             return;
         }
-        if (!committed_->unchanged_) {
-            health_->activate(std::move(*committed_->health_));
-            tls_contexts_.publish(std::move(committed_->tls_contexts_));
-            listeners_.swap(committed_->listeners_);
+        auto rollback_state = std::move(committed_);
+        if (!rollback_state->unchanged_) {
+            health_->activate(std::move(*rollback_state->previous_health_));
+            tls_contexts_.publish(std::move(rollback_state->previous_tls_contexts_));
+            listeners_ = std::move(rollback_state->previous_listeners_);
+            for (const auto& listener : rollback_state->additions_) {
+                listener->request_stop();
+            }
         }
-        runtime_.publish(std::move(committed_->config_), std::move(committed_->patterns_));
-        committed_->committed_ = false;
-        committed_.reset();
+        runtime_.publish(std::move(rollback_state->previous_config_),
+            std::move(rollback_state->previous_patterns_));
     }
 
     void require_accepting() const {
@@ -465,7 +454,7 @@ private:
     listener_map listeners_;
     std::vector<std::shared_ptr<edge_listener>> owned_listeners_;
     std::unique_ptr<prepared_reload> pending_;
-    std::unique_ptr<prepared_reload> committed_;
+    std::unique_ptr<committed_reload> committed_;
     std::uint64_t settled_sequence_{};
     bool stopping_{};
     ruvia::event_loop_stop_registration stop_registration_;

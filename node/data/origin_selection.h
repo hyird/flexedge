@@ -5,13 +5,13 @@
 #include <string_view>
 #include <vector>
 
-#include "node/proto/edge_control.pb.h"
+#include "node/data/route_rules.h"
 
 namespace flexedge::node {
 
 inline std::vector<const v2::Origin*> origin_candidates(const v2::Website& website,
     std::uint64_t sequence,
-    const v2::RouteRule* route = nullptr) {
+    const evaluated_route_policy* route = nullptr) {
     std::vector<const v2::Origin*> result;
     const auto target_group =
         route != nullptr && !route->origin_group().empty() ? std::string_view(route->origin_group())
@@ -21,9 +21,9 @@ inline std::vector<const v2::Origin*> origin_candidates(const v2::Website& websi
         std::vector<const v2::Origin*> group;
         std::uint64_t total_weight{};
         for (const auto& origin : website.origins()) {
-            const auto selected_by_legacy_route = route != nullptr && !route->origin_ids().empty();
+            const auto selected_by_ids = route != nullptr && !route->origin_ids().empty();
             const auto selected =
-                selected_by_legacy_route
+                selected_by_ids
                     ? std::ranges::find(route->origin_ids(), origin.id()) !=
                           route->origin_ids().end()
                     : (origin.group().empty() ? std::string_view{"default"}

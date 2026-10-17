@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useEffectEvent, useState } from 'react'
 import { z } from 'zod'
 import { useNavigate } from '@tanstack/react-router'
 import type { PageData } from './api'
@@ -199,4 +199,26 @@ export function useListState<TSearch extends ListSearch>(
         ) as Partial<TSearch>
       ),
   }
+}
+
+/** Resolves the item targeted by `sheet.editing` on the current page and
+ * closes the sheet if the loaded page does not contain it. */
+export function useListSheetTarget<T extends { id: string }>(
+  sheet: Pick<ListSheetState, 'editing' | 'close'>,
+  query: {
+    data?: { list: T[] }
+    isSuccess: boolean
+    isPlaceholderData: boolean
+  }
+): T | undefined {
+  const editing = sheet.editing
+    ? query.data?.list.find((item) => item.id === sheet.editing)
+    : undefined
+  const editMissing =
+    !!sheet.editing && query.isSuccess && !query.isPlaceholderData && !editing
+  const closeMissing = useEffectEvent(() => void sheet.close())
+  useEffect(() => {
+    if (editMissing) closeMissing()
+  }, [editMissing])
+  return editing
 }

@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { EyeSlash, ListCheck } from '@gravity-ui/icons'
 import { Timeline } from '@heroui-pro/react'
 import { Button, Chip, Link, Skeleton } from '@heroui/react'
-import { ApiBusinessError } from '@/lib/api-response'
+import { apiErrorCode } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { CopyButton } from '@/components/copy-button'
 import { taskAttemptTraceQuery } from './data'
@@ -96,9 +96,7 @@ function TraceTimeline({
     query.data?.state === 'available' && query.data.steps.length > 0
       ? query.data
       : null
-  const notFound =
-    query.error instanceof ApiBusinessError &&
-    query.error.code === traceNotFoundCode
+  const notFound = apiErrorCode(query.error) === traceNotFoundCode
   return (
     <div ref={ref} className='flex min-w-0 flex-col gap-1.5'>
       {full ? (

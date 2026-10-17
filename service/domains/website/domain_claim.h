@@ -1,7 +1,5 @@
 #pragma once
 
-#include <algorithm>
-#include <cctype>
 #include <cstddef>
 #include <span>
 #include <string>
@@ -13,6 +11,7 @@
 #include "service/domains/dns_zone/dns_zone_reference.h"
 #include "service/domains/website/domain_claim_types.h"
 #include "service/features/website_config/model.h"
+#include "service/utils/text.h"
 
 namespace service::website {
 
@@ -24,11 +23,9 @@ inline std::variant<std::vector<domain_claim>, domain_claim_error> plan_domain_c
     std::vector<domain_claim> claims;
     claims.reserve(domains.size());
     for (const auto& domain : domains) {
-        auto key = domain.hostname_;
-        std::ranges::transform(key, key.begin(), [](unsigned char ch) {
-            return static_cast<char>(std::tolower(ch));
-        });
-        domain_claim claim{.id_ = domain.id_, .key_ = std::move(key), .dns_mode_ = domain.dns_mode_};
+        domain_claim claim{.id_ = domain.id_,
+            .key_ = service::utils::to_lower_ascii(domain.hostname_),
+            .dns_mode_ = domain.dns_mode_};
         if (claim.dns_mode_ == "managed") {
             const service::dns_zone::dns_zone_reference* owner = nullptr;
             std::size_t owner_length = 0;

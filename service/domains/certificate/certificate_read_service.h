@@ -47,12 +47,8 @@ public:
         bool abnormal) const {
         const auto filter = [&](ruvia::db_query& query) { filter_query(query, tenant_id, keyword, status, usable, expiring, abnormal); };
         const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
-        const auto total = page_rows.total_;
-        certificate_page_data_dto result({.resource_ = c.pool()});
-        result.template set<"total">(total);
-        result.template set<"page">(page);
-        result.template set<"page_size">(page_size);
-        result.template set<"total_pages">(page_size > 0 ? (total + page_size - 1) / page_size : 0);
+        auto result = service::common::init_page_dto<certificate_page_data_dto>(
+            c.pool(), page_rows.total_, page, page_size);
         auto& items = result.template ensure<"list">();
         for (const auto& row : page_rows.rows_) {
             fill_certificate(c, items.emplace_back(), row);

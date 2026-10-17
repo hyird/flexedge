@@ -18,34 +18,8 @@
 
 namespace service::password_detail {
 
-inline int hex_value(char ch) {
-    if (ch >= '0' && ch <= '9') {
-        return ch - '0';
-    }
-    if (ch >= 'a' && ch <= 'f') {
-        return ch - 'a' + 10;
-    }
-    if (ch >= 'A' && ch <= 'F') {
-        return ch - 'A' + 10;
-    }
-    return -1;
-}
-
 inline std::vector<unsigned char> hex_decode(std::string_view value) {
-    if (value.size() % 2 != 0) {
-        return {};
-    }
-    std::vector<unsigned char> out;
-    out.reserve(value.size() / 2);
-    for (std::size_t i = 0; i < value.size(); i += 2) {
-        const int high = hex_value(value[i]);
-        const int low = hex_value(value[i + 1]);
-        if (high < 0 || low < 0) {
-            return {};
-        }
-        out.push_back(static_cast<unsigned char>((high << 4) | low));
-    }
-    return out;
+    return flexedge::crypto::hex_decode(value).value_or(std::vector<unsigned char>{});
 }
 
 inline bool pbkdf2(std::string_view plain, const unsigned char* salt, std::size_t salt_size,

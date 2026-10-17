@@ -30,12 +30,9 @@ inline ruvia::task<void> process_task(service::background::task_context& context
     }
     if (!context.get_stop_token().stop_requested() && exception) {
         const auto failure = service::outbound_http::classify_attempt_failure(exception, "同步任务发生未知错误");
-        trace.mark_failure(failure.message_);
-        auto step = trace.begin_step(service::attempt_trace::step_code::record_failure);
         const bool terminal = failure.permanent_ || task.failures_ >= 2;
-        trace.log(terminal ? service::attempt_trace::log_level::error
-                           : service::attempt_trace::log_level::warning,
-            terminal ? "本次同步失败，等待下次检查或手动重试" : "将在 15 秒后自动重试");
+        auto step = service::sync_runtime::record_attempt_failure_step(
+            trace, failure.message_, terminal, "本次同步失败，等待下次检查或手动重试");
         co_await fail_dns_task(context, trace, task, failure.message_, terminal,
             attempt.to_json(context.pool()));
         step.complete();

@@ -153,6 +153,7 @@ export function applyNodeRuntimePagePatch(
 export function nodesQuery(params: NodesQueryParams) {
   return queryOptions({
     retry: false,
+    meta: { inlineError: true },
     queryKey: [...queryKeys.nodes, 'list', params],
     queryFn: ({ queryKey, signal }) =>
       readLiveQuery(

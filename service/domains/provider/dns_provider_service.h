@@ -15,7 +15,6 @@
 #include "service/common/http.h"
 #include "service/domains/dns_zone/dns_zone_reference.h"
 #include "service/domains/provider/dns_provider_error.h"
-#include "service/domains/provider/dns_provider_read_service.h"
 #include "service/domains/provider/dns_provider_types.h"
 #include "service/features/background/queued_work.h"
 #include "service/features/dns/provider_config_mapper.h"
@@ -23,25 +22,11 @@
 #include "service/features/provider_verification/queue.h"
 #include "service/features/sync_runtime/work_commit.h"
 #include "service/utils/secret.h"
-
+#include "service/utils/text.h"
 namespace service::provider {
 
 class dns_provider_service final {
 public:
-    ruvia::task<dns_provider_page_data_dto> list(ruvia::context& c, const std::string& tenant_id,
-        std::int64_t page, std::int64_t page_size,
-        std::int64_t skip,
-        const std::optional<std::string>& keyword,
-        const std::optional<std::string>& status) {
-        co_return co_await get_dns_provider_read_service().list(c, tenant_id, page, page_size, skip, keyword,
-            status);
-    }
-
-    ruvia::task<dns_provider_dto> get(ruvia::context& c, const std::string& tenant_id,
-        const std::string& id) {
-        co_return co_await get_dns_provider_read_service().get(c, tenant_id, id);
-    }
-
     ruvia::task<std::int64_t> create(ruvia::context& c, const std::string& tenant_id,
         const create_dns_provider_body& body) {
         const auto& name_input = body.get<"name">();
@@ -52,23 +37,24 @@ public:
             service::common::throw_app_error(service::common::validation_error_code,
                 "DNS 供应商名称、类型、账号和令牌不能为空", 400);
         }
-        const auto name = trim(name_input->view());
+        const auto name = service::utils::trim_ascii(name_input->view());
         const auto provider = normalize_provider(provider_input->view());
         const auto account_id = normalize_account_id(provider, account_id_input->view());
         const auto token = token_input->view();
         validate_credential_shape(provider, account_id, token);
         const auto config = service::dns::serialize_dns_provider_config(
-            service::utils::seal_secret(token), secret_hint(token), c.pool());
+            service::utils::seal_secret(token), service::utils::secret_hint(token), c.pool());
         try {
             auto transaction = co_await c.db().begin_transaction();
             const auto inserted = co_await transaction.query(
                 "INSERT INTO sys_provider (tenant_id, kind, provider, name, account_id, "
                 "revision, config, runtime, status, created_at, updated_at) VALUES ($1, 'dns', "
                 "$2, $3, $4, 1, $5::jsonb, '{}'::jsonb, 'unverified', NOW(), NOW()) RETURNING id, revision",
-                tenant_id, std::string_view(provider), std::string_view(name),
+                tenant_id, std::string_view(provider), name,
                 std::string_view(account_id), std::string_view(config));
             const auto id = std::string(inserted.front()[0].value().value_or(""));
-            co_await commit_changes(transaction, c, tenant_id, id, service::background::queued_work{});
+            co_await service::sync_runtime::commit_work(transaction, c, tenant_id,
+                service::live_resource::resource::providers, id, service::background::queued_work{});
             co_return inserted.front()[1].as<std::int64_t>().value_or(1);
         } catch (const ruvia::db_error& error) {
             if (service::common::is_unique_constraint_violation(error, "uk_provider_name")) {
@@ -83,36 +69,33 @@ public:
 
     ruvia::task<std::int64_t> update(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, std::int64_t expected_revision, const update_dns_provider_body& body) {
-        const auto rows = co_await c.db().query(
-            "SELECT revision, provider, account_id, config::text FROM sys_provider WHERE id = $1 "
-            "AND tenant_id = $2 AND kind = 'dns' AND deleted_at IS NULL LIMIT 1",
-            id, tenant_id);
-        service::common::require_current_revision(rows, expected_revision, revision_errors_);
-
-        const auto provider = std::string(rows.front()[1].value().value_or(""));
-        const auto account_id = std::string(rows.front()[2].value().value_or(""));
-        const auto current = service::dns::parse_dns_provider_config(
-            rows.front()[3].value().value_or("{}"), c.pool());
         const auto& name_input = body.get<"name">();
         if (!name_input) {
             service::common::throw_app_error(service::common::validation_error_code,
                 "DNS 供应商名称不能为空", 400);
         }
-        const auto name = trim(name_input->view());
-        co_await ensure_available(c, tenant_id, provider, name, account_id, id);
-
-        auto envelope = current.credential_envelope_;
-        auto hint = current.credential_hint_;
-        bool credentials_changed = false;
-        if (const auto& token = body.get<"api_token">(); token) {
-            validate_token_shape(provider, token->view());
-            envelope = service::utils::seal_secret(token->view());
-            hint = secret_hint(token->view());
-            credentials_changed = true;
-        }
-        const auto config = service::dns::serialize_dns_provider_config(envelope, hint, c.pool());
+        const auto name = service::utils::trim_ascii(name_input->view());
         try {
             auto transaction = co_await c.db().begin_transaction();
+            const auto rows = co_await transaction.query(
+                "SELECT revision, provider, config::text FROM sys_provider WHERE id = $1 "
+                "AND tenant_id = $2 AND kind = 'dns' AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
+                id, tenant_id);
+            service::common::require_current_revision(rows, expected_revision, revision_errors_);
+
+            const auto provider = std::string(rows.front()[1].value().value_or(""));
+            const auto current = service::dns::parse_dns_provider_config(
+                rows.front()[2].value().value_or("{}"), c.pool());
+            auto envelope = current.credential_envelope_;
+            auto hint = current.credential_hint_;
+            bool credentials_changed = false;
+            if (const auto& token = body.get<"api_token">(); token) {
+                validate_token_shape(provider, token->view());
+                envelope = service::utils::seal_secret(token->view());
+                hint = service::utils::secret_hint(token->view());
+                credentials_changed = true;
+            }
+            const auto config = service::dns::serialize_dns_provider_config(envelope, hint, c.pool());
             const auto updated = co_await transaction.query(
                 "UPDATE sys_provider SET name = $1, revision = revision + 1, config = $2::jsonb, "
                 "verification_generation = verification_generation + 1, runtime = CASE WHEN "
@@ -122,7 +105,7 @@ public:
                 "last_error = CASE WHEN $3::BOOLEAN THEN NULL ELSE last_error END, updated_at = "
                 "NOW() WHERE id = $4 AND tenant_id = $5 AND kind = 'dns' AND revision = $6 "
                 "AND deleted_at IS NULL RETURNING revision",
-                std::string_view(name), std::string_view(config), credentials_changed, id, tenant_id,
+                name, std::string_view(config), credentials_changed, id, tenant_id,
                 expected_revision);
             co_await service::common::require_revision_written(transaction, !updated.empty(), "sys_provider",
                 tenant_id, id, revision_errors_);
@@ -132,7 +115,8 @@ public:
             } else {
                 co_await service::provider_verification::remove(transaction, tenant_id, id, work);
             }
-            co_await commit_changes(transaction, c, tenant_id, id, work);
+            co_await service::sync_runtime::commit_work(
+                transaction, c, tenant_id, service::live_resource::resource::providers, id, work);
             co_return updated.front()[0].as<std::int64_t>().value_or(0);
         } catch (const ruvia::db_error& error) {
             if (service::common::is_unique_constraint_violation(error, "uk_provider_name")) {
@@ -151,7 +135,8 @@ public:
             co_await service::provider_verification::enqueue_dns(transaction, tenant_id, id, expected_revision, work);
         co_await service::common::require_revision_written(transaction, enqueued, "sys_provider", tenant_id, id,
             revision_errors_);
-        co_await commit_changes(transaction, c, tenant_id, id, work);
+        co_await service::sync_runtime::commit_work(
+            transaction, c, tenant_id, service::live_resource::resource::providers, id, work);
         co_return expected_revision;
     }
 
@@ -173,7 +158,8 @@ public:
             id, tenant_id);
         service::background::queued_work work;
         co_await service::provider_verification::remove(transaction, tenant_id, id, work);
-        co_await commit_changes(transaction, c, tenant_id, id, work);
+        co_await service::sync_runtime::commit_work(
+            transaction, c, tenant_id, service::live_resource::resource::providers, id, work);
         co_return removed.front()[0].as<std::int64_t>().value_or(0);
     }
 
@@ -181,49 +167,8 @@ private:
     static constexpr service::common::revision_errors revision_errors_{dns_provider_error::not_found,
         dns_provider_error::revision_conflict};
 
-    static ruvia::task<void> commit_changes(ruvia::db_transaction& transaction, ruvia::context& c, const std::string& tenant_id, const std::string& id,
-        const service::background::queued_work& work) {
-        service::live_resource::notifications::resource_notification notification(tenant_id);
-        notification.changed(service::live_resource::resource::providers, id);
-        co_await service::sync_runtime::commit_work(transaction, c, std::move(notification), work);
-    }
-
-    static ruvia::task<void> ensure_available(ruvia::context& c, const std::string& tenant_id,
-        std::string_view provider, std::string_view name,
-        std::string_view account_id,
-        const std::optional<std::string>& excluded_id) {
-        const auto rows = co_await c.db().query(
-            "SELECT id, name, account_id FROM sys_provider "
-            "WHERE tenant_id = $1 AND kind = 'dns' "
-            "AND provider = $2 AND deleted_at IS NULL",
-            tenant_id, provider);
-        for (const auto& row : rows) {
-            if (excluded_id && row[0].value().value_or("") == *excluded_id) {
-                continue;
-            }
-            if (row[1].value().value_or("") == name) {
-                service::common::throw_app_error(dns_provider_error::name_exists);
-            }
-            if (row[2].value().value_or("") == account_id) {
-                service::common::throw_app_error(dns_provider_error::account_exists);
-            }
-        }
-        co_return;
-    }
-
-    static std::string trim(std::string_view input) {
-        const auto begin = std::find_if_not(input.begin(), input.end(),
-            [](unsigned char ch) { return std::isspace(ch) != 0; });
-        const auto end = std::find_if_not(input.rbegin(), input.rend(), [](unsigned char ch) {
-            return std::isspace(ch) != 0;
-        }).base();
-        return begin < end ? std::string(begin, end) : std::string{};
-    }
-
     static std::string normalize_provider(std::string_view input) {
-        auto result = trim(input);
-        std::transform(result.begin(), result.end(), result.begin(),
-            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        auto result = service::utils::to_lower_ascii(service::utils::trim_ascii(input));
         if (result != "cloudflare" && result != "aliyun") {
             service::common::throw_app_error(service::common::validation_error_code,
                 "服务商类型不支持", 400);
@@ -232,12 +177,10 @@ private:
     }
 
     static std::string normalize_account_id(std::string_view provider, std::string_view input) {
-        std::string result(input);
         if (provider == "cloudflare") {
-            std::transform(result.begin(), result.end(), result.begin(),
-                [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            return service::utils::to_lower_ascii(input);
         }
-        return result;
+        return std::string(input);
     }
 
     static void validate_credential_shape(std::string_view provider, std::string_view account_id,
@@ -264,12 +207,6 @@ private:
         return value.size() == 32 && std::all_of(value.begin(), value.end(), [](unsigned char ch) {
             return std::isxdigit(ch) != 0;
         });
-    }
-
-    static std::string secret_hint(std::string_view value) {
-        constexpr std::size_t visible{4};
-        return "****" +
-               std::string(value.substr(value.size() > visible ? value.size() - visible : 0));
     }
 };
 

@@ -44,10 +44,19 @@ export function NodeDetailLayout() {
   const tabGuard = useTabSwitchGuard()
   const onLogs = tab === 'logs'
   const live = useQuery({ ...nodeQuery(nodeId), enabled: !onLogs })
-  const snapshot = useQuery({ ...nodeSnapshotQuery(nodeId), enabled: onLogs })
-  const query = onLogs ? snapshot : live
-  // Entering the logs tab keeps the last live frame until the snapshot lands.
-  const node = onLogs ? (snapshot.data ?? live.data) : live.data
+  const snapshot = useQuery({
+    ...nodeSnapshotQuery(nodeId),
+    enabled: onLogs && !live.data,
+  })
+  const showLive =
+    !onLogs || (!!live.data && live.dataUpdatedAt >= snapshot.dataUpdatedAt)
+  const query = showLive ? live : snapshot
+  // Entering the logs tab keeps the last live frame until a newer snapshot lands.
+  const node = onLogs
+    ? live.data && live.dataUpdatedAt >= snapshot.dataUpdatedAt
+      ? live.data
+      : (snapshot.data ?? live.data)
+    : (live.data ?? snapshot.data)
   useBreadcrumbLabel(node?.name)
   if (apiErrorCode(query.error) === nodeNotFoundCode)
     return (
@@ -57,6 +66,16 @@ export function NodeDetailLayout() {
           title='节点不存在'
           description='节点可能已被删除，或链接不正确。'
           action={<LinkButton href='/nodes'>返回节点列表</LinkButton>}
+        />
+      </Page>
+    )
+  if (!node && query.isError)
+    return (
+      <Page>
+        <QueryNotice
+          query={query}
+          onRetry={() => void query.refetch()}
+          title='节点加载失败'
         />
       </Page>
     )

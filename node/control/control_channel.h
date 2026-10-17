@@ -239,10 +239,7 @@ private:
             co_return;
         }
         try {
-            std::uint64_t offset{};
-            std::uint64_t total_bytes{};
-            std::string version;
-            for (;;) {
+            for (std::uint64_t offset = 0;;) {
                 auto request = node_release_request(node_id, digest, offset);
                 auto replies = connection.send(request);
                 const auto response = co_await replies.receive();
@@ -250,31 +247,11 @@ private:
                     !response.has_node_release_chunk()) {
                     throw std::runtime_error("control plane did not return a node release chunk");
                 }
-                const auto& chunk = response.node_release_chunk();
-                if (!valid_node_release_version(chunk.version()) || chunk.digest_sha256() != digest ||
-                    chunk.total_bytes() == 0 || chunk.total_bytes() > maximum_node_release_bytes ||
-                    chunk.offset() != offset || chunk.offset() >= chunk.total_bytes() ||
-                    chunk.data().empty() || chunk.data().size() > node_release_chunk_bytes ||
-                    static_cast<std::uint64_t>(chunk.data().size()) >
-                        chunk.total_bytes() - chunk.offset()) {
-                    throw std::runtime_error("control plane sent an invalid node release chunk");
-                }
-                if (offset == 0) {
-                    version = chunk.version();
-                    total_bytes = chunk.total_bytes();
-                    updater_.begin(version, digest, total_bytes);
-                } else if (chunk.version() != version || chunk.total_bytes() != total_bytes) {
-                    throw std::runtime_error("control plane changed the node release mid-transfer");
-                }
-                updater_.append(chunk.offset(), chunk.data());
-                offset = updater_.written_bytes();
-                if (offset == total_bytes) {
-                    if (!updater_.complete()) {
-                        throw std::runtime_error("node release transfer did not complete");
-                    }
+                if (updater_.accept_chunk(digest, response.node_release_chunk())) {
                     updater_.commit();
                     co_return;
                 }
+                offset = updater_.written_bytes();
             }
         } catch (...) {
             updater_.abort();

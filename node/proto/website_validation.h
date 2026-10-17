@@ -46,11 +46,7 @@ public:
 using route_patterns = std::unordered_map<const v2::RouteRule*, std::shared_ptr<const RE2>>;
 
 [[nodiscard]] inline bool http_token(std::string_view value) noexcept {
-    return !value.empty() && std::ranges::all_of(value, [](unsigned char ch) {
-        return std::isalnum(ch) || ch == '!' || ch == '#' || ch == '$' || ch == '%' || ch == '&' ||
-               ch == '\'' || ch == '*' || ch == '+' || ch == '-' || ch == '.' || ch == '^' ||
-               ch == '_' || ch == '`' || ch == '|' || ch == '~';
-    });
+    return flexedge::route_policy::http_token(value, value.size());
 }
 
 // A header a route rule may set: a token outside the connection-level and HSTS headers the
@@ -99,19 +95,15 @@ using route_patterns = std::unordered_map<const v2::RouteRule*, std::shared_ptr<
 }
 
 [[nodiscard]] inline bool compression_mime_type(std::string_view value) noexcept {
-    const auto valid_token = [](std::string_view segment) {
-        return !segment.empty() && std::ranges::all_of(segment, [](unsigned char ch) {
-            return std::isalnum(ch) || ch == '!' || ch == '#' || ch == '$' || ch == '&' ||
-                   ch == '^' || ch == '_' || ch == '.' || ch == '+' || ch == '-';
-        });
-    };
     const auto slash = value.find('/');
     if (slash == std::string_view::npos ||
         value.find('/', slash + 1) != std::string_view::npos) {
         return false;
     }
+    const auto type = value.substr(0, slash);
     const auto subtype = value.substr(slash + 1);
-    return valid_token(value.substr(0, slash)) && (subtype == "*" || valid_token(subtype));
+    return flexedge::route_policy::http_token(type, type.size()) &&
+           (subtype == "*" || flexedge::route_policy::http_token(subtype, subtype.size()));
 }
 
 enum class compression_match_kind { mime_type,
@@ -233,7 +225,7 @@ inline bool route_headers(const google::protobuf::RepeatedPtrField<v2::HeaderMut
         }
         std::string normalized(header.name());
         std::ranges::transform(normalized, normalized.begin(),
-            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            [](unsigned char ch) { return flexedge::route_policy::lower_ascii(ch); });
         if (!names.emplace(std::move(normalized)).second) {
             return false;
         }

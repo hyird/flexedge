@@ -47,14 +47,13 @@ public:
     [[nodiscard]] pooled_origin_connection acquire(const origin_connection_key& key) {
         const auto now = std::chrono::steady_clock::now();
         expire_idle(now);
-        for (auto iterator = idle_.begin(); iterator != idle_.end();) {
+        for (auto iterator = idle_.rbegin(); iterator != idle_.rend(); ++iterator) {
             if (iterator->key_ == key) {
                 auto transport = std::move(iterator->transport_);
-                idle_.erase(iterator);
+                idle_.erase((iterator + 1).base());
                 tracked_.at(transport.get()).idle_ = false;
                 return transport;
             }
-            ++iterator;
         }
         pooled_origin_connection transport(new origin_transport(executor_, tls_context_), {this});
         tracked_.emplace(transport.get(), tracked_connection{.key_ = key});

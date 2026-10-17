@@ -55,6 +55,21 @@ public:
     }
 
 private:
+    double record_cpu_ticks(std::uint64_t idle, std::uint64_t total) noexcept {
+        double usage{};
+        if (last_cpu_total_ != 0 && total > last_cpu_total_) {
+            const auto total_delta = total - last_cpu_total_;
+            const auto idle_delta = idle - last_cpu_idle_;
+            usage = total_delta > idle_delta
+                        ? static_cast<double>(total_delta - idle_delta) /
+                              static_cast<double>(total_delta)
+                        : 0.0;
+        }
+        last_cpu_idle_ = idle;
+        last_cpu_total_ = total;
+        return usage;
+    }
+
 #ifdef _WIN32
     static std::uint64_t file_time(const FILETIME& value) noexcept {
         ULARGE_INTEGER result;
@@ -68,18 +83,8 @@ private:
         FILETIME kernel{};
         FILETIME user{};
         if (GetSystemTimes(&idle, &kernel, &user)) {
-            const auto idle_value = file_time(idle);
-            const auto total_value = file_time(kernel) + file_time(user);
-            if (last_cpu_total_ != 0 && total_value > last_cpu_total_) {
-                const auto total_delta = total_value - last_cpu_total_;
-                const auto idle_delta = idle_value - last_cpu_idle_;
-                result.cpu_usage_ = total_delta > idle_delta
-                                        ? static_cast<double>(total_delta - idle_delta) /
-                                              static_cast<double>(total_delta)
-                                        : 0;
-            }
-            last_cpu_idle_ = idle_value;
-            last_cpu_total_ = total_value;
+            result.cpu_usage_ =
+                record_cpu_ticks(file_time(idle), file_time(kernel) + file_time(user));
         }
         MEMORYSTATUSEX memory{.dwLength = sizeof(memory)};
         if (GlobalMemoryStatusEx(&memory)) {
@@ -98,16 +103,7 @@ private:
                                      static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_SYSTEM]) +
                                      idle_value +
                                      static_cast<std::uint64_t>(cpu.cpu_ticks[CPU_STATE_NICE]);
-            if (last_cpu_total_ != 0 && total_value > last_cpu_total_) {
-                const auto total_delta = total_value - last_cpu_total_;
-                const auto idle_delta = idle_value - last_cpu_idle_;
-                result.cpu_usage_ = total_delta > idle_delta
-                                        ? static_cast<double>(total_delta - idle_delta) /
-                                              static_cast<double>(total_delta)
-                                        : 0;
-            }
-            last_cpu_idle_ = idle_value;
-            last_cpu_total_ = total_value;
+            result.cpu_usage_ = record_cpu_ticks(idle_value, total_value);
         }
 
         std::uint64_t total_memory{};
@@ -148,16 +144,7 @@ private:
         if (stat >> label >> user >> nice >> system >> idle >> io_wait >> irq >> soft_irq >> steal) {
             const auto idle_value = idle + io_wait;
             const auto total_value = user + nice + system + idle + io_wait + irq + soft_irq + steal;
-            if (last_cpu_total_ != 0 && total_value > last_cpu_total_) {
-                const auto total_delta = total_value - last_cpu_total_;
-                const auto idle_delta = idle_value - last_cpu_idle_;
-                result.cpu_usage_ = total_delta > idle_delta
-                                        ? static_cast<double>(total_delta - idle_delta) /
-                                              static_cast<double>(total_delta)
-                                        : 0;
-            }
-            last_cpu_idle_ = idle_value;
-            last_cpu_total_ = total_value;
+            result.cpu_usage_ = record_cpu_ticks(idle_value, total_value);
         }
         struct sysinfo info{};
         if (::sysinfo(&info) == 0) {

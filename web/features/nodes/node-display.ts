@@ -35,17 +35,6 @@ export const nodeSpecStates = {
 } as const satisfies StatusDictionary<'applied' | 'pending'>
 export const nodeSpecStateReserve = statusReserve(nodeSpecStates)
 
-/** State of the live log tail on the node logs tab. */
-export const nodeLogStreamStates = {
-  paused: { label: '已暂停', tone: 'default' },
-  live: { label: '实时', tone: 'success' },
-  interrupted: { label: '连接中断', tone: 'danger' },
-  connecting: { label: '正在连接', tone: 'accent' },
-} as const satisfies StatusDictionary<
-  'paused' | 'live' | 'interrupted' | 'connecting'
->
-export const nodeLogStreamStateReserve = statusReserve(nodeLogStreamStates)
-
 type LiveMetrics = Pick<
   Node['runtime'],
   | 'cpu_usage'

@@ -23,35 +23,41 @@
 namespace service::provider_verification::detail {
 
 inline ruvia::task<void> reconcile(service::background::task_context& context) {
-    const auto rows = co_await context.db().query(
-        "SELECT marker.tenant_id, marker.id, marker.resource_id, provider.verification_generation "
-        "FROM sys_sync_task marker INNER JOIN sys_provider provider ON provider.tenant_id = "
-        "marker.tenant_id AND provider.id = marker.resource_id WHERE marker.resource_type = "
-        "'provider' AND provider.deleted_at IS NULL AND marker.version <> "
-        "provider.verification_generation LIMIT 64");
-    for (const auto& row : rows) {
+    ruvia::db_query candidates(context.pool());
+    candidates.select({candidates.column("tenant_id", "provider"), candidates.column("id", "provider"),
+                          candidates.column("verification_generation", "provider")})
+        .from("sys_provider", "provider")
+        .where(candidates.sql(
+            "provider.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM sys_sync_task marker "
+            "WHERE marker.resource_type = 'provider' AND marker.tenant_id = provider.tenant_id "
+            "AND marker.resource_id = provider.id AND marker.version = provider.verification_generation)"))
+        .limit(64);
+    const auto missing = co_await context.db().query(candidates);
+    for (const auto& row : missing) {
         const auto tenant_id = std::string(row[0].value().value_or(""));
-        service::background::queued_work work;
+        const auto provider_id = std::string(row[1].value().value_or(""));
+        const auto version = row[2].as<std::int64_t>().value_or(1);
         auto transaction = co_await context.db().begin_transaction();
-        const auto provider_id = std::string(row[2].value().value_or(""));
-        const auto locked = co_await transaction.query(
-            "SELECT verification_generation FROM sys_provider WHERE tenant_id = $1 AND id = $2 "
-            "AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
-            tenant_id, provider_id);
-        if (locked.empty()) {
+        ruvia::db_query aggregate(context.pool());
+        aggregate.select(aggregate.column("id"))
+            .from("sys_provider")
+            .where(aggregate.sql({"tenant_id = ", " AND id = ", " AND verification_generation = ",
+                                     " AND deleted_at IS NULL"},
+                {aggregate.value(tenant_id), aggregate.value(provider_id), aggregate.value(version)}))
+            .limit(1)
+            .lock({.mode_ = ruvia::db_row_lock::update});
+        const auto locked = co_await transaction.query(aggregate);
+        if (locked.empty() || co_await service::sync_runtime::marker_version_exists(transaction, tenant_id,
+                                  service::sync_runtime::marker_resource_type::provider, provider_id, version)) {
             co_await transaction.commit();
             continue;
         }
-        const auto generation = locked.front()[0].as<std::int64_t>().value_or(1);
-        if (!co_await service::sync_runtime::marker_version_exists(transaction, tenant_id,
-                service::sync_runtime::marker_resource_type::provider, provider_id, generation)) {
-            (void)co_await service::sync_runtime::upsert_marker(transaction, tenant_id,
-                service::sync_runtime::marker_resource_type::provider, provider_id,
-                service::sync_runtime::marker_operation::verify, generation, work);
-        }
+        service::background::queued_work work;
+        (void)co_await service::sync_runtime::upsert_marker(transaction, tenant_id,
+            service::sync_runtime::marker_resource_type::provider, provider_id,
+            service::sync_runtime::marker_operation::verify, version, work);
         co_await service::sync_runtime::commit_work(transaction, context, tenant_id, work);
     }
-    co_return;
 }
 
 inline ruvia::task<std::optional<std::string>>

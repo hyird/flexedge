@@ -1,4 +1,4 @@
-import { ApiBusinessError } from '@/lib/api-response'
+import { apiErrorCode } from '@/lib/api'
 import {
   enablementStatuses,
   statusIds,
@@ -77,5 +77,5 @@ const zoneNotFoundCode = 16201
 
 /** `resource-error` for a deleted or unknown zone. */
 export function isZoneNotFound(error: unknown) {
-  return error instanceof ApiBusinessError && error.code === zoneNotFoundCode
+  return apiErrorCode(error) === zoneNotFoundCode
 }

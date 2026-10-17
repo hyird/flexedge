@@ -145,14 +145,15 @@ namespace detail {
 template <typename context_type>
 inline ruvia::task<void> commit_tenant_changes(ruvia::db_transaction& transaction, context_type& context,
     std::vector<service::live_resource::notifications::resource_notification> notifications) {
+    std::vector<std::string> notification_ids;
+    notification_ids.reserve(notifications.size());
     for (const auto& notification : notifications) {
-        (void)co_await service::live_resource::enqueue_notification(transaction, notification);
+        notification_ids.push_back(co_await service::live_resource::enqueue_notification(transaction, notification));
     }
     co_await transaction.commit();
-    if constexpr (requires { context.record_committed_notification(notifications.front()); }) {
-        for (const auto& notification : notifications) {
-            co_await context.record_committed_notification(notification);
-        }
+    for (std::size_t index = 0; index < notifications.size(); ++index) {
+        co_await service::live_resource::wake_committed_notification(
+            context, notification_ids[index], notifications[index]);
     }
 }
 
@@ -228,6 +229,19 @@ inline ruvia::task<void> resume_stale_waiters(context_type& context, marker_reso
         "RETURNING waiter.tenant_id, waiter.resource_id",
         describe(resource_type).name_, std::int64_t{wait_settle_delay.count()});
     co_await detail::commit_marker_changes(transaction, context, resource_type, rows);
+}
+
+// Marks the trace as failed, opens the `record_failure` step, and logs the
+// terminal or retry schedule message before persisting the failure result.
+[[nodiscard]] inline service::attempt_trace::step_scope record_attempt_failure_step(
+    service::attempt_trace::recorder& trace, std::string_view failure_message, bool terminal = false,
+    std::string_view terminal_note = {}, std::string_view retry_note = "将在 15 秒后自动重试") {
+    trace.mark_failure(failure_message);
+    auto step = trace.begin_step(service::attempt_trace::step_code::record_failure);
+    trace.log(terminal ? service::attempt_trace::log_level::error
+                       : service::attempt_trace::log_level::warning,
+        terminal ? terminal_note : retry_note);
+    return step;
 }
 
 // Retention: attempts older than 7 days (their traces cascade). Runs once per

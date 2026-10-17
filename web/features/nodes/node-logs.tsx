@@ -8,9 +8,11 @@ import { EmptyState } from '@/components/page'
 import { Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { liveLogCapacity } from '@/features/logs/log-event'
-import { useLiveLogs } from '@/features/logs/use-live-logs'
+import {
+  getLogStreamState,
+  useLiveLogs,
+} from '@/features/logs/use-live-logs'
 import { nodeLogsQuery } from './data'
-import { nodeLogStreamStateReserve, nodeLogStreamStates } from './node-display'
 
 const route = getRouteApi('/_authenticated/nodes/$nodeId')
 
@@ -23,16 +25,7 @@ export function NodeLogs() {
     nodeLogsQuery(nodeId),
     !paused
   )
-  const state =
-    nodeLogStreamStates[
-      paused
-        ? 'paused'
-        : connected
-          ? 'live'
-          : error
-            ? 'interrupted'
-            : 'connecting'
-    ]
+  const state = getLogStreamState({ paused, error, connected })
   return (
     <Section
       title='实时日志'
@@ -40,7 +33,7 @@ export function NodeLogs() {
       contentClassName='flex flex-col gap-3'
       actions={
         <>
-          <StatusChip {...state} reserve={nodeLogStreamStateReserve} />
+          <StatusChip {...state} />
           <Button
             size='sm'
             variant='tertiary'

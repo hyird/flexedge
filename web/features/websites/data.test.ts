@@ -1,11 +1,16 @@
-import { afterEach, expect, it } from 'vitest'
+import { QueryClient } from '@tanstack/react-query'
+import { afterEach, expect, it, vi } from 'vitest'
 import { api } from '@/lib/api'
 import { ApiBusinessError, ApiProtocolError } from '@/lib/api-response'
+import { queryKeys } from '@/lib/query-keys'
 import {
+  afterWebsiteWrite,
   createWebsite,
   isWebsiteNotFound,
   patchWebsiteOriginRuntime,
   updateWebsite,
+  websiteSnapshotKey,
+  websitesSnapshotKey,
 } from './data'
 import type { Website } from './types'
 import { defaultWebsiteConfig } from './website-form'
@@ -165,4 +170,17 @@ it('recognises the website not-found stream error', () => {
     false
   )
   expect(isWebsiteNotFound(new Error('网站不存在'))).toBe(false)
+})
+
+it('invalidates dependent caches after a website write', async () => {
+  const client = new QueryClient()
+  const spy = vi.spyOn(client, 'invalidateQueries')
+  await afterWebsiteWrite(client, 'site-1')
+  expect(spy.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([
+    websitesSnapshotKey,
+    queryKeys.certificates,
+    queryKeys.dnsZones,
+    queryKeys.clusters,
+    [...websiteSnapshotKey, 'site-1'],
+  ])
 })

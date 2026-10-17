@@ -42,39 +42,49 @@ inline ruvia::task<void> expire_certificates(service::background::task_context& 
     co_return;
 }
 
-// A lost marker of the current issuance revision is re-created.
+// A lost marker of the current issuance revision is re-created. The aggregate
+// owns both eligibility and the choice between initial issuance and renewal.
 inline ruvia::task<void>
 reconcile_missing_issuance_markers(service::background::task_context& context) {
-    const auto missing = co_await context.db().query(
-        "SELECT tenant_id, id, issuance_revision FROM sys_certificate certificate WHERE "
-        "certificate.deleted_at IS NULL AND certificate.issued_revision < "
-        "certificate.issuance_revision "
-        "AND NOT EXISTS (SELECT 1 FROM sys_sync_task marker WHERE marker.resource_type = "
-        "'certificate' AND marker.tenant_id = certificate.tenant_id AND marker.resource_id = "
-        "certificate.id AND marker.version = certificate.issuance_revision)");
+    ruvia::db_query candidates(context.pool());
+    candidates.select({candidates.column("tenant_id", "certificate"),
+                          candidates.column("id", "certificate"),
+                          candidates.column("issuance_revision", "certificate")})
+        .from("sys_certificate", "certificate")
+        .where(candidates.sql(
+            "certificate.deleted_at IS NULL AND certificate.issued_revision < certificate.issuance_revision "
+            "AND NOT EXISTS (SELECT 1 FROM sys_sync_task marker WHERE marker.resource_type = 'certificate' "
+            "AND marker.tenant_id = certificate.tenant_id AND marker.resource_id = certificate.id "
+            "AND marker.version = certificate.issuance_revision)"))
+        .limit(64);
+    const auto missing = co_await context.db().query(candidates);
     for (const auto& row : missing) {
         const auto tenant_id = std::string(row[0].value().value_or(""));
-        service::background::queued_work work;
-        auto transaction = co_await context.db().begin_transaction();
+        const auto certificate_id = std::string(row[1].value().value_or(""));
         const auto revision = row[2].as<std::int64_t>().value_or(1);
-        const auto locked = co_await transaction.query(
-            "SELECT issued_revision FROM sys_certificate WHERE tenant_id = $1 AND id = $2 AND "
-            "issuance_revision = $3 AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
-            tenant_id, row[1].value().value_or(""), revision);
+        auto transaction = co_await context.db().begin_transaction();
+        ruvia::db_query certificate(context.pool());
+        certificate.select(certificate.column("issued_revision"))
+            .from("sys_certificate")
+            .where(certificate.sql({"tenant_id = ", " AND id = ", " AND issuance_revision = ",
+                                       " AND deleted_at IS NULL"},
+                {certificate.value(tenant_id), certificate.value(certificate_id), certificate.value(revision)}))
+            .limit(1)
+            .lock({.mode_ = ruvia::db_row_lock::update});
+        const auto locked = co_await transaction.query(certificate);
         if (locked.empty() || co_await service::sync_runtime::marker_version_exists(transaction, tenant_id,
-                                  service::sync_runtime::marker_resource_type::certificate, row[1].value().value_or(""), revision)) {
+                                  service::sync_runtime::marker_resource_type::certificate, certificate_id, revision)) {
             co_await transaction.commit();
             continue;
         }
-        co_await enqueue_certificate_revision(transaction, tenant_id, row[1].value().value_or(""), revision,
-            locked.front()[0].as<std::int64_t>().value_or(0) == 0 ? service::sync_runtime::marker_operation::issue
-                                                                  : service::sync_runtime::marker_operation::renew,
-            work);
-        service::live_resource::notifications::resource_notification notification(tenant_id);
-        notification.changed(service::live_resource::resource::certificates, row[1].value().value_or(""));
-        co_await service::sync_runtime::commit_work(transaction, context, std::move(notification), work);
+        const auto operation = locked.front()[0].as<std::int64_t>().value_or(0) == 0
+                                   ? service::sync_runtime::marker_operation::issue
+                                   : service::sync_runtime::marker_operation::renew;
+        service::background::queued_work work;
+        (void)co_await enqueue_certificate_revision(transaction, tenant_id, certificate_id, revision, operation, work);
+        co_await service::sync_runtime::commit_work(transaction, context, tenant_id,
+            service::live_resource::resource::certificates, certificate_id, work);
     }
-    co_return;
 }
 
 // Certificates expiring within 30 days with automatic renewal are renewed.
@@ -117,9 +127,8 @@ inline ruvia::task<void> schedule_auto_renewals(service::background::task_contex
         service::background::queued_work work;
         co_await enqueue_certificate_revision(transaction, tenant_id, certificate_id, issuance_revision,
             service::sync_runtime::marker_operation::renew, work);
-        service::live_resource::notifications::resource_notification notification(tenant_id);
-        notification.changed(service::live_resource::resource::certificates, certificate_id);
-        co_await service::sync_runtime::commit_work(transaction, context, std::move(notification), work);
+        co_await service::sync_runtime::commit_work(transaction, context, tenant_id,
+            service::live_resource::resource::certificates, certificate_id, work);
     }
     co_return;
 }

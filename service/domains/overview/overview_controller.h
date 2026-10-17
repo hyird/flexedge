@@ -36,6 +36,25 @@ private:
     static constexpr std::int64_t node_page = 1;
     static constexpr std::int64_t node_page_size = 100;
 
+    static ruvia::task<overview_response> read_overview(auto& read, const std::string& tenant) {
+        auto data = co_await get_overview_service().get(read, tenant);
+        co_return service::common::ok<overview_response>(read, std::move(data));
+    }
+
+    static ruvia::task<overview_traffic_response> read_traffic(auto& read,
+        const std::string& tenant) {
+        auto data = co_await get_overview_traffic_service().get(read, tenant);
+        co_return service::common::ok<overview_traffic_response>(read, std::move(data));
+    }
+
+    static ruvia::task<service::node::node_page_response> read_nodes(auto& read,
+        const std::string& tenant) {
+        auto data = co_await service::node::get_node_read_service().list(read, tenant, node_page,
+            node_page_size, 0, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+            std::nullopt);
+        co_return service::common::ok<service::node::node_page_response>(read, std::move(data));
+    }
+
     ruvia::task<void> get(ruvia::context& c) {
         namespace live = service::live_resource;
         const auto tenant = service::middleware::current_tenant_id(c);
@@ -50,26 +69,18 @@ private:
         auto sub = live::get_hub(c).subscribe(c.worker(), tenant, std::move(parts));
 
         std::vector<live::snapshot_part> snapshots;
-        snapshots.push_back({"snapshot", [tenant](auto& read) -> ruvia::task<std::string> {
-                                 auto data = co_await get_overview_service().get(read, tenant);
-                                 co_return std::string(ruvia::to_json(
-                                     service::common::ok<overview_response>(read, std::move(data)),
-                                     {.resource_ = read.pool()}));
-                             }});
-        snapshots.push_back({"traffic", [tenant](auto& read) -> ruvia::task<std::string> {
-                                 auto data = co_await get_overview_traffic_service().get(read, tenant);
-                                 co_return std::string(ruvia::to_json(
-                                     service::common::ok<overview_traffic_response>(read, std::move(data)),
-                                     {.resource_ = read.pool()}));
-                             }});
-        snapshots.push_back({"nodes", [tenant](auto& read) -> ruvia::task<std::string> {
-                                 auto data = co_await service::node::get_node_read_service().list(
-                                     read, tenant, node_page, node_page_size, 0, std::nullopt, std::nullopt,
-                                     std::nullopt, std::nullopt, std::nullopt);
-                                 co_return std::string(ruvia::to_json(
-                                     service::common::ok<service::node::node_page_response>(read, std::move(data)),
-                                     {.resource_ = read.pool()}));
-                             }});
+        snapshots.push_back(live::make_snapshot_part("snapshot",
+            [tenant](auto& read) -> ruvia::task<overview_response> {
+                co_return co_await read_overview(read, tenant);
+            }));
+        snapshots.push_back(live::make_snapshot_part("traffic",
+            [tenant](auto& read) -> ruvia::task<overview_traffic_response> {
+                co_return co_await read_traffic(read, tenant);
+            }));
+        snapshots.push_back(live::make_snapshot_part("nodes",
+            [tenant](auto& read) -> ruvia::task<service::node::node_page_response> {
+                co_return co_await read_nodes(read, tenant);
+            }));
         co_await live::stream_snapshots(c, std::move(sub), std::move(snapshots));
     }
 };

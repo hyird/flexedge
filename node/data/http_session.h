@@ -158,6 +158,11 @@ private:
     enum class timeout_action { close,
         failover };
 
+    struct tunnel_state final {
+        std::string client_upgrade_remainder_;
+        std::array<char, 16384> client_tunnel_buffer_{};
+    };
+
     static bool normal_io_close(const std::error_code& error) noexcept {
         return error == asio::error::eof || error == asio::error::operation_aborted ||
                error == asio::ssl::error::stream_truncated;
@@ -255,80 +260,96 @@ private:
         send(std::move(bytes), status.value());
     }
 
-    void handle_request(const http1_request_reader& parsed) {
-        const auto config = context_.runtime_.config();
-        active_patterns_ = context_.runtime_.patterns();
-        if (!config) {
-            reply(ruvia::http_status::service_unavailable);
-            return;
-        }
+    std::optional<std::pair<std::string_view, std::string>>
+    resolve_request_host(const http1_request_reader& parsed) {
         const auto host = parsed.request().header("Host");
         if (!host) {
             reply(ruvia::http_status::bad_request);
-            return;
+            return std::nullopt;
         }
         access_log_.request(parsed, *host);
-        const auto hostname = flexedge::route_policy::hostname(*host);
+        auto hostname = flexedge::route_policy::hostname(*host);
         if (hostname.empty() || hostname.size() > 253) {
             log(hostname.empty() ? "request rejected: invalid HTTP Host header: empty hostname"
                                  : "request rejected: invalid HTTP Host header: hostname exceeds 253 bytes");
             reply(ruvia::http_status::bad_request);
-            return;
+            return std::nullopt;
         }
-        const auto* website = config->website(hostname);
-        if (website != nullptr) {
-            access_log_.website(parsed, *website);
-        }
-        if (!secure_) {
-            if (const auto redirect =
-                    http_to_https_redirect(*config, hostname, parsed.request().target())) {
-                reply(redirect->status_, "Location: " + redirect->location_ + "\r\n");
-                return;
-            }
-        }
-        if (website == nullptr) {
-            reply(ruvia::http_status::misdirected_request);
-            return;
-        }
-        hsts_enabled_ = secure_ && website->hsts_enabled();
+        return std::pair{*host, std::move(hostname)};
+    }
+
+    bool resolve_route_policy(const http1_request_reader& parsed, const v2::Website& website,
+        std::string_view host) {
         flexedge::route_policy::header_values match_headers;
+        match_headers.reserve(parsed.request().headers().size());
         for (const auto& header : parsed.request().headers()) {
             match_headers.emplace_back(header.name(), header.value());
         }
-        effective_route_ = evaluate_route_rules(*website, parsed.request().method(),
-            parsed.request().target(), *host, match_headers, active_patterns_.get());
+        effective_route_ = evaluate_route_rules(website, parsed.request().method(),
+            parsed.request().target(), host, match_headers, active_patterns_.get());
         if (!effective_route_) {
             reply(ruvia::http_status::bad_request);
-            return;
+            return false;
         }
         route_ = &*effective_route_;
+        return true;
+    }
+
+    bool select_origin_candidates(const v2::Website& website) {
+        origins_ = origin_candidates(website, sequence_, route_);
+        const auto health = context_.health_.snapshot();
+        std::stable_partition(origins_.begin(), origins_.end(), [&](const v2::Origin* origin) {
+            return health->healthy(website.id(), origin->id());
+        });
+        healthy_threshold_ = website.healthy_threshold();
+        unhealthy_threshold_ = website.unhealthy_threshold();
+        return !origins_.empty();
+    }
+
+    void handle_request(const http1_request_reader& parsed) {
+        active_config_ = context_.runtime_.config();
+        active_patterns_ = context_.runtime_.patterns();
+        if (!active_config_) {
+            reply(ruvia::http_status::service_unavailable);
+            return;
+        }
+        const auto resolved_host = resolve_request_host(parsed);
+        if (!resolved_host) {
+            return;
+        }
+        const auto& [host, hostname] = *resolved_host;
+        website_ = active_config_->website(hostname);
+        if (website_ != nullptr) {
+            access_log_.website(parsed, *website_);
+        }
+        if (!secure_) {
+            if (const auto redirect_target =
+                    http_to_https_redirect(*active_config_, hostname, parsed.request().target())) {
+                reply(redirect_target->status_, "Location: " + redirect_target->location_ + "\r\n");
+                return;
+            }
+        }
+        if (website_ == nullptr) {
+            reply(ruvia::http_status::misdirected_request);
+            return;
+        }
+        hsts_enabled_ = secure_ && website_->hsts_enabled();
+        if (!resolve_route_policy(parsed, *website_, host)) {
+            return;
+        }
         if (route_->action() == "redirect") {
             redirect(*route_);
             return;
         }
         upgrade_requested_ = parsed.request().header("Upgrade").has_value();
-        const auto consumed_bytes = parsed.message_bytes();
-        if (upgrade_requested_ && consumed_bytes < request_bytes_.size()) {
-            client_upgrade_remainder_.assign(request_bytes_.data() + consumed_bytes,
-                request_bytes_.size() - consumed_bytes);
-        }
-        active_config_ = config;
-        website_ = website;
-        origins_ = origin_candidates(*website, sequence_, route_);
-        const auto health = context_.health_.snapshot();
-        std::stable_partition(origins_.begin(), origins_.end(), [&](const v2::Origin* origin) {
-            return health->healthy(website->id(), origin->id());
-        });
-        healthy_threshold_ = website->healthy_threshold();
-        unhealthy_threshold_ = website->unhealthy_threshold();
-        if (origins_.empty()) {
+        if (!select_origin_candidates(*website_)) {
             reply(ruvia::http_status::bad_gateway);
             return;
         }
-        proxy(parsed);
+        proxy(parsed, host);
     }
 
-    void redirect(const v2::RouteRule& route) {
+    void redirect(const evaluated_route_policy& route) {
         const auto& location = route.redirect_url();
         if (location.empty()) {
             reply(ruvia::http_status::bad_request);
@@ -344,7 +365,7 @@ private:
         reply(ruvia::http_status_code::from_value(status), headers);
     }
 
-    void proxy(const http1_request_reader& parsed) {
+    void proxy(const http1_request_reader& parsed, std::string_view host) {
         if (client_address_ == "unknown") {
             reply(ruvia::http_status::bad_gateway);
             return;
@@ -357,6 +378,13 @@ private:
         if (buffered_) {
             accept_encoding_ = *accept_encoding;
         }
+        auto prepared = prepare_origin_request(parsed, *website_, host, client_address_,
+            secure_, upgrade_requested_, false, force_identity_encoding_, route_);
+        if (!prepared) {
+            reply(ruvia::http_status::bad_gateway);
+            return;
+        }
+        prepared_request_.emplace(std::move(*prepared));
         connect_timeout_ = std::chrono::seconds(website_->origin_connect_timeout_seconds());
         read_timeout_ = std::chrono::seconds(website_->origin_read_timeout_seconds());
         try_next_origin();
@@ -415,31 +443,19 @@ private:
         start_origin_attempt(origin, origin_attempt_);
     }
 
-    // Each attempt prepares its own request so its response parser starts fresh.
     void start_origin_attempt(const v2::Origin& origin, std::uint64_t attempt) {
-        auto prepared = prepare_origin_request(request_reader_, *website_,
-            *request_reader_.request().header("Host"), client_address_, secure_,
-            upgrade_requested_, false, force_identity_encoding_, route_,
-            active_patterns_.get());
-        if (!prepared) {
-            reply(ruvia::http_status::bad_gateway);
-            return;
-        }
         auto response =
-            buffered_ ? origin_response_codec(std::move(prepared->response_exchange_), hsts_enabled_,
+            buffered_ ? origin_response_codec(prepared_request_->make_exchange_state(), hsts_enabled_,
                             route_, context_.response_buffers_.lease())
-                      : origin_response_codec(std::move(prepared->response_exchange_), hsts_enabled_,
+                      : origin_response_codec(prepared_request_->make_exchange_state(), hsts_enabled_,
                             route_);
-        if (buffered_) {
-            origin_target_ = std::move(prepared->target_);
-        }
         exchange_ = std::make_shared<origin_exchange>(context_.origin_connections_,
             origin_connection_key{
                 .host_ = origin.host(),
                 .port_ = static_cast<std::uint16_t>(origin.port()),
                 .secure_ = origin.protocol() == "https",
             },
-            std::move(prepared->bytes_), std::move(response));
+            prepared_request_->bytes_, std::move(response));
         arm(connect_timeout_, attempt, timeout_action::failover);
         const auto self = this->shared_from_this();
         exchange_->send([self, attempt](const std::error_code& error) {
@@ -534,7 +550,7 @@ private:
         cancel_timer();
         auto& codec = exchange_->response();
         auto response = codec.take_response();
-        apply_response_compression(*website_, origin_target_, accept_encoding_, response);
+        apply_response_compression(*website_, prepared_request_->target_, accept_encoding_, response);
         std::string wire;
         if (!codec.frame(response, wire)) {
             reply(ruvia::http_status::service_unavailable);
@@ -606,15 +622,19 @@ private:
     }
 
     void start_tunnel(std::uint64_t attempt) {
+        tunnel_state_ = std::make_unique<tunnel_state>();
+        if (upgrade_requested_ && !request_reader_.unconsumed_bytes().empty()) {
+            tunnel_state_->client_upgrade_remainder_.assign(request_reader_.unconsumed_bytes());
+        }
         exchange_->enter_tunnel();
         cancel_timer();
-        if (client_upgrade_remainder_.empty()) {
+        if (tunnel_state_->client_upgrade_remainder_.empty()) {
             read_tunnel_client(attempt);
             read_tunnel_origin(attempt);
             return;
         }
         const auto self = this->shared_from_this();
-        exchange_->write(asio::buffer(client_upgrade_remainder_),
+        exchange_->write(asio::buffer(tunnel_state_->client_upgrade_remainder_),
             [self, attempt](const std::error_code& error) {
                 if (!self->origin_attempt_current(attempt)) {
                     return;
@@ -623,7 +643,7 @@ private:
                     self->close();
                     return;
                 }
-                self->client_upgrade_remainder_.clear();
+                self->tunnel_state_->client_upgrade_remainder_.clear();
                 self->read_tunnel_client(attempt);
                 self->read_tunnel_origin(attempt);
             });
@@ -631,7 +651,7 @@ private:
 
     void read_tunnel_client(std::uint64_t attempt) {
         const auto self = this->shared_from_this();
-        stream_.async_read_some(asio::buffer(client_tunnel_buffer_),
+        stream_.async_read_some(asio::buffer(tunnel_state_->client_tunnel_buffer_),
             [self, attempt](const std::error_code& error, std::size_t size) {
                 if (!self->origin_attempt_current(attempt)) {
                     return;
@@ -640,7 +660,8 @@ private:
                     self->close();
                     return;
                 }
-                self->exchange_->write(asio::buffer(self->client_tunnel_buffer_.data(), size),
+                self->exchange_->write(
+                    asio::buffer(self->tunnel_state_->client_tunnel_buffer_.data(), size),
                     [self, attempt](const std::error_code& write_error) {
                         if (!self->origin_attempt_current(attempt)) {
                             return;
@@ -760,8 +781,8 @@ private:
     std::shared_ptr<const compiled_config> active_config_;
     std::shared_ptr<const route_patterns> active_patterns_;
     const v2::Website* website_{};
-    std::optional<v2::RouteRule> effective_route_;
-    const v2::RouteRule* route_{};
+    std::optional<evaluated_route_policy> effective_route_;
+    const evaluated_route_policy* route_{};
     std::vector<const v2::Origin*> origins_;
     std::size_t origin_index_{};
     std::uint64_t origin_attempt_{};
@@ -770,12 +791,11 @@ private:
     std::uint32_t unhealthy_threshold_{1};
     std::chrono::seconds connect_timeout_{10};
     std::chrono::seconds read_timeout_{30};
+    std::optional<prepared_origin_request> prepared_request_;
     std::shared_ptr<origin_exchange> exchange_;
-    std::string origin_target_;
     std::string_view accept_encoding_;
     std::string relay_bytes_;
-    std::string client_upgrade_remainder_;
-    std::array<char, 16384> client_tunnel_buffer_{};
+    std::unique_ptr<tunnel_state> tunnel_state_;
     std::uint64_t proxied_response_bytes_{};
     std::uint64_t sequence_{};
     bool secure_{};

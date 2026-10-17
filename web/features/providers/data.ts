@@ -24,6 +24,7 @@ const certificateProviderListSchema = z.array(certificateProviderSchema)
 export function dnsProvidersQuery(params: ProviderFilters) {
   return queryOptions({
     retry: false,
+    meta: { inlineError: true },
     queryKey: [...queryKeys.providers, 'dns', 'list', params],
     queryFn: ({ queryKey, signal }) =>
       readLiveQuery(
@@ -48,6 +49,7 @@ export const dnsProviderOptionsQuery = queryOptions({
 /** Paginated GET/SSE contract; every filter is part of the live-query identity. */
 export function certificateProvidersQuery(params: ProviderFilters) {
   return queryOptions({
+    meta: { inlineError: true },
     retry: false,
     queryKey: [...queryKeys.providers, 'certificate', 'list', params],
     queryFn: ({ queryKey, signal }) =>

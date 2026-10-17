@@ -41,7 +41,6 @@ export function CertificatesPage() {
       abnormal,
     }),
     placeholderData: keepPreviousData,
-    meta: { inlineError: true },
   })
   const filtered = hasListFilters(list.search, certificateFilterKeys)
   const createAction = (

@@ -7,6 +7,54 @@
 
 namespace flexedge::route_policy {
 
+[[nodiscard]] inline constexpr char lower_ascii(unsigned char c) noexcept {
+    return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : static_cast<char>(c);
+}
+
+[[nodiscard]] inline constexpr bool ascii_equal(std::string_view left, std::string_view right) noexcept {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        if (lower_ascii(static_cast<unsigned char>(left[i])) !=
+            lower_ascii(static_cast<unsigned char>(right[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] inline constexpr bool ascii_starts_with(std::string_view value, std::string_view prefix) noexcept {
+    return value.size() >= prefix.size() && ascii_equal(value.substr(0, prefix.size()), prefix);
+}
+
+[[nodiscard]] inline constexpr std::string_view trim_ows(std::string_view value) noexcept {
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) {
+        value.remove_suffix(1);
+    }
+    return value;
+}
+
+[[nodiscard]] inline constexpr bool is_http_token_char(char c) noexcept {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+           std::string_view("!#$%&'*+-.^_`|~").find(c) != std::string_view::npos;
+}
+
+[[nodiscard]] inline constexpr bool http_token(std::string_view value, std::size_t maximum = 256) noexcept {
+    if (value.empty() || value.size() > maximum) {
+        return false;
+    }
+    for (const char c : value) {
+        if (!is_http_token_char(c)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 inline bool clean_text(std::string_view value, std::size_t maximum) {
     return value.size() <= maximum &&
            std::ranges::none_of(value, [](unsigned char c) { return std::iscntrl(c) != 0; });

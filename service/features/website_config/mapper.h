@@ -153,6 +153,48 @@ template <typename values_type>
 
 }  // namespace detail
 
+enum class route_origin_reference_status {
+    valid,
+    redirect_forbids_origin_group,
+    missing_enabled_origin_group,
+};
+
+[[nodiscard]] inline std::unordered_set<std::string_view>
+collect_enabled_origin_groups(const std::vector<website_origin_data>& origins) {
+    std::unordered_set<std::string_view> groups;
+    for (const auto& origin : origins) {
+        if (origin.status_ == "enabled") {
+            groups.emplace(origin.group_);
+        }
+    }
+    return groups;
+}
+
+[[nodiscard]] inline std::unordered_set<std::string_view>
+collect_enabled_origin_groups(const ruvia::array<website_origin_input>& origins) {
+    std::unordered_set<std::string_view> groups;
+    for (const auto& origin : origins) {
+        const auto& group = origin.get<"group">();
+        const auto& status = origin.get<"status">();
+        if (group && status && status->view() == "enabled") {
+            groups.emplace(group->view());
+        }
+    }
+    return groups;
+}
+
+[[nodiscard]] inline route_origin_reference_status check_route_origin_reference(
+    std::string_view action, std::string_view origin_group,
+    const std::unordered_set<std::string_view>& enabled_origin_groups) {
+    if (action == "redirect" && !origin_group.empty()) {
+        return route_origin_reference_status::redirect_forbids_origin_group;
+    }
+    if (action == "proxy" && !enabled_origin_groups.contains(origin_group)) {
+        return route_origin_reference_status::missing_enabled_origin_group;
+    }
+    return route_origin_reference_status::valid;
+}
+
 [[nodiscard]] inline std::optional<website_config_data> normalize(const website_config_input& input) {
     const auto& domains = input.get<"domains">();
     const auto& origins = input.get<"origins">();
@@ -272,20 +314,13 @@ template <typename values_type>
         }
         result.route_rules_.push_back(std::move(*normalized));
     }
-    std::unordered_set<std::string_view> enabled_origin_groups;
-    for (const auto& origin : result.origins_) {
-        if (origin.status_ == "enabled") {
-            enabled_origin_groups.emplace(origin.group_);
-        }
-    }
+    const auto enabled_origin_groups = collect_enabled_origin_groups(result.origins_);
     if (!enabled_origin_groups.contains(result.default_origin_group_)) {
         return std::nullopt;
     }
     for (const auto& rule : result.route_rules_) {
-        if (rule.action_ == "redirect" && !rule.origin_group_.empty()) {
-            return std::nullopt;
-        }
-        if (rule.action_ == "proxy" && !enabled_origin_groups.contains(rule.origin_group_)) {
+        if (check_route_origin_reference(rule.action_, rule.origin_group_, enabled_origin_groups) !=
+            route_origin_reference_status::valid) {
             return std::nullopt;
         }
     }

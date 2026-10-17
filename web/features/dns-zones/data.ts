@@ -41,6 +41,7 @@ export function dnsZonesQuery(params: {
 }) {
   return queryOptions({
     retry: false,
+    meta: { inlineError: true },
     queryKey: [...queryKeys.dnsZones, 'list', params],
     queryFn: ({ queryKey, signal }) =>
       readLiveQuery(

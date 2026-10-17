@@ -29,6 +29,7 @@ export function clustersQuery(params: {
 }) {
   return queryOptions({
     retry: false,
+    meta: { inlineError: true },
     queryKey: [...queryKeys.clusters, 'list', params],
     queryFn: ({ queryKey, signal }) =>
       readLiveQuery(

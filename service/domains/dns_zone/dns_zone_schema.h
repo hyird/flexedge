@@ -10,34 +10,31 @@
 #include <optional>
 #include <string_view>
 
+#include "service/common/http.h"
 #include "service/domains/dns_zone/dns_zone_types.h"
 
 namespace service::dns_zone {
 
-class create_dns_zone_validator final {
-public:
-    ruvia::task<void> handle(ruvia::context& context, ruvia::next& next) {
-        const auto& body = context.req().validated_json<create_dns_zone_body>().value();
-        ruvia::validator validator({.resource_ = context.pool()});
-        const auto& provider_id = body.get<"dns_provider_id">();
-        validator.required(provider_id, "dns_provider_id", "请选择 DNS 服务商账号");
-        if (provider_id && !is_valid_uuid(*provider_id)) {
-            validator.add("dns_provider_id", "regex", "DNS 服务商账号不正确");
-        }
-
-        const auto& domain = body.get<"domain">();
-        validator.required(domain, "domain", "域名不能为空");
-        if (domain) {
-            validator.min_length(domain, "domain", 1, "域名不能为空");
-            validator.max_length(domain, "domain", 253, "域名最多253个字符");
-            if (!is_valid_zone_domain(*domain)) {
-                validator.add("domain", "regex", "域名格式不正确");
-            }
-        }
-        validator.throw_if_invalid();
-        co_await next();
+inline void validate_create_dns_zone(const create_dns_zone_body& body, ruvia::validator& validator) {
+    const auto& provider_id = body.get<"dns_provider_id">();
+    validator.required(provider_id, "dns_provider_id", "请选择 DNS 服务商账号");
+    if (provider_id && !is_valid_uuid(*provider_id)) {
+        validator.add("dns_provider_id", "regex", "DNS 服务商账号不正确");
     }
-};
+
+    const auto& domain = body.get<"domain">();
+    validator.required(domain, "domain", "域名不能为空");
+    if (domain) {
+        validator.min_length(domain, "domain", 1, "域名不能为空");
+        validator.max_length(domain, "domain", 253, "域名最多253个字符");
+        if (!is_valid_zone_domain(*domain)) {
+            validator.add("domain", "regex", "域名格式不正确");
+        }
+    }
+}
+
+using create_dns_zone_validator =
+    service::common::json_validator_middleware<create_dns_zone_body, validate_create_dns_zone>;
 
 // Ruvia's json_body parses with its default budget (64Ki array elements, 16 MiB of charged
 // representation). Each record element is charged 4 * (sizeof(zone_record_input) + pointer), so

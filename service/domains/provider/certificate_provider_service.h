@@ -4,8 +4,6 @@
 #include <ruvia/web/context.h>
 #include <ruvia/web/db/db.h>
 
-#include <algorithm>
-#include <cctype>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -23,6 +21,7 @@
 #include "service/features/sync_runtime/work_commit.h"
 #include "service/utils/secret.h"
 #include "service/utils/sensitive_string.h"
+#include "service/utils/text.h"
 
 namespace service::provider {
 
@@ -51,7 +50,7 @@ public:
             credential_mode, account_email,
             access_key ? std::optional<std::string>{service::utils::seal_secret(*access_key)}
                        : std::nullopt,
-            access_key ? std::optional<std::string>{secret_hint(*access_key)} : std::nullopt,
+            access_key ? std::optional<std::string>{service::utils::secret_hint(*access_key)} : std::nullopt,
             c.pool());
         try {
             auto transaction = co_await c.db().begin_transaction();
@@ -61,7 +60,8 @@ public:
                 "$3::jsonb, '{}'::jsonb, 'unverified', NOW(), NOW()) RETURNING id, revision",
                 tenant_id, std::string_view(provider), std::string_view(config));
             const auto id = std::string(inserted.front()[0].value().value_or(""));
-            co_await commit_changes(transaction, c, tenant_id, id, service::background::queued_work{});
+            co_await service::sync_runtime::commit_work(transaction, c, tenant_id,
+                service::live_resource::resource::providers, id, service::background::queued_work{});
             co_return inserted.front()[1].as<std::int64_t>().value_or(1);
         } catch (const ruvia::db_error& error) {
             if (service::common::is_unique_constraint_violation(error,
@@ -74,14 +74,6 @@ public:
 
     ruvia::task<std::int64_t> update(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, std::int64_t expected_revision, const update_certificate_provider_body& body) {
-        const auto rows = co_await c.db().query(
-            "SELECT revision, provider, config::text FROM sys_provider WHERE id = $1 AND "
-            "tenant_id = $2 AND kind = 'certificate' AND deleted_at IS NULL LIMIT 1",
-            id, tenant_id);
-        service::common::require_current_revision(rows, expected_revision, revision_errors_);
-        const auto provider = std::string(rows.front()[1].value().value_or(""));
-        const auto current = service::certificate_issuance::parse_certificate_provider_config(
-            rows.front()[2].value().value_or("{}"), c.pool());
         const auto& credential_mode_input = body.get<"credential_mode">();
         if (!credential_mode_input) {
             service::common::throw_app_error(service::common::validation_error_code,
@@ -96,6 +88,15 @@ public:
         if (const auto& value = body.get<"access_key">(); value) {
             submitted_key = value->view();
         }
+        auto transaction = co_await c.db().begin_transaction();
+        const auto rows = co_await transaction.query(
+            "SELECT revision, provider, config::text FROM sys_provider WHERE id = $1 AND "
+            "tenant_id = $2 AND kind = 'certificate' AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
+            id, tenant_id);
+        service::common::require_current_revision(rows, expected_revision, revision_errors_);
+        const auto provider = std::string(rows.front()[1].value().value_or(""));
+        const auto current = service::certificate_issuance::parse_certificate_provider_config(
+            rows.front()[2].value().value_or("{}"), c.pool());
         std::optional<service::utils::sensitive_string> stored_key;
         std::optional<std::string_view> plain_key;
         std::optional<std::string> envelope;
@@ -104,7 +105,7 @@ public:
             if (submitted_key) {
                 plain_key = *submitted_key;
                 envelope = service::utils::seal_secret(*submitted_key);
-                hint = secret_hint(*submitted_key);
+                hint = service::utils::secret_hint(*submitted_key);
             } else if (current.credential_mode_ == "access_key" && current.envelope_) {
                 envelope = current.envelope_;
                 hint = current.hint_;
@@ -117,7 +118,6 @@ public:
                              account_email != current.account_email_ || submitted_key.has_value();
         const auto config = service::certificate_issuance::serialize_certificate_provider_config(
             credential_mode, account_email, envelope, hint, c.pool());
-        auto transaction = co_await c.db().begin_transaction();
         const auto updated = co_await transaction.query(
             "UPDATE sys_provider SET revision = revision + 1, config = $1::jsonb, runtime = CASE "
             "WHEN $2::BOOLEAN THEN '{}'::jsonb ELSE runtime END, status = CASE WHEN $2::BOOLEAN "
@@ -134,7 +134,8 @@ public:
         } else {
             co_await service::provider_verification::remove(transaction, tenant_id, id, work);
         }
-        co_await commit_changes(transaction, c, tenant_id, id, work);
+        co_await service::sync_runtime::commit_work(
+            transaction, c, tenant_id, service::live_resource::resource::providers, id, work);
         co_return updated.front()[0].as<std::int64_t>().value_or(0);
     }
 
@@ -147,7 +148,8 @@ public:
             id, expected_revision, work);
         co_await service::common::require_revision_written(transaction, enqueued, "sys_provider", tenant_id, id,
             revision_errors_);
-        co_await commit_changes(transaction, c, tenant_id, id, work);
+        co_await service::sync_runtime::commit_work(
+            transaction, c, tenant_id, service::live_resource::resource::providers, id, work);
         co_return expected_revision;
     }
 
@@ -169,7 +171,8 @@ public:
             id, tenant_id);
         service::background::queued_work work;
         co_await service::provider_verification::remove(transaction, tenant_id, id, work);
-        co_await commit_changes(transaction, c, tenant_id, id, work);
+        co_await service::sync_runtime::commit_work(
+            transaction, c, tenant_id, service::live_resource::resource::providers, id, work);
         co_return removed.front()[0].as<std::int64_t>().value_or(0);
     }
 
@@ -177,33 +180,8 @@ private:
     static constexpr service::common::revision_errors revision_errors_{certificate_provider_error::not_found,
         certificate_provider_error::revision_conflict};
 
-    static ruvia::task<void> commit_changes(ruvia::db_transaction& transaction, ruvia::context& c, const std::string& tenant_id, const std::string& id,
-        const service::background::queued_work& work) {
-        service::live_resource::notifications::resource_notification notification(tenant_id);
-        notification.changed(service::live_resource::resource::providers, id);
-        co_await service::sync_runtime::commit_work(transaction, c, std::move(notification), work);
-    }
-
-    static std::string trim(std::string_view input) {
-        const auto begin = std::find_if_not(input.begin(), input.end(),
-            [](unsigned char ch) { return std::isspace(ch) != 0; });
-        const auto end = std::find_if_not(input.rbegin(), input.rend(), [](unsigned char ch) {
-            return std::isspace(ch) != 0;
-        }).base();
-        return begin < end ? std::string(begin, end) : std::string{};
-    }
-
     static std::string normalize_email(std::string_view input) {
-        auto result = trim(input);
-        std::transform(result.begin(), result.end(), result.begin(),
-            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        return result;
-    }
-
-    static std::string secret_hint(std::string_view value) {
-        constexpr std::size_t visible{4};
-        return "****" +
-               std::string(value.substr(value.size() > visible ? value.size() - visible : 0));
+        return service::utils::to_lower_ascii(service::utils::trim_ascii(input));
     }
 
     static void validate_credentials(std::string_view provider, std::string_view credential_mode,

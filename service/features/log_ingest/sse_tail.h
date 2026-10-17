@@ -98,4 +98,21 @@ ruvia::task<void> stream_sse_tail(ruvia::context& c, fanout::hub::subscription s
     }
 }
 
+template <typename response_type, typename fetch_type>
+ruvia::task<void> stream_model_sse_tail(ruvia::context& c, fanout::hub::subscription subscription,
+    std::optional<tail_cursor> after, fetch_type fetch) {
+    co_await stream_sse_tail(c, std::move(subscription), std::move(after),
+        [fetch = std::move(fetch)](auto& read,
+            const std::optional<tail_cursor>& cursor) -> ruvia::task<tail_batch> {
+            auto data = co_await fetch(read, cursor);
+            const auto next_cursor = tail_response_cursor(data);
+            const auto response = service::common::ok<response_type>(read, std::move(data));
+            const auto json = ruvia::to_json(response, {.resource_ = read.pool()});
+            co_return tail_batch{
+                .payload_ = std::string(json.data(), json.size()),
+                .cursor_ = next_cursor,
+            };
+        });
+}
+
 }  // namespace service::log_ingest

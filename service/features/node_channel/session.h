@@ -30,6 +30,7 @@
 #include "service/features/node_channel/channel_service.h"
 #include "service/features/node_channel/error.h"
 #include "service/features/node_channel/protocol.h"
+#include "service/features/node_channel/report_service.h"
 #include "service/features/node_channel/types.h"
 #include "service/features/node_dispatch/fanout.h"
 #include "service/features/node_presence/node_connection.h"
@@ -263,19 +264,6 @@ private:
         }
     }
 
-    static std::string_view reported_phase_name(flexedge::node::v2::ApplyPhase phase) noexcept {
-        switch (phase) {
-            case flexedge::node::v2::APPLY_PHASE_STAGE:
-                return "stage";
-            case flexedge::node::v2::APPLY_PHASE_VALIDATE:
-                return "validate";
-            case flexedge::node::v2::APPLY_PHASE_ACTIVATE:
-                return "activate";
-            default:
-                return "";
-        }
-    }
-
     // Milliseconds since this connection sent the desired state `release_id`
     // answers; each dispatch times one result.
     static std::optional<std::int64_t> take_dispatch_elapsed(state& session, std::string_view release_id) {
@@ -506,7 +494,7 @@ private:
             service::attempt_trace::node_message_field{.name_ = "release_id", .value_ = result.release_id()},
             service::attempt_trace::node_message_field{.name_ = "applied", .value_ = applied},
             service::attempt_trace::node_message_field{.name_ = "failed_phase",
-                .value_ = reported_phase_name(result.failed_phase())},
+                .value_ = apply_phase_name(result.failed_phase())},
             service::attempt_trace::node_message_field{.name_ = "error_code", .value_ = result.error_code()},
             service::attempt_trace::node_message_field{.name_ = "retryable", .value_ = retryable},
             service::attempt_trace::node_message_field{.name_ = "error", .value_ = result.error()}};

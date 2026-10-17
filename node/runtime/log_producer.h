@@ -16,6 +16,7 @@
 
 #include <openssl/rand.h>
 
+#include "common/hex.h"
 #include "node/proto/edge_control.pb.h"
 #include "node/proto/log_contract.h"
 
@@ -226,16 +227,18 @@ private:
         }
         bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0f) | 0x40);
         bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3f) | 0x80);
-        constexpr char hex[] = "0123456789abcdef";
+        const auto hex = flexedge::crypto::hex_encode(bytes);
         std::string result;
         result.reserve(36);
-        for (std::size_t index = 0; index < sizeof(bytes); ++index) {
-            if (index == 4 || index == 6 || index == 8 || index == 10) {
-                result.push_back('-');
-            }
-            result.push_back(hex[bytes[index] >> 4]);
-            result.push_back(hex[bytes[index] & 0x0f]);
-        }
+        result.append(hex, 0, 8);
+        result.push_back('-');
+        result.append(hex, 8, 4);
+        result.push_back('-');
+        result.append(hex, 12, 4);
+        result.push_back('-');
+        result.append(hex, 16, 4);
+        result.push_back('-');
+        result.append(hex, 20, 12);
         return result;
     }
 

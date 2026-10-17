@@ -38,4 +38,13 @@ inline ruvia::task<void> commit_work(transaction_type& transaction, context_type
         service::live_resource::notifications::resource_notification(tenant_id), work);
 }
 
+template <typename transaction_type, typename context_type>
+inline ruvia::task<void> commit_work(transaction_type& transaction, context_type& context,
+    std::string_view tenant_id, service::live_resource::resource resource_kind,
+    std::string_view resource_id, const service::background::queued_work& work) {
+    service::live_resource::notifications::resource_notification notification(tenant_id);
+    notification.changed(resource_kind, resource_id);
+    co_await commit_work(transaction, context, std::move(notification), work);
+}
+
 }  // namespace service::sync_runtime

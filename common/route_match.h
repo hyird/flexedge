@@ -101,38 +101,10 @@ inline bool condition_options(std::string_view source, std::string_view name,
         ((op == "exists" || op == "absent") && !value.empty())) {
         return false;
     }
-    if (source == "header") {
-        for (const auto c : name) {
-            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                    (c >= '0' && c <= '9') || std::string_view("!#$%&'*+-.^_`|~").find(c) != std::string_view::npos)) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-inline bool ascii_equal(std::string_view left, std::string_view right) {
-    if (left.size() != right.size()) {
+    if (source == "header" && !http_token(name, 256)) {
         return false;
     }
-    for (std::size_t i = 0; i < left.size(); ++i) {
-        const auto lower = [](unsigned char c) { return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c; };
-        if (lower(left[i]) != lower(right[i])) {
-            return false;
-        }
-    }
     return true;
-}
-
-inline std::string_view trim_ows(std::string_view value) {
-    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
-        value.remove_prefix(1);
-    }
-    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) {
-        value.remove_suffix(1);
-    }
-    return value;
 }
 
 inline bool valid_utf8(std::string_view value) {

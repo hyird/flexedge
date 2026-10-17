@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 
+#include "service/common/database.h"
 #include "service/domains/overview/overview_types.h"
 
 namespace service::overview {
@@ -68,9 +69,9 @@ public:
             item.template set<"request_count">(classes[index]);
         }
 
-        auto& top_websites = result.template ensure<"top_websites">();
+        auto& top_website_items = result.template ensure<"top_websites">();
         for (const auto& row : top_rows) {
-            auto& item = top_websites.emplace_back(ruvia::model_options{.resource_ = c.pool()});
+            auto& item = top_website_items.emplace_back(ruvia::model_options{.resource_ = c.pool()});
             item.template set<"website_id">(row[0].value().value_or(""));
             item.template set<"name">(row[1].value().value_or(""));
             item.template set<"request_count">(number(row, 2));
@@ -91,12 +92,11 @@ public:
         auto status_count = [&](std::int64_t lower, std::string_view alias) {
             return minutes.alias(
                 minutes.filter(minutes.aggregate("count", {minutes.star()}),
-                    minutes.binary(
-                        minutes.binary(status_code, ruvia::db_binary_operator::greater_equal,
-                            minutes.value(lower)),
-                        ruvia::db_binary_operator::and_value,
-                        minutes.binary(status_code, ruvia::db_binary_operator::less,
-                            minutes.value(lower + 100)))),
+                    service::common::db_all(minutes,
+                        {minutes.binary(status_code, ruvia::db_binary_operator::greater_equal,
+                             minutes.value(lower)),
+                            minutes.binary(status_code, ruvia::db_binary_operator::less,
+                                minutes.value(lower + 100))})),
                 alias);
         };
         const auto minute = minutes.call(
@@ -144,12 +144,12 @@ public:
                                {window_start(query), current_hour(query), hour}),
                 "hours", {.columns_ = {{.name_ = "bucket", .type_ = {}}}})
             .join(ruvia::db_join_type::left, "minutes",
-                query.binary(
-                    query.binary(query.column("bucket", "minutes"),
-                        ruvia::db_binary_operator::greater_equal, bucket),
-                    ruvia::db_binary_operator::and_value,
-                    query.binary(query.column("bucket", "minutes"), ruvia::db_binary_operator::less,
-                        query.binary(bucket, ruvia::db_binary_operator::add, hour))),
+                service::common::db_all(query,
+                    {query.binary(query.column("bucket", "minutes"),
+                         ruvia::db_binary_operator::greater_equal, bucket),
+                        query.binary(query.column("bucket", "minutes"),
+                            ruvia::db_binary_operator::less,
+                            query.binary(bucket, ruvia::db_binary_operator::add, hour))}),
                 "minutes")
             .group_by({bucket})
             .order_by(bucket);
@@ -202,10 +202,7 @@ public:
 
         ruvia::db_query query(resource);
         const auto config = query.column("config", "website");
-        const auto text = [&](ruvia::db_expression value, std::string_view key) {
-            return query.binary(value, ruvia::db_binary_operator::json_get_text, query.value(key));
-        };
-        const auto first_hostname = text(
+        const auto first_hostname = service::common::db_json_text(query,
             query.binary(query.binary(config, ruvia::db_binary_operator::json_get,
                              query.value("domains")),
                 ruvia::db_binary_operator::json_get, query.value(0)),
@@ -214,18 +211,19 @@ public:
         const auto requests = query.column("requests", "totals");
         query.with("totals", totals)
             .select({query.column("id", "website"),
-                query.coalesce({query.null_if(text(config, "name"), query.value("")),
+                query.coalesce({query.null_if(service::common::db_json_text(query, config, "name"),
+                                    query.value("")),
                     first_hostname, query.value("")}),
                 query.cast(requests, ruvia::db_data_type::big_int),
                 query.cast(bytes, ruvia::db_data_type::big_int)})
             .from("totals")
             .join(ruvia::db_join_type::inner, "sys_website",
-                query.binary(query.binary(query.column("tenant_id", "website"),
-                                 ruvia::db_binary_operator::equal, query.value(tenant_id)),
-                    ruvia::db_binary_operator::and_value,
-                    query.binary(query.column("id", "website"),
-                        ruvia::db_binary_operator::equal,
-                        query.column("website_id", "totals"))),
+                service::common::db_all(query,
+                    {query.binary(query.column("tenant_id", "website"),
+                         ruvia::db_binary_operator::equal, query.value(tenant_id)),
+                        query.binary(query.column("id", "website"),
+                            ruvia::db_binary_operator::equal,
+                            query.column("website_id", "totals"))}),
                 "website")
             .where(query.unary(ruvia::db_unary_operator::is_null, query.column("deleted_at", "website")))
             .order_by(bytes, ruvia::db_order_direction::desc)

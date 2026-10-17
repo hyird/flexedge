@@ -1,5 +1,5 @@
 import { AxiosError } from 'axios'
-import { QueryCache, QueryClient } from '@tanstack/react-query'
+import { MutationCache, QueryCache, QueryClient } from '@tanstack/react-query'
 import { apiErrorMessage } from './api'
 import { ApiBusinessError, ApiProtocolError } from './api-response'
 
@@ -49,6 +49,11 @@ export function createAppQueryClient(
         },
       },
     },
+    mutationCache: new MutationCache({
+      onError: (error) => {
+        handleError?.(error)
+      },
+    }),
     queryCache: new QueryCache({
       onError: (error, query) => {
         if (handleError?.(error) || query.meta?.inlineError) return

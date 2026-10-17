@@ -13,6 +13,8 @@
 #include <string_view>
 #include <vector>
 
+#include "service/common/database.h"
+
 namespace service::certificate {
 
 // Configured names of a usable certificate (also known before issuance).
@@ -37,17 +39,10 @@ inline ruvia::task<std::optional<std::vector<certificate_reference>>> lock_usabl
     for (const auto& id : certificate_ids) {
         ids.push_back(query.value(id));
     }
-    const auto all = [&](std::initializer_list<ruvia::db_expression> predicates) {
-        auto result = *predicates.begin();
-        for (auto it = predicates.begin() + 1; it != predicates.end(); ++it) {
-            result = query.binary(result, ruvia::db_binary_operator::and_value, *it);
-        }
-        return result;
-    };
     query.select({query.column("id"), query.subscript(names, query.value(std::int64_t{1})),
                      query.subscript(names, query.value(std::int64_t{2}))})
         .from("sys_certificate")
-        .where(all({
+        .where(service::common::db_all(query, {
             query.binary(query.column("tenant_id"), ruvia::db_binary_operator::equal, query.value(tenant_id)),
             query.binary(query.column("id"), ruvia::db_binary_operator::in, query.list(ids)),
             query.unary(ruvia::db_unary_operator::is_null, query.column("deleted_at")),

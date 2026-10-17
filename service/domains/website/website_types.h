@@ -7,6 +7,7 @@
 #include "ruvia/web/model.h"
 
 #include "service/features/website_config/mapper.h"
+#include "service/features/node_runtime/transport.h"
 
 namespace service::website {
 
@@ -38,14 +39,6 @@ RUVIA_MODEL(
     RUVIA_REQUIRED_FIELD_NAME("resolution_status", resolution_status, ruvia::string),
     RUVIA_OPTIONAL_FIELD_NAME("last_verified_at", last_verified_at, ruvia::string, RUVIA_OMIT_EMPTY),
     RUVIA_OPTIONAL_FIELD_NAME("last_error", last_error, ruvia::string, RUVIA_OMIT_EMPTY));
-RUVIA_MODEL(
-    website_origin_runtime_dto, RUVIA_REQUIRED_FIELD_NAME("node_id", node_id, ruvia::string),
-    RUVIA_REQUIRED_FIELD_NAME("node_name", node_name, ruvia::string),
-    RUVIA_REQUIRED_FIELD_NAME("origin_id", origin_id, ruvia::string),
-    RUVIA_REQUIRED_FIELD(status, ruvia::string),
-    RUVIA_REQUIRED_FIELD_NAME("checked_at_unix_millis", checked_at_unix_millis, ruvia::int64),
-    RUVIA_REQUIRED_FIELD_NAME("latency_millis", latency_millis, ruvia::int64),
-    RUVIA_OPTIONAL_FIELD_NAME("last_error", last_error, ruvia::string, RUVIA_OMIT_EMPTY));
 
 RUVIA_MODEL(website_origin_source_dto,
     RUVIA_REQUIRED_FIELD_NAME("node_id", node_id, ruvia::string),
@@ -57,7 +50,7 @@ RUVIA_MODEL(website_runtime_dto,
     RUVIA_REQUIRED_FIELD_NAME("domain_states", domain_states,
         ruvia::array<website_domain_runtime_dto>),
     RUVIA_REQUIRED_FIELD_NAME("origin_states", origin_states,
-        ruvia::array<website_origin_runtime_dto>),
+        ruvia::array<service::node_runtime::website_origin_runtime_dto>),
     RUVIA_REQUIRED_FIELD_NAME("deploy_status", deploy_status, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("target_node_count", target_node_count, ruvia::int64),
     RUVIA_REQUIRED_FIELD_NAME("synced_node_count", synced_node_count, ruvia::int64));

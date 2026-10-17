@@ -124,6 +124,16 @@ export function ClusterDetailLayout() {
         />
       </Page>
     )
+  if (!cluster && query.isError)
+    return (
+      <Page>
+        <QueryNotice
+          query={query}
+          onRetry={() => void query.refetch()}
+          title='集群加载失败'
+        />
+      </Page>
+    )
   return (
     <Page>
       {cluster ? (

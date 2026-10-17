@@ -41,7 +41,6 @@ export function DnsZonesPage() {
       sync_status: syncFilter,
     }),
     placeholderData: keepPreviousData,
-    meta: { inlineError: true },
   })
   const filtered = hasListFilters(list.search, filterKeys)
   const createAction = (

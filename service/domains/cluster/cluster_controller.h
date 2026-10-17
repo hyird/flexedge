@@ -50,19 +50,11 @@ private:
 
     static list_query parse_list(ruvia::context& c) {
         const auto [page, page_size, skip] = service::common::require_pagination(c);
-        std::optional<std::string> dns_zone_id;
-        if (const auto value = c.req().query("dns_zone_id")) {
-            dns_zone_id = service::common::parse_uuid(value);
-            if (!dns_zone_id) {
-                service::common::throw_app_error(service::common::validation_error_code,
-                    "dns_zone_id 必须是 UUID", 400);
-            }
-        }
         return {.page_ = page,
             .page_size_ = page_size,
             .skip_ = skip,
             .keyword_ = service::common::require_keyword(c.req().query("keyword")),
-            .dns_zone_id_ = std::move(dns_zone_id),
+            .dns_zone_id_ = service::common::optional_uuid_query(c, "dns_zone_id"),
             .status_ = service::common::require_enum_query(c, "status", {"enabled", "disabled"},
                 "status 不正确")};
     }
@@ -99,9 +91,8 @@ private:
             service::live_resource::query_key("list", q.page_, q.page_size_, q.keyword_.value_or(""),
                 q.dns_zone_id_, q.status_));
         co_await service::live_resource::stream_snapshot(
-            c, std::move(sub), [tenant, q](auto& read) -> ruvia::task<std::string> {
-                co_return std::string(
-                    ruvia::to_json(co_await read_list(read, tenant, q), {.resource_ = read.pool()}));
+            c, std::move(sub), [tenant, q](auto& read) -> ruvia::task<cluster_page_response> {
+                co_return co_await read_list(read, tenant, q);
             });
     }
 
@@ -119,9 +110,8 @@ private:
             c.worker(), tenant, service::live_resource::resource::clusters, id,
             service::live_resource::query_key("detail"));
         co_await service::live_resource::stream_snapshot(
-            c, std::move(sub), [tenant, id](auto& read) -> ruvia::task<std::string> {
-                co_return std::string(
-                    ruvia::to_json(co_await read_detail(read, tenant, id), {.resource_ = read.pool()}));
+            c, std::move(sub), [tenant, id](auto& read) -> ruvia::task<cluster_detail_response> {
+                co_return co_await read_detail(read, tenant, id);
             });
     }
 

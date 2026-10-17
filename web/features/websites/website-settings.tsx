@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
 import { Chip, Skeleton, Tabs, useMediaQuery } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
@@ -16,6 +16,7 @@ import {
 import { usableCertificateOptionsQuery } from '@/features/certificates/data'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import {
+  afterWebsiteWrite,
   createWebsite,
   hostedZoneOptionsQuery,
   updateWebsite,
@@ -25,11 +26,17 @@ import { collectOriginGroups } from './origin-groups'
 import { initialRouteEditorView } from './route-tabs'
 import type { Website } from './types'
 import type { WebsiteArrival } from './website-context'
+import { DomainsSection } from './website-domain-section'
 import { validateWebsiteForm, type WebsiteFormValues } from './website-form'
 import {
   websiteFormToConfig,
   websiteToFormValues,
 } from './website-form-mapping'
+import {
+  HealthSection,
+  OriginSettingsSection,
+  OriginsSection,
+} from './website-origin-section'
 import { WebsiteRouteEditor } from './website-route-editor'
 import {
   collectWebsiteFormErrors,
@@ -38,17 +45,13 @@ import {
   websiteSections,
   websiteSectionFrom,
   type WebsiteSectionId,
+  type WebsiteSectionProps,
 } from './website-sections'
 import {
   BasicSection,
   CompressionSection,
-  DomainsSection,
-  HealthSection,
   HttpsSection,
   LogsSection,
-  OriginSettingsSection,
-  OriginsSection,
-  type WebsiteSectionProps,
 } from './website-settings-sections'
 
 const settingsRoute = getRouteApi('/_authenticated/websites/$websiteId')
@@ -234,6 +237,7 @@ function WebsiteEditor({
   /** Re-reads the website after a revision conflict. */
   onReload?: () => Promise<Website | undefined>
 }) {
+  const client = useQueryClient()
   const navigate = useNavigate()
   // The user's changes; absent while the draft shows the clean values.
   const [edits, setEdits] = useState<WebsiteFormValues>()
@@ -260,6 +264,7 @@ function WebsiteEditor({
       return { created: null, revision: result.revision }
     },
     onSaved: ({ created }) => {
+      void afterWebsiteWrite(client, website?.id ?? created?.id)
       if (created) {
         toastWriteSuccess('网站已创建，配置正在分发到边缘节点', {
           resourceType: 'website',
@@ -351,7 +356,13 @@ function WebsiteEditor({
   }, [pendingFocus, section])
 
   function replace(change: (current: WebsiteFormValues) => WebsiteFormValues) {
-    setEdits((current) => change(current ?? clean))
+    const next = change(edits ?? clean)
+    if (JSON.stringify(next) === JSON.stringify(clean)) {
+      setEdits(undefined)
+      draft.track(false)
+      return
+    }
+    setEdits(next)
     draft.track(true)
   }
 

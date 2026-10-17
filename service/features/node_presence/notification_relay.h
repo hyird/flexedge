@@ -44,43 +44,21 @@ struct resource_relay final {
                                         ? "*"
                                         : redis_snapshot_cache::tenant_scope(notification->tenant_id_));
         }
-        fields.emplace_back("event_id", id);
-        const std::array<std::string, 6> keys{"flexedge:notification-published:v1:" + std::string(id),
-            std::string(notifications::stream_key), std::string(redis_snapshot_cache::generation_keys[0]),
-            std::string(redis_snapshot_cache::generation_keys[1]), std::string(redis_snapshot_cache::generation_keys[2]),
-            std::string(deadlines_key)};
-        std::vector<std::string> arguments{std::to_string(notifications::max_entries), std::to_string(invalidations.size())};
-        arguments.insert(arguments.end(), invalidations.begin(), invalidations.end());
-        for (const auto& [name, value] : fields) {
-            arguments.push_back(name);
-            arguments.push_back(value);
-        }
-        arguments.insert(arguments.end(), {notification->tenant_id_, notification->node_id_,
-                                              std::to_string(notification->node_seen_unix_ms_), std::string(id)});
-        std::array<std::string_view, 6> key_views;
-        std::transform(keys.begin(), keys.end(), key_views.begin(), [](const auto& key) { return std::string_view(key); });
-        std::vector<std::string_view> argument_views;
-        argument_views.reserve(arguments.size());
-        for (const auto& argument : arguments) {
-            argument_views.push_back(argument);
-        }
-        const auto script = std::string(redis_snapshot_cache::invalidation_lua) + record_lua + std::string(publish_script);
-        const auto result = co_await redis.eval(script, key_views, argument_views);
-        service::utils::require_redis_success(result, "could not publish committed resource notification");
-        if (result.kind() != ruvia::redis_value::kind_type::string) {
-            throw std::runtime_error("invalid resource outbox publish result");
-        }
+        co_await outbox::publish(redis, id,
+            {.stream_ = notifications::stream_key,
+                .max_entries_ = notifications::max_entries,
+                .fields_ = std::move(fields),
+                .invalidations_ = std::move(invalidations),
+                .extra_keys_ = {std::string(deadlines_key)},
+                .extra_arguments_ = {notification->tenant_id_, notification->node_id_,
+                    std::to_string(notification->node_seen_unix_ms_)},
+                .helper_lua_ = record_lua,
+                .pre_publish_lua_ = validate_presence_script,
+                .post_publish_lua_ = record_presence_script});
     }
 
 private:
-    static constexpr std::string_view publish_script{R"lua(
-local duplicate = redis.call('GET', KEYS[1])
-if duplicate then return duplicate end
-local stream_type = redis.call('TYPE', KEYS[2]).ok
-if stream_type ~= 'none' and stream_type ~= 'stream' then
-    return redis.error_reply('notification target must be a stream')
-end
-snapshot_validate_generations(KEYS[3], KEYS[4], KEYS[5])
+    static constexpr std::string_view validate_presence_script{R"lua(
 local has_presence = ARGV[#ARGV-2] ~= ''
 if has_presence then
     presence_validate(KEYS[6])
@@ -89,13 +67,10 @@ if has_presence then
         return redis.error_reply('invalid presence metadata')
     end
 end
-local scopes = {}
-for i=1,tonumber(ARGV[2]) do scopes[i] = ARGV[2+i] end
-local entry = redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[1], '*', unpack(ARGV, 3+#scopes, #ARGV-4))
-snapshot_invalidate(KEYS[3], KEYS[4], KEYS[5], scopes, ARGV[#ARGV])
+)lua"};
+
+    static constexpr std::string_view record_presence_script{R"lua(
 if has_presence then presence_record(KEYS[6], ARGV[#ARGV-3], ARGV[#ARGV-2], tonumber(ARGV[#ARGV-1])) end
-redis.call('SET', KEYS[1], entry, 'EX', 604800)
-return entry
 )lua"};
 };
 

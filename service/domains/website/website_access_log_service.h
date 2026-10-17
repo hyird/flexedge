@@ -25,23 +25,16 @@ public:
         std::int64_t limit, const std::optional<service::log_ingest::tail_cursor>& after) const {
         ruvia::db_query entries(c.pool());
         entries
-            .select({entries.star("access"),
+            .select({entries.star("entry"),
                 entries.alias(entries.sql("COALESCE(node.name, '')"), "node_name"),
                 entries.alias(
-                    entries.sql("ROUND(EXTRACT(EPOCH FROM access.created_at) * 1000000)::bigint"),
+                    entries.sql("ROUND(EXTRACT(EPOCH FROM entry.created_at) * 1000000)::bigint"),
                     "ingested_unix_micros")})
-            .from("sys_website_access_log", "access")
+            .from("sys_website_access_log", "entry")
             .join(ruvia::db_join_type::left, "sys_node",
-                entries.sql("node.tenant_id = access.tenant_id AND node.id = access.node_id"), "node")
-            .where(entries.sql("access.tenant_id = website.tenant_id AND access.website_id = website.id"));
-        if (after) {
-            entries.and_where(entries.sql({"(access.created_at, access.id) > (TIMESTAMPTZ 'epoch' + ",
-                                              "::bigint * INTERVAL '1 microsecond', ", "::uuid)"},
-                {entries.value(after->ingested_unix_micros_), entries.value(after->id_)}));
-        }
-        entries.order_by(entries.sql("access.created_at"), ruvia::db_order_direction::desc)
-            .add_order_by(entries.sql("access.id"), ruvia::db_order_direction::desc)
-            .limit(static_cast<std::uint64_t>(limit));
+                entries.sql("node.tenant_id = entry.tenant_id AND node.id = entry.node_id"), "node")
+            .where(entries.sql("entry.tenant_id = website.tenant_id AND entry.website_id = website.id"));
+        service::log_ingest::apply_tail_cursor_window(entries, "entry", limit, after);
         ruvia::db_query query(c.pool());
         query
             .select(service::common::sql_columns(query,
@@ -135,18 +128,14 @@ public:
                 .add_order_by(query.sql("access.id"), ruvia::db_order_direction::desc);
         };
         const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
-        const auto total = page_rows.total_;
         const auto& rows = page_rows.rows_;
-        website_access_log_page_data_dto result({.resource_ = c.pool()});
+        auto result = service::common::init_page_dto<website_access_log_page_data_dto>(
+            c.pool(), page_rows.total_, page, page_size);
         auto& items = result.template ensure<"list">();
         items.reserve(rows.size());
         for (const auto& row : rows) {
             fill_website_access_log(items.emplace_back(), row);
         }
-        result.template set<"total">(total);
-        result.template set<"page">(page);
-        result.template set<"page_size">(page_size);
-        result.template set<"total_pages">(page_size > 0 ? (total + page_size - 1) / page_size : 0);
         co_return result;
     }
 };

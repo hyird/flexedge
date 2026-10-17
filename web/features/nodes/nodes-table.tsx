@@ -1,8 +1,8 @@
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQueries, useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { Plus } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
-import { Button } from '@heroui/react'
+import { Button, Tooltip } from '@heroui/react'
 import { formatBitsPerSecond, formatNumber } from '@/lib/format'
 import { hasListFilters, type ListSearchState } from '@/lib/list-search'
 import { describeStatus, statusOptions } from '@/lib/status'
@@ -13,9 +13,13 @@ import { MetricMeter } from '@/components/metric-meter'
 import { Mono } from '@/components/mono'
 import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
-import { clusterOptionsQuery } from '@/features/clusters/data'
+import {
+  clusterOptionsQuery,
+  clusterSnapshotQuery,
+} from '@/features/clusters/data'
 import { dnsZoneLinesQuery } from '@/features/dns-zones/data'
 import { dnsLineName } from '@/features/dns-zones/dns-lines'
+import type { DnsLine } from '@/features/dns-zones/types'
 import { nodesQuery } from './data'
 import { NodeConnectionChip } from './node-connection-chip'
 import { NodeCreateSheet } from './node-create-sheet'
@@ -33,29 +37,35 @@ const nodeStatusOptions = statusOptions(nodeStatuses)
 
 /** Keep the endpoint order and line height aligned with the IP column.
  * Queries are shared by zone and never open another live stream. */
-function NodeDnsLines({ node }: { node: Node }) {
-  const clusters = useQuery(clusterOptionsQuery)
-  const zoneId = clusters.data?.find(
-    (cluster) => cluster.id === node.cluster_id
-  )?.dns_zone_id
-  const lines = useQuery(dnsZoneLinesQuery(zoneId))
-  const endpoints = node.config.endpoints
-  if (!endpoints.length) return <span className='text-muted'>—</span>
+function NodeDnsLines({ node, lines }: { node: Node; lines: DnsLine[] }) {
+  const [primary, ...others] = node.config.endpoints
+  if (!primary) return <span className='text-muted'>—</span>
+  const names = node.config.endpoints.map((endpoint) =>
+    dnsLineName(lines, endpoint.line_code)
+  )
+  const allNames = names.join('\n')
   return (
-    <ul className='flex flex-col gap-1.5'>
-      {endpoints.map((endpoint) => {
-        const name = dnsLineName(lines.data ?? [], endpoint.line_code)
-        return (
-          <li
-            key={endpoint.id}
-            title={name}
-            className='h-5 max-w-40 truncate text-[13px] leading-5 text-muted'
+    <div className='flex min-w-0 items-center gap-1.5'>
+      <span
+        title={names[0]}
+        className='max-w-40 min-w-0 truncate text-[13px] text-muted'
+      >
+        {names[0]}
+      </span>
+      {others.length > 0 && (
+        <Tooltip delay={300}>
+          <Tooltip.Trigger
+            aria-label={allNames}
+            className='shrink-0 text-xs text-muted tabular-nums'
           >
-            {name}
-          </li>
-        )
-      })}
-    </ul>
+            +{others.length}
+          </Tooltip.Trigger>
+          <Tooltip.Content className='whitespace-pre-line'>
+            {allNames}
+          </Tooltip.Content>
+        </Tooltip>
+      )}
+    </div>
   )
 }
 
@@ -79,6 +89,10 @@ export function NodesTable({
     ...clusterOptionsQuery,
     enabled: clusterId === undefined,
   })
+  const clusterSnapshot = useQuery({
+    ...clusterSnapshotQuery(clusterId ?? ''),
+    enabled: clusterId !== undefined,
+  })
   const query = useQuery({
     ...nodesQuery({
       page: list.page,
@@ -90,6 +104,30 @@ export function NodesTable({
     }),
     placeholderData: keepPreviousData,
   })
+  const clusterZoneById = new Map(
+    (clusters.data ?? []).map((cluster) => [cluster.id, cluster.dns_zone_id])
+  )
+  if (clusterSnapshot.data)
+    clusterZoneById.set(
+      clusterSnapshot.data.id,
+      clusterSnapshot.data.dns_zone_id
+    )
+  const zoneIds = [
+    ...new Set(
+      (query.data?.list ?? [])
+        .map((node) => clusterZoneById.get(node.cluster_id))
+        .filter((zoneId): zoneId is string => !!zoneId)
+    ),
+  ]
+  const zoneLineResults = useQueries({
+    queries: zoneIds.map((zoneId) => dnsZoneLinesQuery(zoneId)),
+  })
+  const linesByZoneId = new Map(
+    zoneIds.map((zoneId, index) => [
+      zoneId,
+      zoneLineResults[index]?.data ?? [],
+    ])
+  )
   const filterKeys = nodeFilterKeys.filter(
     (key) => clusterId === undefined || key !== 'cluster_id'
   )
@@ -127,26 +165,47 @@ export function NodesTable({
       header: 'IP',
       width: 160,
       maxWidth: 160,
-      cell: (node) =>
-        node.config.endpoints.length ? (
-          <ul className='flex flex-col gap-1.5'>
-            {node.config.endpoints.map((endpoint) => (
-              <li key={endpoint.id} className='h-5'>
-                <Mono truncate className='w-[15ch] leading-5'>
-                  {endpoint.ip_address}
-                </Mono>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <span className='text-muted'>—</span>
-        ),
+      cell: (node) => {
+        const [primary, ...others] = node.config.endpoints
+        if (!primary) return <span className='text-muted'>—</span>
+        const allIps = node.config.endpoints
+          .map((endpoint) => endpoint.ip_address)
+          .join('\n')
+        return (
+          <div className='flex min-w-0 items-center gap-1.5'>
+            <Mono truncate className='min-w-0'>
+              {primary.ip_address}
+            </Mono>
+            {others.length > 0 && (
+              <Tooltip delay={300}>
+                <Tooltip.Trigger
+                  aria-label={allIps}
+                  className='shrink-0 text-xs text-muted tabular-nums'
+                >
+                  +{others.length}
+                </Tooltip.Trigger>
+                <Tooltip.Content className='whitespace-pre-line'>
+                  {allIps}
+                </Tooltip.Content>
+              </Tooltip>
+            )}
+          </div>
+        )
+      },
     },
     {
       id: 'dns-line',
       header: 'DNS 线路',
       minWidth: 110,
-      cell: (node) => <NodeDnsLines node={node} />,
+      cell: (node) => {
+        const zoneId = clusterZoneById.get(node.cluster_id)
+        return (
+          <NodeDnsLines
+            node={node}
+            lines={zoneId ? (linesByZoneId.get(zoneId) ?? []) : []}
+          />
+        )
+      },
     },
     {
       id: 'cpu',

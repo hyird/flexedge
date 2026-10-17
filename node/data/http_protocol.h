@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstdio>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -12,6 +11,8 @@
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
 #include <openssl/tls1.h>
+
+#include "common/hex.h"
 
 namespace flexedge::node {
 
@@ -49,11 +50,7 @@ inline std::string md5_hex(std::string_view value) {
         digest_size != 16) {
         return {};
     }
-    std::array<char, 33> output{};
-    for (unsigned int index = 0; index < digest_size; ++index) {
-        std::snprintf(output.data() + index * 2, 3, "%02x", digest[index]);
-    }
-    return std::string(output.data(), 32);
+    return flexedge::crypto::hex_encode({digest.data(), digest_size});
 }
 
 inline std::vector<std::uint16_t> cipher_suites(SSL* ssl) {

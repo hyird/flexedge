@@ -46,12 +46,7 @@ public:
 
 private:
     static std::string require_cluster_id(ruvia::context& c) {
-        const auto id = service::common::parse_uuid(c.req().query("cluster_id"));
-        if (!id) {
-            service::common::throw_app_error(service::common::validation_error_code,
-                "cluster_id 必须是 UUID", 400);
-        }
-        return *id;
+        return service::common::require_uuid_query(c, "cluster_id");
     }
 
     struct list_query final {
@@ -66,22 +61,14 @@ private:
 
     static list_query parse_list(ruvia::context& c) {
         const auto [page, page_size, skip] = service::common::require_pagination(c);
-        std::optional<std::string> cluster_id;
-        if (const auto value = c.req().query("cluster_id")) {
-            cluster_id = service::common::parse_uuid(value);
-            if (!cluster_id) {
-                service::common::throw_app_error(service::common::validation_error_code,
-                    "cluster_id 必须是 UUID", 400);
-            }
-        }
         return {.page_ = page,
             .page_size_ = page_size,
             .skip_ = skip,
             .keyword_ = service::common::require_keyword(c.req().query("keyword")),
-            .cluster_id_ = std::move(cluster_id),
+            .cluster_id_ = service::common::optional_uuid_query(c, "cluster_id"),
             .status_ = service::common::require_enum_query(c, "status", {"enabled", "disabled"},
                 "status 不正确"),
-            .certificate_id_ = parse_certificate_id_filter(c.req().query("certificate_id"))};
+            .certificate_id_ = parse_certificate_id_filter(c)};
     }
 
     static ruvia::task<website_page_response> read_list(auto& read, const std::string& tenant,
@@ -97,6 +84,12 @@ private:
         co_return service::common::ok<website_detail_response>(read, std::move(data));
     }
 
+    static ruvia::task<website_dashboard_response> read_dashboard(auto& read,
+        const std::string& tenant, const std::string& id) {
+        auto data = co_await get_website_dashboard_service().dashboard(read, tenant, id);
+        co_return service::common::ok<website_dashboard_response>(read, std::move(data));
+    }
+
     ruvia::task<ruvia::http_response> list(ruvia::context& c) {
         co_return c.json(co_await read_list(c, service::middleware::current_tenant_id(c), parse_list(c)));
     }
@@ -109,9 +102,8 @@ private:
             service::live_resource::query_key("list", q.page_, q.page_size_, q.keyword_.value_or(""),
                 q.cluster_id_, q.status_, q.certificate_id_));
         co_await service::live_resource::stream_snapshot(
-            c, std::move(sub), [tenant, q](auto& read) -> ruvia::task<std::string> {
-                co_return std::string(
-                    ruvia::to_json(co_await read_list(read, tenant, q), {.resource_ = read.pool()}));
+            c, std::move(sub), [tenant, q](auto& read) -> ruvia::task<website_page_response> {
+                co_return co_await read_list(read, tenant, q);
             });
     }
 
@@ -127,9 +119,8 @@ private:
             service::live_resource::resource::websites, id,
             service::live_resource::query_key("detail"));
         co_await service::live_resource::stream_snapshot(
-            c, std::move(sub), [tenant, id](auto& read) -> ruvia::task<std::string> {
-                co_return std::string(
-                    ruvia::to_json(co_await read_detail(read, tenant, id), {.resource_ = read.pool()}));
+            c, std::move(sub), [tenant, id](auto& read) -> ruvia::task<website_detail_response> {
+                co_return co_await read_detail(read, tenant, id);
             });
     }
 
@@ -156,20 +147,15 @@ private:
         const auto tenant = service::middleware::current_tenant_id(c);
         const auto id = service::common::require_uuid_param(c, "id");
         const auto limit = service::log_ingest::require_tail_limit(c);
-        co_await service::log_ingest::stream_sse_tail(
+        co_await service::log_ingest::stream_model_sse_tail<website_access_log_tail_response>(
             c,
             service::log_ingest::fanout::get_hub(c).subscribe(
                 c.worker(), service::log_ingest::notifications::log_resource_type::access, tenant,
                 id),
             service::log_ingest::optional_sse_tail_cursor(c),
             [tenant, id, limit](auto& read, const std::optional<service::log_ingest::tail_cursor>& after)
-                -> ruvia::task<service::log_ingest::tail_batch> {
-                auto data = co_await get_website_access_log_service().tail(read, tenant, id, limit, after);
-                auto cursor = service::log_ingest::tail_response_cursor(data);
-                auto json = ruvia::to_json(service::common::ok<website_access_log_tail_response>(read, std::move(data)),
-                    {.resource_ = read.pool()});
-                co_return service::log_ingest::tail_batch{.payload_ = std::string(json.data(), json.size()),
-                    .cursor_ = std::move(cursor)};
+                -> ruvia::task<website_access_log_tail_data_dto> {
+                co_return co_await get_website_access_log_service().tail(read, tenant, id, limit, after);
             });
     }
 
@@ -181,11 +167,8 @@ private:
             service::live_resource::query_key("dashboard"));
         co_await service::live_resource::stream_snapshot(
             c, std::move(sub),
-            [tenant, id](auto& read) -> ruvia::task<std::string> {
-                auto data = co_await get_website_dashboard_service().dashboard(read, tenant, id);
-                auto json = ruvia::to_json(service::common::ok<website_dashboard_response>(read, std::move(data)),
-                    {.resource_ = read.pool()});
-                co_return std::string(json.data(), json.size());
+            [tenant, id](auto& read) -> ruvia::task<website_dashboard_response> {
+                co_return co_await read_dashboard(read, tenant, id);
             },
             "dashboard");
     }
@@ -193,7 +176,7 @@ private:
     ruvia::task<ruvia::http_response> create(ruvia::context& c) {
         auto data = co_await get_website_command_service().create(
             c, service::middleware::current_tenant_id(c), require_cluster_id(c),
-            c.req().validated_json<website_save_input>());
+            c.req().validated<website_save_input>());
         service::common::set_revision_etag(c, data.get<"revision">().value_);
         website_created_response response({.resource_ = c.pool()});
         response.set<"code">(0);
@@ -207,7 +190,7 @@ private:
         const auto revision = co_await get_website_command_service().update(c,
             service::middleware::current_tenant_id(c), service::common::require_uuid_param(c, "id"),
             require_cluster_id(c), expected_revision,
-            c.req().validated_json<website_save_input>());
+            c.req().validated<website_save_input>());
         service::common::set_revision_etag(c, revision);
         co_return c.json(service::common::operation(c, "网站配置已更新，配置任务已提交"));
     }

@@ -8,8 +8,6 @@
 
 #include "ruvia/web/model.h"
 
-#include "service/domains/node/node_types.h"
-#include "service/domains/website/website_types.h"
 #include "service/features/live_resource/notifications.h"
 #include "service/features/node_channel/heartbeat_store.h"
 #include "service/features/node_channel/types.h"
@@ -20,14 +18,14 @@ namespace service::node_channel {
 
 RUVIA_MODEL(node_runtime_patch, RUVIA_REQUIRED_FIELD(id, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("node_revision", node_revision, ruvia::int64),
-    RUVIA_REQUIRED_FIELD(runtime, service::node::node_runtime_dto));
+    RUVIA_REQUIRED_FIELD(runtime, service::node_runtime::node_runtime_dto));
 RUVIA_MODEL(
     origin_runtime_patch, RUVIA_REQUIRED_FIELD(id, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("node_id", node_id, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("node_revision", node_revision, ruvia::int64),
     RUVIA_REQUIRED_FIELD_NAME("reported_at", reported_at, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("origin_states", origin_states,
-        ruvia::array<service::website::website_origin_runtime_dto>));
+        ruvia::array<service::node_runtime::website_origin_runtime_dto>));
 
 // The reported runtime fields the stored runtime and the node DTO share.
 template <typename runtime_model>
@@ -72,7 +70,7 @@ std::string stored_runtime_json(runtime_type& c, const heartbeat_report& report)
 // The node runtime patch a heartbeat publishes.
 template <typename runtime_type>
 std::string runtime_patch(runtime_type& c, const heartbeat_report& report, const heartbeat_update& update) {
-    service::node::node_runtime_dto runtime({.resource_ = c.pool()});
+    service::node_runtime::node_runtime_dto runtime({.resource_ = c.pool()});
     runtime.set<"registration_status">("registered");
     runtime.set<"connection_status">(update.status_ == "enabled" ? "online" : "offline");
     runtime.set<"last_heartbeat_at">(update.at_);

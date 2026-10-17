@@ -233,7 +233,7 @@ int main() try {
     const auto legacy_runtime = service::node_runtime::parse_stored(R"({"connection_count":2})");
     expect(legacy_runtime && !legacy_runtime->connected_ip_count_,
         "a runtime without connected IP count must stay without it");
-    service::node::node_runtime_dto runtime_dto;
+    service::node_runtime::node_runtime_dto runtime_dto;
     runtime_dto.set<"registration_status">("registered");
     runtime_dto.set<"connection_status">("online");
     runtime_dto.set<"applied_node_spec_revision">(1);

@@ -198,6 +198,7 @@ CREATE TABLE public.sys_cluster_release (
     target_node_count bigint DEFAULT 0 NOT NULL,
     created_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL,
     activated_at timestamptz,
+)sql"} + R"sql(
     schema_version integer NOT NULL,
     CONSTRAINT pk_cluster_release PRIMARY KEY (tenant_id, id),
     CONSTRAINT uq_cluster_release_generation UNIQUE (tenant_id, cluster_id, generation),
@@ -378,8 +379,8 @@ CREATE TABLE public.sys_website (
 );
 
 CREATE INDEX idx_website_category ON public.sys_website USING btree (tenant_id, category, sort DESC) WHERE (deleted_at IS NULL);
+)sql" + R"sql(
 CREATE INDEX idx_website_cluster ON public.sys_website USING btree (tenant_id, cluster_id, sort DESC) WHERE (deleted_at IS NULL);
-
 CREATE TABLE public.sys_website_domain_claim (
     tenant_id uuid NOT NULL,
     website_id uuid NOT NULL,
@@ -530,7 +531,7 @@ CREATE TABLE public.sys_scheduled_job (
     next_run_at timestamptz DEFAULT now() NOT NULL,
     CONSTRAINT sys_scheduled_job_pkey PRIMARY KEY (name)
 );
-
+)sql" + R"sql(
 CREATE TABLE public.sys_website_access_log (
     tenant_id uuid NOT NULL,
     occurred_at timestamptz NOT NULL,
@@ -605,7 +606,7 @@ INSERT INTO public.sys_instance_state (singleton) VALUES (true);
 INSERT INTO public.sys_scheduled_job (name) VALUES ('sync_event_retention');
 
 END;
-$flexedge_initial$)sql"},
+$flexedge_initial$)sql",
         }},
     };
     return migrations;

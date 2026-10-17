@@ -56,8 +56,8 @@ public:
 
     ruvia::task<website_created_dto> create(ruvia::context& c, const std::string& tenant_id,
         const std::string& cluster_id,
-        const ruvia::validated_json<website_save_input>& body) {
-        const auto normalized = normalize(body.value());
+        const website_save_input& body) {
+        const auto normalized = normalize(body);
         if (!normalized) {
             throw_corrupt_config();
         }
@@ -96,8 +96,8 @@ public:
 
     ruvia::task<std::int64_t> update(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, const std::string& cluster_id, std::int64_t expected_revision,
-        const ruvia::validated_json<website_save_input>& body) {
-        const auto normalized = normalize(body.value());
+        const website_save_input& body) {
+        const auto normalized = normalize(body);
         if (!normalized) {
             throw_corrupt_config();
         }

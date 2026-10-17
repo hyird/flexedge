@@ -16,6 +16,7 @@
 #include "service/common/domain_name.h"
 #include "service/common/ip_address.h"
 #include "service/common/uuid.h"
+#include "service/features/website_config/mapper.h"
 #include "service/features/website_config/transport.h"
 
 namespace service::website_config {
@@ -184,6 +185,15 @@ struct website_route_rule_validator final {
     template <typename validator_t_type>
     void validate_nested(const website_route_rule_input& value, std::string_view path,
         validator_t_type& validator) const {
+        validate_metadata_and_hostnames(value, path, validator);
+        const auto pattern = validate_match_and_headers(value, path, validator);
+        validate_action_and_rewrite(value, path, pattern, validator);
+    }
+
+private:
+    template <typename validator_t_type>
+    static void validate_metadata_and_hostnames(const website_route_rule_input& value,
+        std::string_view path, validator_t_type& validator) {
         namespace policy = flexedge::route_policy;
         namespace protocol = flexedge::node;
         if (const auto& name = value.get<"name">();
@@ -221,6 +231,13 @@ struct website_route_rule_validator final {
         if (!status || (status->view() != "enabled" && status->view() != "disabled")) {
             validator.add(std::string(path) + ".status", "enum", "规则状态不正确");
         }
+    }
+
+    template <typename validator_t_type>
+    static std::shared_ptr<const RE2> validate_match_and_headers(
+        const website_route_rule_input& value, std::string_view path, validator_t_type& validator) {
+        namespace policy = flexedge::route_policy;
+        namespace protocol = flexedge::node;
         const auto& match_type = value.get<"match_type">();
         if (!match_type || !policy::valid_match_type(match_type->view())) {
             validator.add(std::string(path) + ".match_type", "enum", "匹配方式不正确");
@@ -280,6 +297,14 @@ struct website_route_rule_validator final {
             validator.add(std::string(path) + ".response_headers", "too_big",
                 "最多" + header_limit + "个响应头");
         }
+        return pattern;
+    }
+
+    template <typename validator_t_type>
+    static void validate_action_and_rewrite(const website_route_rule_input& value,
+        std::string_view path, const std::shared_ptr<const RE2>& pattern,
+        validator_t_type& validator) {
+        namespace policy = flexedge::route_policy;
         const auto& action = value.get<"action">();
         if (!action || (action->view() != "proxy" && action->view() != "redirect" &&
                            action->view() != "rewrite")) {
@@ -323,6 +348,8 @@ struct website_route_rule_validator final {
         if ((mode == "replace_path" || mode == "replace_prefix") && rewrite_path->empty()) {
             validator.add(std::string(path) + ".rewrite_path", "required", "请填写替换路径");
         }
+        const auto& match_type = value.get<"match_type">();
+        const auto& route_path = value.get<"path">();
         if ((mode == "strip_prefix" || mode == "replace_prefix") &&
             (!match_type || match_type->view() != "prefix" || !route_path ||
                 !policy::path_only(route_path->view()) ||
@@ -438,262 +465,304 @@ inline bool has_unique_certificate_ids(const ruvia::array<ruvia::string>& values
 struct website_config_rules final {
     void validate_nested(const website_config_input& body, std::string_view prefix,
         ruvia::validator& validator) const {
-        const auto field = [&](std::string_view name) {
-            std::string result(prefix);
-            if (!result.empty()) {
-                result.push_back('.');
-            }
-            result.append(name);
-            return result;
-        };
-        const auto required = [&](const auto& value, std::string_view name,
-                                  std::string_view message) {
-            validator.required(value, field(name), message);
-        };
-        const auto bounded = [&](const auto& value, std::string_view name, auto minimum,
-                                 auto maximum, std::string_view message) {
-            validator.range(value, field(name), minimum, maximum, message);
-        };
-        const auto custom = [&](const auto& value, std::string_view name, auto predicate,
-                                std::string_view code, std::string_view message) {
-            if (value && !predicate(*value)) {
-                validator.add(field(name), code, message);
-            }
-        };
         const auto& name = body.get<"name">();
-        validator.max_length(name, field("name"), 100, "网站名称最多100个字符");
-        custom(
-            name, "name", [](const auto& v) { return is_website_name(v.view()); }, "custom",
-            "网站名称不能为空");
+        validator.max_length(name, field_path(prefix, "name"), 100, "网站名称最多100个字符");
+        add_if_invalid(validator, prefix, name, "name",
+            [](const auto& v) { return is_website_name(v.view()); }, "custom", "网站名称不能为空");
 
-        const auto& domains = body.get<"domains">();
-        required(domains, "domains", "至少需要一个绑定域名");
-        if (domains) {
-            if (domains->empty()) {
-                validator.add(field("domains"), "too_small", "至少需要一个绑定域名");
-            }
-            if (domains->size() > 100) {
-                validator.add(field("domains"), "too_big", "单个网站最多绑定100个域名");
-            }
-            custom(
-                domains, "domains", [](const auto& v) { return valid_domain_set(v); }, "custom",
-                "域名 ID 和主机名必须唯一");
-            std::size_t index{};
-            for (const auto& value : *domains) {
-                website_domain_validator{}.validate_nested(
-                    value, field("domains[" + std::to_string(index++) + "]"), validator);
-            }
+        validate_domains(body, prefix, validator);
+        validate_origins(body, prefix, validator);
+        validate_health_check(body, prefix, validator);
+        validate_access_log(body, prefix, validator);
+        validate_https(body, prefix, validator);
+        validate_compression(body, prefix, validator);
+        validate_route_rules(body, prefix, validator);
+        validate_origin_references(body, prefix, validator);
+    }
+
+private:
+    [[nodiscard]] static std::string field_path(std::string_view prefix, std::string_view name) {
+        std::string result(prefix);
+        if (!result.empty()) {
+            result.push_back('.');
         }
+        result.append(name);
+        return result;
+    }
+
+    template <typename value_type>
+    static void require_field(ruvia::validator& validator, std::string_view prefix,
+        const value_type& value, std::string_view name, std::string_view message) {
+        validator.required(value, field_path(prefix, name), message);
+    }
+
+    template <typename value_type, typename limit_type>
+    static void require_bounded_field(ruvia::validator& validator, std::string_view prefix,
+        const value_type& value, std::string_view name, std::string_view required_message,
+        limit_type minimum, limit_type maximum, std::string_view range_message) {
+        const auto path = field_path(prefix, name);
+        validator.required(value, path, required_message);
+        validator.range(value, path, minimum, maximum, range_message);
+    }
+
+    template <typename value_type, typename predicate_type>
+    static void add_if_invalid(ruvia::validator& validator, std::string_view prefix,
+        const value_type& value, std::string_view name, predicate_type predicate,
+        std::string_view code, std::string_view message) {
+        if (value && !predicate(*value)) {
+            validator.add(field_path(prefix, name), code, message);
+        }
+    }
+
+    static void validate_domains(const website_config_input& body, std::string_view prefix,
+        ruvia::validator& validator) {
+        const auto& domains = body.get<"domains">();
+        require_field(validator, prefix, domains, "domains", "至少需要一个绑定域名");
+        if (!domains) {
+            return;
+        }
+        if (domains->empty()) {
+            validator.add(field_path(prefix, "domains"), "too_small", "至少需要一个绑定域名");
+        }
+        if (domains->size() > 100) {
+            validator.add(field_path(prefix, "domains"), "too_big", "单个网站最多绑定100个域名");
+        }
+        add_if_invalid(validator, prefix, domains, "domains",
+            [](const auto& v) { return valid_domain_set(v); }, "custom",
+            "域名 ID 和主机名必须唯一");
+        std::size_t index{};
+        for (const auto& value : *domains) {
+            website_domain_validator{}.validate_nested(
+                value, field_path(prefix, "domains[" + std::to_string(index++) + "]"), validator);
+        }
+    }
+
+    static void validate_origins(const website_config_input& body, std::string_view prefix,
+        ruvia::validator& validator) {
         const auto& origins = body.get<"origins">();
-        required(origins, "origins", "至少需要一个源站");
+        require_field(validator, prefix, origins, "origins", "至少需要一个源站");
         if (origins) {
             if (origins->empty()) {
-                validator.add(field("origins"), "too_small", "至少需要一个源站");
+                validator.add(field_path(prefix, "origins"), "too_small", "至少需要一个源站");
             }
             if (origins->size() > 100) {
-                validator.add(field("origins"), "too_big", "单个网站最多配置100个源站");
+                validator.add(field_path(prefix, "origins"), "too_big", "单个网站最多配置100个源站");
             }
-            custom(
-                origins, "origins", [](const auto& v) { return valid_origin_set(v); }, "custom",
+            add_if_invalid(validator, prefix, origins, "origins",
+                [](const auto& v) { return valid_origin_set(v); }, "custom",
                 "源站 ID 必须唯一，且每个启用的源站组都需要主源站");
             std::size_t index{};
             for (const auto& value : *origins) {
                 website_origin_validator{}.validate_nested(
-                    value, field("origins[" + std::to_string(index++) + "]"), validator);
+                    value, field_path(prefix, "origins[" + std::to_string(index++) + "]"), validator);
             }
         }
 
         const auto& default_origin_group = body.get<"default_origin_group">();
-        required(default_origin_group, "default_origin_group", "请选择默认源站组");
-        validator.max_length(default_origin_group, field("default_origin_group"), 100,
+        require_field(validator, prefix, default_origin_group, "default_origin_group",
+            "请选择默认源站组");
+        validator.max_length(default_origin_group, field_path(prefix, "default_origin_group"), 100,
             "默认源站组最多100个字符");
-        custom(
-            default_origin_group, "default_origin_group",
+        add_if_invalid(validator, prefix, default_origin_group, "default_origin_group",
             [](const auto& v) { return is_origin_group(v.view()); }, "custom",
             "默认源站组名称不正确");
         const auto& origin_host_header = body.get<"origin_host_header">();
-        required(origin_host_header, "origin_host_header", "回源 Host 不能为空");
-        validator.max_length(origin_host_header, field("origin_host_header"), 253,
+        require_field(validator, prefix, origin_host_header, "origin_host_header",
+            "回源 Host 不能为空");
+        validator.max_length(origin_host_header, field_path(prefix, "origin_host_header"), 253,
             "回源 Host 最多253个字符");
-        custom(
-            origin_host_header, "origin_host_header",
+        add_if_invalid(validator, prefix, origin_host_header, "origin_host_header",
             [](const auto& v) { return is_origin_host_header(v.view()); }, "custom",
             "请输入 $host 或有效域名");
 
-        const auto& origin_connect_timeout_seconds = body.get<"origin_connect_timeout_seconds">();
-        required(origin_connect_timeout_seconds, "origin_connect_timeout_seconds", "连接超时不能为空");
-        bounded(origin_connect_timeout_seconds, "origin_connect_timeout_seconds", 1, 300,
+        require_bounded_field(validator, prefix, body.get<"origin_connect_timeout_seconds">(),
+            "origin_connect_timeout_seconds", "连接超时不能为空", 1, 300,
             "连接超时必须在1到300秒之间");
-        const auto& origin_read_timeout_seconds = body.get<"origin_read_timeout_seconds">();
-        required(origin_read_timeout_seconds, "origin_read_timeout_seconds", "读取超时不能为空");
-        bounded(origin_read_timeout_seconds, "origin_read_timeout_seconds", 1, 600,
+        require_bounded_field(validator, prefix, body.get<"origin_read_timeout_seconds">(),
+            "origin_read_timeout_seconds", "读取超时不能为空", 1, 600,
             "读取超时必须在1到600秒之间");
-        required(body.get<"pass_client_ip">(), "pass_client_ip", "真实访客 IP 设置不能为空");
-        required(body.get<"health_check_enabled">(), "health_check_enabled", "健康检查设置不能为空");
+        require_field(validator, prefix, body.get<"pass_client_ip">(), "pass_client_ip",
+            "真实访客 IP 设置不能为空");
+    }
+
+    static void validate_health_check(const website_config_input& body, std::string_view prefix,
+        ruvia::validator& validator) {
+        require_field(validator, prefix, body.get<"health_check_enabled">(),
+            "health_check_enabled", "健康检查设置不能为空");
         const auto& health_check_path = body.get<"health_check_path">();
-        required(health_check_path, "health_check_path", "健康检查路径不能为空");
-        custom(
-            health_check_path, "health_check_path",
+        require_field(validator, prefix, health_check_path, "health_check_path",
+            "健康检查路径不能为空");
+        add_if_invalid(validator, prefix, health_check_path, "health_check_path",
             [](const auto& v) { return flexedge::node::route_path(v.view()); }, "custom",
             "健康检查路径必须以 / 开头");
-        const auto& health_check_interval_seconds = body.get<"health_check_interval_seconds">();
-        required(health_check_interval_seconds, "health_check_interval_seconds",
-            "健康检查间隔不能为空");
-        bounded(health_check_interval_seconds, "health_check_interval_seconds", 1, 3600,
+        require_bounded_field(validator, prefix, body.get<"health_check_interval_seconds">(),
+            "health_check_interval_seconds", "健康检查间隔不能为空", 1, 3600,
             "健康检查间隔必须在1到3600秒之间");
-        const auto& health_check_timeout_seconds = body.get<"health_check_timeout_seconds">();
-        required(health_check_timeout_seconds, "health_check_timeout_seconds", "健康检查超时不能为空");
-        bounded(health_check_timeout_seconds, "health_check_timeout_seconds", 1, 300,
+        require_bounded_field(validator, prefix, body.get<"health_check_timeout_seconds">(),
+            "health_check_timeout_seconds", "健康检查超时不能为空", 1, 300,
             "健康检查超时必须在1到300秒之间");
-        const auto& health_check_expected_status = body.get<"health_check_expected_status">();
-        required(health_check_expected_status, "health_check_expected_status",
-            "健康检查期望状态码不能为空");
-        bounded(health_check_expected_status, "health_check_expected_status", 100, 599,
+        require_bounded_field(validator, prefix, body.get<"health_check_expected_status">(),
+            "health_check_expected_status", "健康检查期望状态码不能为空", 100, 599,
             "健康检查期望状态码必须在100到599之间");
-        const auto& healthy_threshold = body.get<"healthy_threshold">();
-        required(healthy_threshold, "healthy_threshold", "健康恢复阈值不能为空");
-        bounded(healthy_threshold, "healthy_threshold", 1, 10, "健康恢复阈值必须在1到10之间");
-        const auto& unhealthy_threshold = body.get<"unhealthy_threshold">();
-        required(unhealthy_threshold, "unhealthy_threshold", "故障阈值不能为空");
-        bounded(unhealthy_threshold, "unhealthy_threshold", 1, 10, "故障阈值必须在1到10之间");
+        require_bounded_field(validator, prefix, body.get<"healthy_threshold">(),
+            "healthy_threshold", "健康恢复阈值不能为空", 1, 10, "健康恢复阈值必须在1到10之间");
+        require_bounded_field(validator, prefix, body.get<"unhealthy_threshold">(),
+            "unhealthy_threshold", "故障阈值不能为空", 1, 10, "故障阈值必须在1到10之间");
+    }
 
-        required(body.get<"access_log_enabled">(), "access_log_enabled", "访问日志设置不能为空");
-        required(body.get<"access_log_request_headers">(), "access_log_request_headers",
-            "请求头日志设置不能为空");
-        required(body.get<"access_log_request_body">(), "access_log_request_body",
-            "请求体日志设置不能为空");
-        required(body.get<"access_log_response_headers">(), "access_log_response_headers",
-            "响应头日志设置不能为空");
-        required(body.get<"access_log_query_params">(), "access_log_query_params",
-            "参数日志设置不能为空");
-        required(body.get<"access_log_cookies">(), "access_log_cookies", "Cookie 日志设置不能为空");
-        required(body.get<"access_log_referer">(), "access_log_referer", "请求来源日志设置不能为空");
-        required(body.get<"access_log_user_agent">(), "access_log_user_agent",
-            "终端信息日志设置不能为空");
+    static void validate_access_log(const website_config_input& body, std::string_view prefix,
+        ruvia::validator& validator) {
+        require_field(validator, prefix, body.get<"access_log_enabled">(), "access_log_enabled",
+            "访问日志设置不能为空");
+        require_field(validator, prefix, body.get<"access_log_request_headers">(),
+            "access_log_request_headers", "请求头日志设置不能为空");
+        require_field(validator, prefix, body.get<"access_log_request_body">(),
+            "access_log_request_body", "请求体日志设置不能为空");
+        require_field(validator, prefix, body.get<"access_log_response_headers">(),
+            "access_log_response_headers", "响应头日志设置不能为空");
+        require_field(validator, prefix, body.get<"access_log_query_params">(),
+            "access_log_query_params", "参数日志设置不能为空");
+        require_field(validator, prefix, body.get<"access_log_cookies">(), "access_log_cookies",
+            "Cookie 日志设置不能为空");
+        require_field(validator, prefix, body.get<"access_log_referer">(), "access_log_referer",
+            "请求来源日志设置不能为空");
+        require_field(validator, prefix, body.get<"access_log_user_agent">(),
+            "access_log_user_agent", "终端信息日志设置不能为空");
         const auto& access_log_status_code_ranges = body.get<"access_log_status_code_ranges">();
-        required(access_log_status_code_ranges, "access_log_status_code_ranges",
-            "请选择访问日志状态码");
-        custom(
-            access_log_status_code_ranges, "access_log_status_code_ranges",
+        require_field(validator, prefix, access_log_status_code_ranges,
+            "access_log_status_code_ranges", "请选择访问日志状态码");
+        add_if_invalid(validator, prefix, access_log_status_code_ranges,
+            "access_log_status_code_ranges",
             [](const auto& v) { return valid_access_log_status_code_ranges(v); }, "custom",
             "访问日志状态码范围不正确");
-        required(body.get<"access_log_client_abort">(), "access_log_client_abort",
-            "客户端中断日志设置不能为空");
+        require_field(validator, prefix, body.get<"access_log_client_abort">(),
+            "access_log_client_abort", "客户端中断日志设置不能为空");
+    }
 
-        required(body.get<"https_enabled">(), "https_enabled", "HTTPS 设置不能为空");
+    static void validate_https(const website_config_input& body, std::string_view prefix,
+        ruvia::validator& validator) {
+        require_field(validator, prefix, body.get<"https_enabled">(), "https_enabled",
+            "HTTPS 设置不能为空");
         const auto& certificate_ids = body.get<"certificate_ids">();
-        required(certificate_ids, "certificate_ids", "certificate_ids 不能为空");
+        require_field(validator, prefix, certificate_ids, "certificate_ids",
+            "certificate_ids 不能为空");
         if (certificate_ids && certificate_ids->size() > max_website_certificates) {
-            validator.add(field("certificate_ids"), "too_big", "最多绑定20张证书");
+            validator.add(field_path(prefix, "certificate_ids"), "too_big", "最多绑定20张证书");
         }
-        custom(
-            certificate_ids, "certificate_ids",
+        add_if_invalid(validator, prefix, certificate_ids, "certificate_ids",
             [](const auto& v) { return has_unique_certificate_ids(v); }, "custom",
             "证书 ID 必须为 UUID 且不能重复");
         const auto& minimum_tls_version = body.get<"minimum_tls_version">();
-        required(minimum_tls_version, "minimum_tls_version", "请选择最低 TLS 版本");
-        custom(
-            minimum_tls_version, "minimum_tls_version",
+        require_field(validator, prefix, minimum_tls_version, "minimum_tls_version",
+            "请选择最低 TLS 版本");
+        add_if_invalid(validator, prefix, minimum_tls_version, "minimum_tls_version",
             [](const auto& v) { return v.view() == "1.2" || v.view() == "1.3"; }, "regex",
             "最低 TLS 版本不正确");
-        required(body.get<"force_https">(), "force_https", "HTTPS 跳转设置不能为空");
-        required(body.get<"hsts_enabled">(), "hsts_enabled", "HSTS 设置不能为空");
-        required(body.get<"response_compression_enabled">(), "response_compression_enabled",
-            "响应压缩设置不能为空");
+        require_field(validator, prefix, body.get<"force_https">(), "force_https",
+            "HTTPS 跳转设置不能为空");
+        require_field(validator, prefix, body.get<"hsts_enabled">(), "hsts_enabled",
+            "HSTS 设置不能为空");
+    }
+
+    static void validate_compression(const website_config_input& body, std::string_view prefix,
+        ruvia::validator& validator) {
+        require_field(validator, prefix, body.get<"response_compression_enabled">(),
+            "response_compression_enabled", "响应压缩设置不能为空");
         const auto& response_compression_min_bytes = body.get<"response_compression_min_bytes">();
-        required(response_compression_min_bytes, "response_compression_min_bytes",
-            "响应压缩阈值不能为空");
-        bounded(response_compression_min_bytes, "response_compression_min_bytes",
+        require_bounded_field(validator, prefix, response_compression_min_bytes,
+            "response_compression_min_bytes", "响应压缩阈值不能为空",
             static_cast<std::int64_t>(flexedge::node::min_response_compression_bytes),
             static_cast<std::int64_t>(flexedge::node::max_response_compression_min_bytes),
             "响应压缩阈值必须在256字节到1 MiB之间");
         const auto& response_compression_max_bytes = body.get<"response_compression_max_bytes">();
-        required(response_compression_max_bytes, "response_compression_max_bytes",
-            "响应压缩最大长度不能为空");
+        require_field(validator, prefix, response_compression_max_bytes,
+            "response_compression_max_bytes", "响应压缩最大长度不能为空");
         if (response_compression_max_bytes && response_compression_max_bytes->value_ < 0) {
-            validator.add(field("response_compression_max_bytes"), "too_small",
+            validator.add(field_path(prefix, "response_compression_max_bytes"), "too_small",
                 "响应压缩最大长度不能小于0");
         }
         if (response_compression_max_bytes &&
             response_compression_max_bytes->value_ >
                 static_cast<std::int64_t>(flexedge::node::max_response_compression_bytes)) {
-            validator.add(field("response_compression_max_bytes"), "too_big",
+            validator.add(field_path(prefix, "response_compression_max_bytes"), "too_big",
                 "响应压缩最大长度不能超过64 MiB");
         }
         const auto& response_compression_algorithms = body.get<"response_compression_algorithms">();
-        required(response_compression_algorithms, "response_compression_algorithms",
-            "压缩算法不能为空");
-        custom(
-            response_compression_algorithms, "response_compression_algorithms",
+        require_field(validator, prefix, response_compression_algorithms,
+            "response_compression_algorithms", "压缩算法不能为空");
+        add_if_invalid(validator, prefix, response_compression_algorithms,
+            "response_compression_algorithms",
             [](const auto& v) { return valid_compression_algorithms(v); }, "custom",
             "压缩算法必须从 br、zstd、gzip 中选择且不能重复");
         const auto& response_compression_mime_types = body.get<"response_compression_mime_types">();
-        required(response_compression_mime_types, "response_compression_mime_types",
-            "压缩 MIME 类型不能为空");
-        custom(
-            response_compression_mime_types, "response_compression_mime_types",
+        require_field(validator, prefix, response_compression_mime_types,
+            "response_compression_mime_types", "压缩 MIME 类型不能为空");
+        add_if_invalid(validator, prefix, response_compression_mime_types,
+            "response_compression_mime_types",
             [](const auto& v) {
                 return valid_compression_values(v, flexedge::node::compression_match_kind::mime_type);
             },
-            "custom",
-            "压缩 MIME 类型不正确");
+            "custom", "压缩 MIME 类型不正确");
         const auto& response_compression_extensions = body.get<"response_compression_extensions">();
-        required(response_compression_extensions, "response_compression_extensions",
-            "压缩扩展名不能为空");
-        custom(
-            response_compression_extensions, "response_compression_extensions",
+        require_field(validator, prefix, response_compression_extensions,
+            "response_compression_extensions", "压缩扩展名不能为空");
+        add_if_invalid(validator, prefix, response_compression_extensions,
+            "response_compression_extensions",
             [](const auto& v) {
                 return valid_compression_values(v, flexedge::node::compression_match_kind::extension);
             },
-            "custom",
-            "压缩扩展名不正确");
+            "custom", "压缩扩展名不正确");
         const auto& response_compression_excluded_extensions =
             body.get<"response_compression_excluded_extensions">();
-        required(response_compression_excluded_extensions, "response_compression_excluded_extensions",
-            "例外扩展名不能为空");
-        custom(
-            response_compression_excluded_extensions, "response_compression_excluded_extensions",
+        require_field(validator, prefix, response_compression_excluded_extensions,
+            "response_compression_excluded_extensions", "例外扩展名不能为空");
+        add_if_invalid(validator, prefix, response_compression_excluded_extensions,
+            "response_compression_excluded_extensions",
             [](const auto& v) {
                 return valid_compression_values(v, flexedge::node::compression_match_kind::extension);
             },
-            "custom",
-            "例外扩展名不正确");
-        const auto& rules = body.get<"route_rules">();
-        required(rules, "route_rules", "路由规则不能为空");
-        if (rules) {
-            if (rules->size() > flexedge::node::max_route_rules) {
-                validator.add(field("route_rules"), "too_big",
-                    "最多配置" + std::to_string(flexedge::node::max_route_rules) + "条路由规则");
-            }
-            custom(
-                rules, "route_rules", [](const auto& v) { return valid_route_rule_set(v); }, "custom",
-                "路由规则 ID 和请求头名称必须唯一");
-            std::size_t index{};
-            for (const auto& value : *rules) {
-                website_route_rule_validator{}.validate_nested(
-                    value, field("route_rules[" + std::to_string(index++) + "]"), validator);
-            }
-        }
-
+            "custom", "例外扩展名不正确");
         if (response_compression_min_bytes && response_compression_max_bytes &&
             response_compression_max_bytes->value_ != 0 &&
             response_compression_max_bytes->value_ < response_compression_min_bytes->value_) {
-            validator.add(field("response_compression_max_bytes"), "range",
+            validator.add(field_path(prefix, "response_compression_max_bytes"), "range",
                 "最大压缩大小不能小于最小压缩大小");
         }
+    }
+
+    static void validate_route_rules(const website_config_input& body, std::string_view prefix,
+        ruvia::validator& validator) {
+        const auto& rules = body.get<"route_rules">();
+        require_field(validator, prefix, rules, "route_rules", "路由规则不能为空");
+        if (!rules) {
+            return;
+        }
+        if (rules->size() > flexedge::node::max_route_rules) {
+            validator.add(field_path(prefix, "route_rules"), "too_big",
+                "最多配置" + std::to_string(flexedge::node::max_route_rules) + "条路由规则");
+        }
+        add_if_invalid(validator, prefix, rules, "route_rules",
+            [](const auto& v) { return valid_route_rule_set(v); }, "custom",
+            "路由规则 ID 和请求头名称必须唯一");
+        std::size_t index{};
+        for (const auto& value : *rules) {
+            website_route_rule_validator{}.validate_nested(
+                value, field_path(prefix, "route_rules[" + std::to_string(index++) + "]"),
+                validator);
+        }
+    }
+
+    static void validate_origin_references(const website_config_input& body, std::string_view prefix,
+        ruvia::validator& validator) {
+        const auto& origins = body.get<"origins">();
+        const auto& default_origin_group = body.get<"default_origin_group">();
+        const auto& rules = body.get<"route_rules">();
         if (!origins || !default_origin_group || !rules) {
             return;
         }
-        std::unordered_set<std::string_view> enabled_origin_groups;
-        for (const auto& origin : *origins) {
-            const auto& group = origin.get<"group">();
-            const auto& status = origin.get<"status">();
-            if (group && status && status->view() == "enabled") {
-                enabled_origin_groups.emplace(group->view());
-            }
-        }
+        const auto enabled_origin_groups = collect_enabled_origin_groups(*origins);
         if (!enabled_origin_groups.contains(default_origin_group->view())) {
-            validator.add(field("default_origin_group"), "reference",
+            validator.add(field_path(prefix, "default_origin_group"), "reference",
                 "默认源站组必须包含启用的源站");
         }
         std::size_t index{};
@@ -701,11 +770,13 @@ struct website_config_rules final {
             const auto& action = route.get<"action">();
             const auto& origin_group = route.get<"origin_group">();
             if (action && origin_group) {
-                const auto path = field("route_rules[" + std::to_string(index) + "].origin_group");
-                if (action->view() == "redirect" && !origin_group->empty()) {
+                const auto path = field_path(
+                    prefix, "route_rules[" + std::to_string(index) + "].origin_group");
+                const auto status = check_route_origin_reference(
+                    action->view(), origin_group->view(), enabled_origin_groups);
+                if (status == route_origin_reference_status::redirect_forbids_origin_group) {
                     validator.add(path, "forbidden", "跳转规则不能选择源站组");
-                }
-                if (action->view() == "proxy" && !enabled_origin_groups.contains(origin_group->view())) {
+                } else if (status == route_origin_reference_status::missing_enabled_origin_group) {
                     validator.add(path, "reference", "只能选择包含启用源站的源站组");
                 }
             }

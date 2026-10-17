@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "service/common/database.h"
 #include "service/domains/task/task_entity.h"
 #include "service/features/attempt_trace/model.h"
 #include "service/features/node_presence/node_connection.h"
@@ -137,26 +138,13 @@ private:
         return expressions_.binary(left, ruvia::db_binary_operator::not_equal, right);
     }
     expression all(std::initializer_list<expression> values) {
-        auto result = *values.begin();
-        for (auto it = values.begin() + 1; it != values.end(); ++it) {
-            result = expressions_.binary(result, ruvia::db_binary_operator::and_value, *it);
-        }
-        return result;
+        return service::common::db_all(expressions_, values);
     }
     expression either(std::initializer_list<expression> values) {
-        auto result = *values.begin();
-        for (auto it = values.begin() + 1; it != values.end(); ++it) {
-            result = expressions_.binary(result, ruvia::db_binary_operator::or_value, *it);
-        }
-        return result;
+        return service::common::db_any(expressions_, values);
     }
     expression one_of(expression input, std::initializer_list<std::string_view> options) {
-        std::vector<expression> values;
-        values.reserve(options.size());
-        for (const auto option : options) {
-            values.push_back(value(option));
-        }
-        return expressions_.binary(input, ruvia::db_binary_operator::in, expressions_.list(values));
+        return service::common::db_in(expressions_, input, options);
     }
     expression text(expression input) {
         return expressions_.cast(input, ruvia::db_data_type::text);
@@ -165,7 +153,7 @@ private:
         return expressions_.binary(input, ruvia::db_binary_operator::json_get, value(key));
     }
     expression json_text(expression input, std::string_view key) {
-        return expressions_.binary(input, ruvia::db_binary_operator::json_get_text, value(key));
+        return service::common::db_json_text(expressions_, input, key);
     }
     expression format_time(expression input) {
         return expressions_.coalesce({expressions_.call("to_char",
@@ -236,68 +224,123 @@ private:
         return query;
     }
 
+    expression node_release_status_expr() {
+        return expressions_.case_when(
+            {{equal(column("target", "status"), value("pending")), value("queued")},
+                {equal(column("target", "status"), value("failed")),
+                    expressions_.case_when(
+                        {{expressions_.unary(ruvia::db_unary_operator::is_false,
+                              column("target", "retryable")),
+                            value("failed")}},
+                        value("retrying"))}},
+            value("completed"));
+    }
+
+    expression node_spec_status_expr(expression spec_pending, expression current_spec) {
+        return expressions_.case_when(
+            {{expressions_.unary(ruvia::db_unary_operator::not_value, spec_pending),
+                 value("completed")},
+                {all({current_spec,
+                     expressions_.binary(column("node", "config_task_failures"),
+                         ruvia::db_binary_operator::greater, value(std::int64_t{0}))}),
+                    expressions_.case_when(
+                        {{expressions_.unary(ruvia::db_unary_operator::is_false,
+                              column("node", "config_task_retryable")),
+                            value("failed")}},
+                        value("retrying"))}},
+            value("queued"));
+    }
+
+    expression node_updated_at_expr(expression spec_pending, expression current_spec) {
+        return expressions_.greatest({column("target", "updated_at"),
+            expressions_.case_when({{current_spec, column("node", "config_task_updated_at")}},
+                null_time()),
+            expressions_.case_when(
+                {{all({spec_pending,
+                      expressions_.unary(ruvia::db_unary_operator::not_value, current_spec)}),
+                    column("node", "updated_at")}},
+                null_time()),
+            expressions_.coalesce(
+                {column("node", "registered_at"), column("node", "created_at")})});
+    }
+
     auto node_tasks() {
         auto target = source<release_entity>("release");
-        target.template join<release_target_entity>(ruvia::db_join_type::inner, "release_target", all({equal(column("release_target", "tenant_id"), column("release", "tenant_id")), equal(column("release_target", "release_id"), column("release", "id"))}))
+        target.template join<release_target_entity>(ruvia::db_join_type::inner, "release_target",
+                  all({equal(column("release_target", "tenant_id"), column("release", "tenant_id")),
+                      equal(column("release_target", "release_id"), column("release", "id"))}))
             .where(all({equal(column("release", "tenant_id"), value(tenant_)),
                 equal(column("release", "cluster_id"), column("node", "cluster_id")),
                 equal(column("release_target", "node_id"), column("node", "id"))}))
-            .select({{"release_id", column("release_target", "release_id")}, {"status", column("release_target", "status")},
-                {"retryable", column("release_target", "retryable")}, {"last_error", column("release_target", "last_error")},
+            .select({{"release_id", column("release_target", "release_id")},
+                {"status", column("release_target", "status")},
+                {"retryable", column("release_target", "retryable")},
+                {"last_error", column("release_target", "last_error")},
                 {"count_fails", column("release_target", "count_fails")},
                 {"updated_at", column("release_target", "updated_at")}})
             .order_by(column("release", "generation"), ruvia::db_order_direction::desc)
             .take(1);
         auto statistics = event_statistics("node", "id", value("node"));
-        const auto spec_pending = expressions_.binary(column("node", "node_spec_revision"), ruvia::db_binary_operator::greater,
-            column("node", "applied_node_spec_revision"));
-        const auto current_spec = equal(column("node", "config_task_revision"), column("node", "node_spec_revision"));
-        const auto release_status = expressions_.case_when({{equal(column("target", "status"), value("pending")), value("queued")},
-                                                               {equal(column("target", "status"), value("failed")), expressions_.case_when({{expressions_.unary(ruvia::db_unary_operator::is_false, column("target", "retryable")), value("failed")}}, value("retrying"))}},
-            value("completed"));
-        const auto spec_status = expressions_.case_when({{expressions_.unary(ruvia::db_unary_operator::not_value, spec_pending), value("completed")},
-                                                            {all({current_spec, expressions_.binary(column("node", "config_task_failures"), ruvia::db_binary_operator::greater, value(std::int64_t{0}))}), expressions_.case_when({{expressions_.unary(ruvia::db_unary_operator::is_false, column("node", "config_task_retryable")), value("failed")}}, value("retrying"))}},
-            value("queued"));
+        const auto spec_pending = expressions_.binary(column("node", "node_spec_revision"),
+            ruvia::db_binary_operator::greater, column("node", "applied_node_spec_revision"));
+        const auto current_spec =
+            equal(column("node", "config_task_revision"), column("node", "node_spec_revision"));
+        const auto release_status = node_release_status_expr();
+        const auto spec_status = node_spec_status_expr(spec_pending, current_spec);
         const auto rank = [&](expression status) {
-            return expressions_.case_when({{equal(status, value("failed")), value(std::int64_t{3})},
-                                              {equal(status, value("retrying")), value(std::int64_t{2})},
-                                              {equal(status, value("queued")), value(std::int64_t{1})}},
+            return expressions_.case_when(
+                {{equal(status, value("failed")), value(std::int64_t{3})},
+                    {equal(status, value("retrying")), value(std::int64_t{2})},
+                    {equal(status, value("queued")), value(std::int64_t{1})}},
                 value(std::int64_t{0}));
         };
         // Pick one current operation, then derive all its fields together.
         // Retained history contributes totals only, never scheduling state.
-        const auto use_spec = all({spec_pending, expressions_.binary(rank(spec_status),
-                                                     ruvia::db_binary_operator::greater_equal, rank(release_status))});
+        const auto use_spec = all({spec_pending,
+            expressions_.binary(
+                rank(spec_status), ruvia::db_binary_operator::greater_equal, rank(release_status))});
         const auto status = expressions_.case_when({{use_spec, spec_status}}, release_status);
-        const std::array interval_args{ruvia::db_named_argument{"secs", value(service::node::online_window_seconds)}};
-        const auto recent = expressions_.coalesce({expressions_.binary(column("node", "last_heartbeat_at"),
-                                                       ruvia::db_binary_operator::greater_equal, expressions_.binary(expressions_.call("now"), ruvia::db_binary_operator::subtract, expressions_.call("make_interval", {}, interval_args))),
-            value(false)});
+        const std::array interval_args{
+            ruvia::db_named_argument{"secs", value(service::node::online_window_seconds)}};
+        const auto recent = expressions_.coalesce(
+            {expressions_.binary(column("node", "last_heartbeat_at"),
+                 ruvia::db_binary_operator::greater_equal,
+                 expressions_.binary(expressions_.call("now"), ruvia::db_binary_operator::subtract,
+                     expressions_.call("make_interval", {}, interval_args))),
+                value(false)});
         auto query = source<node_entity>("node");
         query.join(ruvia::db_join_type::left, target, "target", value(true), {.lateral_ = true})
             .join(ruvia::db_join_type::cross, statistics, "attempts", {}, {.lateral_ = true})
             .where(all({equal(column("node", "tenant_id"), value(tenant_)),
                 equal(column("node", "registration_status"), value("registered")),
                 expressions_.unary(ruvia::db_unary_operator::is_null, column("node", "deleted_at"))}))
-            .select({{"resource_type", value("node")}, {"resource_id", column("node", "id")}, {"resource_kind", value("")},
-                {"name", column("node", "name")}, {"operation", expressions_.case_when({{use_spec, value("configure")}}, value("publish"))},
+            .select({{"resource_type", value("node")}, {"resource_id", column("node", "id")},
+                {"resource_kind", value("")}, {"name", column("node", "name")},
+                {"operation", expressions_.case_when({{use_spec, value("configure")}}, value("publish"))},
                 {"status", status},
-                {"error", expressions_.case_when({{one_of(status, {"failed", "retrying"}), expressions_.case_when({{use_spec, column("node", "config_task_error")}},
-                                                                                               expressions_.coalesce({column("target", "last_error"), value("")}))}},
-                              value(""))},
+                {"error",
+                    expressions_.case_when(
+                        {{one_of(status, {"failed", "retrying"}),
+                            expressions_.case_when(
+                                {{use_spec, column("node", "config_task_error")}},
+                                expressions_.coalesce({column("target", "last_error"), value("")}))}},
+                        value(""))},
                 {"next_attempt_at", null_time()},
-                {"updated_at", expressions_.greatest({column("target", "updated_at"),
-                                   expressions_.case_when({{current_spec, column("node", "config_task_updated_at")}}, null_time()),
-                                   expressions_.case_when({{all({spec_pending, expressions_.unary(ruvia::db_unary_operator::not_value, current_spec)}),
-                                                              column("node", "updated_at")}},
-                                       null_time()),
-                                   expressions_.coalesce({column("node", "registered_at"), column("node", "created_at")})})},
+                {"updated_at", node_updated_at_expr(spec_pending, current_spec)},
                 {"last_success_at", column("attempts", "last_success_at")},
                 {"attempt_count", column("attempts", "attempt_count")},
-                {"failure_count", expressions_.case_when({{equal(status, value("completed")), value(std::int64_t{0})},
-                                                             {use_spec, expressions_.case_when({{current_spec, column("node", "config_task_failures")}}, value(std::int64_t{0}))}},
-                                      expressions_.coalesce({column("target", "count_fails"), value(std::int64_t{0})}))},
-                {"node_offline", all({expressions_.unary(ruvia::db_unary_operator::not_value, recent), different(status, value("completed"))})}});
+                {"failure_count",
+                    expressions_.case_when(
+                        {{equal(status, value("completed")), value(std::int64_t{0})},
+                            {use_spec,
+                                expressions_.case_when(
+                                    {{current_spec, column("node", "config_task_failures")}},
+                                    value(std::int64_t{0}))}},
+                        expressions_.coalesce(
+                            {column("target", "count_fails"), value(std::int64_t{0})}))},
+                {"node_offline",
+                    all({expressions_.unary(ruvia::db_unary_operator::not_value, recent),
+                        different(status, value("completed"))})}});
         return query;
     }
 

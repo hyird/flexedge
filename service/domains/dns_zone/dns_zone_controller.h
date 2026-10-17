@@ -51,19 +51,11 @@ private:
 
     static list_query parse_list(ruvia::context& c) {
         const auto [page, page_size, skip] = service::common::require_pagination(c);
-        std::optional<std::string> provider_id;
-        if (const auto value = c.req().query("dns_provider_id")) {
-            provider_id = service::common::parse_uuid(value);
-            if (!provider_id) {
-                service::common::throw_app_error(service::common::validation_error_code,
-                    "dns_provider_id 必须是 UUID", 400);
-            }
-        }
         return {.page_ = page,
             .page_size_ = page_size,
             .skip_ = skip,
             .keyword_ = service::common::require_keyword(c.req().query("keyword")),
-            .provider_id_ = std::move(provider_id),
+            .provider_id_ = service::common::optional_uuid_query(c, "dns_provider_id"),
             .sync_status_ = service::common::require_enum_query(c, "sync_status",
                 {dns_zone_issue_filter, "pending", "synced", "failed"}, "sync_status 不正确")};
     }
@@ -90,13 +82,9 @@ private:
     }
 
     ruvia::task<ruvia::http_response> available(ruvia::context& c) {
-        const auto provider_id = service::common::parse_uuid(c.req().query("dns_provider_id"));
-        if (!provider_id) {
-            service::common::throw_app_error(service::common::validation_error_code,
-                "dns_provider_id 必须是 UUID", 400);
-        }
+        const auto provider_id = service::common::require_uuid_query(c, "dns_provider_id");
         auto data = co_await get_dns_zone_read_service().available(c,
-            service::middleware::current_tenant_id(c), *provider_id);
+            service::middleware::current_tenant_id(c), provider_id);
         co_return c.json(service::common::ok<available_dns_zone_list_response>(c, std::move(data)));
     }
 
@@ -112,9 +100,8 @@ private:
             service::live_resource::query_key("list", q.page_, q.page_size_, q.keyword_.value_or(""),
                 q.provider_id_, q.sync_status_));
         co_await service::live_resource::stream_snapshot(
-            c, std::move(sub), [tenant, q](auto& read) -> ruvia::task<std::string> {
-                co_return std::string(
-                    ruvia::to_json(co_await read_list(read, tenant, q), {.resource_ = read.pool()}));
+            c, std::move(sub), [tenant, q](auto& read) -> ruvia::task<dns_zone_page_response> {
+                co_return co_await read_list(read, tenant, q);
             });
     }
 
@@ -128,14 +115,8 @@ private:
             }
             owner_of.emplace(*value);
         }
-        std::optional<bool> available;
-        if (const auto value = c.req().query("available")) {
-            available = service::common::parse_boolean(value);
-            if (!available) {
-                service::common::throw_app_error(service::common::validation_error_code,
-                    "available 必须是 true 或 false", 400);
-            }
-        }
+        const auto available = service::common::optional_bool_query(
+            c, "available", "available 必须是 true 或 false");
         auto data = co_await get_dns_zone_read_service().options(c,
             service::middleware::current_tenant_id(c), keyword, owner_of, available);
         co_return c.json(service::common::ok<dns_zone_option_list_response>(c, std::move(data)));
@@ -160,9 +141,8 @@ private:
             service::live_resource::resource::dns_zones, id,
             service::live_resource::query_key("detail"));
         co_await service::live_resource::stream_snapshot(
-            c, std::move(sub), [tenant, id](auto& read) -> ruvia::task<std::string> {
-                co_return std::string(
-                    ruvia::to_json(co_await read_detail(read, tenant, id), {.resource_ = read.pool()}));
+            c, std::move(sub), [tenant, id](auto& read) -> ruvia::task<dns_zone_detail_response> {
+                co_return co_await read_detail(read, tenant, id);
             });
     }
 

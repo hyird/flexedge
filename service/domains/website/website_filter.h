@@ -22,4 +22,8 @@ inline std::optional<std::string> parse_certificate_id_filter(std::optional<std:
     return id;
 }
 
+inline std::optional<std::string> parse_certificate_id_filter(ruvia::context& c) {
+    return service::common::optional_uuid_query(c, "certificate_id");
+}
+
 }  // namespace service::website

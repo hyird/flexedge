@@ -22,6 +22,7 @@
 #include "service/features/live_resource/outbox_entity.h"
 #include "service/features/live_resource/redis_snapshot_cache.h"
 #include "service/features/logging/logger.h"
+#include "service/utils/text.h"
 #include "service/utils/token.h"
 
 // The transactional outbox: a business transaction inserts one row with its
@@ -45,35 +46,21 @@ inline constexpr std::string_view resource_kind{"resource"};
 inline std::string pack(std::span<const std::pair<std::string, std::string>> fields) {
     std::string payload;
     for (const auto& [name, value] : fields) {
-        for (const std::string_view part : {std::string_view{name}, std::string_view{value}}) {
-            payload += std::to_string(part.size()) + ":";
-            payload += part;
-        }
+        service::utils::append_length_prefixed(payload, name);
+        service::utils::append_length_prefixed(payload, value);
     }
     return payload;
 }
 
 inline std::vector<std::pair<std::string, std::string>> unpack(std::string_view payload) {
-    std::vector<std::string> parts;
+    std::vector<std::pair<std::string, std::string>> fields;
     while (!payload.empty()) {
-        const auto colon = payload.find(':');
-        std::size_t length{};
-        if (colon == std::string_view::npos) {
+        const auto name = service::utils::consume_length_prefixed(payload);
+        const auto value = name ? service::utils::consume_length_prefixed(payload) : std::nullopt;
+        if (!name || !value) {
             throw std::runtime_error("invalid notification outbox payload");
         }
-        const auto [end, error] = std::from_chars(payload.data(), payload.data() + colon, length);
-        if (error != std::errc{} || end != payload.data() + colon || length > payload.size() - colon - 1) {
-            throw std::runtime_error("invalid notification outbox length");
-        }
-        parts.emplace_back(payload.substr(colon + 1, length));
-        payload.remove_prefix(colon + 1 + length);
-    }
-    if (parts.size() % 2 != 0) {
-        throw std::runtime_error("invalid notification outbox fields");
-    }
-    std::vector<std::pair<std::string, std::string>> fields;
-    for (std::size_t index = 0; index < parts.size(); index += 2) {
-        fields.emplace_back(std::move(parts[index]), std::move(parts[index + 1]));
+        fields.emplace_back(std::string(*name), std::string(*value));
     }
     return fields;
 }
@@ -105,11 +92,42 @@ struct publication final {
     std::vector<std::pair<std::string, std::string>> fields_{};
     // Snapshot cache scopes invalidated atomically with the append.
     std::vector<std::string> invalidations_{};
+    std::vector<std::string> extra_keys_{};
+    std::vector<std::string> extra_arguments_{};
+    std::string_view helper_lua_{};
+    std::string_view pre_publish_lua_{};
+    std::string_view post_publish_lua_{};
 };
 
 // Atomically deduplicates a committed event and publishes it. The same event
 // may be retried after the sender dies between Redis and the database commit.
-inline constexpr std::string_view publish_script{R"lua(
+inline ruvia::task<void> publish(ruvia::redis_handle redis, std::string_view id, publication value) {
+    value.fields_.emplace_back("event_id", id);
+    std::vector<std::string> keys{"flexedge:notification-published:v1:" + std::string(id), std::string(value.stream_)};
+    for (const auto key : redis_snapshot_cache::generation_keys) {
+        keys.emplace_back(key);
+    }
+    keys.insert(keys.end(), value.extra_keys_.begin(), value.extra_keys_.end());
+    std::vector<std::string> arguments{std::to_string(value.max_entries_), std::to_string(value.invalidations_.size())};
+    arguments.insert(arguments.end(), value.invalidations_.begin(), value.invalidations_.end());
+    for (const auto& [name, field] : value.fields_) {
+        arguments.push_back(name);
+        arguments.push_back(field);
+    }
+    arguments.insert(arguments.end(), value.extra_arguments_.begin(), value.extra_arguments_.end());
+    arguments.emplace_back(id);
+    std::vector<std::string_view> key_views, argument_views;
+    key_views.reserve(keys.size());
+    for (const auto& key : keys) {
+        key_views.push_back(key);
+    }
+    argument_views.reserve(arguments.size());
+    for (const auto& argument : arguments) {
+        argument_views.push_back(argument);
+    }
+    std::string script(redis_snapshot_cache::invalidation_lua);
+    script.append(value.helper_lua_);
+    script.append(R"lua(
 local duplicate = redis.call('GET', KEYS[1])
 if duplicate then return duplicate end
 local stream_type = redis.call('TYPE', KEYS[2]).ok
@@ -117,35 +135,21 @@ if stream_type ~= 'none' and stream_type ~= 'stream' then
     return redis.error_reply('notification target must be a stream')
 end
 snapshot_validate_generations(KEYS[3], KEYS[4], KEYS[5])
+)lua");
+    script.append(value.pre_publish_lua_);
+    script.append(R"lua(
 local scopes = {}
 for i=1,tonumber(ARGV[2]) do scopes[i] = ARGV[2+i] end
-local entry = redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[1], '*', unpack(ARGV, 3+#scopes, #ARGV-1))
+local entry = redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[1], '*', unpack(ARGV, 3+#scopes, #ARGV-)lua");
+    script.append(std::to_string(value.extra_arguments_.size() + 1));
+    script.append(R"lua())
 snapshot_invalidate(KEYS[3], KEYS[4], KEYS[5], scopes, ARGV[#ARGV])
+)lua");
+    script.append(value.post_publish_lua_);
+    script.append(R"lua(
 redis.call('SET', KEYS[1], entry, 'EX', 604800)
 return entry
-)lua"};
-
-inline ruvia::task<void> publish(ruvia::redis_handle redis, std::string_view id, publication value) {
-    value.fields_.emplace_back("event_id", id);
-    std::vector<std::string> keys{"flexedge:notification-published:v1:" + std::string(id), std::string(value.stream_)};
-    for (const auto key : redis_snapshot_cache::generation_keys) {
-        keys.emplace_back(key);
-    }
-    std::vector<std::string> arguments{std::to_string(value.max_entries_), std::to_string(value.invalidations_.size())};
-    arguments.insert(arguments.end(), value.invalidations_.begin(), value.invalidations_.end());
-    for (const auto& [name, field] : value.fields_) {
-        arguments.push_back(name);
-        arguments.push_back(field);
-    }
-    arguments.emplace_back(id);
-    std::vector<std::string_view> key_views, argument_views;
-    for (const auto& key : keys) {
-        key_views.push_back(key);
-    }
-    for (const auto& argument : arguments) {
-        argument_views.push_back(argument);
-    }
-    const auto script = std::string(redis_snapshot_cache::invalidation_lua) + std::string(publish_script);
+)lua");
     const auto result = co_await redis.eval(script, key_views, argument_views);
     service::utils::require_redis_success(result, "could not publish committed notification");
     if (result.kind() != ruvia::redis_value::kind_type::string) {
@@ -166,6 +170,7 @@ ruvia::task<void> publish_event(ruvia::redis_handle redis, std::string_view id,
                 published = true;
             }
         }
+        co_return;
     };
     (co_await publish_with.template operator()<participants>(), ...);
     if (!published) {

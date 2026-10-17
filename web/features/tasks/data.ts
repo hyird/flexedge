@@ -33,6 +33,7 @@ function parsePage(value: unknown, page: number) {
 export function tasksQuery(params: TaskFilters = {}) {
   return queryOptions({
     retry: false,
+    meta: { inlineError: true },
     queryKey: [...queryKeys.tasks, 'list', params],
     queryFn: ({ queryKey, signal }) =>
       readLiveQuery(streamPath('/tasks', params), queryKey, signal, (data) =>

@@ -18,9 +18,9 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <wincrypt.h>
-#include <windows.h>
 #include <winsock2.h>
+#include <windows.h>
+#include <wincrypt.h>
 #endif
 
 #include <ruvia/core/task.h>
@@ -260,11 +260,14 @@ bool is_spa_fallback_request(ruvia::context& c, ruvia::http_error_info info) {
     return info.status() == ruvia::http_status::not_found && is_spa_request(c);
 }
 
+ruvia::http_response serve_spa_index(ruvia::context& c) {
+    c.header("cache-control", "no-cache");
+    return c.file({.path_ = web_index_path(), .content_type_ = "text/html; charset=UTF-8"});
+}
+
 ruvia::task<ruvia::http_response> handle_not_found(ruvia::context& c) {
     if (is_spa_request(c)) {
-        c.header("cache-control", "no-cache");
-        co_return c.file(
-            {.path_ = web_index_path(), .content_type_ = "text/html; charset=UTF-8"});
+        co_return serve_spa_index(c);
     }
     c.status(ruvia::http_status::not_found);
     co_return c.json(service::common::error(
@@ -275,9 +278,7 @@ ruvia::task<ruvia::http_response> handle_not_found(ruvia::context& c) {
 // 与 ruvia::http_error_handler_type 签名匹配；运行时把业务 http_error 转成统一响应 DTO。
 ruvia::task<ruvia::http_response> handle_error(ruvia::context& c, ruvia::http_error_info info) {
     if (is_spa_fallback_request(c, info)) {
-        c.header("cache-control", "no-cache");
-        co_return c.file(
-            {.path_ = web_index_path(), .content_type_ = "text/html; charset=UTF-8"});
+        co_return serve_spa_index(c);
     }
 
     const auto status = info.status();
@@ -415,38 +416,37 @@ int main(int argc, char* argv[]) {
                         throw std::runtime_error("Web Worker task could not start");
                     }
                 };
+                const auto post_task_worker = [&post](auto operation) {
+                    post([operation](ruvia::web_worker_context& context) -> ruvia::task<void> {
+                        service::background::task_context task(context);
+                        co_await operation(task);
+                    });
+                };
                 post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
                     co_await service::live_resource::run_notification_reader<service::live_resource::resource_subscriptions,
                         service::node_dispatch::fanout::desired_state_waits, service::log_ingest::fanout::log_tails,
                         service::log_ingest::fanout::log_tail_recovery, service::node_channel::report_receipts>(context);
                 });
-                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
-                    service::background::task_context task(context);
+                post_task_worker([](service::background::task_context& task) -> ruvia::task<void> {
                     co_await service::provider_verification::run_worker(task);
                 });
-                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
-                    service::background::task_context task(context);
+                post_task_worker([](service::background::task_context& task) -> ruvia::task<void> {
                     co_await service::dns_sync::run_worker(task);
                 });
-                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
-                    service::background::task_context task(context);
+                post_task_worker([](service::background::task_context& task) -> ruvia::task<void> {
                     co_await service::certificate_issuance::run_worker(task);
                 });
-                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
-                    service::background::task_context task(context);
+                post_task_worker([](service::background::task_context& task) -> ruvia::task<void> {
                     co_await service::website_dns::run_worker(task);
                 });
-                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
-                    service::background::task_context task(context);
+                post_task_worker([](service::background::task_context& task) -> ruvia::task<void> {
                     co_await service::node_presence::run_worker(task);
                 });
-                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
-                    service::background::task_context task(context);
+                post_task_worker([](service::background::task_context& task) -> ruvia::task<void> {
                     co_await service::live_resource::outbox::run_worker<service::node_presence::resource_relay,
                         service::log_ingest::log_relay, service::node_channel::projection_refresh>(task);
                 });
-                post([](ruvia::web_worker_context& context) -> ruvia::task<void> {
-                    service::background::task_context task(context);
+                post_task_worker([](service::background::task_context& task) -> ruvia::task<void> {
                     co_await service::log_ingest::run_worker(task, std::string(task.lease_owner()));
                 });
                 post([](ruvia::web_worker_context& context) -> ruvia::task<void> {

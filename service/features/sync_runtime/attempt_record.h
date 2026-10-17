@@ -40,10 +40,11 @@ inline constexpr std::string_view detail_dropped_json{R"({"kind":"none","truncat
 [[nodiscard]] inline std::string bounded_detail_text(std::string_view value, bool& cut,
     std::size_t limit = detail_text_bytes) {
     std::string result;
-    result.reserve(value.size() < limit ? value.size() : limit);
+    result.reserve(std::min(value.size(), limit));
     for (std::size_t index = 0; index < value.size();) {
         const auto length = service::utils::utf8_sequence_length(value, index);
         if (length == 0) {
+            cut = true;
             ++index;
             continue;
         }

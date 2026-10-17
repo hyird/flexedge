@@ -88,68 +88,31 @@ inline ruvia::task<void> run_worker(context_type& context, std::string consumer)
     if (consumer.empty()) {
         throw std::invalid_argument("log ingest consumer name cannot be empty");
     }
-    // Subscribe before the first claim: deliveries this worker enqueues later
-    // wake it at once.
-    const auto own = service::background::work_available::subscribe(context, work_type);
-    bool initialized{};
     auto next_recovery = std::chrono::steady_clock::now();
-    auto next_consumer_cleanup = next_recovery;
-    while (!context.get_stop_token().stop_requested()) {
-        bool failed{};
-        try {
-            if (!initialized) {
-                co_await queue::initialize(context.redis());
-                initialized = true;
-            }
-            const auto now = std::chrono::steady_clock::now();
-            if (now >= next_consumer_cleanup) {
-                (void)co_await service::background::stream_consumers::remove_idle(
-                    context.redis(), queue::stream_key, queue::consumer_group, consumer);
-                next_consumer_cleanup = now + service::background::stream_consumers::cleanup_interval;
-            }
-            if (now >= next_recovery) {
+    co_await service::background::reliable_stream::run_consumer(
+        context, queue::stream, work_type, consumer,
+        [&]() -> ruvia::task<std::optional<std::chrono::milliseconds>> {
+            if (std::chrono::steady_clock::now() >= next_recovery) {
                 co_await recover_stale(context, consumer);
                 next_recovery = std::chrono::steady_clock::now() + std::chrono::seconds(5);
             }
             auto retries = co_await queue::claim_retries(context.redis(), consumer);
             if (!retries.empty()) {
                 (void)co_await persist_deliveries(context, consumer, std::move(retries));
+                co_return std::nullopt;
             }
             auto entries = co_await queue::read(context.redis(), consumer);
             if (!entries.empty()) {
                 (void)co_await persist_deliveries(context, consumer, std::move(entries));
-                continue;
+                co_return std::nullopt;
             }
-            (void)co_await service::background::stream_consumers::remove_empty(
-                context.redis(), queue::stream_key, queue::consumer_group, consumer);
-            // Only a wait deadline is local; Redis retains every retry record.
-            // New deliveries wake immediately, retries use their real deadline,
-            // and abandoned claims retain the existing recovery cadence.
-            const auto recovery_wait = std::chrono::duration_cast<std::chrono::milliseconds>(
+            co_return std::chrono::duration_cast<std::chrono::milliseconds>(
                 next_recovery - std::chrono::steady_clock::now());
-            const auto wait = co_await queue::retry_wait(context.redis(), recovery_wait);
-            (void)co_await own.receive_for(wait, context.get_stop_token());
-        } catch (const std::exception& error) {
-            if (context.get_stop_token().stop_requested()) {
-                co_return;
-            }
-            initialized = false;
-            failed = true;
-            service::logging::error("Log ingest worker failure: " + std::string(error.what()));
-        } catch (...) {
-            if (context.get_stop_token().stop_requested()) {
-                co_return;
-            }
-            initialized = false;
-            failed = true;
-            service::logging::error("Log ingest worker failure with unknown exception");
-        }
-        if (failed && co_await ruvia::sleep_for(context.worker(), std::chrono::seconds(1),
-                          context.get_stop_token()) ==
-                          ruvia::timer_sleep_result::stop_requested) {
-            co_return;
-        }
-    }
+        },
+        [](const std::exception* error) {
+            service::logging::error(error ? "Log ingest worker failure: " + std::string(error->what())
+                                          : "Log ingest worker failure with unknown exception");
+        });
 }
 
 }  // namespace service::log_ingest

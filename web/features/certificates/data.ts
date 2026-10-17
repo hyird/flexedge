@@ -33,6 +33,7 @@ export function certificatesQuery(params: {
 }) {
   return queryOptions({
     retry: false,
+    meta: { inlineError: true },
     queryKey: [...queryKeys.certificates, 'list', params],
     queryFn: ({ queryKey, signal }) =>
       readLiveQuery(

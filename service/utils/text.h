@@ -1,11 +1,13 @@
 #pragma once
 
 #include <algorithm>
+#include <charconv>
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
-
+#include <system_error>
 namespace service::utils {
 
 [[nodiscard]] inline char lower_ascii(char value) noexcept {
@@ -18,6 +20,46 @@ namespace service::utils {
         ch = lower_ascii(ch);
     }
     return result;
+}
+
+[[nodiscard]] inline constexpr bool is_whitespace_ascii(char value) noexcept {
+    return value == ' ' || value == '\t' || value == '\r' || value == '\n' ||
+           value == '\f' || value == '\v';
+}
+
+[[nodiscard]] inline constexpr std::string_view trim_ascii(std::string_view value) noexcept {
+    while (!value.empty() && is_whitespace_ascii(value.front())) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && is_whitespace_ascii(value.back())) {
+        value.remove_suffix(1);
+    }
+    return value;
+}
+
+[[nodiscard]] inline constexpr bool has_non_whitespace_ascii(std::string_view value) noexcept {
+    return !trim_ascii(value).empty();
+}
+
+inline void append_length_prefixed(std::string& output, std::string_view field) {
+    output += std::to_string(field.size());
+    output.push_back(':');
+    output.append(field);
+}
+
+[[nodiscard]] inline std::optional<std::string_view> consume_length_prefixed(std::string_view& payload) noexcept {
+    const auto colon = payload.find(':');
+    if (colon == std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::size_t length{};
+    const auto [end, error] = std::from_chars(payload.data(), payload.data() + colon, length);
+    if (error != std::errc{} || end != payload.data() + colon || length > payload.size() - colon - 1) {
+        return std::nullopt;
+    }
+    const auto field = payload.substr(colon + 1, length);
+    payload.remove_prefix(colon + 1 + length);
+    return field;
 }
 
 [[nodiscard]] inline bool equals_ignore_case(std::string_view left, std::string_view right) noexcept {

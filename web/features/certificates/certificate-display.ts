@@ -1,4 +1,4 @@
-import { ApiBusinessError } from '@/lib/api-response'
+import { apiErrorCode } from '@/lib/api'
 import {
   statusReserve,
   type StatusDictionary,
@@ -69,7 +69,5 @@ export function formatFingerprint(value: string) {
 const certificateNotFoundCode = 16001
 
 export function isCertificateNotFound(error: unknown) {
-  return (
-    error instanceof ApiBusinessError && error.code === certificateNotFoundCode
-  )
+  return apiErrorCode(error) === certificateNotFoundCode
 }

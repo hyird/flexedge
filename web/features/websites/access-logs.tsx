@@ -35,8 +35,11 @@ const filterKeys = ['method', 'status_class'] as const
 const liveStates = {
   paused: { label: '已暂停', tone: 'default' },
   connected: { label: '实时连接', tone: 'success' },
+  interrupted: { label: '连接中断', tone: 'danger' },
   connecting: { label: '正在连接', tone: 'accent' },
-} as const satisfies StatusDictionary<'paused' | 'connected' | 'connecting'>
+} as const satisfies StatusDictionary<
+  'paused' | 'connected' | 'interrupted' | 'connecting'
+>
 const liveStateReserve = statusReserve(liveStates)
 
 /** Website detail “访问日志” tab. Mode, filters, page and the open request
@@ -198,7 +201,9 @@ export function AccessLogs() {
     ? liveStates.paused
     : live.connected
       ? liveStates.connected
-      : liveStates.connecting
+      : live.error !== null
+        ? liveStates.interrupted
+        : liveStates.connecting
 
   return (
     <Section

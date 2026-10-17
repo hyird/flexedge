@@ -10,9 +10,6 @@ export type WebsiteDetailTab = 'overview' | 'traffic' | 'logs' | 'settings'
 type WebsiteDetailContext = {
   /** Live detail on the overview/settings tabs, a one-shot snapshot elsewhere. */
   website: Website
-  /** Re-reads the header snapshot after a write on a snapshot tab; a no-op
-   * where the live detail stream already pushes the change. */
-  refresh: () => void
   /** Switches the in-page tab without touching the URL; `initial` seeds the
    * opened tab (e.g. the settings group). */
   openTab: (tab: WebsiteDetailTab, initial?: WebsiteArrival) => void
@@ -33,10 +30,6 @@ function useDetailContext() {
 
 export function useWebsite() {
   return useDetailContext().website
-}
-
-export function useRefreshWebsite() {
-  return useDetailContext().refresh
 }
 
 export function useOpenWebsiteTab() {

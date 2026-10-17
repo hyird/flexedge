@@ -34,14 +34,8 @@
 // them; work and notifications they queue are claimed at the next scan.
 namespace service::node_channel {
 
-namespace report_detail {
-
-inline bool hash_matches(std::string_view actual, std::string_view expected) {
-    return actual.size() == expected.size() && CRYPTO_memcmp(actual.data(), expected.data(), actual.size()) == 0;
-}
-
 // Task history wording of the node's failure phase.
-inline std::string_view apply_phase_name(flexedge::node::v2::ApplyPhase phase) noexcept {
+[[nodiscard]] inline constexpr std::string_view apply_phase_name(flexedge::node::v2::ApplyPhase phase) noexcept {
     switch (phase) {
         case flexedge::node::v2::APPLY_PHASE_STAGE:
             return "stage";
@@ -54,6 +48,11 @@ inline std::string_view apply_phase_name(flexedge::node::v2::ApplyPhase phase) n
     }
 }
 
+namespace report_detail {
+
+inline bool hash_matches(std::string_view actual, std::string_view expected) {
+    return actual.size() == expected.size() && CRYPTO_memcmp(actual.data(), expected.data(), actual.size()) == 0;
+}
 // What an apply result or an applied heartbeat changed: the node, its
 // cluster and websites (deployment state).
 inline void add_apply_change(service::live_resource::notifications::resource_notification& notification,
@@ -76,6 +75,39 @@ inline void add_node_task_change(service::live_resource::notifications::resource
     if (deployment_changed || !recorded.empty()) {
         notification.changed(service::live_resource::resource::tasks, principal.node_id_);
     }
+}
+
+struct applied_transitions final {
+    bool target_changed_{};
+    bool revision_raised_{};
+    std::vector<service::node_dispatch::recorded_node_attempt> recorded_{};
+
+    [[nodiscard]] bool deployment_changed() const noexcept {
+        return target_changed_ || revision_raised_;
+    }
+};
+
+inline ruvia::task<applied_transitions> record_applied_transitions(ruvia::db_transaction& transaction,
+    const service::node_dispatch::node_apply_attempt& attempt, std::optional<std::int64_t> previous_revision,
+    std::int64_t applied_revision, std::pmr::memory_resource* resource) {
+    applied_transitions output{
+        .target_changed_ = co_await service::node_dispatch::mark_node_target_applied(
+            transaction, attempt.tenant_id_, attempt.release_id_, attempt.node_id_),
+        .revision_raised_ = previous_revision && *previous_revision < applied_revision,
+        .recorded_ = {},
+    };
+    if (output.target_changed_) {
+        if (auto recorded = co_await service::node_dispatch::record_node_apply_attempt(transaction, attempt, resource)) {
+            output.recorded_.push_back(std::move(*recorded));
+        }
+    }
+    if (output.revision_raised_) {
+        if (auto recorded = co_await service::node_dispatch::record_node_config_attempt(
+                transaction, attempt, applied_revision, resource)) {
+            output.recorded_.push_back(std::move(*recorded));
+        }
+    }
+    co_return output;
 }
 
 // Immutable traces and their attempts commit together. A retried report
@@ -194,7 +226,6 @@ ruvia::task<void> record_heartbeat(context_type& context, ruvia::db_transaction&
         }
         service::common::throw_app_error(revision_invalid);
     }
-    const auto target_changed = co_await service::node_dispatch::mark_node_target_applied(transaction, principal.tenant_id_, report.active_release_id_, report.node_id_);
     const service::node_dispatch::node_apply_attempt confirmed{.tenant_id_ = principal.tenant_id_,
         .release_id_ = report.active_release_id_,
         .node_id_ = report.node_id_,
@@ -205,22 +236,8 @@ ruvia::task<void> record_heartbeat(context_type& context, ruvia::db_transaction&
         .error_ = {},
         .retryable_ = false,
         .elapsed_milliseconds_ = std::nullopt};
-    std::vector<service::node_dispatch::recorded_node_attempt> recorded;
-    if (target_changed) {
-        if (auto attempt = co_await service::node_dispatch::record_node_apply_attempt(transaction, confirmed,
-                context.pool())) {
-            recorded.push_back(std::move(*attempt));
-        }
-    }
-    // A heartbeat raising the applied node spec revision records the
-    // configuration attempt whose result report was lost.
-    const bool revision_raised = previous_revision && *previous_revision < report.applied_node_spec_revision_;
-    if (revision_raised) {
-        if (auto attempt = co_await service::node_dispatch::record_node_config_attempt(transaction, confirmed,
-                report.applied_node_spec_revision_, context.pool())) {
-            recorded.push_back(std::move(*attempt));
-        }
-    }
+    const auto transitions = co_await report_detail::record_applied_transitions(
+        transaction, confirmed, previous_revision, report.applied_node_spec_revision_, context.pool());
     // One notification per heartbeat: the online window, the runtime and
     // origin patches, and the transitions this report caused.
     using service::live_resource::resource;
@@ -233,10 +250,11 @@ ruvia::task<void> record_heartbeat(context_type& context, ruvia::db_transaction&
             .changed(resource::overview)
             .changed(resource::clusters, principal.cluster_id_);
     }
-    if (target_changed) {
+    if (transitions.target_changed_) {
         report_detail::add_apply_change(notification, principal);
     }
-    report_detail::add_node_task_change(notification, principal, target_changed || revision_raised, recorded);
+    report_detail::add_node_task_change(
+        notification, principal, transitions.deployment_changed(), transitions.recorded_);
     (void)co_await service::live_resource::enqueue_notification(transaction, notification);
 }
 
@@ -267,22 +285,10 @@ ruvia::task<void> record_apply_result(context_type& context, ruvia::db_transacti
                 result.release_id(), result.manifest_digest()))) {
             service::common::throw_app_error(revision_invalid);
         }
-        const bool target_changed = co_await service::node_dispatch::mark_node_target_applied(
-            transaction, principal.tenant_id_, result.release_id(), node_id);
-        if (target_changed) {
-            if (auto attempt = co_await service::node_dispatch::record_node_apply_attempt(transaction, applied,
-                    context.pool())) {
-                recorded.push_back(std::move(*attempt));
-            }
-        }
-        const bool revision_raised = *previous_revision < result.node_spec_revision();
-        if (revision_raised) {
-            if (auto attempt = co_await service::node_dispatch::record_node_config_attempt(transaction, applied,
-                    result.node_spec_revision(), context.pool())) {
-                recorded.push_back(std::move(*attempt));
-            }
-        }
-        co_await report_detail::finish_apply(transaction, principal, target_changed || revision_raised, recorded, trace);
+        const auto transitions = co_await report_detail::record_applied_transitions(
+            transaction, applied, previous_revision, result.node_spec_revision(), context.pool());
+        co_await report_detail::finish_apply(
+            transaction, principal, transitions.deployment_changed(), transitions.recorded_, trace);
         co_return;
     }
     const auto phase = flexedge::node::v2::ApplyPhase_Name(result.failed_phase());
@@ -306,7 +312,7 @@ ruvia::task<void> record_apply_result(context_type& context, ruvia::db_transacti
         .node_id_ = node_id,
         .source_ = "apply_result",
         .applied_ = false,
-        .phase_ = report_detail::apply_phase_name(result.failed_phase()),
+        .phase_ = apply_phase_name(result.failed_phase()),
         .error_code_ = failure.error_code_,
         .error_ = failure.error_,
         .retryable_ = failure.retryable_,

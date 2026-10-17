@@ -90,6 +90,29 @@ public:
         value.written_bytes_ += static_cast<std::uint64_t>(bytes.size());
     }
 
+    [[nodiscard]] bool accept_chunk(std::string_view expected_digest,
+        const v2::NodeReleaseChunk& chunk) {
+        const auto expected_offset = transfer_ ? transfer_->written_bytes_ : std::uint64_t{0};
+        if (!valid_node_release_version(chunk.version()) ||
+            chunk.digest_sha256() != expected_digest || chunk.total_bytes() == 0 ||
+            chunk.total_bytes() > maximum_node_release_bytes ||
+            chunk.offset() != expected_offset || chunk.offset() >= chunk.total_bytes() ||
+            chunk.data().empty() || chunk.data().size() > node_release_chunk_bytes ||
+            static_cast<std::uint64_t>(chunk.data().size()) >
+                chunk.total_bytes() - chunk.offset()) {
+            throw std::runtime_error("control plane sent an invalid node release chunk");
+        }
+        if (!transfer_) {
+            begin(chunk.version(), expected_digest, chunk.total_bytes());
+        } else if (chunk.version() != transfer_->version_ ||
+                   chunk.digest_sha256() != transfer_->digest_ ||
+                   chunk.total_bytes() != transfer_->total_bytes_) {
+            throw std::runtime_error("control plane changed the node release mid-transfer");
+        }
+        append(chunk.offset(), chunk.data());
+        return complete();
+    }
+
     [[nodiscard]] bool complete() const noexcept {
         return transfer_ && transfer_->written_bytes_ == transfer_->total_bytes_;
     }

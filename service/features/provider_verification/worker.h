@@ -59,11 +59,8 @@ inline ruvia::task<void> process_task(service::background::task_context& context
     }
     if (!context.get_stop_token().stop_requested() && exception) {
         const auto failure = service::outbound_http::classify_attempt_failure(exception, "供应商检测发生未知错误");
-        trace.mark_failure(failure.message_);
-        auto step = trace.begin_step(service::attempt_trace::step_code::record_failure);
-        trace.log(failure.permanent_ ? service::attempt_trace::log_level::error
-                                     : service::attempt_trace::log_level::warning,
-            failure.permanent_ ? "永久失败，供应商标记为无效，不再自动重试" : "将在 15 秒后自动重试");
+        auto step = service::sync_runtime::record_attempt_failure_step(
+            trace, failure.message_, failure.permanent_, "永久失败，供应商标记为无效，不再自动重试");
         co_await fail_verification(context, trace, task, failure.message_, failure.permanent_,
             attempt.to_json(context.pool()));
         step.complete();

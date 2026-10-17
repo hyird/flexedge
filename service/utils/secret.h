@@ -24,29 +24,12 @@ inline constexpr std::size_t key_size = 32;
 inline constexpr std::size_t nonce_size = 12;
 inline constexpr std::size_t tag_size = 16;
 
-inline unsigned char decode_nibble(char value) {
-    if (value >= '0' && value <= '9') {
-        return static_cast<unsigned char>(value - '0');
-    }
-    if (value >= 'a' && value <= 'f') {
-        return static_cast<unsigned char>(value - 'a' + 10);
-    }
-    if (value >= 'A' && value <= 'F') {
-        return static_cast<unsigned char>(value - 'A' + 10);
-    }
-    throw std::runtime_error("secret envelope contains invalid hexadecimal data");
-}
-
 inline std::vector<unsigned char> decode_hex(std::string_view value) {
-    if (value.size() % 2 != 0) {
+    auto decoded = flexedge::crypto::hex_decode(value);
+    if (!decoded) {
         throw std::runtime_error("secret envelope contains invalid hexadecimal data");
     }
-    std::vector<unsigned char> result(value.size() / 2);
-    for (std::size_t index = 0; index < result.size(); ++index) {
-        result[index] = static_cast<unsigned char>((decode_nibble(value[index * 2]) << 4) |
-                                                   decode_nibble(value[index * 2 + 1]));
-    }
-    return result;
+    return std::move(*decoded);
 }
 
 inline int checked_size(std::size_t size) {
@@ -175,6 +158,13 @@ inline std::string open_secret(std::string_view envelope) {
         throw std::runtime_error("SECRET_MASTER_KEY is not configured");
     }
     return secret_detail::open_with_key(envelope, secret_detail::configured_key());
+}
+
+[[nodiscard]] inline std::string secret_hint(std::string_view value, std::size_t visible = 4) {
+    if (value.size() <= visible) {
+        return "****";
+    }
+    return "****" + std::string(value.substr(value.size() - visible));
 }
 
 }  // namespace service::utils

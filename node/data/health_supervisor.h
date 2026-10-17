@@ -2,7 +2,6 @@
 
 #include <ruvia/core/event_loop.h>
 #include <ruvia/core/task.h>
-
 #include <chrono>
 #include <coroutine>
 #include <cstddef>
@@ -80,7 +79,6 @@ private:
           runtime_(runtime),
           timer_(loop_.io_context()),
           tls_context_(tls_context) {}
-
 public:
     ~origin_health_supervisor() {
         if (started_ && !stop_and_wait_completed_) {
@@ -112,21 +110,62 @@ public:
     }
 
     // Owner loop. Builds the next membership without changing the published health.
-    [[nodiscard]] origin_health_state::prepared prepare(const origin_health_key_set& keys, const origin_health_key_set& replaced) {
+    [[nodiscard]] origin_health_state::prepared prepare(
+        const origin_health_key_set& keys, const origin_health_key_set& replaced) {
         if (!loop_.is_current()) {
             throw std::logic_error("origin health must be prepared on its owner loop");
         }
         return state_.prepare(keys, replaced);
     }
 
-    // Owner loop.
-    void activate(origin_health_state::prepared&& next) noexcept {
+    [[nodiscard]] origin_health_state::prepared prepare(
+        const compiled_config* active, const compiled_config& next) {
+        if (!loop_.is_current()) {
+            throw std::logic_error("origin health must be prepared on its owner loop");
+        }
+        std::unordered_map<origin_health_key, std::pair<const v2::Website*, const v2::Origin*>,
+            origin_health_key_hash, origin_health_key_equal>
+            previous;
+        if (active != nullptr) {
+            for (const auto* website : active->websites()) {
+                for (const auto& origin : website->origins()) {
+                    previous.emplace(
+                        origin_health_key{.website_id_ = website->id(), .origin_id_ = origin.id()},
+                        std::pair{website, &origin});
+                }
+            }
+        }
+        origin_health_key_set keys;
+        origin_health_key_set replaced;
+        for (const auto* website : next.websites()) {
+            for (const auto& origin : website->origins()) {
+                origin_health_key key{.website_id_ = website->id(), .origin_id_ = origin.id()};
+                if (const auto old = previous.find(key); old != previous.end()) {
+                    const auto& [old_website, old_origin] = old->second;
+                    if (website->enabled() != old_website->enabled() ||
+                        origin.enabled() != old_origin->enabled() ||
+                        website->health_check_enabled() != old_website->health_check_enabled() ||
+                        website->health_check_interval_seconds() !=
+                            old_website->health_check_interval_seconds() ||
+                        make_origin_probe_config(*website, origin) !=
+                            make_origin_probe_config(*old_website, *old_origin)) {
+                        replaced.emplace(key);
+                    }
+                }
+                keys.emplace(std::move(key));
+            }
+        }
+        return state_.prepare(keys, replaced);
+    }
+
+    // Owner loop. Returns the displaced membership so rollback can restore it explicitly.
+    origin_health_state::prepared activate(origin_health_state::prepared next) noexcept {
         if (!loop_.is_current()) {
             std::terminate();
         }
         cancel_probes();
-        state_.activate(std::move(next));
         stale_ = true;
+        return state_.activate(std::move(next));
     }
 
     void request_start() {
@@ -163,12 +202,15 @@ public:
 private:
     struct stop_awaiter final {
         origin_health_supervisor* supervisor_;
+
         bool await_ready() const noexcept {
             return supervisor_->stop_complete();
         }
+
         void await_suspend(std::coroutine_handle<> continuation) {
             supervisor_->stop_waiters_.push_back(continuation);
         }
+
         void await_resume() const noexcept {}
     };
 
@@ -190,7 +232,6 @@ private:
             waiter.resume();
         }
     }
-
     void stop() noexcept {
         stopped_ = true;
         std::error_code ignored;
@@ -304,8 +345,8 @@ private:
     asio::steady_timer timer_;
     ruvia::event_loop_stop_registration stop_registration_;
     origin_tls_context& tls_context_;
-    std::unordered_map<origin_health_probe*, std::shared_ptr<origin_health_probe>> probes_;
     std::vector<std::coroutine_handle<>> stop_waiters_;
+    std::unordered_map<origin_health_probe*, std::shared_ptr<origin_health_probe>> probes_;
     bool timer_pending_{};
     bool started_{};
     bool stopped_{};

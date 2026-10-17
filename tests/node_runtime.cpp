@@ -958,7 +958,7 @@ int main(int argc, char* argv[]) {
                 {.method_ = "GET", .target_ = "/", .headers_ = {}, .body_ = {}, .has_body_ = false},
                 streaming_config.website(), "www.example.com", "198.51.100.1", true, false, false);
             REQUIRE(prepared);
-            return std::move(prepared->response_exchange_);
+            return prepared->make_exchange_state();
         };
         // Streaming keeps the origin framing for the relayed body and only tracks its end.
         flexedge::node::origin_response_codec streamed(origin_exchange_state(), true, nullptr);
@@ -1975,8 +1975,11 @@ int main(int argc, char* argv[]) {
         source_route->clear_query_string();
         proxy_route->set_action("rewrite");
         proxy_route->clear_origin_ids();
+        const auto route_policy = flexedge::node::evaluate_route_rules(
+            proxy_snapshot.website(), "GET", "/a/users?q=1", "www.example.com");
+        REQUIRE(route_policy);
         const auto candidates =
-            flexedge::node::origin_candidates(proxy_snapshot.website(), 0, source_route);
+            flexedge::node::origin_candidates(proxy_snapshot.website(), 0, &*route_policy);
         REQUIRE(candidates.size() == 1);
         REQUIRE(candidates.front()->id() == "origin-backup");
         publish(std::move(proxy_snapshot));

@@ -8,6 +8,7 @@
 #include <string_view>
 #include <utility>
 
+#include "common/route_policy.h"
 #include "node/data/http1_request_reader.h"
 #include "node/proto/edge_control.pb.h"
 #include "node/runtime/log_producer.h"
@@ -130,10 +131,7 @@ private:
             if (colon == std::string_view::npos) {
                 append_bounded(result, line, maximum);
             } else {
-                auto value = line.substr(colon + 1);
-                while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
-                    value.remove_prefix(1);
-                }
+                const auto value = flexedge::route_policy::trim_ows(line.substr(colon + 1));
                 append_bounded(result, line.substr(0, colon), maximum);
                 append_bounded(result, ": ", maximum);
                 append_bounded(result, value, maximum);

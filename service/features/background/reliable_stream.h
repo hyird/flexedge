@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ruvia/core/task.h>
+#include <ruvia/core/timer.h>
 #include <ruvia/web/redis/redis.h>
 
 #include <algorithm>
@@ -15,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "service/features/background/stream_consumers.h"
+#include "service/features/background/work_available.h"
 #include "service/utils/redis_reply.h"
 
 // A durable Redis Streams work queue with a consumer group. Producers append
@@ -288,6 +291,87 @@ inline ruvia::task<std::chrono::milliseconds> next_due(ruvia::redis_handle redis
         throw std::runtime_error("unexpected stream retry deadline reply");
     }
     co_return std::chrono::milliseconds(result.integer());
+}
+
+// Claims one due retry, otherwise one abandoned entry, otherwise one new entry.
+inline ruvia::task<std::optional<entry>> claim_next(ruvia::redis_handle redis, const definition& queue,
+    std::string_view consumer) {
+    auto claimed = co_await claim_due(redis, queue, consumer, 1);
+    if (claimed.empty()) {
+        claimed = co_await reclaim(redis, queue, consumer, 1);
+    }
+    if (claimed.empty()) {
+        claimed = co_await read(redis, queue, consumer, 1);
+    }
+    if (claimed.empty()) {
+        co_return std::nullopt;
+    }
+    co_return std::move(claimed.front());
+}
+
+// Runs a reliable stream consumer loop: lazy group initialization, periodic
+// idle consumer cleanup, `step()` execution, empty consumer cleanup before
+// waiting, retry deadline calculation, wake-signal wait, and 1s error backoff.
+// `step()` returns `std::nullopt` when work was processed and the loop should
+// continue immediately, or the maximum idle wait duration when no work was claimed.
+template <typename context_type, typename step_type, typename error_type>
+ruvia::task<void> run_consumer(context_type& context, const definition& queue,
+    std::string_view work_type, std::string_view consumer, step_type step, error_type on_error) {
+    if (consumer.empty()) {
+        throw std::invalid_argument("reliable stream consumer name cannot be empty");
+    }
+    const auto own = service::background::work_available::subscribe(context, work_type);
+    bool initialized{};
+    auto next_consumer_cleanup = std::chrono::steady_clock::now();
+    while (!context.get_stop_token().stop_requested()) {
+        bool failed{};
+        try {
+            if (!initialized) {
+                co_await initialize(context.redis(), queue);
+                initialized = true;
+            }
+            if (const auto now = std::chrono::steady_clock::now(); now >= next_consumer_cleanup) {
+                (void)co_await service::background::stream_consumers::remove_idle(
+                    context.redis(), queue.stream_, queue.group_, consumer);
+                next_consumer_cleanup = now + service::background::stream_consumers::cleanup_interval;
+            }
+            const auto idle_wait = co_await step();
+            if (!idle_wait) {
+                continue;
+            }
+            (void)co_await service::background::stream_consumers::remove_empty(
+                context.redis(), queue.stream_, queue.group_, consumer);
+            const auto wait = co_await next_due(context.redis(), queue, *idle_wait);
+            (void)co_await own.receive_for(wait, context.get_stop_token());
+        } catch (const std::exception& error) {
+            if (context.get_stop_token().stop_requested()) {
+                co_return;
+            }
+            initialized = false;
+            failed = true;
+            if constexpr (requires { on_error(&error); }) {
+                on_error(&error);
+            } else {
+                on_error();
+            }
+        } catch (...) {
+            if (context.get_stop_token().stop_requested()) {
+                co_return;
+            }
+            initialized = false;
+            failed = true;
+            if constexpr (requires { on_error(static_cast<const std::exception*>(nullptr)); }) {
+                on_error(nullptr);
+            } else {
+                on_error();
+            }
+        }
+        if (failed && co_await ruvia::sleep_for(context.worker(), std::chrono::seconds(1),
+                          context.get_stop_token()) ==
+                          ruvia::timer_sleep_result::stop_requested) {
+            co_return;
+        }
+    }
 }
 
 }  // namespace service::background::reliable_stream

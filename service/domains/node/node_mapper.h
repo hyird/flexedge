@@ -25,10 +25,10 @@ inline std::string serialize_node_config(auto& c,
 }
 
 template <typename row_type>
-inline node_runtime_dto get_node_runtime_dto(auto& c,
+inline service::node_runtime::node_runtime_dto get_node_runtime_dto(auto& c,
     const service::node_runtime::node_runtime_data& input,
     const row_type& row) {
-    node_runtime_dto output(ruvia::model_options{.resource_ = c.pool()});
+    service::node_runtime::node_runtime_dto output(ruvia::model_options{.resource_ = c.pool()});
     output.set<"registration_status">(row[7].value().value_or("pending"));
     output.set<"connection_status">(row[8].value().value_or("unregistered"));
     output.set<"applied_node_spec_revision">(row[10].template as<std::int64_t>().value_or(0));

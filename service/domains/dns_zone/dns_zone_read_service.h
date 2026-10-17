@@ -140,13 +140,9 @@ public:
             }
         };
         const auto page_rows = co_await service::common::query_page(c, filter, project, page_size, skip);
-        const auto total = page_rows.total_;
         const auto& rows = page_rows.rows_;
-        dns_zone_page_data_dto result({.resource_ = c.pool()});
-        result.template set<"total">(total);
-        result.template set<"page">(page);
-        result.template set<"page_size">(page_size);
-        result.template set<"total_pages">(page_size > 0 ? (total + page_size - 1) / page_size : 0);
+        auto result = service::common::init_page_dto<dns_zone_page_data_dto>(
+            c.pool(), page_rows.total_, page, page_size);
         auto& items = result.template ensure<"list">();
         auto db = c.db();
         std::vector<std::string> zone_ids;

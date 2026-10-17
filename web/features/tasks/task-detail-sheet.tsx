@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, Skeleton } from '@heroui/react'
-import { ApiBusinessError } from '@/lib/api-response'
+import { apiErrorCode } from '@/lib/api'
 import { describeStatus } from '@/lib/status'
 import { FormSheet } from '@/components/form-sheet'
 import { EmptyState, QueryNotice } from '@/components/page'
@@ -37,8 +37,7 @@ export function TaskDetailSheet({
     meta: { inlineError: true },
   })
   const task = detail.data
-  const code =
-    detail.error instanceof ApiBusinessError ? detail.error.code : undefined
+  const code = apiErrorCode(detail.error)
   const status = task && describeStatus(taskStatuses, task.status)
   return (
     <FormSheet

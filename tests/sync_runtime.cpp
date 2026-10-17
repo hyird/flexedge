@@ -21,6 +21,10 @@
 #include "service/features/website_dns/worker.h"
 #include "support/postgres_test.h"
 
+
+#ifdef _MSC_VER
+#pragma optimize("", off)
+#endif
 namespace {
 
 namespace sync = service::sync_runtime;
@@ -387,6 +391,65 @@ ruvia::task<void> verify_stale_maintenance_candidates(ruvia::web_worker_context&
     }
 }
 
+ruvia::task<void> verify_missing_domain_markers(task_context& context) {
+    constexpr std::string_view recovery_tenant{"00000000-0000-4000-8000-000000000b01"};
+    auto db = context.db();
+    (void)co_await db.execute(
+        "INSERT INTO sys_certificate(id, tenant_id, issuance_revision, issued_revision, deleted_at) VALUES "
+        "('00000000-0000-4000-8000-000000000b02', $1, 1, 0, NULL), "
+        "('00000000-0000-4000-8000-000000000b03', $1, 3, 2, NULL), "
+        "('00000000-0000-4000-8000-000000000b04', $1, 2, 2, NULL), "
+        "('00000000-0000-4000-8000-000000000b05', $1, 1, 0, NOW())",
+        recovery_tenant);
+    (void)co_await db.execute(
+        "INSERT INTO sys_provider(id, tenant_id, verification_generation, deleted_at) VALUES "
+        "('00000000-0000-4000-8000-000000000b06', $1, 3, NULL), "
+        "('00000000-0000-4000-8000-000000000b07', $1, 3, NOW())",
+        recovery_tenant);
+    (void)co_await db.execute(
+        "INSERT INTO sys_website(id, tenant_id, revision, deleted_at) VALUES "
+        "('00000000-0000-4000-8000-000000000b08', $1, 4, NULL), "
+        "('00000000-0000-4000-8000-000000000b09', $1, 4, NOW())",
+        recovery_tenant);
+    (void)co_await db.execute(
+        "INSERT INTO sys_dns_zone(id, tenant_id, desired_revision, synced_revision, deleted_at) VALUES "
+        "('00000000-0000-4000-8000-000000000b0a', $1, 3, 2, NOW()), "
+        "('00000000-0000-4000-8000-000000000b0b', $1, 3, 3, NOW())",
+        recovery_tenant);
+    for (int round = 0; round < 2; ++round) {
+        co_await service::certificate_issuance::worker_detail::reconcile_missing_issuance_markers(context);
+        co_await service::provider_verification::detail::reconcile(context);
+        co_await service::website_dns::detail::reconcile_markers(context);
+        co_await service::dns_sync::detail::reconcile_tasks(context);
+        const auto restored = co_await db.query(
+            "SELECT COUNT(*), "
+            "COUNT(*) FILTER (WHERE resource_type = 'certificate' AND operation = 'issue' AND version = 1), "
+            "COUNT(*) FILTER (WHERE resource_type = 'certificate' AND operation = 'renew' AND version = 3), "
+            "COUNT(*) FILTER (WHERE resource_type = 'provider' AND operation = 'verify' AND version = 3), "
+            "COUNT(*) FILTER (WHERE resource_type = 'website' AND operation = 'apply' AND version = 4), "
+            "COUNT(*) FILTER (WHERE resource_type = 'dns_zone' AND operation = 'delete' AND version = 3) "
+            "FROM sys_sync_task WHERE tenant_id = $1",
+            recovery_tenant);
+        require(restored.front()[0].as<int>().value() == 5,
+            "domain recovery excludes settled certificates, removed providers/websites and completed DNS deletions");
+        for (std::size_t column = 1; column < 6; ++column) {
+            require(restored.front()[column].as<int>().value() == 1,
+                "each domain restores its own operation and current revision exactly once");
+        }
+        if (round == 0) {
+            (void)co_await db.execute(
+                "UPDATE sys_sync_task SET is_done = TRUE, is_ok = FALSE, processed_version = version, "
+                "count_fails = 2, error = 'retained domain failure' WHERE tenant_id = $1",
+                recovery_tenant);
+        }
+    }
+    const auto retained = co_await db.query(
+        "SELECT COUNT(*) FROM sys_sync_task WHERE tenant_id = $1 AND is_done AND NOT is_ok "
+        "AND count_fails = 2 AND error = 'retained domain failure'",
+        recovery_tenant);
+    require(retained.front()[0].as<int>().value() == 5, "repeated domain recovery preserves terminal failures");
+}
+
 ruvia::task<void> verify(ruvia::web_worker_context& web) {
     task_context first(web);
     task_context second(web);
@@ -396,6 +459,7 @@ ruvia::task<void> verify(ruvia::web_worker_context& web) {
     co_await verify_waiting(first);
     co_await verify_rollback(first);
     co_await verify_stale_maintenance_candidates(web, first);
+    co_await verify_missing_domain_markers(first);
 }
 
 }  // namespace
@@ -440,7 +504,7 @@ int main() {
             std::rethrow_exception(failure);
         }
         require(completed, "the real Web Worker completes its owned operations before shutdown");
-        std::cout << "Sync outcomes: terminal failures, bounded retries, maintenance, re-initiation, leases, dependencies, atomic history/notification rollback and four controlled maintenance races passed\n";
+        std::cout << "Sync outcomes: terminal failures, bounded retries, domain recovery eligibility and operations, re-initiation, leases, dependencies, atomic history/notification rollback and four controlled maintenance races passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

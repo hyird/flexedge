@@ -94,6 +94,30 @@ inline ruvia::db_expression node_attempt_detail(ruvia::db_query& source, std::st
         ruvia::db_binary_operator::json_concat, node_fields);
 }
 
+inline void select_node_attempt_columns(ruvia::db_query& source, const node_apply_attempt& attempt,
+    std::string_view operation, const service::sync_runtime::attempt_sequence_columns& sequence,
+    std::pmr::memory_resource* resource) {
+    const auto detail_json = attempt.to_json(resource);
+    const auto column = [&](const service::sync_runtime::qualified_column& value) {
+        return source.column(value.name_, value.table_);
+    };
+    const auto text = [&](std::string_view value) {
+        return source.cast(source.value(value), ruvia::db_data_type::text);
+    };
+    const auto emitted_at = service::sync_runtime::join_attempt_clock(source);
+    const auto stored_detail = node_attempt_detail(source, detail_json);
+    source.select({column(sequence.tenant_id_), column(sequence.task_id_), text("node"),
+        column(sequence.resource_id_), text(operation), column(sequence.version_),
+        text(attempt.applied_ ? service::sync_runtime::event_outcome_completed
+                              : service::sync_runtime::event_outcome_failed),
+        source.call("left",
+            {text(attempt.applied_ ? std::string_view{} : attempt.error_), source.value(std::int64_t{1000})}),
+        service::sync_runtime::next_attempt_number(source, sequence),
+        service::sync_runtime::attempt_started_at(source, emitted_at, attempt.elapsed_milliseconds_),
+        source.cast(source.value(attempt.elapsed_milliseconds_.value_or(0)), ruvia::db_data_type::big_int),
+        stored_detail, emitted_at});
+}
+
 inline ruvia::task<std::optional<recorded_node_attempt>> insert_node_attempt(ruvia::db_transaction& transaction,
     ruvia::db_query& source) {
     ruvia::db_query insert;
@@ -114,13 +138,11 @@ inline ruvia::task<std::optional<recorded_node_attempt>> insert_node_attempt(ruv
 // the attempt numbering. Returns the recorded row, if any.
 inline ruvia::task<std::optional<recorded_node_attempt>> record_node_apply_attempt(ruvia::db_transaction& transaction,
     const node_apply_attempt& attempt, std::pmr::memory_resource* resource) {
-    const auto detail_json = attempt.to_json(resource);
     ruvia::db_query source;
     const auto target = [&](std::string_view column) { return source.column(column, "target"); };
     const auto equals = [&](ruvia::db_expression left, ruvia::db_expression right) {
         return source.binary(left, ruvia::db_binary_operator::equal, right);
     };
-    const auto text = [&](std::string_view value) { return source.value(value); };
     source.from("sys_node_release_target", "target")
         .join(ruvia::db_join_type::inner, "sys_cluster_release",
             source.binary(equals(source.column("tenant_id", "release"), target("tenant_id")),
@@ -130,21 +152,12 @@ inline ruvia::task<std::optional<recorded_node_attempt>> record_node_apply_attem
             source.binary(equals(source.column("tenant_id", "node"), target("tenant_id")),
                 ruvia::db_binary_operator::and_value, equals(source.column("id", "node"), target("node_id"))),
             "node");
-    const auto emitted_at = service::sync_runtime::join_attempt_clock(source);
-    const auto stored_detail = detail::node_attempt_detail(source, detail_json);
-    source.select({target("tenant_id"), target("release_id"),
-        source.cast(text("node"), ruvia::db_data_type::text), target("node_id"),
-        source.cast(text("publish"), ruvia::db_data_type::text), source.column("generation", "release"),
-        source.cast(text(attempt.applied_ ? service::sync_runtime::event_outcome_completed
-                                          : service::sync_runtime::event_outcome_failed),
-            ruvia::db_data_type::text),
-        source.call("left",
-            {source.cast(text(attempt.applied_ ? std::string_view{} : attempt.error_), ruvia::db_data_type::text),
-                source.value(std::int64_t{1000})}),
-        service::sync_runtime::next_attempt_number(source, {.tenant_id_ = {"tenant_id", "target"}, .task_id_ = {"release_id", "target"}, .resource_id_ = {"node_id", "target"}, .version_ = {"generation", "release"}}),
-        service::sync_runtime::attempt_started_at(source, emitted_at, attempt.elapsed_milliseconds_),
-        source.cast(source.value(attempt.elapsed_milliseconds_.value_or(0)), ruvia::db_data_type::big_int),
-        stored_detail, emitted_at});
+    detail::select_node_attempt_columns(source, attempt, "publish",
+        {.tenant_id_ = {"tenant_id", "target"},
+            .task_id_ = {"release_id", "target"},
+            .resource_id_ = {"node_id", "target"},
+            .version_ = {"generation", "release"}},
+        resource);
     source.where(equals(target("tenant_id"), source.value(attempt.tenant_id_)))
         .and_where(equals(target("release_id"), source.value(attempt.release_id_)))
         .and_where(equals(target("node_id"), source.value(attempt.node_id_)));
@@ -177,30 +190,20 @@ inline ruvia::task<std::optional<recorded_node_attempt>> record_node_config_atte
         .and_where(snapshot.binary(snapshot.column("id"), ruvia::db_binary_operator::equal, snapshot.value(attempt.node_id_)))
         .and_where(snapshot.binary(snapshot.column("node_spec_revision"), ruvia::db_binary_operator::equal, snapshot.value(revision)));
     (void)co_await transaction.execute(snapshot);
-    const auto detail_json = attempt.to_json(resource);
     ruvia::db_query source;
     const auto node = [&](std::string_view column) { return source.column(column, "node"); };
     const auto equals = [&](ruvia::db_expression left, ruvia::db_expression right) {
         return source.binary(left, ruvia::db_binary_operator::equal, right);
     };
-    const auto text = [&](std::string_view value) { return source.value(value); };
     ruvia::db_query spec(source.resource());
     spec.select(spec.alias(spec.cast(spec.value(revision), ruvia::db_data_type::big_int), "revision"));
     source.from("sys_node", "node").join(ruvia::db_join_type::cross, spec, {}, "spec");
-    const auto emitted_at = service::sync_runtime::join_attempt_clock(source);
-    const auto stored_detail = detail::node_attempt_detail(source, detail_json);
-    source.select({node("tenant_id"), node("id"), source.cast(text("node"), ruvia::db_data_type::text), node("id"),
-        source.cast(text("configure"), ruvia::db_data_type::text), source.column("revision", "spec"),
-        source.cast(text(attempt.applied_ ? service::sync_runtime::event_outcome_completed
-                                          : service::sync_runtime::event_outcome_failed),
-            ruvia::db_data_type::text),
-        source.call("left",
-            {source.cast(text(attempt.applied_ ? std::string_view{} : attempt.error_), ruvia::db_data_type::text),
-                source.value(std::int64_t{1000})}),
-        service::sync_runtime::next_attempt_number(source, {.tenant_id_ = {"tenant_id", "node"}, .task_id_ = {"id", "node"}, .resource_id_ = {"id", "node"}, .version_ = {"revision", "spec"}}),
-        service::sync_runtime::attempt_started_at(source, emitted_at, attempt.elapsed_milliseconds_),
-        source.cast(source.value(attempt.elapsed_milliseconds_.value_or(0)), ruvia::db_data_type::big_int),
-        stored_detail, emitted_at});
+    detail::select_node_attempt_columns(source, attempt, "configure",
+        {.tenant_id_ = {"tenant_id", "node"},
+            .task_id_ = {"id", "node"},
+            .resource_id_ = {"id", "node"},
+            .version_ = {"revision", "spec"}},
+        resource);
     source.where(equals(node("tenant_id"), source.value(attempt.tenant_id_)))
         .and_where(equals(node("id"), source.value(attempt.node_id_)));
     co_return co_await detail::insert_node_attempt(transaction, source);

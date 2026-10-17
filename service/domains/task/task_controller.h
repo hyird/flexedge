@@ -77,6 +77,12 @@ private:
         co_return service::common::ok<task_response>(read, std::move(data));
     }
 
+    static ruvia::task<task_history_response> read_history(auto& read, const std::string& tenant,
+        const std::string& type, const std::string& id) {
+        auto data = co_await get_task_service().history(read, tenant, type, id);
+        co_return service::common::ok<task_history_response>(read, std::move(data));
+    }
+
     ruvia::task<ruvia::http_response> list(ruvia::context& c) {
         co_return c.json(co_await read_list(c, service::middleware::current_tenant_id(c), parse_list(c)));
     }
@@ -90,9 +96,8 @@ private:
             service::live_resource::query_key("list", q.page_, q.size_, q.filter_.status_, q.filter_.type_,
                 q.filter_.keyword_));
         co_await service::live_resource::stream_snapshot(c, std::move(sub),
-            [tenant, q](auto& read) -> ruvia::task<std::string> {
-                auto response = co_await read_list(read, tenant, q);
-                co_return std::string(ruvia::to_json(response, {.resource_ = read.pool()}));
+            [tenant, q](auto& read) -> ruvia::task<task_page_response> {
+                co_return co_await read_list(read, tenant, q);
             });
     }
 
@@ -115,22 +120,21 @@ private:
         parts.push_back({live::resource::tasks, id, live::query_key("history", type), true});
         auto sub = live::get_hub(c).subscribe(c.worker(), tenant, std::move(parts));
         std::vector<live::snapshot_part> snapshots;
-        snapshots.push_back({.event_ = "snapshot",
-            .fetch_ = [tenant, type, id](auto& read) -> ruvia::task<std::string> {
-                auto response = co_await read_detail(read, tenant, type, id);
-                co_return std::string(ruvia::to_json(response, {.resource_ = read.pool()}));
-            }});
-        snapshots.push_back({.event_ = "history",
-            .fetch_ = [tenant, type, id](auto& read) -> ruvia::task<std::string> {
-                auto data = co_await get_task_service().history(read, tenant, type, id);
-                co_return std::string(ruvia::to_json(
-                    service::common::ok<task_history_response>(read, std::move(data)), {.resource_ = read.pool()}));
-            },
-            .update_event_ = "attempt",
-            .update_ = [tenant, type, id](auto& read,
-                           std::vector<live::task_attempt_notice> notices) -> ruvia::task<std::vector<std::string>> {
-                co_return co_await get_task_service().recorded_attempts(read, tenant, type, id, notices);
-            }});
+        snapshots.push_back(live::make_snapshot_part("snapshot",
+            [tenant, type, id](auto& read) -> ruvia::task<task_response> {
+                co_return co_await read_detail(read, tenant, type, id);
+            }));
+        auto history_part = live::make_snapshot_part("history",
+            [tenant, type, id](auto& read) -> ruvia::task<task_history_response> {
+                co_return co_await read_history(read, tenant, type, id);
+            });
+        history_part.update_event_ = "attempt";
+        history_part.update_ = [tenant, type, id](auto& read,
+                                   std::vector<live::task_attempt_notice> notices)
+            -> ruvia::task<std::vector<std::string>> {
+            co_return co_await get_task_service().recorded_attempts(read, tenant, type, id, notices);
+        };
+        snapshots.push_back(std::move(history_part));
         co_await live::stream_snapshots(c, std::move(sub), std::move(snapshots));
     }
 
