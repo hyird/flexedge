@@ -109,7 +109,10 @@ last = snapshot("/api/tasks/stream?page=3&page_size=4")
 assert [item["resource_id"] for item in last["list"]] == order[8:] and last["total"] == 10, last
 beyond = snapshot("/api/tasks/stream?page=99&page_size=4")
 assert beyond["list"] == [] and beyond["total"] == 10 and beyond["active"] == 4, beyond
-assert snapshot("/api/tasks/stream")["page_size"] == 20
+assert snapshot("/api/tasks/stream")["page_size"] == 100
+for size in [500, 1000]:
+    assert snapshot("/api/tasks/stream?page_size=" + str(size))["page_size"] == size
+    assert read("/api/tasks?page_size=" + str(size))["page_size"] == size
 # GET reads answer the stream's first snapshot.
 assert read("/api/tasks?page=1&page_size=4") == page
 assert read("/api/tasks?status=failed&page_size=100") == snapshot("/api/tasks/stream?status=failed&page_size=100")
@@ -132,7 +135,7 @@ for keyword, count in {"%25": 1, "_": 1, "%27": 0, "%5C": 0, "QA-1.EXAMPLE": 1, 
                        "000000000201": 1, "qa+node": 4, "letsencrypt": 1}.items():
     assert total("keyword=" + keyword) == count, keyword
 for query in ("status=unknown", "status=ACTIVE", "status=merged", "type=unknown", "type=cluster", "page=0",
-              "page=-1", "page_size=0", "page_size=101", "keyword=" + "a" * 201):
+              "page=-1", "page_size=0", "page_size=1001", "keyword=" + "a" * 201):
     snapshot("/api/tasks/stream?" + query, expected_code=10001)
 
 # Task snapshots.

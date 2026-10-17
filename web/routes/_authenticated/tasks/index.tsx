@@ -4,6 +4,6 @@ import { TasksPage } from '@/features/tasks/tasks-page'
 
 export const Route = createFileRoute('/_authenticated/tasks/')({
   validateSearch: tasksSearchSchema,
-  staticData: { breadcrumb: '任务中心' },
+  staticData: { breadcrumb: '任务' },
   component: TasksPage,
 })

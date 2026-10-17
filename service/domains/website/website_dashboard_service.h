@@ -233,6 +233,25 @@ private:
             "COALESCE(NULLIF(access.referer, ''), '/')", "1", tenant_id, website_id, as_of);
         co_await append_ranking(c, result.template ensure<"paths">(),
             "split_part(access.target, '?', 1)", "1", tenant_id, website_id, as_of);
+        const auto node_rows = co_await c.db().query(
+            "SELECT access.node_id::text, COALESCE(NULLIF(node.name,''),'已删除节点'), "
+            "COUNT(*)::bigint, COALESCE(SUM(access.response_bytes),0)::bigint "
+            "FROM sys_website_access_log access LEFT JOIN sys_node node "
+            "ON node.tenant_id=access.tenant_id AND node.id=access.node_id "
+            "WHERE access.tenant_id=$1 AND access.website_id=$2 "
+            "AND access.occurred_at >= $3::timestamptz-INTERVAL '24 hours' "
+            "AND access.occurred_at <= $3::timestamptz "
+            "GROUP BY access.node_id,node.name "
+            "ORDER BY SUM(access.response_bytes) DESC,COUNT(*) DESC,access.node_id ASC LIMIT 10",
+            tenant_id, website_id, as_of);
+        auto& nodes = result.template ensure<"nodes">();
+        for (const auto& row : node_rows) {
+            auto& node = nodes.emplace_back();
+            node.template set<"node_id">(row[0].value().value_or(""));
+            node.template set<"label">(row[1].value().value_or(""));
+            node.template set<"request_count">(row[2].template as<std::int64_t>().value_or(0));
+            node.template set<"response_bytes">(row[3].template as<std::int64_t>().value_or(0));
+        }
     }
 
     struct ranking_total final {

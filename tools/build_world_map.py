@@ -27,6 +27,7 @@ def simplify(points):
 
 countries = []
 countries_by_code = {}
+display_names = {'CN': '中国', 'HK': '中国香港', 'MO': '中国澳门', 'TW': '中国台湾'}
 for feature in source['features']:
     properties, geometry = feature['properties'], feature['geometry']
     if properties['ADM0_A3'] == 'ATA':
@@ -47,7 +48,7 @@ for feature in source['features']:
             coordinates = [f'{x:.1f},{y:.1f}' for x,y in reduced]
             paths.append('M' + 'L'.join(coordinates) + 'Z')
     bounds = [min(x for x,y in all_points), max(x for x,y in all_points), min(y for x,y in all_points), max(y for x,y in all_points)]
-    item = {'code': code, 'name': properties['NAME_ZH'] or properties['NAME'], 'path': ''.join(paths), 'marker': None}
+    item = {'code': code, 'name': display_names.get(code) or properties['NAME_ZH'] or properties['NAME'], 'path': ''.join(paths), 'marker': None}
     if max(bounds[1]-bounds[0], bounds[3]-bounds[2]) < 3:
         item['marker'] = [round((bounds[0]+bounds[1])/2, 2), round((bounds[2]+bounds[3])/2, 2)]
     if code in countries_by_code:
@@ -56,5 +57,5 @@ for feature in source['features']:
         countries.append(item)
         countries_by_code[code] = item
 output = Path(__file__).resolve().parents[1] / 'web/features/websites/world_map_paths.json'
-output.write_text(json.dumps(countries, ensure_ascii=False, separators=(',', ':'))+'\n', encoding='utf-8')
+output.write_text(json.dumps(countries, ensure_ascii=False, separators=(',', ':'))+'\n', encoding='utf-8', newline='\n')
 print(f'Generated {len(countries)} country paths ({output.stat().st_size} bytes)')

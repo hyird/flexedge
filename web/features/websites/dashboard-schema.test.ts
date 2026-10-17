@@ -25,6 +25,7 @@ const dashboard = {
   cache_states: [],
   cache_reasons: [],
   protocols: [],
+  nodes: [],
   summary: {
     previous_month_peak_bps: 0,
     current_month_peak_bps: 1,

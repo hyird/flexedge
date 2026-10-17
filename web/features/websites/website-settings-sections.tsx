@@ -397,6 +397,7 @@ export function CompressionSection({
             <div className='grid gap-4 lg:grid-cols-3'>
               <ArrayLines
                 label='MIME类型'
+                rows={8}
                 value={values.response_compression_mime_types}
                 onChange={(items) =>
                   update('response_compression_mime_types', items)
@@ -405,6 +406,7 @@ export function CompressionSection({
               />
               <ArrayLines
                 label='扩展名'
+                rows={8}
                 value={values.response_compression_extensions}
                 onChange={(items) =>
                   update('response_compression_extensions', items)
@@ -413,6 +415,7 @@ export function CompressionSection({
               />
               <ArrayLines
                 label='排除扩展名'
+                rows={8}
                 value={values.response_compression_excluded_extensions}
                 onChange={(items) =>
                   update('response_compression_excluded_extensions', items)

@@ -325,7 +325,7 @@ export function CacheOperations({
       </Section>
       <Section
         title='最近任务'
-        description='同一对象的同类操作复用同一条任务，执行历史保留在任务中心。'
+        description='同一对象的同类操作复用同一条任务，执行历史保留在任务中。'
       >
         {retry.error && <Notice>{apiErrorMessage(retry.error)}</Notice>}
         <DataTable

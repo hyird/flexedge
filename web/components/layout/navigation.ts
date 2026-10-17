@@ -36,7 +36,7 @@ export const navigation: NavigationItem[] = [
   },
   {
     href: '/tasks',
-    label: '任务中心',
+    label: '任务',
     icon: ListCheck,
     group: '工作台',
     keywords: 'tasks',

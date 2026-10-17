@@ -366,11 +366,6 @@ export function AccessLogs() {
       title='访问日志'
       className='access-logs min-h-0 flex-1 [&>.card__header]:shrink-0 [@media(max-height:700px)]:overflow-y-auto'
       contentClassName='flex min-h-0 flex-1 flex-col [@media(max-height:700px)]:flex-none'
-      description={
-        history
-          ? '按条件查询已入库的访问记录。'
-          : `实时接收新请求，最多保留最近 ${liveLogCapacity} 条，最新在前。`
-      }
       actions={
         <Segment
           size='sm'
@@ -635,13 +630,20 @@ function AccessLogDetail({ log }: { log: AccessLog }) {
                 asn={log.client_ip_asn}
                 asName={log.client_ip_as_name}
                 label={log.client_ip || '—'}
-                className='font-mono text-[13px] tabular-nums'
+                className='max-w-full text-left font-mono text-[13px] break-all whitespace-normal tabular-nums'
               />
             ),
           },
           {
             label: 'IP归属',
             value: formatClientLocation(log.client_ip_location),
+          },
+          {
+            label: 'ASN',
+            value:
+              [log.client_ip_asn?.trim(), log.client_ip_as_name?.trim()]
+                .filter(Boolean)
+                .join(' ') || '—',
           },
           { label: '耗时', value: `${log.duration_ms} ms` },
           { label: '请求流量', value: formatBytes(log.request_bytes) },

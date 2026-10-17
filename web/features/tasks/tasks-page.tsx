@@ -132,7 +132,7 @@ export function TasksPage() {
     },
   ]
   return (
-    <Page title='任务中心'>
+    <Page title='任务'>
       <div className='grid grid-cols-1 gap-3 sm:grid-cols-2'>
         <TaskKpi
           title='进行中'

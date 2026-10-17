@@ -35,12 +35,12 @@ export function TaskCenter() {
         size='sm'
         variant='ghost'
         isIconOnly
-        aria-label='任务中心'
+        aria-label='任务'
         onPress={() => setOpen(true)}
       >
         <ListCheck className='size-4' />
       </Button>
-      <Tooltip.Content>任务中心</Tooltip.Content>
+      <Tooltip.Content>任务</Tooltip.Content>
     </Tooltip>
   )
   if (isMobile)

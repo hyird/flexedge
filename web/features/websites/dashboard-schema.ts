@@ -20,6 +20,7 @@ const clientIpRanking = ranking.extend({
   asn: z.string(),
   as_name: z.string(),
 })
+const nodeRanking = ranking.extend({ node_id: z.string() })
 const websiteDashboardSchema = z.object({
   statistics: z.object({
     request_count: z.number().int().nonnegative(),
@@ -54,6 +55,7 @@ const websiteDashboardSchema = z.object({
   cache_states: z.array(ranking),
   cache_reasons: z.array(ranking),
   protocols: z.array(ranking),
+  nodes: z.array(nodeRanking),
   status_codes: z.array(ranking),
   methods: z.array(ranking),
   countries: z.array(ranking),

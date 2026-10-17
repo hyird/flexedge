@@ -175,7 +175,7 @@ export function NodeConfigFields({
         return (
           <div
             key={endpoint.formKey}
-            className='grid items-start gap-3 rounded-lg border border-border bg-surface-secondary p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'
+            className='grid items-start gap-3 rounded-lg border border-border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]'
           >
             <Controller
               control={form.control}

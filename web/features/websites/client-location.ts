@@ -10,9 +10,7 @@ export function clientIpDisplay(value: string) {
     ? formatClientLocation(location.join(''))
     : undefined
   return {
-    label: geographicLabel
-      ? `${ip.trim()} ${geographicLabel}`
-      : ip.trim() || '未知',
-    location: geographicLabel,
+    ip: ip.trim() || '未知',
+    location: geographicLabel || '未知',
   }
 }

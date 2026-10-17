@@ -129,7 +129,7 @@ export function RecordForm({
         }
       >
         <RevisionConflictAlert draft={draft} subject='记录' />
-        <div className='grid gap-4 sm:grid-cols-2'>
+        <div className='grid min-w-0 gap-4'>
           <Controller
             control={form.control}
             name='type'
@@ -153,11 +153,12 @@ export function RecordForm({
                 isInvalid={!!fieldState.error}
                 isDisabled={disabled}
                 variant='secondary'
-                className='w-full'
+                className='w-full min-w-0'
               >
                 <Label>名称</Label>
                 <InputGroup variant='secondary' className='w-full'>
                   <InputGroup.Input
+                    className='min-w-0'
                     placeholder='@'
                     autoFocus
                     autoComplete='off'
@@ -183,7 +184,7 @@ export function RecordForm({
                   isDisabled={disabled}
                   isRequired
                   variant='secondary'
-                  className='w-full sm:col-span-2'
+                  className='w-full'
                 >
                   <Label>{contentLabels[type]}</Label>
                   <TextArea
@@ -208,7 +209,6 @@ export function RecordForm({
                   required
                   disabled={disabled}
                   autoComplete='off'
-                  className='sm:col-span-2'
                 />
               )
             }

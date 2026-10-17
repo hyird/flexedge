@@ -800,8 +800,8 @@ ruvia::task<void> verify_dashboard_cache_statistics(read_context& c, ruvia::db_t
         (void)co_await tx.execute(
             "INSERT INTO sys_website_access_log(tenant_id,occurred_at,node_id,website_id,protocol,method,host,target,status_code,request_bytes,response_bytes,duration_ms,cache_status,cache_reason) "
             "VALUES($1,'2026-10-02T11:59:30Z',$2,$3,'http/2','GET','site13.example','/', $4,10,$5,$6,$7,'test')",
-            tenant_a, node_online, website, index == 4 ? 404 : index == 5 ? 503
-                                                                          : 200,
+            tenant_a, index <= 3 ? node_online : std::string_view("00000000-0000-4000-8000-0000000000a2"), website, index == 4 ? 404 : index == 5 ? 503
+                                                                                                                                                  : 200,
             index * 100, index * 10, state);
     }
     const auto dashboard = co_await service::website::get_website_dashboard_service().dashboard(
@@ -827,6 +827,15 @@ ruvia::task<void> verify_dashboard_cache_statistics(read_context& c, ruvia::db_t
     REQUIRE(integer(statistics.get<"cache_bypass_requests">()) == 1);
     REQUIRE(dashboard.get<"cache_states">().size() == 6);
     REQUIRE(dashboard.get<"protocols">()[0].get<"label">().view() == "http/2");
+    const auto& nodes = dashboard.get<"nodes">();
+    REQUIRE(nodes.size() == 2);
+    REQUIRE(nodes[0].get<"node_id">().view() == "00000000-0000-4000-8000-0000000000a2");
+    REQUIRE(nodes[0].get<"label">().view() == "node-2");
+    REQUIRE(integer(nodes[0].get<"request_count">()) == 3);
+    REQUIRE(integer(nodes[0].get<"response_bytes">()) == 1500);
+    REQUIRE(nodes[1].get<"node_id">().view() == node_online);
+    REQUIRE(integer(nodes[1].get<"request_count">()) == 3);
+    REQUIRE(integer(nodes[1].get<"response_bytes">()) == 600);
     const auto& hour = dashboard.get<"hourly">()[22];
     REQUIRE(integer(hour.get<"cache_hit_requests">()) == 2);
     REQUIRE(integer(hour.get<"cache_hit_bytes">()) == 300);

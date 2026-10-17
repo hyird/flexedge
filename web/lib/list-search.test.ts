@@ -2,6 +2,8 @@ import { z } from 'zod'
 import { describe, expect, it } from 'vitest'
 import {
   applyListSearchPatch,
+  defaultPageSize,
+  pageSizeOptions,
   hasListFilters,
   listSearchSchema,
   optionalSearchValue,
@@ -14,12 +16,18 @@ const websiteSearchSchema = listSearchSchema.extend({
 })
 
 describe('list search schema', () => {
+  it('uses 100 by default and permits 500 or 1000 rows', () => {
+    expect(defaultPageSize).toBe(100)
+    expect(pageSizeOptions).toEqual([100, 500, 1000])
+    expect(listSearchSchema.parse({ page_size: 1000 }).page_size).toBe(1000)
+    expect(listSearchSchema.parse({ page_size: 20 }).page_size).toBeUndefined()
+  })
   it('drops invalid and default values instead of failing the route', () => {
     expect(
       websiteSearchSchema.parse({
         q: '  ',
         page: 1,
-        page_size: 20,
+        page_size: 100,
         status: 'archived',
       })
     ).toEqual({})
@@ -33,10 +41,10 @@ describe('list search schema', () => {
       websiteSearchSchema.parse({
         q: 123,
         page: 3,
-        page_size: 50,
+        page_size: 500,
         status: 'enabled',
       })
-    ).toEqual({ q: '123', page: 3, page_size: 50, status: 'enabled' })
+    ).toEqual({ q: '123', page: 3, page_size: 500, status: 'enabled' })
   })
 })
 
@@ -55,7 +63,7 @@ describe('list search updates', () => {
       q: 'qa',
     })
     expect(
-      applyListSearchPatch({ page: 2, page_size: 50 }, { page_size: 20 })
+      applyListSearchPatch({ page: 2, page_size: 500 }, { page_size: 100 })
     ).toEqual({})
   })
 

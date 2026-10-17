@@ -200,7 +200,6 @@ export function WebsiteOverview({
 
   return (
     <div className='flex flex-col gap-6'>
-      <WebsiteAnalytics dashboard={dashboard} />
       <div className='grid gap-4 sm:grid-cols-3'>
         <KPI>
           <KPI.Header>
@@ -275,7 +274,6 @@ export function WebsiteOverview({
 
       <Section
         title='域名解析'
-        description='托管域名由系统写入DNS记录；外部域名需要自行解析到接入域名。'
         actions={
           <Button
             size='sm'
@@ -417,6 +415,7 @@ export function WebsiteOverview({
           />
         </Section>
       </div>
+      <WebsiteAnalytics dashboard={dashboard} />
     </div>
   )
 }

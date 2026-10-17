@@ -27,7 +27,10 @@ import type {
 } from './dashboard-schema'
 import { todayTrafficStatistics } from './traffic-statistics'
 import { useOpenWebsiteTab, useWebsite } from './website-context'
-import { WebsiteRequestMetrics } from './website_request_metrics'
+import {
+  WebsiteRequestCharts,
+  WebsiteRequestMetrics,
+} from './website_request_metrics'
 
 const statusClassColors: Record<string, string> = {
   '1': 'var(--chart-1)',
@@ -42,8 +45,7 @@ const CountryTrafficMap = lazy(() =>
   }))
 )
 
-/** Website detail “流量分析” tab: access-log based statistics. Subscribes to
- * the dashboard stream only while this tab is mounted. */
+/** Access-log statistics within the website overview, sharing its SSE connection. */
 export function WebsiteAnalytics({
   dashboard,
 }: {
@@ -61,9 +63,7 @@ export function WebsiteAnalytics({
           <Alert.Indicator />
           <Alert.Content>
             <Alert.Title>访问日志未启用</Alert.Title>
-            <Alert.Description>
-              流量统计基于访问日志，启用后新的请求才会计入。
-            </Alert.Description>
+            <Alert.Description>启用后开始统计。</Alert.Description>
           </Alert.Content>
           <Button
             size='sm'
@@ -248,18 +248,97 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
           </KPI.Content>
         </KPI>
       </div>
-      <p className='-mt-3 text-xs text-muted'>
-        统计基于访问日志，按控制台时区（UTC+8）汇总。
-      </p>
       <WebsiteRequestMetrics data={data} />
-      <Suspense fallback={<Skeleton className='h-80 rounded-2xl' />}>
-        <CountryTrafficMap data={data.countries} />
-      </Suspense>
+
+      <div className='grid gap-6 xl:grid-cols-3'>
+        <Suspense
+          fallback={<Skeleton className='h-80 rounded-2xl xl:col-span-2' />}
+        >
+          <CountryTrafficMap data={data.countries} />
+        </Suspense>
+        <Widget className='min-w-0'>
+          <Widget.Header>
+            <Widget.Title>24小时状态码</Widget.Title>
+          </Widget.Header>
+          <Widget.Content className='flex flex-col justify-center'>
+            {totalStatus ? (
+              <div className='flex flex-col items-center gap-4 sm:flex-row xl:flex-col 2xl:flex-row'>
+                <PieChart
+                  height={168}
+                  width={168}
+                  aria-label='24小时状态码分布'
+                  className='w-42 shrink-0'
+                >
+                  <PieChart.Pie
+                    data={data.status_codes}
+                    dataKey='request_count'
+                    nameKey='label'
+                    innerRadius='70%'
+                    outerRadius='96%'
+                    strokeWidth={0}
+                    paddingAngle={2}
+                  >
+                    {data.status_codes.map((item) => (
+                      <PieChart.Cell
+                        key={item.label}
+                        fill={
+                          statusClassColors[item.label[0]] ?? 'var(--chart-1)'
+                        }
+                      />
+                    ))}
+                    <PieChart.Label
+                      position='center'
+                      value={formatNumber(totalStatus, { compact: true })}
+                      className='fill-foreground text-lg font-semibold tabular-nums'
+                    />
+                  </PieChart.Pie>
+                  <PieChart.Tooltip
+                    content={
+                      <PieChart.TooltipContent
+                        hideHeader
+                        valueFormatter={(value) => formatNumber(Number(value))}
+                      />
+                    }
+                  />
+                </PieChart>
+                <Widget.Legend className='w-full min-w-0 flex-col items-stretch gap-2'>
+                  {data.status_codes.map((item) => (
+                    <div
+                      key={item.label}
+                      className='flex items-center gap-2 text-sm tabular-nums'
+                    >
+                      <Widget.LegendItem
+                        color={
+                          statusClassColors[item.label[0]] ?? 'var(--chart-1)'
+                        }
+                        className='font-mono'
+                      >
+                        {item.label}
+                      </Widget.LegendItem>
+                      <span className='ml-auto'>
+                        {formatNumber(item.request_count)}
+                      </span>
+                      <span className='w-14 text-right text-xs text-muted'>
+                        {formatPercent(
+                          ratioOf(item.request_count, totalStatus)
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </Widget.Legend>
+              </div>
+            ) : (
+              <EmptyState size='sm' title='暂无请求' />
+            )}
+          </Widget.Content>
+        </Widget>
+      </div>
+      <WebsiteRequestCharts data={data} />
 
       <div className='grid gap-6 xl:grid-cols-2'>
         <Widget className='min-w-0'>
           <Widget.Header>
-            <Widget.Title>24 小时带宽</Widget.Title>
+            <Widget.Title>24小时带宽</Widget.Title>
           </Widget.Header>
           <Widget.Content>
             {hourly.length ? (
@@ -341,7 +420,7 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
         </Widget>
         <Widget className='min-w-0'>
           <Widget.Header>
-            <Widget.Title>近 15 天请求量</Widget.Title>
+            <Widget.Title>近15天请求量</Widget.Title>
           </Widget.Header>
           <Widget.Content>
             {daily.length ? (
@@ -404,82 +483,13 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
       </div>
 
       <div className='grid gap-6 md:grid-cols-2 xl:grid-cols-3'>
-        <Widget className='min-w-0'>
-          <Widget.Header>
-            <Widget.Title>24小时状态码</Widget.Title>
-          </Widget.Header>
-          <Widget.Content className='flex flex-col justify-center'>
-            {totalStatus ? (
-              <div className='flex flex-col items-center gap-4 sm:flex-row xl:flex-col 2xl:flex-row'>
-                <PieChart
-                  height={168}
-                  width={168}
-                  aria-label='24小时状态码分布'
-                  className='w-42 shrink-0'
-                >
-                  <PieChart.Pie
-                    data={data.status_codes}
-                    dataKey='request_count'
-                    nameKey='label'
-                    innerRadius='70%'
-                    outerRadius='96%'
-                    strokeWidth={0}
-                    paddingAngle={2}
-                  >
-                    {data.status_codes.map((item) => (
-                      <PieChart.Cell
-                        key={item.label}
-                        fill={
-                          statusClassColors[item.label[0]] ?? 'var(--chart-1)'
-                        }
-                      />
-                    ))}
-                    <PieChart.Label
-                      position='center'
-                      value={formatNumber(totalStatus, { compact: true })}
-                      className='fill-foreground text-lg font-semibold tabular-nums'
-                    />
-                  </PieChart.Pie>
-                  <PieChart.Tooltip
-                    content={
-                      <PieChart.TooltipContent
-                        hideHeader
-                        valueFormatter={(value) => formatNumber(Number(value))}
-                      />
-                    }
-                  />
-                </PieChart>
-                <Widget.Legend className='w-full min-w-0 flex-col items-stretch gap-2'>
-                  {data.status_codes.map((item) => (
-                    <div
-                      key={item.label}
-                      className='flex items-center gap-2 text-sm tabular-nums'
-                    >
-                      <Widget.LegendItem
-                        color={
-                          statusClassColors[item.label[0]] ?? 'var(--chart-1)'
-                        }
-                        className='font-mono'
-                      >
-                        {item.label}
-                      </Widget.LegendItem>
-                      <span className='ml-auto'>
-                        {formatNumber(item.request_count)}
-                      </span>
-                      <span className='w-14 text-right text-xs text-muted'>
-                        {formatPercent(
-                          ratioOf(item.request_count, totalStatus)
-                        )}
-                      </span>
-                    </div>
-                  ))}
-                </Widget.Legend>
-              </div>
-            ) : (
-              <EmptyState size='sm' title='暂无请求' />
-            )}
-          </Widget.Content>
-        </Widget>
+        <Ranking title='节点流量分布' data={data.nodes} metric='bytes' />
+        <Ranking title='域名' data={data.hosts} mono />
+        <Ranking title='访问路径' data={data.paths} mono />
+        <Ranking title='接入协议' data={data.protocols} mono />
+        <Ranking title='请求方法' data={data.methods} mono />
+        <Ranking title='来源页面' data={data.referers} mono />
+        <Ranking title='ASN分布' data={data.asns} mono />
         <Ranking
           title='缓存状态'
           data={data.cache_states.map((row) => ({
@@ -502,12 +512,8 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
             }),
           }))}
         />
-        <Ranking title='接入协议' data={data.protocols} mono />
-        <Ranking title='域名' data={data.hosts} mono />
-        <Ranking title='访问路径' data={data.paths} mono />
-        <Ranking title='来源页面' data={data.referers} mono />
-        <Ranking title='请求方法' data={data.methods} mono />
-        <Ranking title='ASN分布' data={data.asns} mono />
+      </div>
+      <div className='grid gap-6 xl:grid-cols-2'>
         <Ranking
           title='客户端IP · 按流量'
           data={data.client_ips_by_bytes}
@@ -527,7 +533,9 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
 }
 
 type RankingRow = WebsiteDashboardRanking &
-  Partial<Pick<WebsiteDashboardClientIpRanking, 'asn' | 'as_name'>>
+  Partial<Pick<WebsiteDashboardClientIpRanking, 'asn' | 'as_name'>> & {
+    node_id?: string
+  }
 
 /** Top 8 of one dimension: each row is a HeroUI Meter scaled to the leader,
  * labelled with the item and showing the ranked metric and the other one. */
@@ -558,13 +566,13 @@ function Ranking({
             {data.slice(0, 8).map((item) => {
               const client = clientIpDisplay(item.label)
               return (
-                <li key={item.label}>
+                <li key={item.node_id ?? item.label}>
                   <Meter
                     value={value(item)}
                     maxValue={leader || 1}
                     valueLabel={
                       metric === 'bytes'
-                        ? `${formatBytes(item.response_bytes)} · ${formatNumber(item.request_count, { compact: true })} 次`
+                        ? `${formatBytes(item.response_bytes)} · ${formatNumber(item.request_count, { compact: true })}次`
                         : `${formatNumber(item.request_count)} · ${formatBytes(item.response_bytes)}`
                     }
                     size='sm'
@@ -572,14 +580,14 @@ function Ranking({
                   >
                     {clientIps ? (
                       <ClientIpTooltip
-                        label={client.label}
-                        location={client.location ?? '未知'}
+                        label={`${client.ip} ${client.location}`}
                         asn={item.asn}
                         asName={item.as_name}
-                        className='max-w-full min-w-0 truncate'
+                        className='max-w-full min-w-0'
                       >
-                        <Label className='block truncate font-mono text-[13px] font-normal'>
-                          {client.label}
+                        <Label className='flex flex-wrap gap-x-2 text-[13px] font-normal'>
+                          <span className='font-mono'>{client.ip}</span>
+                          <span className='text-muted'>{client.location}</span>
                         </Label>
                       </ClientIpTooltip>
                     ) : (

@@ -70,7 +70,7 @@ export function ZoneDetailLayout() {
     )
   }
   return (
-    <Page>
+    <Page fit={tab === 'records'}>
       <QueryNotice
         query={query}
         onRetry={() => void query.refetch()}
@@ -110,6 +110,7 @@ export function ZoneDetailLayout() {
         }
       />
       <PageTabs
+        fit={tab === 'records'}
         guard={tabGuard}
         label='域名详情'
         items={tabs}

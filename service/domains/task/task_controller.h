@@ -49,7 +49,7 @@ private:
     }
 
     static list_query parse_list(ruvia::context& c) {
-        const auto [page, size, skip] = service::common::require_pagination(c, 20, 100);
+        const auto [page, size, skip] = service::common::require_pagination(c);
         return {.page_ = page,
             .size_ = size,
             .skip_ = skip,

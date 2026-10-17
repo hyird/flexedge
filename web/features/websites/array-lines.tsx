@@ -8,12 +8,14 @@ export function ArrayLines({
   onChange,
   hint,
   error,
+  rows = 4,
 }: {
   label: string
   value: string[]
   onChange: (value: string[]) => void
   hint?: string
   error?: string
+  rows?: number
 }) {
   const [text, setText] = useState(value.join('\n'))
   return (
@@ -26,7 +28,7 @@ export function ArrayLines({
       }}
       hint={hint}
       error={error}
-      rows={4}
+      rows={rows}
     />
   )
 }

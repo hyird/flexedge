@@ -29,3 +29,20 @@ test('includes small CDN regions and gives them visible map markers', () => {
     countries.length
   )
 })
+
+test('uses the same regional display name for Taiwan aliases', () => {
+  const result = countryTraffic([
+    { label: '台湾', request_count: 2, response_bytes: 100 },
+    { label: '中国台湾', request_count: 3, response_bytes: 200 },
+    { label: 'Taiwan', request_count: 4, response_bytes: 300 },
+  ])
+  expect(countries.find((country) => country.code === 'TW')?.name).toBe(
+    '中国台湾'
+  )
+  expect(result.get('TW')).toEqual({
+    label: '中国台湾',
+    request_count: 9,
+    response_bytes: 600,
+  })
+  expect(result.size).toBe(1)
+})

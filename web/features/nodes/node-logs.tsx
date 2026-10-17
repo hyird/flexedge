@@ -7,11 +7,7 @@ import { formatDate } from '@/lib/format'
 import { EmptyState } from '@/components/page'
 import { Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
-import { liveLogCapacity } from '@/features/logs/log-event'
-import {
-  getLogStreamState,
-  useLiveLogs,
-} from '@/features/logs/use-live-logs'
+import { getLogStreamState, useLiveLogs } from '@/features/logs/use-live-logs'
 import { nodeLogsQuery } from './data'
 
 const route = getRouteApi('/_authenticated/nodes/$nodeId')
@@ -29,7 +25,6 @@ export function NodeLogs() {
   return (
     <Section
       title='实时日志'
-      description={`最近 100 条起始记录，最多保留 ${liveLogCapacity} 条，最新在前。`}
       contentClassName='flex flex-col gap-3'
       actions={
         <>

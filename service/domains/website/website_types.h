@@ -127,6 +127,11 @@ RUVIA_MODEL(website_dashboard_statistics_dto,
 RUVIA_MODEL(website_dashboard_ranking_dto, RUVIA_REQUIRED_FIELD(label, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("request_count", request_count, ruvia::int64),
     RUVIA_REQUIRED_FIELD_NAME("response_bytes", response_bytes, ruvia::int64));
+RUVIA_MODEL(website_dashboard_node_ranking_dto,
+    RUVIA_REQUIRED_FIELD_NAME("node_id", node_id, ruvia::string),
+    RUVIA_REQUIRED_FIELD(label, ruvia::string),
+    RUVIA_REQUIRED_FIELD_NAME("request_count", request_count, ruvia::int64),
+    RUVIA_REQUIRED_FIELD_NAME("response_bytes", response_bytes, ruvia::int64));
 RUVIA_MODEL(
     website_dashboard_client_ip_ranking_dto, RUVIA_REQUIRED_FIELD(label, ruvia::string),
     RUVIA_REQUIRED_FIELD_NAME("request_count", request_count, ruvia::int64),
@@ -140,6 +145,7 @@ RUVIA_MODEL(
     RUVIA_REQUIRED_FIELD_NAME("cache_states", cache_states, ruvia::array<website_dashboard_ranking_dto>),
     RUVIA_REQUIRED_FIELD_NAME("cache_reasons", cache_reasons, ruvia::array<website_dashboard_ranking_dto>),
     RUVIA_REQUIRED_FIELD(protocols, ruvia::array<website_dashboard_ranking_dto>),
+    RUVIA_REQUIRED_FIELD(nodes, ruvia::array<website_dashboard_node_ranking_dto>),
     RUVIA_REQUIRED_FIELD_NAME("status_codes", status_codes,
         ruvia::array<website_dashboard_ranking_dto>),
     RUVIA_REQUIRED_FIELD(methods, ruvia::array<website_dashboard_ranking_dto>),

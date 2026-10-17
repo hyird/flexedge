@@ -200,7 +200,8 @@ export function ZoneRecords() {
   return (
     <Section
       title={`DNS记录 · ${rows.length}`}
-      contentClassName='flex flex-col gap-3'
+      className='min-h-0 flex-1 [&>.card__header]:shrink-0'
+      contentClassName='flex min-h-0 flex-1 flex-col gap-3'
     >
       <ListToolbar
         search={{
@@ -246,6 +247,7 @@ export function ZoneRecords() {
         }
       />
       <DataTable
+        fit
         label='DNS记录'
         variant='secondary'
         columns={columns}

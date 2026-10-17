@@ -3,8 +3,8 @@ import { z } from 'zod'
 import { useNavigate } from '@tanstack/react-router'
 import type { PageData } from './api'
 
-export const pageSizeOptions = [10, 20, 50, 100] as const
-export const defaultPageSize = 20
+export const pageSizeOptions = [100, 500, 1000] as const
+export const defaultPageSize = 100
 /** Client-side page of an already complete snapshot, for filters the list
  * endpoint does not support (read it once with the endpoint's page size limit). */
 export function pageLocally<T>(
@@ -27,7 +27,7 @@ export function optionalSearchValue<T extends z.ZodType>(schema: T) {
 }
 
 /** Shared list search params. Defaults are never written to the URL:
- * `page` 1, `page_size` 20 and an empty `q` are represented by absence. */
+ * `page` 1, `page_size` 100 and an empty `q` are represented by absence. */
 export const listSearchSchema = z.object({
   // Hand-typed `?q=123` arrives as a number from the router's JSON parser.
   q: optionalSearchValue(z.coerce.string().trim().max(200)).transform(
