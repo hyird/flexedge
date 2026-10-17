@@ -61,7 +61,7 @@ inline std::optional<upgrade_record> parse_upgrade_record(std::string_view bytes
     return record;
 }
 
-inline std::optional<upgrade_record> take_pending_upgrade_record(const std::filesystem::path& path,
+inline std::optional<upgrade_record> read_pending_upgrade_record(const std::filesystem::path& path,
     std::string_view current_digest) {
     std::optional<std::string> bytes;
     try {
@@ -72,9 +72,6 @@ inline std::optional<upgrade_record> take_pending_upgrade_record(const std::file
     if (!bytes) {
         return std::nullopt;
     }
-
-    std::error_code ignored;
-    std::filesystem::remove(path, ignored);
 
     auto record = parse_upgrade_record(*bytes);
     if (record && record->target_sha256_ != current_digest) {

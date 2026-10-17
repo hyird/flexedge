@@ -30,6 +30,18 @@ inline void remove_node_upgrade_candidate(const std::filesystem::path& path) noe
     std::filesystem::remove(path, ignored);
 }
 
+[[nodiscard]] inline std::filesystem::path previous_node_binary_path(const std::filesystem::path& binary_path) {
+    return binary_path.parent_path() / ("." + binary_path.filename().string() + ".previous");
+}
+
+inline void preserve_node_binary(const std::filesystem::path& binary_path) {
+    std::filesystem::create_hard_link(binary_path, previous_node_binary_path(binary_path));
+}
+
+inline void restore_node_binary(const std::filesystem::path& binary_path) {
+    std::filesystem::rename(previous_node_binary_path(binary_path), binary_path);
+}
+
 inline void install_node_upgrade_candidate(const std::filesystem::path& candidate,
     const std::filesystem::path& binary_path) {
 #ifdef _WIN32
@@ -37,10 +49,6 @@ inline void install_node_upgrade_candidate(const std::filesystem::path& candidat
     (void)binary_path;
     throw std::runtime_error("node self-upgrade is not supported on Windows");
 #else
-    if (::chmod(candidate.c_str(),
-            S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH) != 0) {
-        throw std::runtime_error("failed to set node binary permissions");
-    }
     std::error_code error;
     std::filesystem::rename(candidate, binary_path, error);
     if (error) {

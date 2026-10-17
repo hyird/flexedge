@@ -181,7 +181,8 @@ class data_plane final {
 public:
     data_plane(ruvia::event_loop_pool& loops, ruvia::event_loop owner, runtime_state& runtime,
         ruvia::channel_sender<owned_log_batch> logs,
-        std::filesystem::path cache_directory = "cache")
+        std::filesystem::path cache_directory = "cache",
+        std::vector<inherited_listeners> inherited = {})
         : owner_(std::move(owner)),
           runtime_(runtime),
           retired_workers_(loops.loop_count()),
@@ -194,13 +195,17 @@ public:
               request_stop_accepting();
               co_return;
           })) {
+        if (!inherited.empty() && inherited.size() != loops.loop_count()) {
+            throw std::invalid_argument("inherited node listener worker count mismatch");
+        }
         workers_.reserve(loops.loop_count());
         requests_.reserve(loops.loop_count());
         data_loops_.reserve(loops.loop_count());
         for (std::size_t index = 0; index < loops.loop_count(); ++index) {
             data_loops_.push_back(loops.loop(index));
             auto [sender, receiver] = ruvia::make_channel<owned_data_worker_request>(loops.loop(index).handle(), {.capacity_ = 32});
-            workers_.push_back(std::make_unique<data_worker>(loops.loop(index), index, std::move(receiver), results_.first, logs, loops.loop_count(), cache_, cache_results_.first));
+            workers_.push_back(std::make_unique<data_worker>(loops.loop(index), index, std::move(receiver), results_.first, logs, loops.loop_count(), cache_, cache_results_.first,
+                inherited.empty() ? inherited_listeners{} : std::move(inherited[index])));
             requests_.push_back(std::move(sender));
         }
     }
@@ -370,10 +375,10 @@ public:
     }
 
     // Any thread. Cancellation and cleanup take place on each receiving worker.
-    void request_stop_accepting() noexcept {
+    void request_stop_accepting(bool preserve_listeners = false) noexcept {
         stopping_.store(true, std::memory_order_release);
         for (const auto& worker : workers_) {
-            worker->request_stop_accepting();
+            worker->request_stop_accepting(preserve_listeners);
         }
     }
 

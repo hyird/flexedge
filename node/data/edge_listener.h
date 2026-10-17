@@ -33,6 +33,7 @@
 #include "node/data/http_protocol.h"
 #include "node/data/http_session.h"
 #include "node/data/tls_context.h"
+#include "node/runtime/listener_handoff.h"
 
 namespace flexedge::node {
 
@@ -55,9 +56,11 @@ public:
     }
 
     void start() {
-        connection_->set_close([weak = weak_from_this()] {
-            if (const auto self = weak.lock()) {
-                self->close();
+        connection_->set_shutdown_handler([weak = weak_from_this()](edge_shutdown action) {
+            if (action == edge_shutdown::close) {
+                if (const auto self = weak.lock()) {
+                    self->close();
+                }
             }
         });
         const auto self = shared_from_this();
@@ -145,7 +148,13 @@ public:
         context_.metrics_.connection_closed();
     }
     void start() {
-        connection_->set_close([weak = weak_from_this()] {if(auto self=weak.lock()){self->close();} });
+        connection_->set_shutdown_handler([weak = weak_from_this()](edge_shutdown action) {
+            if (action == edge_shutdown::close) {
+                if (const auto self = weak.lock()) {
+                    self->close();
+                }
+            }
+        });
         timer_.expires_after(std::chrono::seconds(10));
         timer_.async_wait([self = shared_from_this()](auto error) {if(!error){self->close();} });
         read();
@@ -204,9 +213,9 @@ public:
     // `tls_contexts` selects HTTPS; nullptr serves plain HTTP.
     [[nodiscard]] static std::shared_ptr<edge_listener> create(ruvia::event_loop owner,
         const http_session_context& context, const asio::ip::tcp::endpoint& endpoint,
-        tls_context_registry* tls_contexts) {
+        tls_context_registry* tls_contexts, std::optional<owned_listener_fd> inherited = {}) {
         auto listener = std::shared_ptr<edge_listener>(
-            new edge_listener(std::move(owner), context, endpoint, tls_contexts));
+            new edge_listener(std::move(owner), context, endpoint, tls_contexts, std::move(inherited)));
         listener->stop_registration_ = listener->owner_.on_stop(
             [weak = std::weak_ptr<edge_listener>(listener)]() -> ruvia::task<void> {
                 if (const auto self = weak.lock()) {
@@ -263,7 +272,7 @@ public:
         }
     }
 
-    void request_stop() noexcept {
+    void request_stop(bool preserve_listener = false) noexcept {
         std::lock_guard lock(lifecycle_mutex_);
         if (loop_stop_complete_) {
             return;
@@ -276,12 +285,12 @@ public:
             return;
         }
         if (owner_.is_current()) {
-            stop();
+            drain(preserve_listener);
             return;
         }
-        asio::post(owner_.executor(), [weak = weak_from_this()] {
+        asio::post(owner_.executor(), [weak = weak_from_this(), preserve_listener] {
             if (const auto self = weak.lock()) {
-                self->stop();
+                self->drain(preserve_listener);
             }
         });
     }
@@ -292,7 +301,8 @@ public:
 
 private:
     edge_listener(ruvia::event_loop owner, const http_session_context& context,
-        const asio::ip::tcp::endpoint& endpoint, tls_context_registry* tls_contexts)
+        const asio::ip::tcp::endpoint& endpoint, tls_context_registry* tls_contexts,
+        std::optional<owned_listener_fd> inherited)
         : owner_(std::move(owner)),
           owner_worker_(owner_.handle()),
           context_(context),
@@ -300,6 +310,14 @@ private:
           acceptor_(owner_.io_context()),
           stop_signal_(owner_worker_) {
         std::error_code error;
+        if (inherited) {
+            error = acceptor_.assign(endpoint.protocol(), inherited->native_handle(), error);
+            if (error) {
+                throw std::system_error(error, "could not adopt inherited node listener");
+            }
+            (void)inherited->release();
+            return;
+        }
         error = acceptor_.open(endpoint.protocol(), error);
         if (!error) {
             error = acceptor_.set_option(asio::socket_base::reuse_address(true), error);
@@ -332,7 +350,8 @@ private:
 public:
     // Owner loop. Retired listeners remain owned until their last callback has returned.
     [[nodiscard]] bool stopped() const noexcept {
-        return stopping_ && pending_operations_ == 0 && active_connections_ == 0;
+        return stopping_ && pending_operations_ == 0 && active_connections_ == 0 &&
+               (!preserve_listener_ || loop_stop_complete_);
     }
 
     ruvia::task<void> stop_and_wait() {
@@ -347,15 +366,31 @@ public:
             co_await stop_signal_.wait();
         }
         std::lock_guard lock(lifecycle_mutex_);
+        if (preserve_listener_ && acceptor_.is_open()) {
+            // Ownership passes to process assembly, which retains this FD through exec.
+            (void)acceptor_.release();
+        }
         loop_stop_complete_ = true;
     }
 
 private:
-    void stop() noexcept {
+    void drain(bool preserve_listener = false) noexcept {
+        preserve_listener_ = preserve_listener_ || (preserve_listener && activated_);
         stopping_ = true;
         std::error_code ignored;
         ignored = acceptor_.cancel(ignored);
-        ignored = acceptor_.close(ignored);
+        if (!preserve_listener_) {
+            ignored = acceptor_.close(ignored);
+        }
+        for (const auto& weak : connections_) {
+            if (const auto connection = weak.lock()) {
+                connection->drain();
+            }
+        }
+    }
+
+    void stop() noexcept {
+        drain();
         for (const auto& weak : connections_) {
             if (const auto connection = weak.lock()) {
                 connection->close();
@@ -469,6 +504,7 @@ private:
     std::vector<std::weak_ptr<edge_connection>> connections_;
     std::uint64_t sequence_{};
     bool stopping_{};
+    bool preserve_listener_{};
     // Accessed only by the owning event loop.
     bool started_{};
     bool activated_{};

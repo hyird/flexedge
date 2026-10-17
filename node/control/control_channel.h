@@ -125,6 +125,9 @@ private:
                     channel_log_.failed(error);
                 }
             } catch (const std::exception& error) {
+                if (updater_.startup_pending()) {
+                    throw;
+                }
                 if (!config_.stop_token_.stop_requested()) {
                     last_error_ = error.what();
                     channel_log_.failed(error.what(), channel_failure_kind::permanent);
@@ -248,11 +251,27 @@ private:
         return envelope;
     }
 
-    ruvia::task<void> update_node_release(control_stream& connection,
-        std::string_view node_id, std::string_view digest) {
-        if (!updater_.update_available(digest)) {
-            co_return;
+    void start_node_release(control_stream& connection, std::string_view node_id, std::string_view digest) {
+        if (release_busy_ || !updater_.update_available(digest)) {
+            return;
         }
+        release_busy_ = true;
+        try {
+            connection.spawn_owned(update_node_release(connection, std::string(node_id), std::string(digest)));
+        } catch (...) {
+            release_busy_ = false;
+            throw;
+        }
+    }
+
+    ruvia::task<void> update_node_release(control_stream& connection,
+        std::string node_id, std::string digest) {
+        struct release final {
+            bool& busy_;
+            ~release() {
+                busy_ = false;
+            }
+        } guard{release_busy_};
         try {
             for (std::uint64_t offset = 0;;) {
                 auto request = node_release_request(node_id, digest, offset);
@@ -263,7 +282,7 @@ private:
                     throw std::runtime_error("control plane did not return a node release chunk");
                 }
                 if (updater_.accept_chunk(digest, response.node_release_chunk())) {
-                    updater_.commit();
+                    co_await updater_.commit(connection.worker(), connection.get_stop_token());
                     co_return;
                 }
                 offset = updater_.written_bytes();
@@ -385,7 +404,7 @@ private:
                 value.desired_release_id(), value.desired_manifest_digest())) {
             co_await receive_desired_state(connection, node_id, co_await replies.receive());
         }
-        co_await update_node_release(connection, node_id, value.node_binary_sha256());
+        start_node_release(connection, node_id, value.node_binary_sha256());
         co_return;
     }
 
@@ -427,7 +446,7 @@ private:
             cache_busy_ = true;
             connection.spawn_owned(process_cache(connection, std::string(node_id), {value.cache_commands().begin(), value.cache_commands().end()}));
         }
-        co_await update_node_release(connection, node_id, value.node_binary_sha256());
+        start_node_release(connection, node_id, value.node_binary_sha256());
         const auto interval =
             std::chrono::seconds((std::max)(value.next_interval_seconds(), std::uint32_t{1}));
         co_return interval;
@@ -484,6 +503,9 @@ private:
             }
             co_return persistent;
         } catch (const stored_state_unusable& error) {
+            if (updater_.startup_pending()) {
+                throw;
+            }
             store_.discard_active();
             report_discarded_state(error.what());
         }
@@ -506,6 +528,7 @@ private:
 
     ruvia::task<void> run_session(ruvia::websocket_client& client) {
         auto persistent = co_await restore_persisted_state();
+        updater_.confirm_startup();
         if (config_.stop_token_.stop_requested()) {
             co_return;
         }
@@ -544,7 +567,7 @@ private:
                     welcome.desired_release_id(), welcome.desired_manifest_digest())) {
                 co_await receive_desired_state(stream, node_id, co_await initial.receive());
             }
-            co_await update_node_release(stream, node_id, welcome.node_binary_sha256());
+            start_node_release(stream, node_id, welcome.node_binary_sha256());
             last_error_.clear();
             co_await run_control_loop(stream, welcome);
         } catch (...) {
@@ -589,6 +612,7 @@ private:
     runtime_state& runtime_;
     data_plane& data_plane_;
     bool cache_busy_{};
+    bool release_busy_{};
     log_producer& logs_;
     self_updater& updater_;
     channel_log channel_log_;

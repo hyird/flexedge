@@ -140,7 +140,15 @@ public:
         context_.metrics_.connection_closed();
     }
     void start(std::string initial = {}) {
-        connection_->set_close([weak = weak_from_this()] {if(auto self=weak.lock()){self->close();} });
+        connection_->set_shutdown_handler([weak = weak_from_this()](edge_shutdown action) {
+            if (const auto self = weak.lock()) {
+                if (action == edge_shutdown::drain) {
+                    self->drain();
+                } else {
+                    self->close();
+                }
+            }
+        });
         if (!initial.empty()) {
             if (!feed(initial)) {
                 return;
@@ -153,6 +161,19 @@ public:
     auto executor() {
         return std::visit([](auto& stream) -> asio::any_io_executor { return stream.get_executor(); }, stream_);
     }
+    void drain() noexcept {
+        if (closed_ || draining_) {
+            return;
+        }
+        draining_ = true;
+        try {
+            protocol_.begin_drain();
+            progress();
+        } catch (...) {
+            close();
+        }
+    }
+
     void close() noexcept {
         if (closed_) {
             return;
@@ -193,6 +214,9 @@ public:
                     stream->complete_write();
                 }
             }
+        }
+        if (draining_ && streams_.empty() && !writing_ && !protocol_.wants_write()) {
+            close();
         }
     }
     ruvia::http2_connection& protocol() {
@@ -375,7 +399,7 @@ private:
     std::array<char, 16384> input_;
     std::pmr::string output_;
     std::chrono::steady_clock::time_point last_activity_{std::chrono::steady_clock::now()};
-    bool reading_{}, writing_{}, closed_{};
+    bool reading_{}, writing_{}, closed_{}, draining_{};
 };
 
 inline void http2_stream_state::read(asio::mutable_buffer buffer, completion handler) {

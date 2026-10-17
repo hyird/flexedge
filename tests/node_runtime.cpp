@@ -870,6 +870,21 @@ ruvia::task<observed_counters> capture_counters(const observed_worker& worker) {
         .addresses_ = worker.clients_->snapshot()};
 }
 
+void commit_upgrade(flexedge::node::self_updater& updater) {
+    ruvia::event_loop_pool loops({.loop_count_ = 1});
+    const auto loop = loops.loop(0);
+    loops.start();
+    try {
+        loop.start(updater.commit(loop.handle())).get();
+    } catch (...) {
+        loops.stop();
+        loops.join();
+        throw;
+    }
+    loops.stop();
+    loops.join();
+}
+
 }  // namespace
 
 // This integration test owns one shared runtime and network lifecycle so each assertion observes
@@ -975,7 +990,7 @@ int main(int argc, char* argv[]) {
         REQUIRE(upgrade_rejected([&] { ws_updater.append(1, "bad-offset"); }));
         REQUIRE(upgrade_rejected([&] { ws_updater.append(0, ""); }));
         REQUIRE(upgrade_rejected([&] { ws_updater.append(0, std::string(next_node_bytes.size() + 1, 'x')); }));
-        REQUIRE(upgrade_rejected([&] { ws_updater.commit(); }));
+        REQUIRE(upgrade_rejected([&] { commit_upgrade(ws_updater); }));
         REQUIRE(ws_updater.written_bytes() == 0);
         ws_updater.append(0, "partial");
         ws_updater.abort();
@@ -984,7 +999,7 @@ int main(int argc, char* argv[]) {
         ws_updater.begin("0.0.1", next_node_digest,
             static_cast<std::uint64_t>(next_node_bytes.size()));
         ws_updater.append(0, std::string(next_node_bytes.size(), 'x'));
-        REQUIRE(upgrade_rejected([&] { ws_updater.commit(); }));
+        REQUIRE(upgrade_rejected([&] { commit_upgrade(ws_updater); }));
         REQUIRE(!restart_requested);
         REQUIRE(flexedge::crypto::file_sha256(updater_binary_path) == original_digest);
         for (const auto& entry : std::filesystem::directory_iterator(credentials_root)) {
@@ -997,24 +1012,16 @@ int main(int argc, char* argv[]) {
         REQUIRE(ws_updater.written_bytes() == 9);
         ws_updater.append(9, std::string_view(next_node_bytes).substr(9));
         REQUIRE(ws_updater.complete());
-#ifndef _WIN32
-        ws_updater.commit();
-        REQUIRE(restart_requested);
-        REQUIRE(flexedge::crypto::file_sha256(updater_binary_path) == next_node_digest);
-        const auto ws_upgrade = flexedge::node::take_pending_upgrade_record(
-            credentials_root / "pending-upgrade", next_node_digest);
-        REQUIRE(ws_upgrade && ws_upgrade->current_version_ == "0.0.1");
-#else
-        REQUIRE(upgrade_rejected([&] { ws_updater.commit(); }));
-        REQUIRE(!flexedge::node::take_pending_upgrade_record(
-            credentials_root / "pending-upgrade", original_digest));
-        REQUIRE(!std::filesystem::exists(credentials_root / "pending-upgrade"));
+        // A complete, digest-matching transfer is not enough: these bytes are
+        // not a runnable node and must leave the active binary untouched.
+        REQUIRE(upgrade_rejected([&] { commit_upgrade(ws_updater); }));
         REQUIRE(!restart_requested);
         REQUIRE(flexedge::crypto::file_sha256(updater_binary_path) == original_digest);
+        REQUIRE(!std::filesystem::exists(credentials_root / "pending-upgrade"));
+        REQUIRE(!std::filesystem::exists(flexedge::node::previous_node_binary_path(updater_binary_path)));
         for (const auto& entry : std::filesystem::directory_iterator(credentials_root)) {
             REQUIRE(!entry.path().filename().string().starts_with(".node.upgrade."));
         }
-#endif
 
         REQUIRE(flexedge::node::accepts_event_stream("text/event-stream"));
         REQUIRE(flexedge::node::accepts_event_stream(
@@ -1177,14 +1184,13 @@ int main(int argc, char* argv[]) {
         };
         flexedge::node::write_pending_upgrade_record(upgrade_record_path, upgrade_record);
         const auto restored_upgrade =
-            flexedge::node::take_pending_upgrade_record(upgrade_record_path, node_digest);
+            flexedge::node::read_pending_upgrade_record(upgrade_record_path, node_digest);
         REQUIRE(restored_upgrade.has_value());
-        REQUIRE(restored_upgrade->message() == upgrade_record.message());
-        REQUIRE(!std::filesystem::exists(upgrade_record_path));
+        REQUIRE(std::filesystem::exists(upgrade_record_path));
         flexedge::node::write_pending_upgrade_record(upgrade_record_path, upgrade_record);
-        REQUIRE(!flexedge::node::take_pending_upgrade_record(
+        REQUIRE(!flexedge::node::read_pending_upgrade_record(
             upgrade_record_path, "e1408004be0e7e8736f9365f835cb1454adeeda979a0b08bc60acf753aa2e4ea"));
-        REQUIRE(!std::filesystem::exists(upgrade_record_path));
+        REQUIRE(std::filesystem::exists(upgrade_record_path));
         flexedge::node::state_store state_store(state_directory,
             "3df64f75-2df7-43b8-aa89-661920126564");
         auto stored_snapshot = snapshot();

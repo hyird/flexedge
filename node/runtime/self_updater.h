@@ -16,6 +16,7 @@
 #include "node/proto/control_protocol.h"
 #include "node/proto/release_metadata.h"
 #include "node/runtime/binary_install.h"
+#include "node/runtime/upgrade_candidate.h"
 #include "node/runtime/upgrade_record.h"
 
 namespace flexedge::node {
@@ -23,6 +24,7 @@ namespace flexedge::node {
 struct self_updater_config final {
     std::filesystem::path binary_path_;
     std::string current_version_;
+    std::string current_sha256_{};
     std::filesystem::path upgrade_record_path_;
     std::function<bool(std::string_view, std::string_view, std::string_view)> node_log_;
     std::function<void()> request_restart_;
@@ -36,8 +38,11 @@ class self_updater final {
 public:
     explicit self_updater(self_updater_config config)
         : config_(std::move(config)),
-          current_digest_(flexedge::crypto::file_sha256(config_.binary_path_)) {
+          current_digest_(config_.current_sha256_.empty()
+                              ? flexedge::crypto::file_sha256(config_.binary_path_)
+                              : std::move(config_.current_sha256_)) {
         validate_config();
+        startup_upgrade_ = read_pending_upgrade_record(config_.upgrade_record_path_, current_digest_);
     }
 
     self_updater(const self_updater&) = delete;
@@ -45,6 +50,32 @@ public:
 
     ~self_updater() {
         abort();
+    }
+
+    [[nodiscard]] bool startup_pending() const noexcept {
+        return startup_upgrade_.has_value() && !startup_confirmed_;
+    }
+
+    void confirm_startup() {
+        if (startup_upgrade_ && !startup_confirmed_) {
+            std::cerr << "flexedge node " << startup_upgrade_->message() << '\n';
+            (void)log("info", startup_upgrade_->message());
+        }
+        startup_confirmed_ = true;
+        std::error_code error;
+        if (startup_upgrade_) {
+            std::filesystem::remove(config_.upgrade_record_path_, error);
+            if (error) {
+                (void)log("warning", "could not confirm node upgrade on disk; previous binary retained");
+                return;
+            }
+        }
+        std::filesystem::remove(previous_node_binary_path(config_.binary_path_), error);
+        if (error) {
+            (void)log("warning", "could not retire previous node binary");
+            return;
+        }
+        startup_upgrade_.reset();
     }
 
     [[nodiscard]] bool update_available(std::string_view digest) const noexcept {
@@ -124,7 +155,7 @@ public:
         return transfer_->written_bytes_;
     }
 
-    void commit() {
+    ruvia::task<void> commit(const ruvia::worker_handle& worker, ruvia::stop_token stop = {}) {
         if (!complete()) {
             throw std::runtime_error("node release transfer is incomplete");
         }
@@ -137,28 +168,43 @@ public:
             throw std::runtime_error("could not finalize node upgrade candidate");
         }
 
+        bool previous_saved{};
+        bool record_written{};
+        bool installed{};
         try {
             if (flexedge::crypto::file_sha256(value.candidate_) != value.digest_) {
                 throw std::runtime_error("control plane node release digest mismatch");
+            }
+            co_await check_node_upgrade_candidate(worker, value.candidate_, value.version_, stop);
+            if (stop.stop_requested()) {
+                throw std::runtime_error("node upgrade cancelled before installation");
             }
             const upgrade_record upgrade_record{
                 .previous_version_ = config_.current_version_,
                 .current_version_ = value.version_,
                 .target_sha256_ = value.digest_,
             };
-            try {
-                write_pending_upgrade_record(config_.upgrade_record_path_, upgrade_record);
-            } catch (const std::exception& error) {
-                std::cerr << "flexedge node could not persist upgrade record: " << error.what()
-                          << '\n';
-            }
+            preserve_node_binary(config_.binary_path_);
+            previous_saved = true;
+            write_pending_upgrade_record(config_.upgrade_record_path_, upgrade_record);
+            record_written = true;
             install_node_upgrade_candidate(value.candidate_, config_.binary_path_);
-            std::cerr << "flexedge node " << upgrade_record.message() << "; restarting service\n";
-            (void)log("info", upgrade_record.message());
+            installed = true;
+            const auto message = "validated node " + value.version_ + " candidate; restarting service";
+            std::cerr << "flexedge node " << message << '\n';
+            (void)log("info", message);
             if (config_.request_restart_) {
                 config_.request_restart_();
             }
         } catch (...) {
+            if (installed) {
+                restore_node_binary(config_.binary_path_);
+            } else if (previous_saved) {
+                std::filesystem::remove(previous_node_binary_path(config_.binary_path_));
+            }
+            if (record_written) {
+                std::filesystem::remove(config_.upgrade_record_path_);
+            }
             remove_node_upgrade_candidate(value.candidate_);
             throw;
         }
@@ -206,6 +252,8 @@ private:
     self_updater_config config_;
     const std::string current_digest_;
     std::optional<transfer> transfer_;
+    std::optional<upgrade_record> startup_upgrade_{};
+    bool startup_confirmed_{};
 };
 
 }  // namespace flexedge::node

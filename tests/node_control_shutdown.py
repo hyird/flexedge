@@ -1,4 +1,4 @@
-"""Linux authenticated shutdown and self-reexec with synthetic loopback peers."""
+"""Authenticated Linux shutdown and shared synthetic control-protocol helpers."""
 import base64
 import hashlib
 import pathlib
@@ -115,7 +115,7 @@ def handshake(peer):
                   "Sec-WebSocket-Accept: " + accept + "\r\nSec-WebSocket-Protocol: flexedge.node.v2\r\n\r\n").encode())
 
 
-def serve(listener, replacement, current_digest, ready, failures):
+def serve(listener, current_digest, ready, failures):
     node_id = "11111111-1111-4111-8111-111111111111"
     release_id = "22222222-2222-4222-8222-222222222222"
     spec_content = text(1, node_id) + number(2, 2) + number(3, 1) + text(4, "shutdown-test")
@@ -123,7 +123,7 @@ def serve(listener, replacement, current_digest, ready, failures):
     manifest_digest = hashlib.sha256(release_content).hexdigest()
     spec = text(1, hashlib.sha256(spec_content).hexdigest()) + text(2, spec_content)
     release = text(1, manifest_digest) + text(2, release_content)
-    digest = hashlib.sha256(replacement).hexdigest() if replacement else current_digest
+    digest = current_digest
     try:
         peer, _ = listener.accept()
         with peer:
@@ -143,11 +143,6 @@ def serve(listener, replacement, current_digest, ready, failures):
                     assert result[5] == 1, result.get(8, b"apply failed").decode()
                     ack = text(1, node_id) + number(2, 1) + text(3, release_id) + text(4, manifest_digest) + number(5, 1)
                     send(peer, text(1, request_id) + text(19, ack))
-                elif 17 in request:
-                    assert replacement and fields(request[17]).get(3, 0) == 0
-                    chunk = text(1, "0.4.1") + text(2, digest) + number(3, len(replacement)) + text(5, replacement)
-                    send(peer, text(1, request_id) + text(18, chunk))
-                    ready.set()
                 elif 12 in request:
                     ack = number(1, 1) + text(2, release_id) + text(3, manifest_digest) + number(4, 10) + text(5, digest)
                     send(peer, text(1, request_id) + text(15, ack))
@@ -166,7 +161,7 @@ def serve(listener, replacement, current_digest, ready, failures):
         ready.set()
 
 
-def run(upgrade):
+def run():
     with tempfile.TemporaryDirectory(prefix="flexedge-upgrade-") as directory:
         root = pathlib.Path(directory)
         executable = root / "node"
@@ -175,15 +170,13 @@ def run(upgrade):
         credentials = root / "credentials"
         credentials.write_text("node_id=" + "a" * 32 + "\nsecret=" + "b" * 32 + "\n")
         credentials.chmod(0o600)
-        # The replacement runs only after the old process has joined its loops.
-        replacement = b"#!/bin/sh\nprintf upgraded > reexec-completed\n" if upgrade else None
         ready = threading.Event()
         failures = []
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             listener.listen(1)
             listener.settimeout(20)
-            peer = threading.Thread(target=serve, args=(listener, replacement, hashlib.sha256(executable.read_bytes()).hexdigest(), ready, failures), daemon=True)
+            peer = threading.Thread(target=serve, args=(listener, hashlib.sha256(executable.read_bytes()).hexdigest(), ready, failures), daemon=True)
             peer.start()
             process = subprocess.Popen([str(executable), f"ws://127.0.0.1:{listener.getsockname()[1]}", str(credentials)],
                 cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -193,8 +186,7 @@ def run(upgrade):
                 if failures:
                     raise failures[0]
                 started = time.monotonic()
-                if not upgrade:
-                    process.send_signal(signal.SIGTERM)
+                process.send_signal(signal.SIGTERM)
                 stdout, stderr = process.communicate(timeout=15)
                 elapsed = time.monotonic() - started
                 peer.join(2)
@@ -204,13 +196,8 @@ def run(upgrade):
                     raise failures[0]
                 if process.returncode != 0 or elapsed > 3:
                     raise RuntimeError(f"exit={process.returncode} elapsed={elapsed:.3f}s\n{stdout}\n{stderr}")
-                if upgrade:
-                    assert "upgrade restart requested" in stderr
-                    assert (root / "reexec-completed").read_text() == "upgraded"
-                else:
-                    assert "shutdown requested" in stderr
                 assert credentials.read_text() == "node_id=" + "a" * 32 + "\nsecret=" + "b" * 32 + "\n"
-                print(f"{'Self-upgrade reexec' if upgrade else 'Authenticated SIGTERM'} completed in {elapsed:.3f}s")
+                print(f"Authenticated shutdown completed in {elapsed:.3f}s")
             except BaseException:
                 if process.poll() is None:
                     process.kill()
@@ -222,5 +209,4 @@ def run(upgrade):
 
 
 if __name__ == "__main__":
-    run(False)
-    run(True)
+    run()

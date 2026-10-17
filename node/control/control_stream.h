@@ -186,7 +186,7 @@ public:
     }
 
     void spawn_owned(ruvia::task<void> operation) {
-        operations_.spawn(std::move(operation));
+        operations_.spawn(run_owned(std::move(operation)));
     }
 
     ruvia::task<void> shutdown() {
@@ -226,6 +226,16 @@ private:
         writes_ready_.close();
         for (const auto& [_, sender] : replies_) {
             sender.close();
+        }
+    }
+
+    ruvia::task<void> run_owned(ruvia::task<void> operation) {
+        try {
+            co_await std::move(operation);
+        } catch (...) {
+            // Keep the original background error; cancellation of the reader
+            // must not replace a failed release/cache operation with EOF.
+            fail(std::current_exception());
         }
     }
 

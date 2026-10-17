@@ -232,7 +232,7 @@ if(BUILD_TESTING)
 
     # Each test owns its dependencies; compilation policy is shared.
     function(flexedge_add_test name)
-        cmake_parse_arguments(TEST "BIG_OBJECT" "DRIVER" "SOURCES;LIBRARIES" ${ARGN})
+        cmake_parse_arguments(TEST "BIG_OBJECT" "DRIVER" "SOURCES;LIBRARIES;DRIVER_ARGS" ${ARGN})
         set(target "flexedge_${name}_test")
         add_executable(${target} ${TEST_SOURCES})
         target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -246,7 +246,7 @@ if(BUILD_TESTING)
             find_package(Python3 COMPONENTS Interpreter REQUIRED)
             add_test(NAME flexedge_${name}
                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/${TEST_DRIVER}"
-                        "$<TARGET_FILE:${target}>")
+                        ${TEST_DRIVER_ARGS} "$<TARGET_FILE:${target}>")
         else()
             add_test(NAME flexedge_${name} COMMAND ${target})
         endif()
@@ -717,12 +717,22 @@ if(BUILD_TESTING)
         )
         set_tests_properties(flexedge_node_shutdown PROPERTIES TIMEOUT 60)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-            add_test(NAME flexedge_node_upgrade
+            flexedge_add_test(listener_handoff
+                SOURCES tests/listener_handoff.cpp
+                LIBRARIES asio::asio Threads::Threads)
+            flexedge_add_test(node_upgrade_transition
+                SOURCES tests/support/node_upgrade_fixture.cpp
+                LIBRARIES flexedge_node_protocol flexedge_route_policy flexedge_node_version ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto
+                DRIVER tests/node_upgrade_transition.py
+                DRIVER_ARGS "$<TARGET_FILE:flexedge_node>")
+            set_tests_properties(flexedge_listener_handoff PROPERTIES TIMEOUT 30)
+            set_tests_properties(flexedge_node_upgrade_transition PROPERTIES TIMEOUT 120)
+            add_test(NAME flexedge_node_control_shutdown
                 COMMAND "${Python3_EXECUTABLE}"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/node_upgrade_smoke.py"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/node_control_shutdown.py"
                     "$<TARGET_FILE:flexedge_node>"
             )
-            set_tests_properties(flexedge_node_upgrade PROPERTIES TIMEOUT 60)
+            set_tests_properties(flexedge_node_control_shutdown PROPERTIES TIMEOUT 60)
         endif()
         add_test(NAME flexedge_node_installer_validation
             COMMAND "${Python3_EXECUTABLE}"

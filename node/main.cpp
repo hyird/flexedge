@@ -1,11 +1,15 @@
+#include <ruvia/core/channel.h>
+#include <ruvia/core/event_loop_pool.h>
+#include <ruvia/core/stop_token.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <iostream>
-#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -13,23 +17,14 @@
 
 #include <asio/signal_set.hpp>
 
-#include "node/runtime/loop_shutdown.h"
-
-#if defined(__linux__)
-#include <sys/syscall.h>
-#include <unistd.h>
-#endif
-
-#include <ruvia/core/channel.h>
-#include <ruvia/core/event_loop_pool.h>
-#include <ruvia/core/stop_token.h>
-
 #include "common/file_digest.h"
 #include "node/control/control_channel.h"
 #include "node/control/transport_config.h"
 #include "node/data/data_plane.h"
 #include "node/proto/control_protocol.h"
+#include "node/runtime/listener_handoff.h"
 #include "node/runtime/log_producer.h"
+#include "node/runtime/loop_shutdown.h"
 #include "node/runtime/node_credentials.h"
 #include "node/runtime/self_updater.h"
 #include "node/runtime/upgrade_record.h"
@@ -53,24 +48,19 @@ std::filesystem::path executable_path(std::string_view fallback) {
     return canonical_error ? path : canonical;
 }
 
-[[noreturn]] void reexec_node(const std::filesystem::path& binary_path, char* const argv[]) {
-#if defined(__linux__)
-    if (::syscall(SYS_close_range, 3U, std::numeric_limits<unsigned int>::max(), 0U) == 0) {
-        ::execv(binary_path.c_str(), argv);
+[[noreturn]] void reexec_node(const std::filesystem::path& binary_path, char* const argv[], std::size_t workers) {
+    try {
+        flexedge::node::reexec_with_listeners(binary_path, argv, workers);
+    } catch (const std::exception& error) {
+        std::cerr << "flexedge node candidate exec failed: " << error.what() << "; restoring previous binary\n";
+        flexedge::node::restore_node_binary(binary_path);
+        std::filesystem::remove("./state/pending-upgrade");
+        flexedge::node::reexec_with_listeners(binary_path, argv, workers);
     }
-#else
-    (void)binary_path;
-    (void)argv;
-#endif
-    std::cerr << "flexedge node could not re-execute upgraded binary\n";
-    std::_Exit(EXIT_FAILURE);
 }
 
 ruvia::task<void> run_node_channel(flexedge::node::control_channel& channel,
-    flexedge::node::log_producer& logs, std::optional<flexedge::node::upgrade_record> upgrade) {
-    if (upgrade) {
-        logs.node("info", "upgrade", upgrade->message());
-    }
+    flexedge::node::log_producer& logs) {
     logs.node("info", "runtime", std::string("flexedge node ") + std::string(flexedge::node::node_version) + " starting");
     co_await channel.run();
 }
@@ -78,7 +68,14 @@ ruvia::task<void> run_node_channel(flexedge::node::control_channel& channel,
 }  // namespace
 
 int main(int argc, char* argv[]) {
+    std::filesystem::path binary_path;
+    std::size_t worker_count{};
+    bool rollback_startup{};
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--check-upgrade") {
+            std::cout << "FLEXEDGE_NODE_UPGRADE_READY " << flexedge::node::node_version << '\n';
+            return 0;
+        }
         if (argc != 3) {
             throw std::runtime_error("usage: node <server-domain> <credentials-file>");
         }
@@ -86,6 +83,7 @@ int main(int argc, char* argv[]) {
         auto web_socket = flexedge::node::control_transport_config(argv[1]);
         ruvia::event_loop_pool control_loops({.loop_count_ = 1});
         ruvia::event_loop_pool worker_loops;
+        worker_count = worker_loops.loop_count();
         const auto loop = control_loops.loop(0);
         flexedge::node::runtime_state runtime;
         auto [data_log_sender, data_log_receiver] =
@@ -96,11 +94,13 @@ int main(int argc, char* argv[]) {
                 {.capacity_ = flexedge::node::control_log_channel_capacity});
         flexedge::node::log_producer control_logs(loop, std::move(control_log_sender));
         const std::filesystem::path state_directory{"./state"};
-        const auto binary_path = executable_path(argv[0]);
+        binary_path = executable_path(argv[0]);
+        const auto current_digest = flexedge::crypto::file_sha256(binary_path);
+        rollback_startup = flexedge::node::read_pending_upgrade_record(state_directory / "pending-upgrade", current_digest).has_value();
         auto credentials = flexedge::node::node_credentials::load(argv[2]);
-        auto startup_upgrade = flexedge::node::take_pending_upgrade_record(
-            state_directory / "pending-upgrade", flexedge::crypto::file_sha256(binary_path));
-        flexedge::node::data_plane data_plane(worker_loops, loop, runtime, data_log_sender, state_directory / "content_cache");
+        auto inherited = flexedge::node::consume_listener_handoff(worker_count);
+        flexedge::node::data_plane data_plane(worker_loops, loop, runtime, data_log_sender,
+            state_directory / "content_cache", std::move(inherited));
         ruvia::stop_source stop_source;
         std::atomic<bool> shutting_down{};
         std::atomic<bool> restart_requested{};
@@ -108,7 +108,7 @@ int main(int argc, char* argv[]) {
             if (!shutting_down.exchange(true)) {
                 std::cerr << "flexedge node " << reason << '\n';
             }
-            data_plane.request_stop_accepting();
+            data_plane.request_stop_accepting(restart_requested.load());
             stop_source.request_stop();
         };
         asio::signal_set signals(loop.io_context(), SIGINT, SIGTERM);
@@ -128,6 +128,7 @@ int main(int argc, char* argv[]) {
         flexedge::node::self_updater self_updater({
             .binary_path_ = binary_path,
             .current_version_ = std::string(flexedge::node::node_version),
+            .current_sha256_ = current_digest,
             .upgrade_record_path_ = state_directory / "pending-upgrade",
             .node_log_ =
                 [&control_logs](std::string_view level, std::string_view category,
@@ -156,29 +157,41 @@ int main(int argc, char* argv[]) {
         worker_loops.start();
         control_loops.start();
         data_plane.start();
-        auto task = loop.start(run_node_channel(channel, control_logs, std::move(startup_upgrade)));
+        auto task = loop.start(run_node_channel(channel, control_logs));
+        std::exception_ptr failure;
         try {
             task.get();
         } catch (...) {
-            loop_shutdown.stop_and_join();
-            if (!shutting_down.load()) {
-                throw;
-            }
-            if (restart_requested.load()) {
-                reexec_node(binary_path, argv);
-            }
-            return 0;
+            failure = std::current_exception();
         }
-        if (shutting_down.load()) {
-            // Each worker reports when its last connection closes; stop after 10 s regardless.
+        rollback_startup = self_updater.startup_pending();
+        if (shutting_down.load() || rollback_startup) {
+            if (rollback_startup) {
+                data_plane.request_stop_accepting(true);
+            }
+            // Stop admission first; keep existing responses alive up to the bounded deadline.
             (void)loop.start(data_plane.wait_drained(std::chrono::seconds(10))).get();
         }
         loop_shutdown.stop_and_join();
+        if (failure && !shutting_down.load()) {
+            std::rethrow_exception(failure);
+        }
         if (restart_requested.load()) {
-            reexec_node(binary_path, argv);
+            reexec_node(binary_path, argv, worker_count);
         }
         return 0;
     } catch (const std::exception& error) {
+        if (rollback_startup && !binary_path.empty() &&
+            std::filesystem::exists(flexedge::node::previous_node_binary_path(binary_path))) {
+            try {
+                std::cerr << "flexedge node candidate startup failed: " << error.what() << "; restoring previous binary\n";
+                flexedge::node::restore_node_binary(binary_path);
+                std::filesystem::remove("./state/pending-upgrade");
+                flexedge::node::reexec_with_listeners(binary_path, argv, worker_count);
+            } catch (const std::exception& rollback) {
+                std::cerr << "flexedge node rollback failed: " << rollback.what() << '\n';
+            }
+        }
         std::cerr << "flexedge node failed: " << error.what() << '\n';
         return 1;
     } catch (...) {

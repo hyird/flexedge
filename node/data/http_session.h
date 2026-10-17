@@ -63,6 +63,9 @@ struct http_session_context final {
 // One accepted client connection as its listener sees it, from accept until the session
 // serving it is destroyed. close() reaches whichever stage currently owns the socket;
 // destruction reports the connection retired. Worker loop only.
+enum class edge_shutdown { drain,
+    close };
+
 class edge_connection final {
 public:
     explicit edge_connection(std::function<void()> on_retired)
@@ -77,13 +80,22 @@ public:
         }
     }
 
-    void set_close(std::function<void()> close) {
-        close_ = std::move(close);
+    void set_shutdown_handler(std::function<void(edge_shutdown)> shutdown) {
+        shutdown_ = std::move(shutdown);
+        if (draining_) {
+            shutdown_(edge_shutdown::drain);
+        }
     }
 
     void close() noexcept {
-        if (close_) {
-            close_();
+        if (shutdown_) {
+            shutdown_(edge_shutdown::close);
+        }
+    }
+    void drain() noexcept {
+        draining_ = true;
+        if (shutdown_) {
+            shutdown_(edge_shutdown::drain);
         }
     }
 
@@ -98,10 +110,11 @@ public:
     }
 
 private:
-    std::function<void()> close_;
+    std::function<void(edge_shutdown)> shutdown_;
     std::function<void()> on_retired_;
     std::shared_ptr<tls_context_set> tls_contexts_;
     std::string tls_server_name_;
+    bool draining_{};
 };
 
 // Serves one HTTP/1 request on a client connection: routing, local responses, proxying
@@ -162,9 +175,11 @@ public:
     }
 
     void start(std::string initial = {}) {
-        connection_->set_close([weak = this->weak_from_this()] {
-            if (const auto self = weak.lock()) {
-                self->close();
+        connection_->set_shutdown_handler([weak = this->weak_from_this()](edge_shutdown action) {
+            if (action == edge_shutdown::close) {
+                if (const auto self = weak.lock()) {
+                    self->close();
+                }
             }
         });
         if (initial.empty()) {

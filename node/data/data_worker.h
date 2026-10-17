@@ -87,7 +87,8 @@ public:
         ruvia::channel_sender<owned_data_worker_result> results,
         ruvia::channel_sender<owned_log_batch> logs, std::size_t worker_count,
         std::shared_ptr<response_cache_publication> cache,
-        ruvia::channel_sender<owned_data_worker_result> cache_results)
+        ruvia::channel_sender<owned_data_worker_result> cache_results,
+        inherited_listeners inherited = {})
         : loop_(std::move(loop)),
           worker_(loop_.handle()),
           identity_(identity),
@@ -101,6 +102,7 @@ public:
           health_(origin_health_supervisor::create(loop_, runtime_, origin_tls_)),
           request_buffers_(maximum_request_buffer_bytes / worker_count),
           response_buffers_(maximum_response_buffer_bytes / worker_count),
+          inherited_(std::move(inherited)),
           stop_registration_(loop_.on_stop([this]() -> ruvia::task<void> {
               stop_accepting();
               health_->request_stop();
@@ -116,6 +118,11 @@ public:
                   co_await listener->stop_and_wait();
               }
               owned_listeners_.clear();
+              if (preserve_listeners_) {
+                  inherited_.release_to_process();
+              } else {
+                  inherited_.close_unused();
+              }
               co_await health_->stop_and_wait();
               origin_connections_.close();
               reload_.reset();
@@ -152,9 +159,9 @@ public:
     }
 
     // Administrative stop only. Runtime mutation and cancellation stay on the owner loop.
-    void request_stop_accepting() noexcept {
+    void request_stop_accepting(bool preserve_listeners = false) noexcept {
         try {
-            (void)loop_.defer_cleanup([this] { stop_accepting(); });
+            (void)loop_.defer_cleanup([this, preserve_listeners] { stop_accepting(preserve_listeners); });
         } catch (...) {
             // The loop's stop hook repeats cleanup when post admission has closed.
         }
@@ -438,8 +445,9 @@ private:
         }
         const auto bind = parsed.is_v6() ? asio::ip::address(asio::ip::address_v6::any())
                                          : asio::ip::address(asio::ip::address_v4::any());
+        const asio::ip::tcp::endpoint endpoint{bind, static_cast<std::uint16_t>(port)};
         auto listener = edge_listener::create(loop_, session_context(),
-            {bind, static_cast<std::uint16_t>(port)}, secure ? &tls_contexts_ : nullptr);
+            endpoint, secure ? &tls_contexts_ : nullptr, inherited_.take(endpoint));
         owned_listeners_.push_back(listener);
         reload.additions_.push_back(listener);
         reload.listeners_.emplace(std::move(key), std::move(listener));
@@ -481,6 +489,7 @@ private:
                 }
             }
             reload_.reset();
+            inherited_.close_unused();
             settled_sequence_ = (std::max)(settled_sequence_, sequence);
         }
     }
@@ -519,7 +528,8 @@ private:
         }
     }
 
-    void stop_accepting() noexcept {
+    void stop_accepting(bool preserve_listeners = false) noexcept {
+        preserve_listeners_ = preserve_listeners_ || preserve_listeners;
         stopping_ = true;
         if (reload_ && reload_->phase_ == reload_participant::phase::prepared) {
             reload_.reset();
@@ -527,7 +537,7 @@ private:
         // Admission stop is not a transaction decision. The control loop may have just
         // committed globally; only its immutable decision can roll back or finalize.
         for (const auto& listener : owned_listeners_) {
-            listener->request_stop();
+            listener->request_stop(preserve_listeners_);
         }
         listeners_.clear();
     }
@@ -561,12 +571,14 @@ private:
     tls_context_registry tls_contexts_;
     buffered_bytes_budget request_buffers_;
     buffered_bytes_budget response_buffers_;
+    inherited_listeners inherited_;
     listener_map listeners_;
     std::vector<std::shared_ptr<edge_listener>> owned_listeners_;
     std::unique_ptr<reload_participant> reload_;
     std::uint64_t settled_sequence_{};
     std::uint64_t prewarm_sequence_{};
     bool stopping_{};
+    bool preserve_listeners_{};
     ruvia::event_loop_stop_registration stop_registration_;
 };
 
