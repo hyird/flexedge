@@ -48,11 +48,13 @@ public:
     std::optional<ruvia::http1_chunked_body_decoder> chunks_;
     asio::const_buffer output_;
     std::size_t output_offset_{};
+    std::optional<std::uint64_t> write_end_;
     completion written_;
     void complete_write(std::error_code error = {}) {
         if (!written_) {
             return;
         }
+        write_end_.reset();
         auto handler = std::move(written_);
         const auto size = error ? 0 : output_.size();
         asio::post(executor_, [handler = std::move(handler), error, size]() mutable { handler(error, size); });
@@ -207,14 +209,19 @@ public:
             (void)id;
             stream->pump();
         }
-        flush();
-        if (!writing_ && !protocol_.wants_write()) {
-            for (auto& [id, stream] : streams_) {
-                if (stream->written_ && stream->output_offset_ == stream->output_.size() && !protocol_.has_queued_data(id)) {
-                    stream->complete_write();
-                }
+        // Fence each write at a finite wire prefix, not at connection-wide
+        // quiescence: other streams may keep appending output indefinitely.
+        const auto write_end = taken_wire_bytes_ + protocol_.pending_output().size();
+        for (auto& [id, stream] : streams_) {
+            if (stream->written_ && !stream->write_end_ &&
+                stream->output_offset_ == stream->output_.size() && !protocol_.has_queued_data(id)) {
+                stream->write_end_ = write_end;
+            }
+            if (stream->write_end_ && *stream->write_end_ <= written_wire_bytes_) {
+                stream->complete_write();
             }
         }
+        flush();
         if (draining_ && streams_.empty() && !writing_ && !protocol_.wants_write()) {
             close();
         }
@@ -342,6 +349,7 @@ private:
         if (output_.empty()) {
             return;
         }
+        taken_wire_bytes_ += output_.size();
         writing_ = true;
         std::visit([self = shared_from_this()](auto& stream) {
             asio::async_write(stream, asio::buffer(self->output_), [self](std::error_code error, std::size_t) {
@@ -350,6 +358,7 @@ private:
                     self->close();
                     return;
                 }
+                self->written_wire_bytes_ = self->taken_wire_bytes_;
                 self->last_activity_ = std::chrono::steady_clock::now();
                 self->progress();
             });
@@ -398,6 +407,7 @@ private:
     std::map<std::uint32_t, std::shared_ptr<http2_stream_state>> streams_;
     std::array<char, 16384> input_;
     std::pmr::string output_;
+    std::uint64_t taken_wire_bytes_{}, written_wire_bytes_{};
     std::chrono::steady_clock::time_point last_activity_{std::chrono::steady_clock::now()};
     bool reading_{}, writing_{}, closed_{}, draining_{};
 };

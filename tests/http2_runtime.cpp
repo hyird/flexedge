@@ -63,6 +63,9 @@ private:
         response.header("Cache-Control", "public, max-age=600");
         response.header("Content-Type", "text/plain");
         response.header("X-Origin-Protocol", "h2");
+        if (path == "/large") {
+            response.header("ETag", "\"h2-runtime\"");
+        }
         response.body(path == "/large"    ? std::string(512 * 1024, 'x')
                       : path == "/upload" ? std::to_string(bytes)
                       : path == "/binary" ? std::to_string(checksum)
@@ -324,6 +327,67 @@ std::vector<received> requests(stream_type& socket, const std::vector<std::strin
     }
     return responses;
 }
+void verify_cached_stream_reuse(asio::ip::tcp::socket& socket) {
+    socket.set_option(asio::ip::tcp::no_delay(true));
+    auto client = ruvia::http2_connection::client();
+    constexpr std::size_t count = 10000, concurrency = 32;
+    std::map<std::uint32_t, bool> active;
+    std::size_t submitted{}, completed{};
+    const auto fill = [&] {
+        const std::array<ruvia::http_header_view, 1> headers{{{"if-none-match", "\"h2-runtime\""}}};
+        while (submitted < count && active.size() < concurrency) {
+            const auto result = client.submit_request_head(ruvia::http2_regular_request_head_view{
+                .method_ = "GET", .authority_ = "www.example.com", .target_ = "/large", .headers_ = headers, .content_ = ruvia::http2_request_content::none()});
+            FLEXEDGE_REQUIRE(result.submitted());
+            active.emplace(result.submitted()->stream_id(), false);
+            ++submitted;
+        }
+    };
+    std::pmr::string output;
+    const auto flush = [&] {
+        if (client.wants_write()) {
+            output.clear();
+            client.take_output(output);
+            asio::write(socket, asio::buffer(output));
+        }
+    };
+    std::array<char, 16384> input{};
+    while (completed != count) {
+        if (client.received_peer_settings()) {
+            fill();
+        }
+        flush();
+        FLEXEDGE_REQUIRE(flexedge::testing::waitUntil(
+            [&] { return socket.available() != 0; }, std::chrono::seconds(3)));
+        const auto size = socket.read_some(asio::buffer(input));
+        FLEXEDGE_REQUIRE(client.feed(std::string_view(input.data(), size)) != ruvia::http2_feed_result::protocol_failure);
+        while (auto event = client.next_event()) {
+            FLEXEDGE_REQUIRE(!event->stream_closed() && !event->goaway() && !event->request_unprocessed());
+            if (const auto* head = event->response_head()) {
+                auto& seen = active.at(head->stream_id());
+                FLEXEDGE_REQUIRE(!seen && head->head().status().value() == 304);
+                bool hit{};
+                for (const auto& field : head->head().headers()) {
+                    if (flexedge::route_policy::ascii_equal(field.name(), "X-Cache")) {
+                        FLEXEDGE_REQUIRE(!hit && field.value() == "HIT");
+                        hit = true;
+                    }
+                }
+                FLEXEDGE_REQUIRE(hit);
+                seen = true;
+            } else if (const auto* body = event->message_body_chunk()) {
+                FLEXEDGE_REQUIRE(body->bytes().empty());
+            } else if (const auto* end = event->message_end()) {
+                FLEXEDGE_REQUIRE(active.at(end->stream_id()));
+                active.erase(end->stream_id());
+                ++completed;
+                fill();
+                flush();
+            }
+        }
+    }
+    FLEXEDGE_REQUIRE(active.empty());
+}
 std::string exchange_http1(std::uint16_t port, std::string_view wire) {
     asio::io_context context;
     asio::ip::tcp::socket socket(context);
@@ -420,6 +484,14 @@ void verify(std::string_view storage) {
         cached.connect({asio::ip::address_v4::loopback(), port});
         const auto hit = requests(cached, {"/large"});
         FLEXEDGE_REQUIRE(hit[0].status_ == 200 && hit[0].body_ == std::string(512 * 1024, 'x'));
+        FLEXEDGE_REQUIRE(plain.count() == count);
+    }
+    {
+        // Ended, bodyless streams must retire while this connection keeps
+        // producing new responses; no more than 32 requests are live at once.
+        asio::ip::tcp::socket cached(clients);
+        cached.connect({asio::ip::address_v4::loopback(), port});
+        verify_cached_stream_reuse(cached);
         FLEXEDGE_REQUIRE(plain.count() == count);
     }
     {
