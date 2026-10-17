@@ -592,7 +592,19 @@ std::string web_socket_round_trip(std::uint16_t port) {
         const auto size = socket.read_some(asio::buffer(buffer));
         response.append(buffer.data(), size);
     }
-    REQUIRE(response.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
+    flexedge::node::http1_request_reader reader(4096);
+    std::string sent(handshake);
+    REQUIRE(reader.consume(sent) == flexedge::node::http1_request_read_status::complete);
+    const auto prepared = flexedge::node::prepare_origin_request(reader,
+        flexedge::node::v2::Website{}, "www.example.com", "127.0.0.1", false, true, false);
+    REQUIRE(prepared);
+    ruvia::http1_client_response_parser parser(prepared->make_exchange_state());
+    const auto parsed = parser.parse(response);
+    REQUIRE(parsed.parsed() && parsed.parsed()->plan().protocol_upgrade());
+    for (const auto& field : parsed.parsed()->head().headers()) {
+        REQUIRE(!flexedge::route_policy::ascii_equal(field.name(), "Content-Length"));
+        REQUIRE(!flexedge::route_policy::ascii_equal(field.name(), "Transfer-Encoding"));
+    }
     constexpr std::string_view client_bytes = "PING";
     asio::write(socket, asio::buffer(client_bytes));
     std::array<char, 4> server_bytes{};
@@ -1074,7 +1086,9 @@ int main(int argc, char* argv[]) {
             for (const auto& test : std::array{
                      no_content_response{"HEAD", "HTTP/1.1 200 OK\r\nContent-Length: 123\r\n\r\n", 200},
                      no_content_response{"GET", "HTTP/1.1 304 Not Modified\r\nContent-Length: 123\r\n\r\n", 304},
-                     no_content_response{"GET", "HTTP/1.1 204 No Content\r\n\r\n", 204}}) {
+                     no_content_response{"GET", "HTTP/1.1 204 No Content\r\n\r\n", 204},
+                     no_content_response{"GET", "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n", 204},
+                     no_content_response{"GET", "HTTP/1.1 204 No Content\r\nContent-Length: nonsense\r\nTransfer-Encoding: nonsense\r\n\r\n", 204}}) {
                 flexedge::node::origin_response_codec codec(origin_exchange_state(test.method_), false, nullptr);
                 if (compression) {
                     codec.set_compression(codec_website, "/file.html", "gzip", codec_budget.lease());
@@ -1091,6 +1105,8 @@ int main(int argc, char* argv[]) {
                     if (flexedge::route_policy::ascii_equal(field.name(), "Content-Length")) {
                         REQUIRE(test.status_ != 204);
                         REQUIRE(field.value() == "123");
+                    } else if (flexedge::route_policy::ascii_equal(field.name(), "Transfer-Encoding")) {
+                        REQUIRE(test.status_ != 204);
                     }
                 }
                 REQUIRE(wire.ends_with("\r\n\r\n"));
@@ -1821,6 +1837,158 @@ int main(int argc, char* argv[]) {
             REQUIRE(answer.find("Location: /new/a%2Fb?q=a+b#end\r\n") != std::string::npos);
             REQUIRE(request(port, "www.example.com", "X-Channel: stable\r\n", "/old/a?q=a+b", "POST", "payload").starts_with("HTTP/1.1 302 Found"));
             REQUIRE(request(port, "www.example.com", "X-Channel: beta\r\n", "/old/a?q=other", "POST", "payload").starts_with("HTTP/1.1 302 Found"));
+        }
+
+        // The origin cannot send its final response until the client has parsed
+        // the early hints. This exercises the actual serialized session relay.
+        {
+            asio::io_context hints_context;
+            asio::ip::tcp::acceptor hints_acceptor(
+                hints_context, {asio::ip::address_v4::loopback(), 0});
+            std::atomic<bool> release_final{};
+            std::atomic<bool> final_sent{};
+            std::atomic<bool> gate_expired{};
+            std::jthread hints_origin([&](std::stop_token stop) {
+                for (;;) {
+                    asio::ip::tcp::socket socket(hints_context);
+                    if (!accept_until_stopped(hints_acceptor, socket, stop)) {
+                        return;
+                    }
+                    std::string incoming;
+                    std::array<char, 4096> buffer{};
+                    std::error_code error;
+                    while (!error && incoming.find("\r\n\r\n") == std::string::npos) {
+                        const auto size = socket.read_some(asio::buffer(buffer), error);
+                        incoming.append(buffer.data(), size);
+                    }
+                    if (error) {
+                        continue;
+                    }
+                    const std::string first =
+                        "HTTP/1.1 103 Early Hints\r\nLink: </early.css>; rel=preload\r\n";
+                    const std::string rest =
+                        "Link: </early.js>; rel=preload\r\n"
+                        "Connection: keep-alive, X-Drop\r\nConnection: Y-Drop\r\n"
+                        "Content-Length: nonsense\r\n"
+                        "X-Drop: secret\r\nY-Drop: secret\r\nKeep-Alive: timeout=5\r\n\r\n";
+                    asio::write(socket, asio::buffer(first), error);
+                    if (!error) {
+                        asio::write(socket, asio::buffer(rest), error);
+                    }
+                    if (error) {
+                        continue;
+                    }
+                    if (incoming.starts_with("GET /hints ")) {
+                        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                        while (!release_final.load() && !stop.stop_requested() &&
+                               std::chrono::steady_clock::now() < deadline) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        }
+                        if (stop.stop_requested()) {
+                            return;
+                        }
+                        gate_expired.store(!release_final.load());
+                    }
+                    final_sent.store(true);
+                    const std::string final =
+                        "HTTP/1.1 199 \r\nX-Progress: second\r\n\r\n"
+                        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                        "ETag: \"final\"\r\nConnection: close\r\n\r\nok";
+                    asio::write(socket, asio::buffer(final), error);
+                }
+            });
+            auto hints_snapshot = snapshot(false);
+            hints_snapshot.setGeneration(next_generation++);
+            hints_snapshot.mutableWebsite()->mutable_origins(0)->set_host("127.0.0.1");
+            hints_snapshot.mutableWebsite()->mutable_origins(0)->set_port(
+                hints_acceptor.local_endpoint().port());
+            hints_snapshot.mutableWebsite()->set_origin_http_version("http1");
+            auto* hints_route = hints_snapshot.mutableWebsite()->add_route_rules();
+            hints_route->set_id("hints");
+            hints_route->set_enabled(true);
+            hints_route->set_match_type("prefix");
+            hints_route->set_path("/");
+            hints_route->set_action("proxy");
+            hints_route->set_origin_group("default");
+            auto* final_header = hints_route->add_response_headers();
+            final_header->set_name("X-Final-Policy");
+            final_header->set_value("applied");
+            publish(std::move(hints_snapshot));
+
+            asio::ip::tcp::socket client(hints_context);
+            client.connect({asio::ip::address_v4::loopback(), port});
+            const std::string head = "GET /hints HTTP/1.1\r\nHost: www.example.com\r\n\r\n";
+            asio::write(client, asio::buffer(head));
+            std::string early;
+            std::array<char, 4096> buffer{};
+            REQUIRE(waitUntil([&] {
+                std::error_code error;
+                if (client.available(error) != 0) {
+                    const auto size = client.read_some(asio::buffer(buffer), error);
+                    early.append(buffer.data(), size);
+                }
+                if (error) {
+                    throw std::system_error(error);
+                }
+                return early.find("\r\n\r\n") != std::string::npos;
+            },
+                std::chrono::seconds(3)));
+            REQUIRE(!final_sent.load() && !gate_expired.load());
+            ruvia::http1_client_response_parser downstream(origin_exchange_state());
+            const auto interim = downstream.parse(early);
+            REQUIRE(interim.parsed() && interim.parsed()->plan().informational());
+            REQUIRE(interim.parsed()->head().status().value() == 103);
+            REQUIRE(interim.parsed()->consumed_bytes() == early.size());
+            std::string links;
+            for (const auto& field : interim.parsed()->head().headers()) {
+                REQUIRE(!flexedge::route_policy::ascii_equal(field.name(), "Connection"));
+                REQUIRE(!flexedge::route_policy::ascii_equal(field.name(), "Keep-Alive"));
+                REQUIRE(!flexedge::route_policy::ascii_equal(field.name(), "X-Drop"));
+                REQUIRE(!flexedge::route_policy::ascii_equal(field.name(), "Y-Drop"));
+                REQUIRE(!flexedge::route_policy::ascii_equal(field.name(), "Content-Length"));
+                REQUIRE(!flexedge::route_policy::ascii_equal(field.name(), "Transfer-Encoding"));
+                REQUIRE(!flexedge::route_policy::ascii_equal(field.name(), "X-Final-Policy"));
+                if (flexedge::route_policy::ascii_equal(field.name(), "Link")) {
+                    links.append(field.value());
+                }
+            }
+            REQUIRE(links.find("</early.css>; rel=preload") != std::string::npos);
+            REQUIRE(links.find("</early.js>; rel=preload") != std::string::npos);
+            release_final.store(true);
+            std::string remainder;
+            std::error_code error;
+            while (!error) {
+                const auto size = client.read_some(asio::buffer(buffer), error);
+                remainder.append(buffer.data(), size);
+            }
+            REQUIRE(error == asio::error::eof);
+            const auto second = downstream.parse(remainder);
+            REQUIRE(second.parsed() && second.parsed()->plan().informational());
+            REQUIRE(second.parsed()->head().status().value() == 199);
+            const auto final_bytes = std::string_view(remainder).substr(second.parsed()->consumed_bytes());
+            const auto final = downstream.parse(final_bytes);
+            REQUIRE(final.parsed() && final.parsed()->head().status().value() == 200);
+            flexedge::node::cache_headers final_fields;
+            for (const auto& field : final.parsed()->head().headers()) {
+                final_fields.emplace_back(field.name(), field.value());
+            }
+            REQUIRE(flexedge::node::cache_header(final_fields, "ETag") == "\"final\"");
+            REQUIRE(flexedge::node::cache_header(final_fields, "X-Final-Policy") == "applied");
+            REQUIRE(flexedge::node::cache_header(final_fields, "Link").empty());
+            REQUIRE(flexedge::node::cache_header(final_fields, "X-Progress").empty());
+            REQUIRE(final_bytes.substr(final.parsed()->consumed_bytes()) == "ok");
+
+            const auto legacy = exchange_raw(port, {"GET /legacy HTTP/1.0\r\nHost: www.example.com\r\n\r\n"});
+            ruvia::http1_client_response_parser legacy_parser(origin_exchange_state());
+            const auto legacy_final = legacy_parser.parse(legacy);
+            REQUIRE(legacy_final.parsed() && !legacy_final.parsed()->plan().informational());
+            REQUIRE(legacy_final.parsed()->head().status().value() == 200);
+            REQUIRE(legacy.substr(legacy_final.parsed()->consumed_bytes()) == "ok");
+            for (const auto& field : legacy_final.parsed()->head().headers()) {
+                REQUIRE(!flexedge::route_policy::ascii_equal(field.name(), "Link"));
+                REQUIRE(!flexedge::route_policy::ascii_equal(field.name(), "X-Progress"));
+            }
+            hints_origin.request_stop();
         }
 
         // Ruvia parses only the request head; the node frames Content-Length and chunked

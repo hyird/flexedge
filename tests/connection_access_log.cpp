@@ -72,7 +72,7 @@ private:
                 const bool websocket = input.starts_with("GET /ws ");
                 auto output = std::make_shared<std::string>(websocket
                                                                 ? "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
-                                                                : "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nConnection: close\r\n\r\ndata: hello\n\n");
+                                                                : "HTTP/1.1 103 Early Hints\r\nLink: </app.css>; rel=preload\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nConnection: close\r\n\r\ndata: hello\n\n");
                 asio::async_write(*socket, asio::buffer(*output), [this, socket, output, websocket](std::error_code write_error, std::size_t) {
                     if (write_error) {
                         return;
@@ -160,7 +160,16 @@ void verify() {
         asio::streambuf response;
         asio::read_until(socket, response, "\r\n\r\n");
         std::string received(asio::buffers_begin(response.data()), asio::buffers_end(response.data()));
-        require(received.starts_with(websocket ? "HTTP/1.1 101" : "HTTP/1.1 200"), "stream handshake succeeds");
+        if (!websocket) {
+            require(received.starts_with("HTTP/1.1 103"), "informational response is forwarded before SSE");
+            std::array<char, 1024> head{};
+            while (received.find("\r\n\r\nHTTP/1.1 200 ") == std::string::npos) {
+                const auto size = socket.read_some(asio::buffer(head));
+                received.append(head.data(), size);
+            }
+        } else {
+            require(received.starts_with("HTTP/1.1 101"), "WebSocket handshake succeeds");
+        }
         std::string frame("\x81\x82\x00\x00\x00\x00hi", 8);
         if (websocket) {
             asio::write(socket, asio::buffer(frame));

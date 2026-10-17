@@ -190,28 +190,39 @@ private:
         buffered_ += bytes.size();
         queue_.push_back({std::move(bytes), 0, std::move(credit)});
     }
+    void append_head(const ruvia::http_client_response_head& head, bool informational) {
+        const auto status = head.status().value();
+        std::string wire = "HTTP/1.1 " + std::to_string(status) + " " + std::string(ruvia::http_reason_phrase(head.status())) + "\r\n";
+        bool length{};
+        for (const auto& field : head.headers()) {
+            if (request_hop_by_hop_header(field.name()) && !flexedge::route_policy::ascii_equal(field.name(), "Content-Length")) {
+                continue;
+            }
+            length = length || flexedge::route_policy::ascii_equal(field.name(), "Content-Length");
+            wire.append(field.name()).append(": ").append(field.value()).append("\r\n");
+        }
+        if (!informational) {
+            chunked_ = !length && !request_is_head_ && status != 204 && status != 304;
+            if (chunked_) {
+                wire.append("Transfer-Encoding: chunked\r\n");
+            }
+        }
+        wire.append("\r\n");
+        append(std::move(wire));
+    }
     void events() {
         while (auto event = protocol_.next_event()) {
-            if (const auto* head = event->response_head()) {
+            if (const auto* interim = event->informational_head()) {
+                if (interim->stream_id() == stream_id_) {
+                    append_head(interim->head(), true);
+                    // Preserve valid progress even if a reset follows in this batch.
+                    deliver();
+                }
+            } else if (const auto* head = event->response_head()) {
                 if (head->stream_id() != stream_id_) {
                     continue;
                 }
-                const auto status = head->head().status().value();
-                std::string wire = "HTTP/1.1 " + std::to_string(status) + " " + std::string(ruvia::http_reason_phrase(head->head().status())) + "\r\n";
-                bool length{};
-                for (const auto& field : head->head().headers()) {
-                    if (request_hop_by_hop_header(field.name()) && !flexedge::route_policy::ascii_equal(field.name(), "Content-Length")) {
-                        continue;
-                    }
-                    length = length || flexedge::route_policy::ascii_equal(field.name(), "Content-Length");
-                    wire.append(field.name()).append(": ").append(field.value()).append("\r\n");
-                }
-                chunked_ = !length && !request_is_head_ && status != 204 && status != 304;
-                if (chunked_) {
-                    wire.append("Transfer-Encoding: chunked\r\n");
-                }
-                wire.append("\r\n");
-                append(std::move(wire));
+                append_head(head->head(), false);
             } else if (auto* data = event->message_body_chunk()) {
                 if (data->stream_id() != stream_id_) {
                     continue;

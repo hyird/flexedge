@@ -482,7 +482,21 @@ inline void http2_stream_state::pump() {
                 const auto& head = parsed.parsed()->head();
                 const auto& plan = parsed.parsed()->plan();
                 if (plan.informational()) {
-                    (void)protocol.submit_interim_response_head(id_, ruvia::http_interim_response_head(head.status()));
+                    std::array<ruvia::http_header_view, ruvia::max_http_header_fields> headers;
+                    std::size_t header_count{};
+                    for (const auto& field : head.headers()) {
+                        if (request_hop_by_hop_header(field.name()) && !flexedge::route_policy::ascii_equal(field.name(), "Content-Length")) {
+                            continue;
+                        }
+                        headers[header_count++] = ruvia::http_header_view(field.name(), field.value());
+                    }
+                    // Both descriptors and parser-owned strings remain alive
+                    // through the synchronous submission, including duplicates.
+                    if (protocol.submit_interim_response_head(id_, ruvia::http_interim_response_head(
+                                                                       head.status(), std::span<const ruvia::http_header_view>(headers).first(header_count))) != ruvia::http2_submit_status::accepted) {
+                        abort();
+                        return;
+                    }
                     response_headers_.clear();
                     continue;
                 }
