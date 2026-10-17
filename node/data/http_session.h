@@ -350,8 +350,8 @@ private:
         for (const auto& header : parsed.request().headers()) {
             match_headers.emplace_back(header.name(), header.value());
         }
-        effective_route_ = evaluate_route_rules(website, parsed.request().method(),
-            parsed.request().target(), host, match_headers, active_patterns_.get());
+        effective_route_ = evaluate_route_rules(active_execution_->routes(), website,
+            parsed.request().method(), parsed.request().target(), host, match_headers);
         if (!effective_route_) {
             reply(ruvia::http_status::bad_request);
             return false;
@@ -361,20 +361,15 @@ private:
     }
 
     bool select_origin_candidates(const v2::Website& website) {
-        origins_ = origin_candidates(website, sequence_, route_);
-        const auto health = context_.health_.snapshot();
-        std::stable_partition(origins_.begin(), origins_.end(), [&](const v2::Origin* origin) {
-            return health->healthy(website.id(), origin->id());
-        });
+        origins_ = origin_cursor(route_->origins(), sequence_, context_.health_.snapshot());
         healthy_threshold_ = website.healthy_threshold();
         unhealthy_threshold_ = website.unhealthy_threshold();
-        return !origins_.empty();
+        return !route_->origins().empty();
     }
 
     void handle_request(const http1_request_reader& parsed) {
-        active_config_ = context_.runtime_.config();
-        active_patterns_ = context_.runtime_.patterns();
-        if (!active_config_) {
+        active_execution_ = context_.runtime_.execution();
+        if (!active_execution_) {
             reply(ruvia::http_status::service_unavailable);
             return;
         }
@@ -383,13 +378,13 @@ private:
             return;
         }
         const auto& [host, hostname] = *resolved_host;
-        website_ = active_config_->website(hostname);
+        website_ = active_execution_->config().website(hostname);
         if (website_ != nullptr) {
             access_log_.website(parsed, *website_);
         }
         if (!secure_) {
             if (const auto redirect_target =
-                    http_to_https_redirect(*active_config_, hostname, parsed.request().target())) {
+                    http_to_https_redirect(active_execution_->config(), hostname, parsed.request().target())) {
                 reply(redirect_target->status_, "Location: " + redirect_target->location_ + "\r\n");
                 return;
             }
@@ -400,7 +395,7 @@ private:
         }
         if (secure_ && !cache_prewarm_) {
             const auto server_name = connection_->tls_server_name();
-            const auto* domain = active_config_->domain(hostname);
+            const auto* domain = active_execution_->config().domain(hostname);
             if (server_name.empty() || hostname != flexedge::route_policy::hostname(server_name) ||
                 domain == nullptr || !domain->https_enabled() || !website_->https_enabled()) {
                 reply(ruvia::http_status::misdirected_request);
@@ -432,7 +427,8 @@ private:
             reply(ruvia::http_status::bad_request);
             return;
         }
-        std::string headers = "Location: " + location + "\r\n";
+        std::string headers{"Location: "};
+        headers.append(location).append("\r\n");
         for (const auto& header : route.response_headers()) {
             headers.append(header.name()).append(": ").append(header.value()).append("\r\n");
         }
@@ -721,13 +717,13 @@ private:
         ++origin_attempt_;
         cancel_timer();
         discard_exchange();
-        if (origin_index_ >= origins_.size()) {
+        const auto* origin = origins_.next();
+        if (origin == nullptr) {
             reply(ruvia::http_status::bad_gateway);
             return;
         }
-        const auto& origin = *origins_[origin_index_++];
-        current_health_ = context_.health_.target(website_->id(), origin.id());
-        start_origin_attempt(origin, origin_attempt_);
+        current_health_ = context_.health_.target(website_->id(), origin->id());
+        start_origin_attempt(*origin, origin_attempt_);
     }
 
     void start_origin_attempt(const v2::Origin& origin, std::uint64_t attempt) {
@@ -1085,13 +1081,11 @@ private:
     buffered_bytes_lease response_reservation_;
     std::string client_address_;
     std::optional<connected_clients::address_key> client_key_;
-    std::shared_ptr<const compiled_config> active_config_;
-    std::shared_ptr<const route_patterns> active_patterns_;
+    std::shared_ptr<const worker_execution_view> active_execution_;
     const v2::Website* website_{};
     std::optional<evaluated_route_policy> effective_route_;
     const evaluated_route_policy* route_{};
-    std::vector<const v2::Origin*> origins_;
-    std::size_t origin_index_{};
+    origin_cursor origins_;
     std::uint64_t origin_attempt_{};
     origin_health_target current_health_;
     std::uint32_t healthy_threshold_{1};

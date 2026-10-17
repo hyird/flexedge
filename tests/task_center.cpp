@@ -210,7 +210,7 @@ service::attempt_trace::trace_kind trace_kind_of(marker_resource_type type) {
 
 // Claims the resource's marker at its current version like a worker, then
 // records one attempt through the production result transition.
-ruvia::task<service::sync_runtime::running_result_transition> run(ruvia::db_handle& db, recorder& worker,
+ruvia::task<service::sync_runtime::task_result> run(ruvia::db_handle& db, recorder& worker,
     marker_resource_type type, std::string_view id, bool ok,
     std::string_view detail = service::sync_runtime::detail_none_json, std::string_view error = "QA 同步失败",
     bool terminal = false) {
@@ -223,15 +223,16 @@ ruvia::task<service::sync_runtime::running_result_transition> run(ruvia::db_hand
     const auto lease = service::sync_runtime::make_running_lease(tenant, marker_id, integer(marker, 1), worker_name,
         std::chrono::steady_clock::now() - std::chrono::milliseconds(20), type, id);
     auto transaction = co_await db.begin_transaction();
-    const auto transition = co_await service::sync_runtime::record_running_result(transaction, lease,
+    service::sync_runtime::running_result_writer writer(transaction, lease);
+    const auto transition = co_await writer.record(
         ok         ? service::sync_runtime::attempt_result::completed()
         : terminal ? service::sync_runtime::attempt_result::failed(error)
                    : service::sync_runtime::attempt_result::retry(error),
         detail);
     service::attempt_trace::recorder trace(trace_kind_of(type), service::sync_runtime::describe(type).work_type_,
         std::chrono::steady_clock::now());
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, worker, lease, transition, trace);
-    require(transition.marker_transitioned_ && transition.event_id_.has_value(), "attempt recorded");
+    co_await writer.commit(worker, trace);
+    require(transition.changed() && transition.event_id().has_value(), "attempt recorded");
     co_return transition;
 }
 
@@ -260,7 +261,7 @@ ruvia::task<void> verify_marker_task(ruvia::db_handle& db, read_context& context
     const auto& failure_sent = worker.sent_.back();
     require(worker.committed_.back() && failure_sent.task_attempts_.size() == 1 &&
                 failure_sent.task_attempts_[0].task_id_ == zone(1) &&
-                failure_sent.task_attempts_[0].notice_.event_id_ == *failed.event_id_ &&
+                failure_sent.task_attempts_[0].notice_.event_id_ == *failed.event_id() &&
                 changes_task(failure_sent, zone(1)),
         "the result notifies task_attempt(zone, event) after its commit");
     const auto retrying = co_await task_of(context, "dns_zone", zone(1));
@@ -300,9 +301,9 @@ ruvia::task<void> verify_marker_task(ruvia::db_handle& db, read_context& context
     const auto history = co_await history_of(context, "dns_zone", zone(1));
     const auto& attempts = history.get<"list">();
     require(attempts.size() == 3, "every attempt of the resource");
-    require(attempts[0].get<"id">().view() == std::to_string(*latest.event_id_) &&
-                attempts[1].get<"id">().view() == std::to_string(*succeeded.event_id_) &&
-                attempts[2].get<"id">().view() == std::to_string(*failed.event_id_),
+    require(attempts[0].get<"id">().view() == std::to_string(*latest.event_id()) &&
+                attempts[1].get<"id">().view() == std::to_string(*succeeded.event_id()) &&
+                attempts[2].get<"id">().view() == std::to_string(*failed.event_id()),
         "newest first, identified by event id");
     require(attempts[0].get<"operation">().view() == "sync" && attempts[0].get<"outcome">().view() == "completed" &&
                 attempts[1].get<"operation">().view() == "sync" && attempts[1].get<"outcome">().view() == "completed" &&

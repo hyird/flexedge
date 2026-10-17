@@ -83,6 +83,7 @@ struct activation_gate final {
     }
     std::pair<ruvia::channel_sender<bool>, ruvia::channel_receiver<bool>> channel_;
     std::chrono::steady_clock::time_point deadline_{};
+    config_activation* activation_{};
     std::atomic<bool> ready_{};
 };
 
@@ -93,12 +94,24 @@ ruvia::task<void> activate_test_config(state_store& store, data_plane& plane, Te
     if (gate) {
         gate->deadline_ = std::chrono::steady_clock::now() + timeout;
     }
-    auto reload = co_await plane.prepare(std::make_shared<const compiled_config>(config.active, config.objects), timeout);
+    auto activation = co_await config_activation::prepare(plane,
+        std::make_shared<const compiled_config>(config.active, config.objects), timeout);
     if (gate) {
+        gate->activation_ = &activation;
         gate->ready_ = true;
         FLEXEDGE_REQUIRE((co_await gate->channel_.second.receive_for(5s)).has_value());
     }
-    co_await activate_staged_config(store, plane, std::move(reload));
+    co_await activation.commit_staged(store);
+}
+
+ruvia::task<void> observe_recovered_state(state_store& store, data_plane& plane) {
+    const auto report = co_await plane.report({});
+    FLEXEDGE_REQUIRE(report.load_.has_value());
+    // This waiter may enter only after worker compensation and durable restoration have
+    // both completed, not merely after workers have acknowledged their rollback.
+    FLEXEDGE_REQUIRE(store.load().contents_.node_spec_.revision() == 3);
+    const auto origins = report.origin_health_->reports();
+    FLEXEDGE_REQUIRE(origins.size() == 1 && origins.front().origin_id_ == "origin-1");
 }
 
 class fixture final {
@@ -144,6 +157,51 @@ public:
     loop_shutdown shutdown_;
 };
 
+ruvia::task<void> reject_reentrant_decisions(config_activation& activation, state_store& store) {
+    bool ordinary_rejected{};
+    try {
+        co_await activation.commit();
+    } catch (const std::logic_error& error) {
+        ordinary_rejected = std::string_view(error.what()) ==
+                            "configuration activation decision is already in progress";
+    }
+    FLEXEDGE_REQUIRE(ordinary_rejected);
+    bool staged_rejected{};
+    try {
+        co_await activation.commit_staged(store);
+    } catch (const std::logic_error& error) {
+        staged_rejected = std::string_view(error.what()) ==
+                          "configuration activation decision is already in progress";
+    }
+    FLEXEDGE_REQUIRE(staged_rejected);
+    FLEXEDGE_REQUIRE(store.load().contents_.node_spec_.revision() == 4);
+}
+
+void verify_reentrant_decision() {
+    fixture test;
+    const auto candidate = test.candidate();
+    activation_gate gate(test.control_.loop(0));
+    auto applying = test.control_.loop(0).start(activate_test_config(test.store_, test.plane_, candidate, 3s, &gate));
+    gate.wait_prepared();
+    worker_barrier blocked(test.workers_.loop(1), std::chrono::steady_clock::now() + 5s);
+    gate.proceed();
+    // The first decision has durably switched to revision 4 and is suspended awaiting
+    // the blocked worker. A reentrant decision must neither replace disk state nor vote.
+    FLEXEDGE_REQUIRE(flexedge::testing::waitUntil([&] {
+        return test.store_.load().contents_.node_spec_.revision() == 4;
+    }, 1s));
+    auto replacement = candidate;
+    replacement.setGeneration(5);
+    replacement.finalize();
+    test.store_.stage(replacement.active, replacement.objects);
+    test.control_.loop(0).start(reject_reentrant_decisions(*gate.activation_, test.store_)).get();
+    blocked.release();
+    applying.get();
+    FLEXEDGE_REQUIRE(test.runtime_.applied_node_spec_revision() == 4);
+    FLEXEDGE_REQUIRE(test.store_.load().contents_.node_spec_.revision() == 4);
+    FLEXEDGE_REQUIRE(test.control_.loop(0).start(test.plane_.report({})).get().load_.has_value());
+}
+
 void verify_activation_timeout() {
     fixture test;
     activation_gate gate(test.control_.loop(0));
@@ -151,6 +209,7 @@ void verify_activation_timeout() {
     gate.wait_prepared();
     worker_barrier blocked(test.workers_.loop(1), gate.deadline_ + 200ms);
     gate.proceed();
+    auto observing = test.control_.loop(0).start(observe_recovered_state(test.store_, test.plane_));
     bool timed_out{};
     try {
         applying.get();
@@ -161,6 +220,7 @@ void verify_activation_timeout() {
     }
     FLEXEDGE_REQUIRE(timed_out);
     test.require_old_state();
+    observing.get();
     // The delayed activate and its late reply cannot resurrect the aborted transaction.
     test.control_.loop(0).start(activate_test_config(test.store_, test.plane_, test.candidate())).get();
     FLEXEDGE_REQUIRE(test.runtime_.applied_node_spec_revision() == 4);
@@ -237,8 +297,10 @@ void verify_rollback_timeout() {
 }  // namespace
 
 int main() {
-    const char* scenario = "activation timeout";
+    const char* scenario = "reentrant activation decision";
     try {
+        verify_reentrant_decision();
+        scenario = "activation timeout";
         verify_activation_timeout();
         scenario = "shutdown during activation";
         verify_shutdown_during_activation();

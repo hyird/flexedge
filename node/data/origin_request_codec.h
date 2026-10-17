@@ -6,11 +6,11 @@
 #include <ruvia/http/http_client.h>
 #include <ruvia/http/http_header.h>
 
-#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "common/route_policy.h"
@@ -20,15 +20,29 @@
 
 namespace flexedge::node {
 
-// `target_` is the request target after route rewriting.
-struct prepared_origin_request final {
-    std::string bytes_;
-    std::string target_;
-    std::optional<ruvia::prepared_http1_client_request> prepared_{};
+// `target_` borrows the request buffer or evaluated route through response handling.
+// Wire bytes are owned. The writer result is private and retained only as the
+// public Ruvia factory for independent response facts on each origin retry.
+class prepared_origin_request final {
+public:
+    // Call only after serializing the writer's head/content views into `bytes`.
+    prepared_origin_request(std::string bytes, std::string_view target,
+        ruvia::prepared_http1_client_request prepared)
+        : bytes_(std::move(bytes)),
+          target_(target),
+          prepared_(std::move(prepared)) {}
 
     [[nodiscard]] ruvia::http1_client_exchange_state make_exchange_state() const {
-        return prepared_->exchange_state();
+        return prepared_.exchange_state();
     }
+
+    std::string bytes_;
+    std::string_view target_;
+
+private:
+    // head()/content_plan() views expire at serialization; never read them here.
+    // Ruvia's public exchange_state() factory reads only its owned protocol facts.
+    ruvia::prepared_http1_client_request prepared_;
 };
 
 struct origin_request_view final {
@@ -75,9 +89,11 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
         website.origin_host_header().empty() || website.origin_host_header() == "$host"
             ? flexedge::route_policy::hostname(incoming_host)
             : website.origin_host_header();
-    std::vector<std::pair<std::string, std::string>> owned_headers;
-    owned_headers.reserve(incoming.headers_.size() + 2 +
-                          (route == nullptr ? 0 : route->request_headers().size()));
+    // Request and compiled header buffers stay alive until the writer has serialized
+    // the head; forwarding and mutations do not need owning string copies.
+    std::vector<std::pair<std::string_view, std::string_view>> forwarded_headers;
+    forwarded_headers.reserve(incoming.headers_.size() + 2 +
+                              (route == nullptr ? 0 : route->request_headers().size()));
     for (const auto& header : incoming.headers_) {
         const auto upgrade_header =
             upgrade_requested && (flexedge::route_policy::ascii_equal(header.name(), "Connection") ||
@@ -88,28 +104,28 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
         if ((upgrade_header || !request_hop_by_hop_header(header.name())) && !encoding_header &&
             !(website.pass_client_ip() &&
                 flexedge::route_policy::ascii_equal(header.name(), "X-Forwarded-For"))) {
-            owned_headers.emplace_back(header.name(), header.value());
+            forwarded_headers.emplace_back(header.name(), header.value());
         }
     }
     if (force_identity_encoding) {
-        owned_headers.emplace_back("Accept-Encoding", "identity");
+        forwarded_headers.emplace_back("Accept-Encoding", "identity");
     }
     if (website.pass_client_ip()) {
-        owned_headers.emplace_back("X-Forwarded-For", client_address);
-        owned_headers.emplace_back("X-Forwarded-Proto", secure ? "https" : "http");
+        forwarded_headers.emplace_back("X-Forwarded-For", client_address);
+        forwarded_headers.emplace_back("X-Forwarded-Proto", secure ? "https" : "http");
     }
     if (route != nullptr) {
-        apply_route_headers(owned_headers, route->request_headers());
+        apply_route_headers(forwarded_headers, route->request_headers());
     }
     std::vector<ruvia::http_header_view> headers;
-    headers.reserve(owned_headers.size());
-    for (const auto& header : owned_headers) {
+    headers.reserve(forwarded_headers.size());
+    for (const auto& header : forwarded_headers) {
         headers.emplace_back(header.first, header.second);
     }
 
     ruvia::http_client_request_view request;
     request.method_ = incoming.method_;
-    auto target = route ? route->rewritten_target() : std::string(incoming.target_);
+    const auto target = route ? route->rewritten_target() : incoming.target_;
     if (target.empty()) {
         return std::nullopt;
     }
@@ -124,7 +140,7 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
         .close_policy_ = close_after_response ? ruvia::http1_close_policy::close_after_response
                                               : ruvia::http1_close_policy::allow_reuse};
     std::vector<char> head(16384);
-    auto finish = [&target](auto& prepared) -> std::optional<prepared_origin_request> {
+    auto finish = [target](auto& prepared) -> std::optional<prepared_origin_request> {
         if (!prepared.prepared()) {
             return std::nullopt;
         }
@@ -132,11 +148,8 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
         if (const auto* content = prepared.prepared()->content_plan().immediate()) {
             bytes.append(content->bytes());
         }
-        return prepared_origin_request{
-            .bytes_ = std::move(bytes),
-            .target_ = std::move(target),
-            .prepared_ = std::move(*prepared.prepared()),
-        };
+        return prepared_origin_request(
+            std::move(bytes), target, std::move(*prepared.prepared()));
     };
     auto prepared = ruvia::http1_client_request_writer().prepare(origin, request, head, policy);
     if (const auto* small = prepared.buffer_too_small()) {

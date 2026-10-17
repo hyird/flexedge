@@ -31,13 +31,13 @@ origin_health_key_set keys_of(origin_health_key_view key) {
 
 std::uint64_t id_of(const origin_health_state& state, origin_health_key_view key) {
     const auto snapshot = state.snapshot();
-    const auto* origin = snapshot->find(key.website_id_, key.origin_id_);
+    const auto* origin = snapshot->find(key);
     REQUIRE(origin != nullptr);
     return origin->id_;
 }
 
 bool healthy(const origin_health_state& state, origin_health_key_view key) {
-    return state.snapshot()->healthy(key.website_id_, key.origin_id_);
+    return state.snapshot()->healthy(key);
 }
 
 }  // namespace
@@ -46,7 +46,7 @@ int main() {
     origin_health_state health_state;
     {
         auto next = health_state.prepare(keys_of(origin_key), {});
-        REQUIRE(health_state.snapshot()->find("website", "origin") == nullptr);
+        REQUIRE(health_state.snapshot()->find(origin_key) == nullptr);
         health_state.activate(std::move(next));
     }
     const auto id = id_of(health_state, origin_key);
@@ -84,7 +84,7 @@ int main() {
     // A retired origin ignores late outcomes and probe results and is not probed.
     const auto retired_probe = health_state.probe_target(origin_key);
     health_state.activate(health_state.prepare({}, {}));
-    REQUIRE(health_state.snapshot()->find("website", "origin") == nullptr);
+    REQUIRE(health_state.snapshot()->find(origin_key) == nullptr);
     REQUIRE(healthy(health_state, origin_key));
     REQUIRE(!health_state.record(origin_key, id, false, 1));
     auto late_probe = retired_probe;
@@ -109,7 +109,7 @@ int main() {
     // Snapshots are immutable: later changes do not alter one already taken.
     const auto before_probe = health_state.snapshot();
     health_state.probe_target(origin_key).record_probe(false, 1, 42, "timeout");
-    REQUIRE(before_probe->healthy("website", "origin"));
+    REQUIRE(before_probe->healthy(origin_key));
     const auto health_reports = health_state.snapshot()->reports();
     REQUIRE(health_reports.size() == 1);
     REQUIRE(health_reports.front().website_id_ == "website");

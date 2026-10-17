@@ -46,14 +46,15 @@ struct certificate_work final {
     std::string zone_domain_;
     std::int64_t dns_minimum_record_ttl_;
     // Progress a previous attempt of this issuance revision left to resume.
-    std::optional<issuance_state> progress_;
+    std::optional<issuance_progress> progress_;
 };
 
 // Read after locking the zone: its result writer locks the same row before
 // transitioning the DNS marker and resuming waiters. A later park therefore
 // cannot miss an already committed dependency result.
 inline ruvia::task<challenge_dns_sync> load_challenge_dns(ruvia::db_transaction& transaction,
-    const certificate_task& task, const certificate_work& work, std::pmr::memory_resource* resource) {
+    const certificate_task& task, const certificate_work& work, const validation_progress& progress,
+    std::pmr::memory_resource* resource) {
     ruvia::db_query expressions(resource);
     const auto equal = [&](ruvia::db_expression left, ruvia::db_expression right) {
         return expressions.binary(left, ruvia::db_binary_operator::equal, right);
@@ -103,7 +104,7 @@ inline ruvia::task<challenge_dns_sync> load_challenge_dns(ruvia::db_transaction&
             return value.id_ && *value.id_ == challenge.id_;
         });
         if (state == runtime->record_states_.end() || state->sync_status_ != "synced" ||
-            state->synced_revision_.value_or(0) < work.progress_->dns_revision_) {
+            state->synced_revision_.value_or(0) < progress.dns_revision()) {
             synced = false;
         }
     }
@@ -112,7 +113,7 @@ inline ruvia::task<challenge_dns_sync> load_challenge_dns(ruvia::db_transaction&
         .version_ = row->is_null<"version">() ? 0 : row->get<"version">(),
         .done_ = !row->is_null<"is_done">() && row->get<"is_done">(),
         .ok_ = !row->is_null<"is_ok">() && row->get<"is_ok">(),
-        .challenge_records_synced_ = synced && matched != 0 && matched == work.progress_->authorizations_.size()};
+        .challenge_records_synced_ = synced && matched != 0 && matched == progress.authorizations().size()};
 }
 
 inline ruvia::task<certificate_work> load_work(service::background::task_context& context,
@@ -203,7 +204,7 @@ inline ruvia::task<certificate_work> load_work(service::background::task_context
         .zone_domain_ = std::string(row[10].value().value_or("")),
         .dns_minimum_record_ttl_ =
             service::dns::dns_provider_driver(row[11].value().value_or("")).minimum_record_ttl(),
-        .progress_ = parse_issuance_state(row[13].value().value_or(""), task.version_, context.pool()),
+        .progress_ = parse_issuance_progress(row[13].value().value_or(""), task.version_, context.pool()),
     };
 }
 

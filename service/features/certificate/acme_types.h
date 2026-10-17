@@ -1,6 +1,8 @@
 #pragma once
 
+#include <exception>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -48,6 +50,37 @@ public:
     explicit acme_pending(std::string_view message)
         : acme_error(message, false) {}
 };
+
+enum class failure_disposition {
+    resume_order,
+    restart_order,
+    terminal,
+};
+
+struct issuance_failure final {
+    std::string message_;
+    failure_disposition disposition_;
+};
+
+// One decision controls task completion, durable progress and DNS cleanup.
+[[nodiscard]] inline issuance_failure classify_issuance_failure(const std::exception_ptr& exception) {
+    try {
+        std::rethrow_exception(exception);
+    } catch (const acme_pending& error) {
+        return {.message_ = error.what(), .disposition_ = failure_disposition::resume_order};
+    } catch (const service::outbound_http::transport_error& error) {
+        return {.message_ = error.what(), .disposition_ = failure_disposition::resume_order};
+    } catch (const service::outbound_http::attempt_error& error) {
+        return {.message_ = error.what(),
+            .disposition_ = error.permanent() ? failure_disposition::terminal : failure_disposition::restart_order};
+    } catch (const std::invalid_argument& error) {
+        return {.message_ = error.what(), .disposition_ = failure_disposition::terminal};
+    } catch (const std::exception& error) {
+        return {.message_ = error.what(), .disposition_ = failure_disposition::restart_order};
+    } catch (...) {
+        return {.message_ = "证书任务发生未知错误", .disposition_ = failure_disposition::restart_order};
+    }
+}
 
 struct eab_credentials final {
     std::string key_id_;

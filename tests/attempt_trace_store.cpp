@@ -147,15 +147,16 @@ ruvia::task<std::optional<std::int64_t>> record_attempt(ruvia::db_handle& db, st
     const auto lease = service::sync_runtime::make_running_lease(tenant, marker, 1, worker, started,
         service::sync_runtime::marker_resource_type::dns_zone, zone);
     auto transaction = co_await db.begin_transaction();
-    const auto transition = co_await service::sync_runtime::record_running_result(transaction, lease, service::sync_runtime::attempt_result::retry(error),
+    service::sync_runtime::running_result_writer writer(transaction, lease);
+    const auto transition = co_await writer.record(service::sync_runtime::attempt_result::retry(error),
         R"({"kind":"dns_sync","truncated":false})");
     test_support::recorded_notifications worker{.handle_ = db};
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, worker, lease, transition, trace);
+    co_await writer.commit(worker, trace);
     require(worker.sent_.size() == 1 && worker.committed_[0], "result notified after its commit");
     step.complete();
-    require(transition.marker_transitioned_ && transition.event_recorded_ && transition.event_id_.has_value(),
+    require(transition.kind() == service::sync_runtime::result_kind::recorded && transition.event_id().has_value(),
         "attempt recorded with its id");
-    co_return transition.event_id_;
+    co_return transition.event_id();
 }
 
 ruvia::task<std::int64_t> trace_count(ruvia::db_handle& db) {

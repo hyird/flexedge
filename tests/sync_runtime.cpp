@@ -1,6 +1,7 @@
 #include <ruvia/core/task_scope.h>
 #include <ruvia/web/app.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -20,6 +21,7 @@
 #include "service/features/sync_runtime/worker.h"
 #include "service/features/website_dns/worker.h"
 #include "support/postgres_test.h"
+#include "support/recorded_notifications.h"
 
 
 #ifdef _MSC_VER
@@ -121,12 +123,13 @@ sync::running_marker_lease lease_of(task_context& context, const sync::claimed_m
         marker.claimed_at_, sync::marker_resource_type::dns_zone, marker.resource_id_);
 }
 
-ruvia::task<sync::running_result_transition> finish(task_context& context, const sync::running_marker_lease& lease,
+ruvia::task<sync::task_result> finish(task_context& context, const sync::running_marker_lease& lease,
     const sync::attempt_result& result) {
     auto transaction = co_await context.db().begin_transaction();
-    auto transition = co_await sync::record_running_result(transaction, lease, result, sync::detail_none_json);
+    sync::running_result_writer writer(transaction, lease);
+    auto transition = co_await writer.record(result, sync::detail_none_json);
     service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::dns_sync, "web", lease.started_);
-    co_await sync::commit_and_publish_result_event(transaction, context, lease, transition, trace);
+    co_await writer.commit(context, trace);
     co_return transition;
 }
 
@@ -154,12 +157,12 @@ ruvia::task<void> verify_terminal_failures(task_context& context) {
         const auto lease = sync::make_running_lease(marker->tenant_id_, marker->id_, marker->version_, context.lease_owner(),
             marker->claimed_at_, subject_value.type_, subject_value.id_);
         const auto transition = co_await finish(context, lease, sync::attempt_result::failed("invalid credentials"));
-        require(transition.marker_transitioned_ && transition.event_id_.has_value(), "terminal result and event commit together");
+        require(transition.kind() == sync::result_kind::recorded && transition.event_id().has_value(), "terminal result and event commit together");
         const auto rows = co_await db.query(
             "SELECT task.is_done AND NOT task.is_ok, task.processed_version = task.version, task.count_fails, "
             "event.outcome = 'failed', task.lease_owner IS NULL AND task.wait_task_id IS NULL "
             "FROM sys_sync_task task JOIN sys_sync_event event ON event.task_id = task.id WHERE event.id = $1",
-            *transition.event_id_);
+            *transition.event_id());
         require(rows.front()[0].as<bool>().value() && rows.front()[1].as<bool>().value() &&
                     rows.front()[2].as<int>().value() == 1 && rows.front()[3].as<bool>().value() && rows.front()[4].as<bool>().value(),
             "terminal failure records its outcome and releases its lease and dependency");
@@ -187,22 +190,29 @@ ruvia::task<void> verify_retry_and_fences(task_context& first, task_context& sec
     const auto retry = co_await db.query(
         "SELECT NOT task.is_done AND NOT task.is_ok, task.next_attempt_at > NOW() + INTERVAL '10 seconds', "
         "event.outcome = 'failed' FROM sys_sync_task task JOIN sys_sync_event event ON event.task_id = task.id WHERE event.id = $1",
-        *retried.event_id_);
+        *retried.event_id());
     require(retry.front()[0].as<bool>().value() && retry.front()[1].as<bool>().value() && retry.front()[2].as<bool>().value(), "retryable failure schedules the same task and records the failed outcome");
     require(!(co_await sync::claim_marker(second, sync::marker_resource_type::dns_zone)), "retry cannot run before it is due");
     (void)co_await db.execute("UPDATE sys_sync_task SET next_attempt_at = NOW() - INTERVAL '1 second' WHERE id = $1", id);
     const auto reclaimed = co_await sync::claim_marker(second, sync::marker_resource_type::dns_zone);
     require(reclaimed.has_value() && reclaimed->id_ == id, "another invocation claims a due retry with its own lease");
     const auto before = co_await event_count(db);
-    require(!(co_await finish(first, original_lease, sync::attempt_result::failed("late owner"))).marker_transitioned_, "a former owner cannot finish the new lease");
+    require((co_await finish(first, original_lease, sync::attempt_result::failed("late owner"))).kind() == sync::result_kind::stale, "a former owner cannot finish the new lease");
     const auto current_lease = lease_of(second, *reclaimed);
     auto wrong_version = current_lease;
     wrong_version.marker_.version_ += 1;
-    require(!(co_await finish(second, wrong_version, sync::attempt_result::completed())).marker_transitioned_, "another version cannot finish the task");
+    require((co_await finish(second, wrong_version, sync::attempt_result::completed())).kind() == sync::result_kind::stale, "another version cannot finish the task");
     (void)co_await db.execute("UPDATE sys_sync_task SET lease_until = NOW() - INTERVAL '1 second' WHERE id = $1", id);
     require(!co_await sync::renew_running_lease(db, current_lease), "expired leases cannot be resurrected by renewal");
-    require(!(co_await finish(second, current_lease, sync::attempt_result::completed())).marker_transitioned_, "an expired lease cannot commit a result");
+    require((co_await finish(second, current_lease, sync::attempt_result::completed())).kind() == sync::result_kind::stale, "an expired lease cannot commit a result");
     require(co_await event_count(db) == before, "rejected owners and versions create no history");
+    {
+        auto locked = co_await db.begin_transaction();
+        (void)co_await locked.query("SELECT id FROM sys_sync_task WHERE id = $1 FOR UPDATE", id);
+        co_await sync::recover_stale_running(first, sync::marker_resource_type::dns_zone);
+        require(co_await event_count(db) == before, "recovery skips an expired lease locked by an unfinished domain transaction");
+        co_await locked.rollback();
+    }
     co_await sync::recover_stale_running(first, sync::marker_resource_type::dns_zone);
     require(co_await event_count(db) == before + 1, "lease recovery records its failed attempt exactly once");
     const auto timed_out = co_await db.query(
@@ -219,7 +229,7 @@ ruvia::task<void> verify_retry_and_fences(task_context& first, task_context& sec
     const auto recovered = co_await sync::claim_marker(first, sync::marker_resource_type::dns_zone);
     require(recovered.has_value(), "the expired lease is recovered by the ordinary claim path");
     const auto completed = co_await finish(first, lease_of(first, *recovered), sync::attempt_result::completed());
-    require(completed.marker_transitioned_, "the recovery owner completes the task");
+    require(completed.kind() == sync::result_kind::recorded, "the recovery owner completes the task");
     const auto rows = co_await db.query("SELECT is_done AND is_ok, processed_version = version, count_fails = 0 FROM sys_sync_task WHERE id = $1", id);
     require(rows.front()[0].as<bool>().value() && rows.front()[1].as<bool>().value() && rows.front()[2].as<bool>().value(), "success finishes the version and clears retry state");
 }
@@ -233,13 +243,13 @@ ruvia::task<void> verify_waiting(task_context& context) {
     const auto waiter_lease = sync::make_running_lease(waiter->tenant_id_, waiter->id_, waiter->version_, context.lease_owner(),
         waiter->claimed_at_, sync::marker_resource_type::website, website);
     const auto parked = co_await finish(context, waiter_lease, sync::attempt_result::waiting(awaited_id, 1));
-    const auto event = co_await db.query("SELECT outcome FROM sys_sync_event WHERE id = $1", *parked.event_id_);
+    const auto event = co_await db.query("SELECT outcome FROM sys_sync_event WHERE id = $1", *parked.event_id());
     require(event.front()[0].value().value() == "progressed", "waiting records the execution outcome");
     require(!(co_await sync::claim_marker(context, sync::marker_resource_type::website)), "a parked task cannot be claimed");
     const auto awaited = co_await sync::claim_marker(context, sync::marker_resource_type::dns_zone);
     require(awaited.has_value(), "the dependency can run independently");
     const auto failed = co_await finish(context, lease_of(context, *awaited), sync::attempt_result::failed("dependency permanently failed"));
-    require(failed.resumed_.size() == 1 && failed.resumed_.front().resource_id_ == website, "a terminal dependency releases its waiter in the result transaction");
+    require(failed.kind() == sync::result_kind::recorded, "a terminal dependency records its result");
     const auto resumed = co_await db.query("SELECT wait_task_id IS NULL AND wait_version IS NULL, next_attempt_at > NOW() FROM sys_sync_task WHERE id = $1", waiter->id_);
     require(resumed.front()[0].as<bool>().value() && resumed.front()[1].as<bool>().value(), "resumption preserves the bounded settle delay");
     (void)co_await db.execute("UPDATE sys_sync_task SET next_attempt_at = NOW() - INTERVAL '1 second' WHERE id = $1", waiter->id_);
@@ -260,22 +270,119 @@ ruvia::task<void> verify_rollback(task_context& context) {
     {
         auto transaction = co_await db.begin_transaction();
         (void)co_await transaction.execute("UPDATE sys_dns_zone SET sync_status = 'failed' WHERE id = $1", zone);
-        const auto transition = co_await sync::record_running_result(transaction, lease_of(context, *marker),
+        sync::running_result_writer writer(transaction, lease_of(context, *marker));
+        const auto transition = co_await writer.record(
             sync::attempt_result::failed("rolled back"), sync::detail_none_json);
-        require(transition.event_id_.has_value(), "the uncommitted transaction contains its result event");
-        service::live_resource::notifications::resource_notification notification(tenant);
-        notification.task_attempt(zone, *transition.event_id_);
-        (void)co_await service::live_resource::enqueue_notification(transaction, notification);
+        require(transition.event_id().has_value(), "the uncommitted transaction contains its result event");
         co_await transaction.rollback();
     }
     const auto after = co_await db.query("SELECT NOT is_done, lease_owner = $2, error = '' FROM sys_sync_task WHERE id = $1", id, context.lease_owner());
     require(after.front()[0].as<bool>().value() && after.front()[1].as<bool>().value() && after.front()[2].as<bool>().value(), "rollback restores the task's running lease");
     require(co_await event_count(db) == before, "rollback removes the result event");
     const auto outbox_after = co_await db.query("SELECT COUNT(*) FROM sys_notification_outbox");
-    require(outbox_before.front()[0].as<int>().value() == outbox_after.front()[0].as<int>().value(), "rollback removes the durable notification");
+    require(outbox_before.front()[0].as<int>().value() == outbox_after.front()[0].as<int>().value(), "rollback publishes no durable notification");
     const auto zone_state = co_await db.query("SELECT sync_status FROM sys_dns_zone WHERE id = $1", zone);
     require(zone_state.front()[0].value().value() == "pending", "rollback also restores the domain result");
-    require((co_await finish(context, lease_of(context, *marker), sync::attempt_result::completed())).marker_transitioned_, "the original owner can still finish after rollback");
+    require((co_await finish(context, lease_of(context, *marker), sync::attempt_result::completed())).changed(), "the original owner can still finish after rollback");
+}
+
+ruvia::task<void> verify_quiet_and_removal(task_context& context) {
+    auto db = context.db();
+    const auto awaited_id = co_await enqueue(context, sync::marker_resource_type::dns_zone, zone, sync::marker_operation::sync, 1);
+    (void)co_await enqueue(context, sync::marker_resource_type::website, website, sync::marker_operation::apply, 1);
+    const auto waiter = co_await sync::claim_marker(context, sync::marker_resource_type::website);
+    require(waiter.has_value(), "the removal fixture has a running dependent");
+    const auto waiter_lease = sync::make_running_lease(tenant, waiter->id_, 1, context.lease_owner(),
+        waiter->claimed_at_, sync::marker_resource_type::website, website);
+    // A removal releases even dependents awaiting a version not yet processed.
+    (void)co_await finish(context, waiter_lease, sync::attempt_result::waiting(awaited_id, 2));
+    const auto claimed = co_await sync::claim_marker(context, sync::marker_resource_type::dns_zone);
+    require(claimed.has_value(), "the inspected dependency is claimed");
+    const auto inspected_lease = lease_of(context, *claimed);
+    const auto before = co_await event_count(db);
+    test_support::recorded_notifications notifications{.handle_ = db};
+    const auto schedule = co_await db.query(
+        "SELECT next_attempt_at::text, updated_at::text FROM sys_sync_task WHERE id = $1", awaited_id);
+    {
+        auto transaction = co_await db.begin_transaction();
+        sync::running_result_writer writer(transaction, inspected_lease);
+        (void)co_await transaction.execute("UPDATE sys_dns_zone SET sync_status = 'synced' WHERE id = $1", zone);
+        const auto result = co_await writer.quiet(sync::quiet_action::inspect);
+        require(result.kind() == sync::result_kind::quiet && !result.event_id(), "an unchanged inspection is explicitly quiet");
+        co_await writer.commit(notifications);
+    }
+    const auto inspected = co_await db.query(
+        "SELECT lease_owner IS NULL, NOT is_done, next_attempt_at::text, updated_at::text FROM sys_sync_task WHERE id = $1",
+        awaited_id);
+    require(inspected.front()[0].as<bool>().value() && inspected.front()[1].as<bool>().value() &&
+                inspected.front()[2].value() == schedule.front()[0].value() &&
+                inspected.front()[3].value() == schedule.front()[1].value(),
+        "quiet inspection releases only its lease and preserves the task schedule and state");
+    require(co_await event_count(db) == before && notifications.sent_.empty(), "quiet inspection creates neither history nor a notification");
+    const auto domain = co_await db.query("SELECT sync_status FROM sys_dns_zone WHERE id = $1", zone);
+    require(domain.front()[0].value() == "synced", "the domain transaction still commits its own updates");
+    const auto reclaimed = co_await sync::claim_marker(context, sync::marker_resource_type::dns_zone);
+    require(reclaimed.has_value(), "quiet inspection leaves unfinished work claimable");
+    const auto lease = lease_of(context, *reclaimed);
+    {
+        auto wrong_owner = lease;
+        wrong_owner.owner_ = "not-the-owner";
+        auto transaction = co_await db.begin_transaction();
+        sync::running_result_writer writer(transaction, wrong_owner);
+        require((co_await writer.remove()).kind() == sync::result_kind::stale, "a stale deletion cannot remove a running task");
+        co_await writer.commit(notifications);
+    }
+    {
+        auto transaction = co_await db.begin_transaction();
+        sync::running_result_writer writer(transaction, lease);
+        const auto result = co_await writer.remove();
+        require(result.kind() == sync::result_kind::removed && !result.event_id(), "removal has its own receipt, not a fabricated event");
+        const auto resumed = co_await transaction.query(
+            "SELECT wait_task_id IS NULL AND wait_version IS NULL FROM sys_sync_task WHERE id = $1", waiter->id_);
+        require(resumed.front()[0].as<bool>().value(), "removal releases future-version dependents in the same transaction");
+        co_await transaction.rollback();
+    }
+    const auto rolled_back = co_await db.query(
+        "SELECT wait_task_id = $2 AND wait_version = 2 FROM sys_sync_task WHERE id = $1", waiter->id_, awaited_id);
+    require(rolled_back.front()[0].as<bool>().value(), "rollback restores the dependency wait");
+    const auto restored = co_await db.query("SELECT lease_owner = $2 FROM sys_sync_task WHERE id = $1", awaited_id, context.lease_owner());
+    require(restored.size() == 1 && restored.front()[0].as<bool>().value(), "rollback restores the removed task and its running lease");
+    require(co_await event_count(db) == before && notifications.sent_.empty(), "stale and rolled-back removals publish nothing");
+    {
+        auto transaction = co_await db.begin_transaction();
+        sync::running_result_writer writer(transaction, lease);
+        require((co_await writer.remove()).kind() == sync::result_kind::removed, "the current owner removes the task");
+        co_await writer.commit(notifications);
+    }
+    require((co_await db.query("SELECT id FROM sys_sync_task WHERE id = $1", awaited_id)).empty(), "committed removal deletes the task");
+    const auto resumed = co_await db.query(
+        "SELECT wait_task_id IS NULL AND wait_version IS NULL, next_attempt_at > NOW() FROM sys_sync_task WHERE id = $1", waiter->id_);
+    require(resumed.front()[0].as<bool>().value() && resumed.front()[1].as<bool>().value(), "removal resumes dependents with their settle delay");
+    require(co_await event_count(db) == before && notifications.sent_.size() == 1 &&
+                notifications.committed_.front() && notifications.sent_.front().task_attempts_.empty(),
+        "removal publishes only its committed changes and creates no attempt history");
+    const auto& changed = notifications.sent_.front().changes_;
+    require(std::ranges::any_of(changed, [](const auto& item) {
+                return item.resource_ == service::live_resource::resource::tasks && item.id_ == zone;
+            }) && std::ranges::any_of(changed, [](const auto& item) {
+                return item.resource_ == service::live_resource::resource::tasks && item.id_ == website;
+            }),
+        "the removal notification includes the deleted task and its resumed dependent");
+    (void)co_await db.execute("UPDATE sys_sync_task SET next_attempt_at = NOW() - INTERVAL '1 second' WHERE id = $1", waiter->id_);
+    const auto ready = co_await sync::claim_marker(context, sync::marker_resource_type::website);
+    require(ready.has_value(), "the resumed dependent runs normally");
+    const auto ready_lease = sync::make_running_lease(tenant, ready->id_, 1, context.lease_owner(),
+        ready->claimed_at_, sync::marker_resource_type::website, website);
+    {
+        auto transaction = co_await db.begin_transaction();
+        sync::running_result_writer writer(transaction, ready_lease);
+        require((co_await writer.quiet(sync::quiet_action::complete)).kind() == sync::result_kind::quiet, "obsolete work can complete quietly");
+        co_await writer.commit(notifications);
+    }
+    const auto completed = co_await db.query("SELECT is_done AND is_ok, processed_version = version FROM sys_sync_task WHERE id = $1", ready->id_);
+    require(completed.front()[0].as<bool>().value() && completed.front()[1].as<bool>().value() &&
+                co_await event_count(db) == before && notifications.sent_.size() == 1,
+        "quiet completion finishes the version without history or duplicate notifications");
 }
 
 ruvia::task<bool> wait_for_resource_lock(task_context& context, std::int64_t holder) {
@@ -367,11 +474,10 @@ ruvia::task<void> verify_stale_maintenance_candidates(ruvia::web_worker_context&
             id, context.lease_owner());
         const auto lease = sync::make_running_lease(tenant, id, repair.version_, context.lease_owner(),
             std::chrono::steady_clock::now(), repair.type_, repair.id_);
-        const auto transition = co_await sync::record_running_result(holder, lease, sync::attempt_result::failed("finished during maintenance scan"), sync::detail_none_json);
-        service::live_resource::notifications::resource_notification notification(tenant);
-        notification.task_attempt(repair.id_, *transition.event_id_);
-        (void)co_await service::live_resource::enqueue_notification(holder, notification);
-        co_await holder.commit();
+        sync::running_result_writer writer(holder, lease);
+        (void)co_await writer.record(sync::attempt_result::failed("finished during maintenance scan"), sync::detail_none_json);
+        service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::dns_sync, "web", lease.started_);
+        co_await writer.commit(context, trace);
         if (repair.type_ != sync::marker_resource_type::dns_zone) {
             co_await tasks.join();
         }
@@ -450,6 +556,50 @@ ruvia::task<void> verify_missing_domain_markers(task_context& context) {
     require(retained.front()[0].as<int>().value() == 5, "repeated domain recovery preserves terminal failures");
 }
 
+ruvia::task<void> verify_recovery_skips_locked_batch(task_context& context) {
+    constexpr std::string_view recovery_tenant{"00000000-0000-4000-8000-000000000d01"};
+    auto db = context.db();
+    (void)co_await db.execute(
+        "INSERT INTO sys_sync_task (id, tenant_id, resource_type, dns_zone_id, operation, version, "
+        "lease_owner, lease_until) SELECT md5('locked-recovery-task-' || sequence::text)::uuid, $1, "
+        "'dns_zone', md5('locked-recovery-zone-' || sequence::text)::uuid, 'sync', 1, $2, "
+        "NOW() - make_interval(secs => 100 - sequence) FROM generate_series(1, 33) AS candidate(sequence)",
+        recovery_tenant, context.lease_owner());
+    const auto before = co_await event_count(db);
+    auto locked = co_await db.begin_transaction();
+    const auto held = co_await locked.query(
+        "SELECT id FROM sys_sync_task WHERE tenant_id = $1 ORDER BY lease_until, id LIMIT 32 FOR UPDATE",
+        recovery_tenant);
+    require(held.size() == 32, "the oldest full recovery batch is locked by another transaction");
+    co_await sync::recover_stale_running(context, sync::marker_resource_type::dns_zone);
+    const auto recovered = co_await db.query(
+        "SELECT task.id = md5('locked-recovery-task-33')::uuid, task.lease_owner IS NULL, "
+        "event.outcome = 'failed' FROM sys_sync_task task JOIN sys_sync_event event ON event.task_id = task.id "
+        "WHERE task.tenant_id = $1",
+        recovery_tenant);
+    require(recovered.size() == 1 && recovered.front()[0].as<bool>().value() &&
+                recovered.front()[1].as<bool>().value() && recovered.front()[2].as<bool>().value(),
+        "one recovery round reaches the unlocked expired lease behind the 32 locked candidates");
+    const auto untouched = co_await db.query(
+        "SELECT COUNT(*) FROM sys_sync_task task WHERE tenant_id = $1 AND lease_owner = $2 "
+        "AND lease_until <= NOW() AND count_fails = 0 AND NOT EXISTS "
+        "(SELECT 1 FROM sys_sync_event event WHERE event.task_id = task.id)",
+        recovery_tenant, context.lease_owner());
+    require(untouched.front()[0].as<int>().value() == 32 && co_await event_count(db) == before + 1,
+        "locked candidates retain their leases and create no recovery history");
+    co_await locked.rollback();
+    co_await sync::recover_stale_running(context, sync::marker_resource_type::dns_zone);
+    const auto resumed = co_await db.query(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE lease_owner IS NULL AND count_fails = 1) "
+        "FROM sys_sync_task WHERE tenant_id = $1",
+        recovery_tenant);
+    require(resumed.front()[0].as<int>().value() == 33 && resumed.front()[1].as<int>().value() == 33 &&
+                co_await event_count(db) == before + 33,
+        "the released batch is recovered normally without duplicating the already recovered lease");
+    co_await sync::recover_stale_running(context, sync::marker_resource_type::dns_zone);
+    require(co_await event_count(db) == before + 33, "later scans do not duplicate either recovery batch");
+}
+
 ruvia::task<void> verify(ruvia::web_worker_context& web) {
     task_context first(web);
     task_context second(web);
@@ -458,8 +608,10 @@ ruvia::task<void> verify(ruvia::web_worker_context& web) {
     co_await verify_retry_and_fences(first, second);
     co_await verify_waiting(first);
     co_await verify_rollback(first);
+    co_await verify_quiet_and_removal(first);
     co_await verify_stale_maintenance_candidates(web, first);
     co_await verify_missing_domain_markers(first);
+    co_await verify_recovery_skips_locked_batch(first);
 }
 
 }  // namespace
@@ -504,7 +656,7 @@ int main() {
             std::rethrow_exception(failure);
         }
         require(completed, "the real Web Worker completes its owned operations before shutdown");
-        std::cout << "Sync outcomes: terminal failures, bounded retries, domain recovery eligibility and operations, re-initiation, leases, dependencies, atomic history/notification rollback and four controlled maintenance races passed\n";
+        std::cout << "Sync outcomes: terminal failures, bounded retries, domain recovery eligibility and operations, re-initiation, leases, dependencies, quiet inspection, atomic removal/history/notification rollback and four controlled maintenance races passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

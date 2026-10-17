@@ -23,6 +23,8 @@
 
 namespace flexedge::node {
 
+class config_activation;
+
 struct data_plane_report final {
     std::optional<data_plane_load> load_{};
     std::shared_ptr<const origin_health_snapshot> origin_health_{};
@@ -111,11 +113,11 @@ private:
     std::vector<waiter*> waiters_;
 };
 
-// Control-loop transaction. Workers retain prepared mutable resources locally; this
-// object only owns immutable configuration and transport endpoints for rollback.
-class prepared_data_plane_reload final {
+// A coordinator-owned control-loop lease. Its destructor only discards an abandoned
+// prepare; commit and compensation are explicit coordinator decisions.
+class data_plane_reload final {
 public:
-    prepared_data_plane_reload(prepared_data_plane_reload&& other) noexcept
+    data_plane_reload(data_plane_reload&& other) noexcept
         : requests_(std::move(other.requests_)),
           config_(std::move(other.config_)),
           sequence_(other.sequence_),
@@ -125,11 +127,11 @@ public:
           timeout_(other.timeout_),
           operation_(std::move(other.operation_)),
           armed_(std::exchange(other.armed_, false)) {}
-    prepared_data_plane_reload& operator=(prepared_data_plane_reload&&) = delete;
-    prepared_data_plane_reload(const prepared_data_plane_reload&) = delete;
-    prepared_data_plane_reload& operator=(const prepared_data_plane_reload&) = delete;
+    data_plane_reload& operator=(data_plane_reload&&) = delete;
+    data_plane_reload(const data_plane_reload&) = delete;
+    data_plane_reload& operator=(const data_plane_reload&) = delete;
 
-    ~prepared_data_plane_reload() {
+    ~data_plane_reload() {
         if (armed_) {
             for (const auto& sender : requests_) {
                 try {
@@ -151,7 +153,8 @@ public:
 
 private:
     friend class data_plane;
-    prepared_data_plane_reload(std::vector<ruvia::channel_sender<owned_data_worker_request>> requests,
+    friend class config_activation;
+    data_plane_reload(std::vector<ruvia::channel_sender<owned_data_worker_request>> requests,
         std::shared_ptr<const compiled_config> config, std::uint64_t sequence,
         std::chrono::steady_clock::time_point deadline, std::chrono::steady_clock::duration timeout,
         data_plane_operations::lease operation)
@@ -232,8 +235,11 @@ public:
         }
     }
 
-    [[nodiscard]] ruvia::task<prepared_data_plane_reload> prepare(std::shared_ptr<const compiled_config> config,
-        std::chrono::steady_clock::duration timeout = std::chrono::seconds(10)) {
+private:
+    friend class config_activation;
+
+    [[nodiscard]] ruvia::task<data_plane_reload> begin_reload(std::shared_ptr<const compiled_config> config,
+        std::chrono::steady_clock::duration timeout) {
         require_owner();
         if (!config) {
             throw std::invalid_argument("data plane config cannot be empty");
@@ -246,55 +252,42 @@ public:
         require_running();
         runtime_.validate_next(*config);
         start();
-        prepared_data_plane_reload reload(requests_, std::move(config), ++sequence_, deadline, timeout, std::move(operation));
-        std::exception_ptr failure;
-        try {
-            send({.operation_ = data_worker_operation::prepare, .sequence_ = reload.sequence_, .config_ = reload.config_, .deadline_ = deadline});
-            const auto replies = co_await receive(data_worker_operation::prepare, reload.sequence_, deadline);
-            for (const auto& reply : replies) {
-                if (!reply->ok_) {
-                    throw std::runtime_error(reply->error_);
-                }
-                reload.added_ += reply->added_listeners_;
-                reload.retired_ += reply->retired_listeners_;
-            }
-        } catch (...) {
-            failure = std::current_exception();
-        }
-        if (failure) {
-            co_await rollback(reload);
-            std::rethrow_exception(failure);
-        }
-        co_return reload;
+        co_return data_plane_reload(requests_, std::move(config), ++sequence_, deadline, timeout, std::move(operation));
     }
 
-    ruvia::task<void> activate(prepared_data_plane_reload& reload) {
+    ruvia::task<void> prepare_workers(data_plane_reload& reload) {
+        send({.operation_ = data_worker_operation::prepare, .sequence_ = reload.sequence_, .config_ = reload.config_, .deadline_ = reload.deadline_});
+        const auto replies = co_await receive(data_worker_operation::prepare, reload.sequence_, reload.deadline_);
+        for (const auto& reply : replies) {
+            if (!reply->ok_) {
+                throw std::runtime_error(reply->error_);
+            }
+            reload.added_ += reply->added_listeners_;
+            reload.retired_ += reply->retired_listeners_;
+        }
+    }
+
+    ruvia::task<void> activate_workers(data_plane_reload& reload) {
         require_owner();
-        std::exception_ptr failure;
-        try {
-            require_running();
-            send({.operation_ = data_worker_operation::activate, .sequence_ = reload.sequence_, .deadline_ = reload.deadline_});
-            const auto replies = co_await receive(data_worker_operation::activate, reload.sequence_, reload.deadline_);
-            for (const auto& reply : replies) {
-                if (!reply->ok_) {
-                    throw std::runtime_error(reply->error_);
-                }
+        require_running();
+        send({.operation_ = data_worker_operation::activate, .sequence_ = reload.sequence_, .deadline_ = reload.deadline_});
+        const auto replies = co_await receive(data_worker_operation::activate, reload.sequence_, reload.deadline_);
+        for (const auto& reply : replies) {
+            if (!reply->ok_) {
+                throw std::runtime_error(reply->error_);
             }
-            require_running();
-            if (std::chrono::steady_clock::now() >= reload.deadline_) {
-                throw std::runtime_error("data plane activation deadline expired");
-            }
-        } catch (...) {
-            failure = std::current_exception();
         }
-        if (failure) {
-            co_await rollback(reload);
-            std::rethrow_exception(failure);
+        require_running();
+        if (std::chrono::steady_clock::now() >= reload.deadline_) {
+            throw std::runtime_error("data plane activation deadline expired");
         }
+    }
+
+    void commit_reload(data_plane_reload& reload) noexcept {
         // Commit linearizes here on the control loop. Admission stops after the final
         // running check cannot revoke a vote on another loop.
         committed_sequence_ = reload.sequence_;
-        runtime_.publish(std::move(reload.config_), {});
+        runtime_.publish_source(std::move(reload.config_));
         last_health_ = empty_health_;
         reload.armed_ = false;
         // All workers committed. Losing finalization only retains old resources until the
@@ -308,6 +301,7 @@ public:
         }
     }
 
+public:
     [[nodiscard]] ruvia::task<data_plane_report> report(ruvia::stop_token stop) {
         require_owner();
         start();
@@ -370,8 +364,9 @@ public:
         }
     }
 
-    // Keep the caller's transaction lease until disk restoration has also finished.
-    ruvia::task<void> rollback(prepared_data_plane_reload& reload) {
+private:
+    // Keep the coordinator's lease until durable restoration has also finished.
+    ruvia::task<void> rollback_workers(data_plane_reload& reload) {
         require_owner();
         if (!reload.armed_) {
             co_return;

@@ -7,6 +7,7 @@
 #include <asio/streambuf.hpp>
 
 #include "node/data/data_plane.h"
+#include "node/runtime/config_activation.h"
 #include "node/runtime/loop_shutdown.h"
 #include "tests/support/config_fixture.h"
 #include "tests/support/http_client.h"
@@ -64,8 +65,8 @@ private:
     std::atomic<unsigned> hits_{};
 };
 ruvia::task<void> activate(data_plane& plane, std::shared_ptr<const compiled_config> config) {
-    auto pending = co_await plane.prepare(std::move(config));
-    co_await plane.activate(pending);
+    auto pending = co_await config_activation::prepare(plane, std::move(config));
+    co_await pending.commit();
 }
 ruvia::task<std::vector<std::string>> cache_log_states(ruvia::channel_receiver<owned_log_batch>& receiver) {
     std::vector<std::string> states;

@@ -16,6 +16,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <asio/post.hpp>
@@ -117,9 +118,9 @@ public:
               owned_listeners_.clear();
               co_await health_->stop_and_wait();
               origin_connections_.close();
-              committed_.reset();
+              reload_.reset();
               tls_contexts_.publish({});
-              runtime_.publish({}, {});
+              runtime_.publish_execution({});
               // Retirement acknowledges that this worker can no longer serve a tentative
               // configuration. Survivors still have to acknowledge rollback themselves.
               try {
@@ -162,37 +163,37 @@ public:
 private:
     using listener_map = std::unordered_map<std::string, std::shared_ptr<edge_listener>>;
 
-    struct prepared_reload final {
-        ~prepared_reload() {
-            if (!activated_) {
-                for (const auto& listener : additions_) {
-                    listener->request_stop();
+    struct retained_resources final {};
+
+    struct replacement_resources final {
+        std::shared_ptr<tls_context_set> tls_contexts_;
+        origin_health_state::prepared health_;
+        listener_map listeners_{};
+        std::vector<std::shared_ptr<edge_listener>> additions_{};
+        std::vector<std::shared_ptr<edge_listener>> retired_{};
+    };
+
+    // Before the vote these values are the candidate; afterwards the same slots own the
+    // displaced runtime. A reconnect has no replacement resources and cannot reset TLS
+    // state, health streaks or in-flight probes.
+    struct reload_participant final {
+        enum class phase { prepared,
+            tentative };
+
+        ~reload_participant() {
+            if (phase_ == phase::prepared) {
+                if (const auto* replacement = std::get_if<replacement_resources>(&resources_)) {
+                    for (const auto& listener : replacement->additions_) {
+                        listener->request_stop();
+                    }
                 }
             }
         }
 
         std::uint64_t sequence_{};
-        std::shared_ptr<const compiled_config> config_{};
-        std::shared_ptr<const route_patterns> patterns_{};
-        std::shared_ptr<tls_context_set> tls_contexts_{};
-        std::optional<origin_health_state::prepared> health_{};
-        listener_map listeners_{};
-        std::vector<std::shared_ptr<edge_listener>> additions_{};
-        std::vector<std::shared_ptr<edge_listener>> retired_{};
-        bool activated_{};
-        bool unchanged_{};
-    };
-
-    struct committed_reload final {
-        std::uint64_t sequence_{};
-        std::shared_ptr<const compiled_config> previous_config_{};
-        std::shared_ptr<const route_patterns> previous_patterns_{};
-        std::shared_ptr<tls_context_set> previous_tls_contexts_{};
-        std::optional<origin_health_state::prepared> previous_health_{};
-        listener_map previous_listeners_{};
-        std::vector<std::shared_ptr<edge_listener>> additions_{};
-        std::vector<std::shared_ptr<edge_listener>> retired_{};
-        bool unchanged_{};
+        std::shared_ptr<const worker_execution_view> execution_{};
+        std::variant<retained_resources, replacement_resources> resources_{};
+        phase phase_{phase::prepared};
     };
 
     void reply(data_worker_result result) {
@@ -217,8 +218,9 @@ private:
                 std::erase_if(owned_listeners_, [](const auto& listener) { return listener->stopped(); });
                 data_worker_result result{.operation_ = request->operation_, .sequence_ = request->sequence_};
                 try {
-                    if (committed_ && committed_->sequence_ <= request->committed_sequence_) {
-                        finalize(committed_->sequence_);
+                    if (reload_ && reload_->phase_ == reload_participant::phase::tentative &&
+                        reload_->sequence_ <= request->committed_sequence_) {
+                        finalize(reload_->sequence_);
                     }
                     switch (request->operation_) {
                         case data_worker_operation::cache_command:
@@ -226,8 +228,10 @@ private:
                             continue;
                         case data_worker_operation::prepare:
                             prepare(*request);
-                            result.added_listeners_ = pending_->additions_.size();
-                            result.retired_listeners_ = pending_->retired_.size();
+                            if (const auto* replacement = std::get_if<replacement_resources>(&reload_->resources_)) {
+                                result.added_listeners_ = replacement->additions_.size();
+                                result.retired_listeners_ = replacement->retired_.size();
+                            }
                             break;
                         case data_worker_operation::activate:
                             require_accepting();
@@ -242,9 +246,6 @@ private:
                             break;
                         case data_worker_operation::discard:
                             rollback(request->sequence_);
-                            if (pending_ && pending_->sequence_ == request->sequence_) {
-                                pending_.reset();
-                            }
                             continue;
                         case data_worker_operation::report:
                             result.snapshot_ = snapshot();
@@ -366,53 +367,53 @@ private:
     void prepare(const data_worker_request& request) {
         require_accepting();
         require_current(request);
-        if (committed_) {
+        if (reload_ && reload_->phase_ == reload_participant::phase::tentative) {
             throw std::logic_error("data worker reload decision is missing");
         }
         if (!request.config_) {
             throw std::invalid_argument("data worker config cannot be empty");
         }
-        if (pending_) {
-            if (request.sequence_ <= pending_->sequence_) {
+        if (reload_) {
+            if (request.sequence_ <= reload_->sequence_) {
                 throw std::logic_error("stale data worker reload");
             }
-            // A newer attempt also recovers an abandoned prepare whose discard could not
-            // enter a full mailbox. No prepared resource survives into the next attempt.
-            pending_.reset();
+            // Recover an abandoned prepare before admitting its replacement.
+            reload_.reset();
         }
         runtime_.validate_next(*request.config_);
-        auto reload = std::make_unique<prepared_reload>();
+        auto reload = std::make_unique<reload_participant>();
         reload->sequence_ = request.sequence_;
-        reload->config_ = request.config_;
-        reload->patterns_ = compile_route_patterns(*reload->config_);
+        reload->execution_ = std::make_shared<const worker_execution_view>(request.config_);
         const auto active = runtime_.config();
-        reload->unchanged_ = active && active->node_spec_digest() == reload->config_->node_spec_digest() &&
-                             active->release_digest() == reload->config_->release_digest();
-        reload->tls_contexts_ = reload->unchanged_ ? tls_contexts_.current() : std::make_shared<tls_context_set>(*reload->config_);
-        if (reload->config_->enabled()) {
-            for (const auto& endpoint : reload->config_->endpoints()) {
-                prepare_listener(*reload, endpoint.ip_address(), endpoint.http_port(), false);
-                if (!reload->tls_contexts_->empty()) {
-                    prepare_listener(*reload, endpoint.ip_address(), endpoint.https_port(), true);
+        const auto unchanged = active &&
+                               active->node_spec_digest() == request.config_->node_spec_digest() &&
+                               active->release_digest() == request.config_->release_digest();
+        if (!unchanged) {
+            auto& replacement = reload->resources_.emplace<replacement_resources>(
+                replacement_resources{std::make_shared<tls_context_set>(*request.config_),
+                    health_->prepare(active.get(), *request.config_)});
+            if (request.config_->enabled()) {
+                for (const auto& endpoint : request.config_->endpoints()) {
+                    prepare_listener(replacement, endpoint.ip_address(), endpoint.http_port(), false);
+                    if (!replacement.tls_contexts_->empty()) {
+                        prepare_listener(replacement, endpoint.ip_address(), endpoint.https_port(), true);
+                    }
                 }
             }
-        }
-        for (const auto& [key, listener] : listeners_) {
-            if (!reload->listeners_.contains(key)) {
-                reload->retired_.push_back(listener);
+            for (const auto& [key, listener] : listeners_) {
+                if (!replacement.listeners_.contains(key)) {
+                    replacement.retired_.push_back(listener);
+                }
+            }
+            for (const auto& listener : replacement.additions_) {
+                listener->request_start();
             }
         }
-        if (!reload->unchanged_) {
-            reload->health_ = health_->prepare(active.get(), *reload->config_);
-        }
-        for (const auto& listener : reload->additions_) {
-            listener->request_start();
-        }
         require_current(request);
-        pending_ = std::move(reload);
+        reload_ = std::move(reload);
     }
 
-    void prepare_listener(prepared_reload& reload, std::string_view address, std::uint32_t port, bool secure) {
+    void prepare_listener(replacement_resources& reload, std::string_view address, std::uint32_t port, bool secure) {
         const auto parsed = asio::ip::make_address(address);
         auto key = std::string(secure ? "https:" : "http:") + (parsed.is_v6() ? "v6:" : "v4:") + std::to_string(port);
         if (reload.listeners_.contains(key)) {
@@ -431,44 +432,42 @@ private:
         reload.listeners_.emplace(std::move(key), std::move(listener));
     }
 
+    void exchange_runtime(reload_participant& reload) noexcept {
+        if (auto* replacement = std::get_if<replacement_resources>(&reload.resources_)) {
+            replacement->health_ = health_->activate(std::move(replacement->health_));
+            auto previous_tls = tls_contexts_.current();
+            tls_contexts_.publish(std::move(replacement->tls_contexts_));
+            replacement->tls_contexts_ = std::move(previous_tls);
+            listeners_.swap(replacement->listeners_);
+        }
+        auto previous = runtime_.execution();
+        runtime_.publish_execution(std::move(reload.execution_));
+        reload.execution_ = std::move(previous);
+    }
+
     void activate(std::uint64_t sequence) {
-        if (!pending_ || pending_->sequence_ != sequence) {
+        if (!reload_ || reload_->sequence_ != sequence ||
+            reload_->phase_ != reload_participant::phase::prepared) {
             throw std::logic_error("data worker reload is not prepared");
         }
-        auto pending = std::move(pending_);
-        pending->activated_ = true;
-        auto rollback_state = std::make_unique<committed_reload>();
-        rollback_state->sequence_ = pending->sequence_;
-        rollback_state->previous_config_ = runtime_.config();
-        rollback_state->previous_patterns_ = runtime_.patterns();
-        rollback_state->unchanged_ = pending->unchanged_;
-        if (pending->unchanged_) {
-            // Reconnecting the control channel restores the same persisted configuration.
-            // Keep in-flight probes, health streaks and TLS runtime for that exact state.
-            runtime_.publish(std::move(pending->config_), std::move(pending->patterns_));
-            committed_ = std::move(rollback_state);
-            return;
+        exchange_runtime(*reload_);
+        reload_->phase_ = reload_participant::phase::tentative;
+        if (const auto* replacement = std::get_if<replacement_resources>(&reload_->resources_)) {
+            for (const auto& listener : replacement->additions_) {
+                listener->activate();
+            }
         }
-        rollback_state->previous_health_ = health_->activate(std::move(*pending->health_));
-        rollback_state->previous_tls_contexts_ = tls_contexts_.current();
-        tls_contexts_.publish(std::move(pending->tls_contexts_));
-        runtime_.publish(std::move(pending->config_), std::move(pending->patterns_));
-        rollback_state->previous_listeners_ =
-            std::exchange(listeners_, std::move(pending->listeners_));
-        rollback_state->additions_ = std::move(pending->additions_);
-        rollback_state->retired_ = std::move(pending->retired_);
-        for (const auto& listener : rollback_state->additions_) {
-            listener->activate();
-        }
-        committed_ = std::move(rollback_state);
     }
 
     void finalize(std::uint64_t sequence) noexcept {
-        if (committed_ && committed_->sequence_ == sequence) {
-            for (const auto& listener : committed_->retired_) {
-                listener->request_stop();
+        if (reload_ && reload_->sequence_ == sequence &&
+            reload_->phase_ == reload_participant::phase::tentative) {
+            if (const auto* replacement = std::get_if<replacement_resources>(&reload_->resources_)) {
+                for (const auto& listener : replacement->retired_) {
+                    listener->request_stop();
+                }
             }
-            committed_.reset();
+            reload_.reset();
             settled_sequence_ = (std::max)(settled_sequence_, sequence);
         }
     }
@@ -478,23 +477,18 @@ private:
             return;
         }
         settled_sequence_ = sequence;
-        if (pending_ && pending_->sequence_ == sequence) {
-            pending_.reset();
-        }
-        if (!committed_ || committed_->sequence_ != sequence) {
+        if (!reload_ || reload_->sequence_ != sequence) {
             return;
         }
-        auto rollback_state = std::move(committed_);
-        if (!rollback_state->unchanged_) {
-            health_->activate(std::move(*rollback_state->previous_health_));
-            tls_contexts_.publish(std::move(rollback_state->previous_tls_contexts_));
-            listeners_ = std::move(rollback_state->previous_listeners_);
-            for (const auto& listener : rollback_state->additions_) {
-                listener->request_stop();
+        if (reload_->phase_ == reload_participant::phase::tentative) {
+            exchange_runtime(*reload_);
+            if (const auto* replacement = std::get_if<replacement_resources>(&reload_->resources_)) {
+                for (const auto& listener : replacement->additions_) {
+                    listener->request_stop();
+                }
             }
         }
-        runtime_.publish(std::move(rollback_state->previous_config_),
-            std::move(rollback_state->previous_patterns_));
+        reload_.reset();
     }
 
     void require_accepting() const {
@@ -514,7 +508,9 @@ private:
 
     void stop_accepting() noexcept {
         stopping_ = true;
-        pending_.reset();
+        if (reload_ && reload_->phase_ == reload_participant::phase::prepared) {
+            reload_.reset();
+        }
         // Admission stop is not a transaction decision. The control loop may have just
         // committed globally; only its immutable decision can roll back or finalize.
         for (const auto& listener : owned_listeners_) {
@@ -554,8 +550,7 @@ private:
     buffered_bytes_budget response_buffers_;
     listener_map listeners_;
     std::vector<std::shared_ptr<edge_listener>> owned_listeners_;
-    std::unique_ptr<prepared_reload> pending_;
-    std::unique_ptr<committed_reload> committed_;
+    std::unique_ptr<reload_participant> reload_;
     std::uint64_t settled_sequence_{};
     std::uint64_t prewarm_sequence_{};
     bool stopping_{};

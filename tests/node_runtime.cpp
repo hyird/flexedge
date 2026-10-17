@@ -31,6 +31,7 @@
 #include <asio/buffer.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/read.hpp>
+#include <asio/read_until.hpp>
 #include <asio/ssl/context.hpp>
 #include <asio/ssl/error.hpp>
 #include <asio/ssl/stream.hpp>
@@ -50,6 +51,7 @@
 #include "node/data/worker_metrics.h"
 #include "node/proto/release_metadata.h"
 #include "node/proto/schema_version.h"
+#include "node/runtime/config_activation.h"
 #include "node/runtime/connected_clients.h"
 #include "node/runtime/http_redirect.h"
 #include "node/runtime/log_producer.h"
@@ -96,8 +98,8 @@ std::shared_ptr<const flexedge::node::compiled_config> compiled(TestConfig value
 void apply(flexedge::node::runtime_state& runtime, TestConfig value) {
     auto config = compiled(std::move(value));
     runtime.validate_next(*config);
-    auto patterns = flexedge::node::compile_route_patterns(*config);
-    runtime.publish(std::move(config), std::move(patterns));
+    runtime.publish_execution(std::make_shared<const flexedge::node::worker_execution_view>(
+        std::move(config)));
 }
 
 using flexedge::testing::request;
@@ -603,23 +605,23 @@ enum class reload_action { abandon,
 
 ruvia::task<void> hold_listener_reload(flexedge::node::data_plane& plane, const TestConfig& config,
     std::atomic<bool>& ready, ruvia::channel_receiver<bool>& release) {
-    auto prepared = co_await plane.prepare(compiled(config));
+    auto prepared = co_await flexedge::node::config_activation::prepare(plane, compiled(config));
     ready = true;
     REQUIRE((co_await release.receive_for(std::chrono::seconds(3))).has_value());
 }
 
 ruvia::task<void> exercise_listener_reload(flexedge::node::data_plane& plane,
     const TestConfig& config, std::size_t added, std::size_t retired, reload_action action) {
-    std::optional<flexedge::node::prepared_data_plane_reload> reload;
+    std::optional<flexedge::node::config_activation> reload;
     {
-        auto prepared = co_await plane.prepare(compiled(config));
+        auto prepared = co_await flexedge::node::config_activation::prepare(plane, compiled(config));
         REQUIRE(prepared.added_listeners() == added);
         REQUIRE(prepared.retired_listeners() == retired);
         reload.emplace(std::move(prepared));
     }
     // The moved-from object's destruction must leave the new owner able to commit.
     if (action == reload_action::activate) {
-        co_await plane.activate(*reload);
+        co_await reload->commit();
     } else if (action == reload_action::fail) {
         throw std::runtime_error("synthetic failure after preparing listeners");
     }
@@ -822,8 +824,8 @@ void record_health_failure(ruvia::event_loop loop, flexedge::node::origin_health
 
 ruvia::task<void> publish_runtime(flexedge::node::runtime_state& local,
     std::shared_ptr<const flexedge::node::compiled_config> config) {
-    auto patterns = flexedge::node::compile_route_patterns(*config);
-    local.publish(std::move(config), std::move(patterns));
+    local.publish_execution(std::make_shared<const flexedge::node::worker_execution_view>(
+        std::move(config)));
     co_return;
 }
 
@@ -1382,8 +1384,10 @@ int main(int argc, char* argv[]) {
         ruvia::event_loop_pool control_loops({.loop_count_ = 1});
         flexedge::node::runtime_state first_runtime;
         flexedge::node::runtime_state second_runtime;
-        first_runtime.publish(runtime.config(), flexedge::node::compile_route_patterns(*runtime.config()));
-        second_runtime.publish(runtime.config(), flexedge::node::compile_route_patterns(*runtime.config()));
+        first_runtime.publish_execution(std::make_shared<const flexedge::node::worker_execution_view>(
+            runtime.config()));
+        second_runtime.publish_execution(std::make_shared<const flexedge::node::worker_execution_view>(
+            runtime.config()));
         flexedge::node::origin_tls_context first_origin_tls;
         flexedge::node::origin_tls_context second_origin_tls;
         auto listener_health =
@@ -1565,8 +1569,8 @@ int main(int argc, char* argv[]) {
             upstream.join();
             REQUIRE(replaced_health.load());
             REQUIRE(failed_response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
-            REQUIRE(settled_health(loops.loop(0), *listener_health)->healthy("website-1", "origin-1"));
-            REQUIRE(settled_health(loops.loop(1), *second_listener_health)->healthy("website-1", "origin-1"));
+            REQUIRE(settled_health(loops.loop(0), *listener_health)->healthy({"website-1", "origin-1"}));
+            REQUIRE(settled_health(loops.loop(1), *second_listener_health)->healthy({"website-1", "origin-1"}));
         }
         const auto no_route_response = request(port, "unknown.example.com");
         REQUIRE(no_route_response.starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
@@ -2048,13 +2052,15 @@ int main(int argc, char* argv[]) {
         source_route->clear_query_string();
         proxy_route->set_action("rewrite");
         proxy_route->clear_origin_ids();
+        const flexedge::node::route_program proxy_program(proxy_snapshot.website());
         const auto route_policy = flexedge::node::evaluate_route_rules(
-            proxy_snapshot.website(), "GET", "/a/users?q=1", "www.example.com");
+            proxy_program, proxy_snapshot.website(), "GET", "/a/users?q=1", "www.example.com");
         REQUIRE(route_policy);
-        const auto candidates =
-            flexedge::node::origin_candidates(proxy_snapshot.website(), 0, &*route_policy);
-        REQUIRE(candidates.size() == 1);
-        REQUIRE(candidates.front()->id() == "origin-backup");
+        flexedge::node::origin_cursor candidates(route_policy->origins(), 0, nullptr);
+        const auto* selected_origin = candidates.next();
+        REQUIRE(selected_origin != nullptr);
+        REQUIRE(selected_origin->id() == "origin-backup");
+        REQUIRE(candidates.next() == nullptr);
         publish(std::move(proxy_snapshot));
         const auto proxy_started = std::chrono::steady_clock::now();
         const auto proxy_response = request(port, "WWW.Example.COM:80", {}, "/a/users?q=1");
@@ -2066,6 +2072,119 @@ int main(int argc, char* argv[]) {
         REQUIRE(proxy_response.find("X-Origin: retained\r\n") != std::string::npos);
         REQUIRE(proxy_response.find("Foo: remove-me\r\n") == std::string::npos);
         REQUIRE(proxy_elapsed < std::chrono::seconds(1));
+
+        // A request must retain its route and remaining origin plan across publication,
+        // including a failover that happens only after both workers adopt the new config.
+        {
+            asio::ip::tcp::acceptor held_primary(origin_context,
+                asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+            asio::ip::tcp::acceptor retained_backup(origin_context,
+                asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+            std::atomic<bool> primary_received{};
+            std::atomic<bool> release_primary{};
+            std::atomic<bool> backup_received_rewrite{};
+            std::jthread held_origin([&](std::stop_token stop_token) {
+                asio::ip::tcp::socket primary_socket(origin_context);
+                if (!accept_until_stopped(held_primary, primary_socket, stop_token)) {
+                    return;
+                }
+                std::string origin_head;
+                std::error_code ignored;
+                (void)asio::read_until(primary_socket, asio::dynamic_buffer(origin_head),
+                    "\r\n\r\n", ignored);
+                primary_received.store(true);
+                while (!release_primary.load() && !stop_token.stop_requested()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                primary_socket.close(ignored);
+                if (stop_token.stop_requested()) {
+                    return;
+                }
+                asio::ip::tcp::socket backup_socket(origin_context);
+                if (!accept_until_stopped(retained_backup, backup_socket, stop_token)) {
+                    return;
+                }
+                origin_head.clear();
+                (void)asio::read_until(backup_socket, asio::dynamic_buffer(origin_head),
+                    "\r\n\r\n", ignored);
+                backup_received_rewrite.store(origin_head.starts_with(
+                    "GET /retained.txt?old=1 HTTP/1.1\r\n"));
+                constexpr std::string_view response =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nold route";
+                asio::write(backup_socket, asio::buffer(response));
+            });
+            auto retained = snapshot(false);
+            retained.setGeneration(next_generation++);
+            auto* retained_website = retained.mutableWebsite();
+            auto* primary = retained_website->mutable_origins(0);
+            primary->set_host("127.0.0.1");
+            primary->set_port(held_primary.local_endpoint().port());
+            auto* old_backup = retained_website->add_origins();
+            *old_backup = *primary;
+            old_backup->set_id("retained-backup");
+            old_backup->set_role("backup");
+            old_backup->set_port(retained_backup.local_endpoint().port());
+            auto* old_rule = retained_website->add_route_rules();
+            old_rule->set_id("retained-route");
+            old_rule->set_enabled(true);
+            old_rule->set_action("proxy");
+            old_rule->set_origin_group("default");
+            old_rule->set_match_type("exact");
+            old_rule->set_path("/held");
+            old_rule->set_rewrite_mode("replace_path");
+            old_rule->set_rewrite_path("/retained.txt");
+            old_rule->set_query_mode("replace");
+            old_rule->set_query_string("old=1");
+            // Proxy matching occurs after the rewrite phase.
+            auto* retained_proxy = retained_website->add_route_rules();
+            retained_proxy->set_id("retained-response-policy");
+            retained_proxy->set_enabled(true);
+            retained_proxy->set_action("proxy");
+            retained_proxy->set_origin_group("default");
+            retained_proxy->set_match_type("exact");
+            retained_proxy->set_path("/retained.txt");
+            auto* old_header = retained_proxy->add_response_headers();
+            old_header->set_name("X-Retained-Policy");
+            old_header->set_value("old-request-retained-execution-header");
+            publish(std::move(retained));
+
+            asio::ip::tcp::socket held_client(origin_context);
+            held_client.connect({asio::ip::address_v4::loopback(), port});
+            constexpr std::string_view held_request =
+                "GET /held HTTP/1.1\r\nHost: www.example.com\r\nConnection: close\r\n\r\n";
+            asio::write(held_client, asio::buffer(held_request));
+            REQUIRE(waitUntil([&] { return primary_received.load(); }, std::chrono::seconds(2)));
+            auto replacement_config = snapshot(false);
+            replacement_config.setGeneration(next_generation++);
+            auto* replacement_rule = replacement_config.mutableWebsite()->add_route_rules();
+            replacement_rule->set_id("replacement-redirect");
+            replacement_rule->set_enabled(true);
+            replacement_rule->set_action("redirect");
+            replacement_rule->set_match_type("exact");
+            replacement_rule->set_path("/held");
+            replacement_rule->set_redirect_status(307);
+            replacement_rule->set_redirect_url("/new-config");
+            publish(std::move(replacement_config));
+            release_primary.store(true);
+
+            std::string retained_response;
+            std::array<char, 4096> bytes{};
+            std::error_code error;
+            while (!error) {
+                const auto received = held_client.read_some(asio::buffer(bytes), error);
+                retained_response.append(bytes.data(), received);
+            }
+            REQUIRE(error == asio::error::eof);
+            REQUIRE(backup_received_rewrite.load());
+            REQUIRE(retained_response.starts_with("HTTP/1.1 200 OK\r\n"));
+            REQUIRE(retained_response.find(
+                        "X-Retained-Policy: old-request-retained-execution-header\r\n") !=
+                    std::string::npos);
+            REQUIRE(retained_response.ends_with("\r\n\r\nold route"));
+            const auto replacement_response = request(port, "www.example.com", {}, "/held");
+            REQUIRE(replacement_response.starts_with("HTTP/1.1 307 Temporary Redirect\r\n"));
+            REQUIRE(replacement_response.find("Location: /new-config\r\n") != std::string::npos);
+        }
 
         asio::ip::tcp::acceptor compression_acceptor(
             origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
@@ -2150,10 +2269,10 @@ int main(int argc, char* argv[]) {
             {.website_id_ = "website-1", .origin_id_ = "origin-1"}};
         set_health_origins(loops.loop(0), *node_health, health_keys);
         record_health_failure(loops.loop(0), *node_health);
-        REQUIRE(!settled_health(loops.loop(0), *node_health)->healthy("website-1", "origin-1"));
+        REQUIRE(!settled_health(loops.loop(0), *node_health)->healthy({"website-1", "origin-1"}));
         node_health->request_start();
         const auto node_healthy = waitUntil(
-            [&] { return settled_health(loops.loop(0), *node_health)->healthy("website-1", "origin-1"); },
+            [&] { return settled_health(loops.loop(0), *node_health)->healthy({"website-1", "origin-1"}); },
             std::chrono::seconds(3));
         if (!node_healthy) {
             std::cerr << "health requests=" << health_requests.load() << '\n';
@@ -2344,10 +2463,10 @@ int main(int argc, char* argv[]) {
         REQUIRE(secure_origin_response.ends_with("\r\n\r\nSECURE"));
 
         record_health_failure(loops.loop(0), *secure_origin_health);
-        REQUIRE(!settled_health(loops.loop(0), *secure_origin_health)->healthy("website-1", "origin-1"));
+        REQUIRE(!settled_health(loops.loop(0), *secure_origin_health)->healthy({"website-1", "origin-1"}));
         secure_origin_health->request_start();
         REQUIRE(waitUntil(
-            [&] { return settled_health(loops.loop(0), *secure_origin_health)->healthy("website-1", "origin-1"); },
+            [&] { return settled_health(loops.loop(0), *secure_origin_health)->healthy({"website-1", "origin-1"}); },
             std::chrono::seconds(3)));
         secure_origin_health->request_stop();
         secure_origin_listener->request_stop();

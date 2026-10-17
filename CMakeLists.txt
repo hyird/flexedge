@@ -53,7 +53,7 @@ FetchContent_Declare(
     ruvia
     SYSTEM
     GIT_REPOSITORY https://github.com/hyird/Ruvia.git
-    GIT_TAG 34949a6a7458f85fa93a383a3f2bdc4c3637fab2 # HTTP/2 server/client and worker-owned AcceptEx, 2026-10-17
+    GIT_TAG 92089cefd60b99e903c375ac449c0879a0480b1e # HTTP header optimizations and HTTP/2 half-close progress, 2026-10-17
 )
 FetchContent_MakeAvailable(ruvia)
 # CMAKE_COMPILE_WARNING_AS_ERROR applies to FlexEdge code only; Ruvia is third-party.
@@ -149,6 +149,21 @@ if(MSVC)
     target_compile_options(xdb_lookup PRIVATE /W4 /permissive- /utf-8 /wd4819)
 else()
     target_compile_options(xdb_lookup PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# Explicit opt-in target: timing runs are not CTest assertions or part of normal builds.
+add_executable(flexedge_node_request_benchmark EXCLUDE_FROM_ALL
+    tools/node_request_benchmark.cpp
+    tools/node_request_allocations.cpp
+)
+target_include_directories(flexedge_node_request_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(flexedge_node_request_benchmark
+    PRIVATE flexedge_node_protocol flexedge_route_policy OpenSSL::Crypto
+)
+if(MSVC)
+    target_compile_options(flexedge_node_request_benchmark PRIVATE /W4 /bigobj /permissive- /utf-8 /wd4819)
+else()
+    target_compile_options(flexedge_node_request_benchmark PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 add_executable(flexedge_node
@@ -402,6 +417,10 @@ if(BUILD_TESTING)
         SOURCES tests/cache_migration.cpp
         LIBRARIES flexedge_route_policy ruvia::web)
     set_tests_properties(flexedge_cache_migration PROPERTIES SKIP_RETURN_CODE 77)
+    flexedge_add_test(origin_selection
+        SOURCES tests/origin_selection.cpp
+        LIBRARIES flexedge_node_protocol Threads::Threads
+    )
     flexedge_add_test(node_runtime BIG_OBJECT
         SOURCES tests/node_runtime.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto

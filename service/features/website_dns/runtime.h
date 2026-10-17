@@ -29,12 +29,10 @@ complete_stale_website_task(service::background::task_context& context,
     const service::sync_runtime::running_marker_lease& marker,
     bool revision_changed) {
     auto completion = co_await context.db().begin_transaction();
-    if (revision_changed) {
-        (void)co_await service::sync_runtime::release_running(completion, marker);
-    } else {
-        (void)co_await service::sync_runtime::transition_running(completion, marker, service::sync_runtime::attempt_result::completed());
-    }
-    co_await completion.commit();
+    service::sync_runtime::running_result_writer writer(completion, marker);
+    (void)co_await writer.quiet(revision_changed ? service::sync_runtime::quiet_action::release
+                                               : service::sync_runtime::quiet_action::complete);
+    co_await writer.commit(context);
     co_return;
 }
 
@@ -166,9 +164,7 @@ inline ruvia::task<void> probe_website(service::background::task_context& contex
     const bool resource_deleted = rows.empty() || rows.front()[4].as<bool>().value_or(false);
     if (resource_deleted) {
         load_step.skip("网站已删除");
-        auto completion = co_await db.begin_transaction();
-        (void)co_await service::sync_runtime::transition_running(completion, marker, service::sync_runtime::attempt_result::completed());
-        co_await completion.commit();
+        co_await complete_stale_website_task(context, marker, false);
         co_return;
     }
     if (rows.empty() || revision_changed) {
@@ -207,20 +203,19 @@ inline ruvia::task<void> probe_website(service::background::task_context& contex
         "UPDATE sys_website SET runtime = $2::jsonb WHERE id = $1 AND revision = $3 AND "
         "tenant_id = $4 AND deleted_at IS NULL",
         website_id, std::string_view(json), expected_revision, marker.marker_.tenant_id_);
-    service::sync_runtime::running_result_transition result_transition;
+    service::sync_runtime::running_result_writer writer(completion, marker);
     if (updated.affected_rows() == 0) {
-        (void)co_await service::sync_runtime::release_running(completion, marker);
+        (void)co_await writer.quiet(service::sync_runtime::quiet_action::release);
     } else {
         if (!co_await service::sync_runtime::renew_running_lease(completion, marker)) {
             throw std::runtime_error("网站同步标记 lease 已失效");
         }
-        result_transition = co_await service::sync_runtime::record_running_result(completion, marker, service::sync_runtime::attempt_result::completed(), attempt.to_json(context.pool()));
-        if (!result_transition.marker_transitioned_) {
+        const auto result = co_await writer.record(service::sync_runtime::attempt_result::completed(), attempt.to_json(context.pool()));
+        if (!result.changed()) {
             throw std::runtime_error("网站同步标记 lease 已失效");
         }
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(completion, context, marker,
-        result_transition, trace);
+    co_await writer.commit(context, trace);
     save_step.complete();
     co_return;
 }
@@ -231,11 +226,10 @@ inline ruvia::task<void> fail_website_task(service::background::task_context& co
     std::string_view error, std::string_view detail) {
     const auto message = service::sync_runtime::attempt_error(trace, error);
     auto transaction = co_await context.db().begin_transaction();
-    const auto result_transition =
-        co_await service::sync_runtime::record_running_result(transaction, lease, service::sync_runtime::attempt_result::retry(message), detail);
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease, result_transition,
-        trace);
-    if (result_transition.marker_transitioned_) {
+    service::sync_runtime::running_result_writer writer(transaction, lease);
+    const auto result = co_await writer.record(service::sync_runtime::attempt_result::retry(message), detail);
+    co_await writer.commit(context, trace);
+    if (result.changed()) {
         service::sync_runtime::log_attempt_failure("Website sync marker", lease.marker_.marker_id_, message);
     }
 }

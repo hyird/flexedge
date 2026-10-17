@@ -36,6 +36,7 @@ inline ruvia::task<void> persist_synced_zone(context_type& context,
     const auto runtime_json = ruvia::to_json(to_output(snapshot.runtime_), {.resource_ = context.pool()});
     const std::string_view status = unsynced_error.empty() ? "synced" : "failed";
     auto transaction = co_await context.db().begin_transaction();
+    service::sync_runtime::running_result_writer writer(transaction, lease);
     const auto current = co_await transaction.query(
         "SELECT config IS DISTINCT FROM $3::jsonb, runtime IS DISTINCT FROM $4::jsonb OR "
         "sync_status <> $5 OR synced_revision <> $6 OR COALESCE(last_error, '') <> $7 "
@@ -43,8 +44,8 @@ inline ruvia::task<void> persist_synced_zone(context_type& context,
         task.tenant_id_, task.resource_id_, std::string_view(config_json), std::string_view(runtime_json),
         status, revision, unsynced_error, snapshot_revision);
     if (current.empty()) {
-        (void)co_await service::sync_runtime::release_running(transaction, lease);
-        co_await transaction.commit();
+        (void)co_await writer.quiet(service::sync_runtime::quiet_action::release);
+        co_await writer.commit(context);
         co_return;
     }
     if (!co_await service::sync_runtime::renew_running_lease(transaction, lease)) {
@@ -57,11 +58,8 @@ inline ruvia::task<void> persist_synced_zone(context_type& context,
             "UPDATE sys_dns_zone SET next_check_at = NOW() + INTERVAL '10 minutes' "
             "+ random() * INTERVAL '1 minute' WHERE tenant_id = $1 AND id = $2",
             task.tenant_id_, task.resource_id_);
-        (void)co_await transaction.execute(
-            "UPDATE sys_sync_task SET lease_owner = NULL, lease_until = NULL "
-            "WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lease_owner = $4",
-            task.tenant_id_, task.id_, task.version_, context.lease_owner());
-        co_await transaction.commit();
+        (void)co_await writer.quiet(service::sync_runtime::quiet_action::inspect);
+        co_await writer.commit(context);
         co_return;
     }
     (void)co_await transaction.execute(
@@ -72,54 +70,36 @@ inline ruvia::task<void> persist_synced_zone(context_type& context,
         "WHERE tenant_id = $1 AND id = $2 AND desired_revision = $6",
         task.tenant_id_, task.resource_id_, std::string_view(config_json), std::string_view(runtime_json),
         status, revision, unsynced_error, std::int64_t{records_changed ? 1 : 0});
-    service::sync_runtime::running_result_transition transition;
-    if (task.operation_ == service::sync_runtime::marker_operation::remove) {
-        if (!co_await service::sync_runtime::remove_running(transaction, lease)) {
-            throw std::runtime_error("DNS 删除任务 lease 已失效");
-        }
-        transition.marker_transitioned_ = true;
-        transition.resumed_ = co_await service::sync_runtime::resume_waiters(transaction, lease, true);
-    } else {
-        transition = co_await service::sync_runtime::record_running_result(transaction, lease,
-            unsynced_error.empty() ? service::sync_runtime::attempt_result::completed()
-                                   : service::sync_runtime::attempt_result::failed(unsynced_error),
-            detail);
-        if (!transition.marker_transitioned_) {
-            throw std::runtime_error("DNS 同步任务 lease 已失效");
-        }
+    const auto result = task.operation_ == service::sync_runtime::marker_operation::remove
+        ? co_await writer.remove()
+        : co_await writer.record(
+              unsynced_error.empty() ? service::sync_runtime::attempt_result::completed()
+                                     : service::sync_runtime::attempt_result::failed(unsynced_error),
+              detail);
+    if (!result.changed()) {
+        throw std::runtime_error("DNS 同步任务 lease 已失效");
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease, transition, trace);
+    co_await writer.commit(context, trace);
 }
 
 inline ruvia::task<void>
 finish_deleted_zone_without_remote(service::background::task_context& context, const dns_task& task,
     const service::sync_runtime::running_marker_lease& lease) {
     auto transaction = co_await context.db().begin_transaction();
+    service::sync_runtime::running_result_writer writer(transaction, lease);
     const auto updated = co_await transaction.execute(
         "UPDATE sys_dns_zone SET synced_revision = GREATEST(synced_revision, $3), "
         "sync_status = 'synced', last_synced_at = NOW(), last_error = NULL, updated_at = NOW() "
         "WHERE id = $1 AND tenant_id = $2 AND desired_revision = $3",
         task.resource_id_, task.tenant_id_, task.version_);
-    bool removed = false;
-    std::vector<service::sync_runtime::marker_waiter> resumed;
     if (updated.affected_rows() != 0) {
-        removed = co_await service::sync_runtime::remove_running(transaction, lease);
-        if (!removed) {
+        if (!(co_await writer.remove()).changed()) {
             throw std::runtime_error("DNS 删除同步标记 lease 已失效");
         }
-        resumed = co_await service::sync_runtime::resume_waiters(transaction, lease, true);
     } else {
-        (void)co_await service::sync_runtime::release_running(transaction, lease);
+        (void)co_await writer.quiet(service::sync_runtime::quiet_action::release);
     }
-    if (removed) {
-        service::live_resource::notifications::resource_notification notification(task.tenant_id_);
-        notification.changed(service::live_resource::resource::tasks, task.resource_id_);
-        for (const auto& waiter : resumed) {
-            notification.changed(service::live_resource::resource::tasks, waiter.resource_id_);
-        }
-        (void)co_await service::live_resource::enqueue_notification(transaction, notification);
-    }
-    co_await transaction.commit();
+    co_await writer.commit(context);
     co_return;
 }
 
@@ -134,15 +114,11 @@ inline ruvia::task<void> fail_dns_task(service::background::task_context& contex
     (void)co_await transaction.query(
         "SELECT id FROM sys_dns_zone WHERE tenant_id = $1 AND id = $2 LIMIT 1 FOR UPDATE",
         task.tenant_id_, task.resource_id_);
-    if (task.inspection_) {
-        (void)co_await transaction.execute(
-            "UPDATE sys_sync_task SET count_fails = 0 WHERE tenant_id = $1 AND id = $2 "
-            "AND version = $3 AND lease_owner = $4",
-            task.tenant_id_, task.id_, task.version_, context.lease_owner());
-    }
-    const auto result_transition = co_await service::sync_runtime::record_running_result(
-        transaction, lease, permanent ? service::sync_runtime::attempt_result::failed(message) : service::sync_runtime::attempt_result::retry(message), detail);
-    if (result_transition.marker_transitioned_) {
+    service::sync_runtime::running_result_writer writer(transaction, lease);
+    const auto result = co_await writer.record(
+        permanent ? service::sync_runtime::attempt_result::failed(message) : service::sync_runtime::attempt_result::retry(message),
+        detail, task.inspection_ ? service::sync_runtime::failure_count::restart : service::sync_runtime::failure_count::accumulate);
+    if (result.changed()) {
         (void)co_await transaction.execute(
             "UPDATE sys_dns_zone SET sync_status = $2, last_error = $3, updated_at = NOW(), "
             "next_check_at = NOW() + INTERVAL '10 minutes' WHERE "
@@ -150,9 +126,8 @@ inline ruvia::task<void> fail_dns_task(service::background::task_context& contex
             task.resource_id_, permanent ? std::string_view{"failed"} : std::string_view{"pending"},
             std::string_view(message), task.version_, task.tenant_id_);
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease,
-        result_transition, trace);
-    if (result_transition.marker_transitioned_) {
+    co_await writer.commit(context, trace);
+    if (result.changed()) {
         service::sync_runtime::log_attempt_failure("DNS sync task", task.id_, message);
     }
     co_return;

@@ -2,11 +2,9 @@
 
 #include <re2/re2.h>
 
-#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -58,39 +56,6 @@ inline bool capture_template(std::string_view value, int groups) {
         i += 3;
     }
     return true;
-}
-
-inline std::optional<std::string> expand_captures(std::string_view value,
-    std::string_view path, const RE2& pattern) {
-    std::array<absl::string_view, 10> captures{};
-    if (!pattern.Match(absl::string_view(path.data(), path.size()), 0, path.size(),
-            RE2::UNANCHORED, captures.data(), pattern.NumberOfCapturingGroups() + 1)) {
-        return {};
-    }
-    std::string result;
-    for (std::size_t i = 0; i < value.size(); ++i) {
-        if (value[i] == '$' && i + 1 < value.size() && value[i + 1] == '$') {
-            result.push_back('$');
-            ++i;
-        } else if (value[i] == '$' && i + 3 < value.size() && value[i + 1] == '{' &&
-                   value[i + 2] >= '0' && value[i + 2] <= '9' && value[i + 3] == '}') {
-            const auto& capture = captures[static_cast<std::size_t>(value[i + 2] - '0')];
-            if (!capture.empty()) {
-                result.append(capture.data(), capture.size());
-            }
-            i += 3;
-        } else {
-            result.push_back(value[i]);
-        }
-        if (result.size() > 16384) {
-            return {};
-        }
-    }
-    // Captures never turn an encoded request path into response header injection.
-    if (!clean_text(result, 16384) || result.find(' ') != std::string::npos) {
-        return {};
-    }
-    return result;
 }
 
 inline bool condition_options(std::string_view source, std::string_view name,
@@ -207,41 +172,6 @@ inline std::optional<query_values> get_query_values(std::string_view target) {
         query.remove_prefix(amp + 1);
     }
     return result;
-}
-
-inline bool condition_matches(std::string_view source, std::string_view name,
-    std::string_view op, std::string_view value,
-    std::span<const std::pair<std::string_view, std::string_view>> headers,
-    const std::optional<query_values>& query) {
-    bool present = false, equal = false;
-    if (source == "header") {
-        for (const auto& [key, item] : headers) {
-            if (ascii_equal(key, name)) {
-                present = true;
-                equal = equal || trim_ows(item) == value;
-            }
-        }
-    } else {
-        if (!query) {
-            return false;
-        }
-        for (const auto& [key, item] : *query) {
-            if (key == name) {
-                present = true;
-                equal = equal || item == value;
-            }
-        }
-    }
-    if (op == "exists") {
-        return present;
-    }
-    if (op == "absent") {
-        return !present;
-    }
-    if (op == "not_equals") {
-        return present && !equal;
-    }
-    return op == "equals" && equal;
 }
 
 }  // namespace flexedge::route_policy

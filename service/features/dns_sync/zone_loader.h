@@ -65,8 +65,9 @@ load_zone_sync_state(service::background::task_context& context, const dns_task&
     const auto revision = row[0].as<std::int64_t>().value_or(task.version_);
     if (revision != task.version_) {
         auto transaction = co_await db.begin_transaction();
-        (void)co_await service::sync_runtime::release_running(transaction, lease);
-        co_await transaction.commit();
+        service::sync_runtime::running_result_writer writer(transaction, lease);
+        (void)co_await writer.quiet(service::sync_runtime::quiet_action::release);
+        co_await writer.commit(context);
         co_return std::nullopt;
     }
 

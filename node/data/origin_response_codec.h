@@ -45,7 +45,8 @@ enum class origin_response_body_status { accepted,
 // Content-Length, dropping the transfer coding and its trailers.
 class origin_response_codec final {
 public:
-    // `route` belongs to the request and must outlive the codec.
+    // `route` and the immutable route program backing its header views must outlive
+    // the codec, including serialization by frame() for buffered responses.
     origin_response_codec(ruvia::http1_client_exchange_state response_exchange, bool hsts_enabled,
         const evaluated_route_policy* route)
         : parser_(std::make_unique<ruvia::http1_client_response_parser>(std::move(response_exchange))),

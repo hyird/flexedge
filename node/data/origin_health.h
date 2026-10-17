@@ -24,9 +24,26 @@ struct origin_health_key final {
     bool operator==(const origin_health_key&) const = default;
 };
 
-struct origin_health_key_view final {
-    std::string_view website_id_;
-    std::string_view origin_id_;
+class origin_health_key_view final {
+public:
+    origin_health_key_view(std::string_view website_id, std::string_view origin_id) noexcept
+        : website_id_(website_id),
+          origin_id_(origin_id),
+          hash_(hash(website_id, origin_id)) {}
+
+    const std::string_view website_id_;
+    const std::string_view origin_id_;
+
+private:
+    friend struct origin_health_key_hash;
+
+    static std::size_t hash(std::string_view website_id, std::string_view origin_id) noexcept {
+        const auto left = std::hash<std::string_view>{}(website_id);
+        const auto right = std::hash<std::string_view>{}(origin_id);
+        return left ^ (right + 0x9e3779b9U + (left << 6U) + (left >> 2U));
+    }
+
+    const std::size_t hash_;
 };
 
 struct origin_health_key_hash final {
@@ -36,10 +53,8 @@ struct origin_health_key_hash final {
         return (*this)(origin_health_key_view{value.website_id_, value.origin_id_});
     }
 
-    [[nodiscard]] std::size_t operator()(origin_health_key_view value) const noexcept {
-        const auto left = std::hash<std::string_view>{}(value.website_id_);
-        const auto right = std::hash<std::string_view>{}(value.origin_id_);
-        return left ^ (right + 0x9e3779b9U + (left << 6U) + (left >> 2U));
+    [[nodiscard]] std::size_t operator()(const origin_health_key_view& value) const noexcept {
+        return value.hash_;
     }
 };
 
@@ -52,11 +67,11 @@ struct origin_health_key_equal final {
     }
 
     [[nodiscard]] bool operator()(const origin_health_key& left,
-        origin_health_key_view right) const noexcept {
+        const origin_health_key_view& right) const noexcept {
         return left.website_id_ == right.website_id_ && left.origin_id_ == right.origin_id_;
     }
 
-    [[nodiscard]] bool operator()(origin_health_key_view left,
+    [[nodiscard]] bool operator()(const origin_health_key_view& left,
         const origin_health_key& right) const noexcept {
         return (*this)(right, left);
     }
@@ -85,7 +100,7 @@ public:
         bool healthy_{true};
         std::int64_t checked_at_unix_millis_{};
         std::uint32_t latency_millis_{};
-        std::string last_error_;
+        std::string last_error_{};
     };
 
     using origin_map =
@@ -95,14 +110,13 @@ public:
     explicit origin_health_snapshot(origin_map origins)
         : origins_(std::move(origins)) {}
 
-    [[nodiscard]] const origin* find(std::string_view website_id,
-        std::string_view origin_id) const noexcept {
-        const auto found = origins_.find(origin_health_key_view{website_id, origin_id});
+    [[nodiscard]] const origin* find(const origin_health_key_view& key) const noexcept {
+        const auto found = origins_.find(key);
         return found == origins_.end() ? nullptr : &found->second;
     }
 
-    [[nodiscard]] bool healthy(std::string_view website_id, std::string_view origin_id) const noexcept {
-        const auto* value = find(website_id, origin_id);
+    [[nodiscard]] bool healthy(const origin_health_key_view& key) const noexcept {
+        const auto* value = find(key);
         return value == nullptr || value->healthy_;
     }
 
@@ -269,20 +283,20 @@ public:
     }
 
     // Applies a request outcome for membership `id`. Returns whether the snapshot changed.
-    bool record(origin_health_key_view key, std::uint64_t id, bool success,
+    bool record(const origin_health_key_view& key, std::uint64_t id, bool success,
         std::uint32_t threshold) noexcept {
         const auto found = entries_.find(key);
         return found != entries_.end() && found->second->id_ == id &&
                found->second->record(success, threshold);
     }
 
-    [[nodiscard]] origin_probe_target probe_target(origin_health_key_view key) const {
+    [[nodiscard]] origin_probe_target probe_target(const origin_health_key_view& key) const {
         const auto found = entries_.find(key);
         return found == entries_.end() ? origin_probe_target{} : origin_probe_target(found->second);
     }
 
     // Claims the next active probe of `key` once `interval` has elapsed since the previous one.
-    [[nodiscard]] bool claim_due(origin_health_key_view key, std::chrono::seconds interval) {
+    [[nodiscard]] bool claim_due(const origin_health_key_view& key, std::chrono::seconds interval) {
         const auto found = entries_.find(key);
         if (found == entries_.end()) {
             return false;

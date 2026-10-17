@@ -47,20 +47,20 @@ ruvia::task<std::shared_ptr<const origin_health_snapshot>> check_streaks(origin_
     target.failure(2);
     target.success(2);
     target.failure(2);
-    FLEXEDGE_REQUIRE(health.snapshot()->healthy("website", "origin"));
+    FLEXEDGE_REQUIRE(health.snapshot()->healthy({"website", "origin"}));
     target.failure(2);
-    FLEXEDGE_REQUIRE(!health.snapshot()->healthy("website", "origin"));
-    FLEXEDGE_REQUIRE(before->healthy("website", "origin"));
+    FLEXEDGE_REQUIRE(!health.snapshot()->healthy({"website", "origin"}));
+    FLEXEDGE_REQUIRE(before->healthy({"website", "origin"}));
     const auto unhealthy = health.snapshot();
     auto pending = health.prepare(keys, {});
     target.success(2);
     target.success(2);
     health.activate(std::move(pending));
-    FLEXEDGE_REQUIRE(health.snapshot()->healthy("website", "origin"));
+    FLEXEDGE_REQUIRE(health.snapshot()->healthy({"website", "origin"}));
     health.activate(health.prepare({}, {}));
     health.activate(health.prepare(keys, {}));
     target.failure(1);
-    FLEXEDGE_REQUIRE(health.snapshot()->healthy("website", "origin"));
+    FLEXEDGE_REQUIRE(health.snapshot()->healthy({"website", "origin"}));
     co_return unhealthy;
 }
 
@@ -299,6 +299,37 @@ void verify_workers() {
     },
         std::chrono::seconds(4)));
     const auto healthy = report();
+
+    // An identical source still receives a new paired execution view, but its participant
+    // owns no replacement TLS, listeners or health membership. It is also reversible.
+    auto reconnect = config;
+    reconnect.finalize();
+    const auto reconnect_config = std::make_shared<const compiled_config>(reconnect.active, reconnect.objects);
+    const auto reconnect_sequence = ++sequence;
+    send({.operation_ = data_worker_operation::prepare, .sequence_ = reconnect_sequence, .config_ = reconnect_config});
+    for (const auto& reply : control.loop(0).start(receive_results(receiver, data_worker_operation::prepare, reconnect_sequence, worker_count)).get()) {
+        FLEXEDGE_REQUIRE(reply->ok_ && reply->added_listeners_ == 0 && reply->retired_listeners_ == 0);
+    }
+    send({.operation_ = data_worker_operation::activate, .sequence_ = reconnect_sequence});
+    for (const auto& reply : control.loop(0).start(receive_results(receiver, data_worker_operation::activate, reconnect_sequence, worker_count)).get()) {
+        FLEXEDGE_REQUIRE(reply->ok_);
+    }
+    for (const auto& reply : report()) {
+        FLEXEDGE_REQUIRE(reply->snapshot_->config_ == reconnect_config);
+        const auto previous = std::ranges::find_if(healthy, [&](const auto& value) {
+            return value->worker_id_ == reply->worker_id_;
+        });
+        FLEXEDGE_REQUIRE(previous != healthy.end());
+        FLEXEDGE_REQUIRE(reply->snapshot_->health_ == (*previous)->snapshot_->health_);
+    }
+    send({.operation_ = data_worker_operation::rollback, .sequence_ = reconnect_sequence});
+    for (const auto& reply : control.loop(0).start(receive_results(receiver, data_worker_operation::rollback, reconnect_sequence, worker_count)).get()) {
+        FLEXEDGE_REQUIRE(reply->ok_);
+    }
+    for (const auto& reply : report()) {
+        FLEXEDGE_REQUIRE(reply->snapshot_->config_ == initial);
+        FLEXEDGE_REQUIRE(reply->snapshot_->health_->all_healthy());
+    }
 
     // One worker commits while the other rejects activation. Rollback must restore both
     // configs, health memberships, certificates and listener sets before the next attempt.

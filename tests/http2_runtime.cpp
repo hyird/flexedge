@@ -5,6 +5,7 @@
 #include <asio/read.hpp>
 
 #include "node/data/data_plane.h"
+#include "node/runtime/config_activation.h"
 #include "node/runtime/loop_shutdown.h"
 #include "tests/support/config_fixture.h"
 #include "tests/support/environment.h"
@@ -194,8 +195,8 @@ std::vector<received> requests(stream_type& socket, const std::vector<std::strin
     return responses;
 }
 ruvia::task<void> apply(data_plane& plane, const flexedge::testing::TestConfig& config) {
-    auto pending = co_await plane.prepare(std::make_shared<const compiled_config>(config.active, config.objects));
-    co_await plane.activate(pending);
+    auto pending = co_await config_activation::prepare(plane, std::make_shared<const compiled_config>(config.active, config.objects));
+    co_await pending.commit();
 }
 void verify() {
     auto identity = flexedge::testing::make_identity("localhost", 8);
