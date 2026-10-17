@@ -932,6 +932,8 @@ private:
 
     void start_origin_attempt(const v2::Origin& origin, std::uint64_t attempt) {
         auto response = origin_response_codec(prepared_request_->make_exchange_state(), hsts_enabled_, route_);
+        response.set_forward_informational(!cache_prewarm_ &&
+                                           request_reader_.request().protocol_version() != ruvia::http_protocol_version::http10);
         if (compress_response_) {
             response.set_compression(*website_, prepared_request_->target_, accept_encoding_,
                 context_.response_buffers_.lease());
@@ -982,66 +984,79 @@ private:
                 self->origin_failed(attempt);
                 return;
             }
-            auto& response = self->exchange_->response();
-            switch (response.consume_head(bytes)) {
-                case origin_response_head_status::need_more:
-                    self->read_origin_head(attempt);
-                    return;
-                case origin_response_head_status::failure:
-                    self->log("origin response head parse failed");
-                    self->origin_failed(attempt);
-                    return;
-                case origin_response_head_status::exhausted:
-                    self->reply(ruvia::http_status::service_unavailable);
-                    return;
-                case origin_response_head_status::ready:
-                    break;
-            }
-            const auto status = response.status_code().value_or(502);
-            if ((status == 500 || status == 502 || status == 503 || status == 504) && self->try_stale()) {
-                return;
-            }
-            if (status == 304 && self->revalidation_response_ && self->cache_ticket_ && response.cache_head()) {
-                const auto refreshed = self->context_.cache_->revalidate(*self->cache_ticket_, *self->cache_rule_,
-                    *self->revalidation_response_, *response.cache_head(), self->request_headers_);
-                if (refreshed) {
-                    self->exchange_->release();
-                    self->stop_cache_fill();
-                    self->access_log_.cache_status(refreshed->body_ ? "hit_memory" : "hit_disk", "origin_not_modified", true);
-                    self->send_cached(refreshed, self->request_reader_, false, true);
-                } else {
-                    self->stop_cache_fill();
-                    self->discard_exchange();
-                    self->revalidation_response_.reset();
-                    if (!self->select_origin_candidates(*self->website_)) {
-                        self->reply(ruvia::http_status::bad_gateway);
-                    } else {
-                        self->proxy(self->request_reader_, *self->request_reader_.request().header("Host"));
-                    }
-                }
-                return;
-            }
-            if (!response.cache_bypass_reason().empty()) {
-                self->access_log_.cache_status("bypass", response.cache_bypass_reason());
-            } else if (self->revalidation_response_) {
-                self->access_log_.cache_status("miss", "origin_changed");
-            }
-            if (self->cache_ticket_ && self->request_reader_.request().method() == "HEAD") {
-                if (self->revalidation_response_ && status < 500) {
-                    self->context_.cache_->discard(self->cached_key_, self->revalidation_response_->identity_);
-                }
-                self->stop_cache_fill();
-            }
-            self->current_health_.success(self->healthy_threshold_);
-            self->tunnel_ = response.tunnel();
-            self->relay_bytes_ = response.take_output();
-            self->access_log_.response_head(self->relay_bytes_);
-            self->relay_origin_bytes(attempt);
+            self->consume_origin_head(attempt, bytes);
         });
+    }
+
+    void consume_origin_head(std::uint64_t attempt, std::string_view bytes) {
+        auto& response = exchange_->response();
+        switch (response.consume_head(bytes)) {
+            case origin_response_head_status::need_more:
+                relay_bytes_ = response.take_output();
+                if (relay_bytes_.empty()) {
+                    read_origin_head(attempt);
+                } else {
+                    relay_origin_bytes(attempt);
+                }
+                return;
+            case origin_response_head_status::failure:
+                log("origin response head parse failed");
+                origin_failed(attempt);
+                return;
+            case origin_response_head_status::exhausted:
+                reply(ruvia::http_status::service_unavailable);
+                return;
+            case origin_response_head_status::ready:
+                break;
+        }
+        const auto status = response.status_code().value_or(502);
+        if ((status == 500 || status == 502 || status == 503 || status == 504) && try_stale()) {
+            return;
+        }
+        if (status == 304 && revalidation_response_ && cache_ticket_ && response.cache_head()) {
+            const auto refreshed = context_.cache_->revalidate(*cache_ticket_, *cache_rule_,
+                *revalidation_response_, *response.cache_head(), request_headers_);
+            if (refreshed) {
+                exchange_->release();
+                stop_cache_fill();
+                access_log_.cache_status(refreshed->body_ ? "hit_memory" : "hit_disk", "origin_not_modified", true);
+                send_cached(refreshed, request_reader_, false, true);
+            } else {
+                stop_cache_fill();
+                discard_exchange();
+                revalidation_response_.reset();
+                if (!select_origin_candidates(*website_)) {
+                    reply(ruvia::http_status::bad_gateway);
+                } else {
+                    proxy(request_reader_, *request_reader_.request().header("Host"));
+                }
+            }
+            return;
+        }
+        if (!response.cache_bypass_reason().empty()) {
+            access_log_.cache_status("bypass", response.cache_bypass_reason());
+        } else if (revalidation_response_) {
+            access_log_.cache_status("miss", "origin_changed");
+        }
+        if (cache_ticket_ && request_reader_.request().method() == "HEAD") {
+            if (revalidation_response_ && status < 500) {
+                context_.cache_->discard(cached_key_, revalidation_response_->identity_);
+            }
+            stop_cache_fill();
+        }
+        current_health_.success(healthy_threshold_);
+        tunnel_ = response.tunnel();
+        relay_bytes_ = response.take_output();
+        access_log_.response_head(relay_bytes_);
+        relay_origin_bytes(attempt);
     }
 
     void continue_origin_response(std::uint64_t attempt) {
         auto& response = exchange_->response();
+        if (!response.status_code()) {
+            consume_origin_head(attempt, {});
+            return;
+        }
         capture_origin_bytes();
         if (cache_prewarm_ && !cache_fill_) {
             reply(ruvia::http_status::content_too_large);

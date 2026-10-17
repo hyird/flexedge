@@ -257,6 +257,112 @@ void response_side_sse() {
         FLEXEDGE_REQUIRE(codec.take_cache_output().empty() && !codec.complete());
     }
 }
+void informational_progress() {
+    const auto site = policy("gzip");
+    const std::string informational =
+        "HTTP/1.1 103 Early Hints\r\n"
+        "Link: </a.css>; rel=preload\r\n"
+        "Link: </b.js>; rel=preload\r\n"
+        "Set-Cookie: a=1\r\nSet-Cookie: b=2\r\n"
+        "Content-Length: nonsense\r\n"
+        "Connection: keep-alive, x-drop\r\n"
+        "Connection: Y-Drop\r\n"
+        "X-Drop: secret\r\nY-Drop: secret\r\nKeep-Alive: timeout=5\r\n"
+        "Cache-Control: no-store\r\nX-Cache: origin-info\r\n\r\n"
+        "HTTP/1.1 199 \r\nContent-Length: 0\r\nX-Progress: second\r\n\r\n";
+    const std::string final =
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nETag: \"final\"\r\n\r\nok";
+    // Every boundary exercises both a fragmented head and a coalesced remainder;
+    // the downstream parser observes each interim before the final is available.
+    for (const bool forward : {true, false}) {
+        for (std::size_t split = 0; split <= informational.size(); ++split) {
+            origin_response_codec codec(exchange(site), true, nullptr);
+            codec.set_forward_informational(forward);
+            codec.set_cache_status("MISS");
+            codec.set_browser_cache_ttl(120, {200});
+            codec.capture_for_cache();
+            ruvia::http1_client_response_parser downstream(exchange(site));
+            std::size_t interim_count{};
+            const auto drain = [&](std::string_view bytes) {
+                for (;;) {
+                    const auto status = codec.consume_head(bytes);
+                    bytes = {};
+                    const auto output = codec.take_output();
+                    if (status == origin_response_head_status::ready) {
+                        const auto parsed = downstream.parse(output);
+                        FLEXEDGE_REQUIRE(parsed.parsed() && !parsed.parsed()->plan().informational());
+                        FLEXEDGE_REQUIRE(parsed.parsed()->head().status().value() == 200);
+                        cache_headers fields;
+                        for (const auto& field : parsed.parsed()->head().headers()) {
+                            fields.emplace_back(field.name(), field.value());
+                        }
+                        FLEXEDGE_REQUIRE(cache_header(fields, "Content-Length") == "2");
+                        FLEXEDGE_REQUIRE(cache_header(fields, "ETag") == "\"final\"");
+                        FLEXEDGE_REQUIRE(cache_header(fields, "Link").empty());
+                        FLEXEDGE_REQUIRE(cache_header(fields, "Set-Cookie").empty());
+                        FLEXEDGE_REQUIRE(cache_header(fields, "X-Cache") == "MISS");
+                        FLEXEDGE_REQUIRE(cache_header(fields, "Cache-Control") == "public, max-age=120");
+                        FLEXEDGE_REQUIRE(cache_header(fields, "Strict-Transport-Security") == "max-age=31536000");
+                        FLEXEDGE_REQUIRE(output.substr(parsed.parsed()->consumed_bytes()) == "ok");
+                        return true;
+                    }
+                    FLEXEDGE_REQUIRE(status == origin_response_head_status::need_more);
+                    FLEXEDGE_REQUIRE(!codec.status_code() && !codec.complete() && !codec.cache_head());
+                    FLEXEDGE_REQUIRE(codec.take_cache_output().empty());
+                    if (output.empty()) {
+                        return false;
+                    }
+                    FLEXEDGE_REQUIRE(forward);
+                    const auto parsed = downstream.parse(output);
+                    FLEXEDGE_REQUIRE(parsed.parsed() && parsed.parsed()->plan().informational());
+                    FLEXEDGE_REQUIRE(parsed.parsed()->consumed_bytes() == output.size());
+                    FLEXEDGE_REQUIRE(parsed.parsed()->head().status().value() == (interim_count == 0 ? 103 : 199));
+                    cache_headers fields;
+                    std::vector<std::string> cookies;
+                    std::string links;
+                    for (const auto& field : parsed.parsed()->head().headers()) {
+                        fields.emplace_back(field.name(), field.value());
+                        if (flexedge::route_policy::ascii_equal(field.name(), "Set-Cookie")) {
+                            cookies.emplace_back(field.value());
+                        }
+                        if (flexedge::route_policy::ascii_equal(field.name(), "Link")) {
+                            links.append(field.value());
+                        }
+                    }
+                    for (const auto name : {"Connection", "Keep-Alive", "X-Drop", "Y-Drop",
+                             "Content-Length", "Transfer-Encoding", "Strict-Transport-Security"}) {
+                        FLEXEDGE_REQUIRE(cache_header(fields, name).empty());
+                    }
+                    if (interim_count == 0) {
+                        FLEXEDGE_REQUIRE(links.find("</a.css>; rel=preload") != std::string::npos);
+                        FLEXEDGE_REQUIRE(links.find("</b.js>; rel=preload") != std::string::npos);
+                        FLEXEDGE_REQUIRE((cookies == std::vector<std::string>{"a=1", "b=2"}));
+                        FLEXEDGE_REQUIRE(cache_header(fields, "Cache-Control") == "no-store");
+                        FLEXEDGE_REQUIRE(cache_header(fields, "X-Cache") == "origin-info");
+                    } else {
+                        FLEXEDGE_REQUIRE(cache_header(fields, "X-Progress") == "second");
+                        FLEXEDGE_REQUIRE(cache_header(fields, "Cache-Control").empty());
+                        FLEXEDGE_REQUIRE(cache_header(fields, "X-Cache").empty());
+                    }
+                    ++interim_count;
+                }
+            };
+            FLEXEDGE_REQUIRE(!drain(std::string_view(informational).substr(0, split)));
+            const auto first_end = informational.find("\r\n\r\n") + 4;
+            const auto completed_interims = static_cast<std::size_t>(split >= first_end) +
+                                            static_cast<std::size_t>(split == informational.size());
+            FLEXEDGE_REQUIRE(interim_count == (forward ? completed_interims : 0u));
+            FLEXEDGE_REQUIRE(drain(informational.substr(split) + final));
+            FLEXEDGE_REQUIRE(interim_count == (forward ? 2u : 0u));
+            FLEXEDGE_REQUIRE(codec.status_code() == 200 && codec.complete());
+            FLEXEDGE_REQUIRE(codec.cache_head() && codec.cache_head()->status_ == 200);
+            FLEXEDGE_REQUIRE(cache_header(codec.cache_head()->headers_, "Link").empty());
+            FLEXEDGE_REQUIRE(cache_header(codec.cache_head()->headers_, "Set-Cookie").empty());
+            FLEXEDGE_REQUIRE(cache_header(codec.cache_head()->headers_, "ETag") == "\"final\"");
+            FLEXEDGE_REQUIRE(codec.take_cache_output() == "ok");
+        }
+    }
+}
 void large_stream() {
     auto site = policy("gzip");
     constexpr std::size_t size = 72 * 1024 * 1024;
@@ -287,6 +393,7 @@ int main() {
         cache_validation_headers();
         independent_cache_directives();
         response_side_sse();
+        informational_progress();
         large_stream();
         std::cout << "response streaming passed\n";
         return 0;

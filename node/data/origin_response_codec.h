@@ -89,6 +89,12 @@ public:
         return cache_bypass_reason_;
     }
 
+    void set_forward_informational(bool enabled) noexcept {
+        forward_informational_ = enabled;
+    }
+
+    // need_more may emit one informational head. Drain take_output(), then call
+    // consume_head({}) before reading again to preserve coalesced response heads.
     [[nodiscard]] origin_response_head_status consume_head(std::string_view bytes) {
         try {
             return consume_head_impl(bytes);
@@ -155,10 +161,15 @@ private:
             if (parsed == nullptr) {
                 return origin_response_head_status::failure;
             }
-            const auto head_start = head_offset_;
             head_offset_ += parsed->consumed_bytes();
             if (parsed->plan().informational()) {
+                if (forward_informational_) {
+                    append_informational_head(parsed->head());
+                }
                 if (head_offset_ == head_bytes_.size()) {
+                    release_head();
+                }
+                if (forward_informational_ || head_bytes_.empty()) {
                     return origin_response_head_status::need_more;
                 }
                 continue;
@@ -202,8 +213,6 @@ private:
                     }
                 }
             }
-            // Informational responses are relayed as received.
-            output_.assign(head_bytes_, 0, head_start);
             append_head(parsed->head());
             const auto status = consume_body_impl(body);
             release_head();
@@ -446,12 +455,8 @@ private:
     }
 
     static void append_status_line(std::string& output, std::uint16_t status) {
-        output.append("HTTP/1.1 ").append(std::to_string(status));
-        const auto reason = ruvia::http_reason_phrase(ruvia::http_status_code::from_value(status));
-        if (!reason.empty()) {
-            output.push_back(' ');
-            output.append(reason);
-        }
+        output.append("HTTP/1.1 ").append(std::to_string(status)).push_back(' ');
+        output.append(ruvia::http_reason_phrase(ruvia::http_status_code::from_value(status)));
         output.append("\r\n");
     }
 
@@ -483,17 +488,32 @@ private:
         output.append("\r\n");
     }
 
+    void append_informational_head(const ruvia::http_client_response_head& head) {
+        const auto options = connection_options(head);
+        append_status_line(output_, static_cast<std::uint16_t>(head.status().value()));
+        for (const auto& header : head.headers()) {
+            if (!hop_by_hop(header.name()) &&
+                !flexedge::route_policy::ascii_equal(header.name(), "Content-Length") &&
+                !connection_option(options, header.name())) {
+                append_field(output_, header.name(), header.value());
+            }
+        }
+        output_.append("\r\n");
+    }
+
     // The relayed body keeps its framing, so the streaming head keeps Transfer-Encoding.
     void append_head(const ruvia::http_client_response_head& head) {
         const auto options = connection_options(head);
         append_status_line(output_, status_code_.value_or(502));
+        const auto framing_forbidden = head.status().value() < 200 || head.status().value() == 204;
         for (const auto& header : head.headers()) {
             const auto name = header.name();
             const auto upgrade_field =
                 tunnel_ && (flexedge::route_policy::ascii_equal(name, "Connection") ||
                                flexedge::route_policy::ascii_equal(name, "Upgrade"));
             const auto framing_field = flexedge::route_policy::ascii_equal(name, "Transfer-Encoding");
-            if ((!upgrade_field && !framing_field &&
+            if ((framing_forbidden && (framing_field || flexedge::route_policy::ascii_equal(name, "Content-Length"))) ||
+                (!upgrade_field && !framing_field &&
                     (hop_by_hop(name) || connection_option(options, name))) ||
                 replaced(name)) {
                 continue;
@@ -692,6 +712,7 @@ private:
     const evaluated_route_policy* route_{};
     bool tunnel_{};
     bool complete_{};
+    bool forward_informational_{true};
     bool origin_reusable_{};
 };
 

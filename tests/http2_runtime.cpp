@@ -9,6 +9,7 @@
 #include <thread>
 
 #include <asio/read.hpp>
+#include <asio/steady_timer.hpp>
 
 #include "node/data/data_plane.h"
 #include "node/runtime/config_activation.h"
@@ -37,11 +38,15 @@ std::uint64_t update_checksum(std::uint64_t value, std::string_view bytes) {
 class origin_connection final : public std::enable_shared_from_this<origin_connection> {
 public:
     using tls_stream = asio::ssl::stream<asio::ip::tcp::socket>;
-    origin_connection(asio::ip::tcp::socket socket, asio::ssl::context* tls, std::atomic<unsigned>& count)
+    origin_connection(asio::ip::tcp::socket socket, asio::ssl::context* tls, std::atomic<unsigned>& count,
+        std::atomic<bool>& hints_seen, std::atomic<bool>& hints_fallback)
         : stream_(tls ? std::variant<asio::ip::tcp::socket, tls_stream>(std::in_place_type<tls_stream>, std::move(socket), *tls)
                       : std::variant<asio::ip::tcp::socket, tls_stream>(std::in_place_type<asio::ip::tcp::socket>, std::move(socket))),
           count_(count),
-          protocol_(ruvia::http2_connection::server()) {}
+          hints_seen_(hints_seen),
+          hints_fallback_(hints_fallback),
+          protocol_(ruvia::http2_connection::server()),
+          hints_timer_(std::visit([](auto& stream) -> asio::any_io_executor { return stream.get_executor(); }, stream_)) {}
     void start() {
         if (auto* tls = std::get_if<tls_stream>(&stream_)) {
             tls->async_handshake(asio::ssl::stream_base::server, [self = shared_from_this()](auto error) {if(!error){self->read();self->flush();} });
@@ -52,6 +57,35 @@ public:
     }
 
 private:
+    void respond(std::uint32_t id, std::string_view path, std::size_t bytes, std::uint64_t checksum) {
+        ruvia::http_response response;
+        response.status(ruvia::http_status::ok);
+        response.header("Cache-Control", "public, max-age=600");
+        response.header("Content-Type", "text/plain");
+        response.header("X-Origin-Protocol", "h2");
+        response.body(path == "/large"    ? std::string(512 * 1024, 'x')
+                      : path == "/upload" ? std::to_string(bytes)
+                      : path == "/binary" ? std::to_string(checksum)
+                                          : std::string(path));
+        FLEXEDGE_REQUIRE(protocol_.submit_buffered_response(id, response) == ruvia::http2_submit_status::accepted);
+    }
+    void finish_hints(std::uint32_t id, std::chrono::steady_clock::time_point deadline) {
+        if (hints_seen_ || std::chrono::steady_clock::now() >= deadline) {
+            hints_fallback_ = !hints_seen_;
+            respond(id, "/hints", 0, checksum_initial);
+            auto& request = requests_.at(id);
+            (void)protocol_.release(std::move(*request.head_));
+            requests_.erase(id);
+            flush();
+            return;
+        }
+        hints_timer_.expires_after(std::chrono::milliseconds(1));
+        hints_timer_.async_wait([self = shared_from_this(), id, deadline](std::error_code error) {
+            if (!error) {
+                self->finish_hints(id, deadline);
+            }
+        });
+    }
     void read() {
         std::visit([self = shared_from_this()](auto& stream) {
             stream.async_read_some(asio::buffer(self->input_), [self](std::error_code error, std::size_t size) {
@@ -99,17 +133,21 @@ private:
                         const auto id = end->stream_id();
                         auto& request = self->requests_.at(id);
                         const auto& path = request.path_;
-                        if (!request.early_) {
-                            ruvia::http_response response;
-                            response.status(ruvia::http_status::ok);
-                            response.header("Cache-Control", "public, max-age=600");
-                            response.header("Content-Type", "text/plain");
-                            response.header("X-Origin-Protocol", "h2");
-                            response.body(path == "/large"    ? std::string(512 * 1024, 'x')
-                                          : path == "/upload" ? std::to_string(request.bytes_)
-                                          : path == "/binary" ? std::to_string(request.checksum_)
-                                                              : path);
-                            FLEXEDGE_REQUIRE(self->protocol_.submit_buffered_response(id, response) == ruvia::http2_submit_status::accepted);
+                        if (path == "/hints" || path == "/hints-reset") {
+                            const std::array<ruvia::http_header_view, 2> headers{{{"link", "</style.css>; rel=preload; as=style"},
+                                {"link", "</script.js>; rel=preload; as=script"}}};
+                            FLEXEDGE_REQUIRE(self->protocol_.submit_interim_response_head(id,
+                                                 ruvia::http_interim_response_head(ruvia::http_status_code::from_value(103), headers)) ==
+                                             ruvia::http2_submit_status::accepted);
+                            if (path == "/hints-reset") {
+                                FLEXEDGE_REQUIRE(self->protocol_.submit_reset(id, ruvia::http2_error_code::no_error) ==
+                                                 ruvia::http2_submit_status::accepted);
+                            } else {
+                                self->finish_hints(id, std::chrono::steady_clock::now() + std::chrono::seconds(2));
+                                continue;
+                            }
+                        } else if (!request.early_) {
+                            self->respond(id, path, request.bytes_, request.checksum_);
                         }
                         (void)self->protocol_.release(std::move(*request.head_));
                         self->requests_.erase(id);
@@ -148,7 +186,10 @@ private:
         bool early_{};
     };
     std::atomic<unsigned>& count_;
+    std::atomic<bool>& hints_seen_;
+    std::atomic<bool>& hints_fallback_;
     ruvia::http2_connection protocol_;
+    asio::steady_timer hints_timer_;
     std::map<std::uint32_t, request> requests_;
     std::array<char, 16384> input_{};
     std::pmr::string output_;
@@ -179,6 +220,12 @@ public:
     unsigned count() const {
         return count_;
     }
+    std::atomic<bool>& hints_seen() {
+        return hints_seen_;
+    }
+    bool hints_fallback() const {
+        return hints_fallback_;
+    }
 
 private:
     void accept() {
@@ -186,7 +233,9 @@ private:
             if (error) {
                 return;
             }
-            std::make_shared<origin_connection>(std::move(socket), tls_ ? &*tls_ : nullptr, count_)->start();
+            std::make_shared<origin_connection>(std::move(socket), tls_ ? &*tls_ : nullptr,
+                count_, hints_seen_, hints_fallback_)
+                ->start();
             accept();
         });
     }
@@ -195,6 +244,7 @@ private:
     std::optional<asio::ssl::context> tls_;
     std::jthread thread_;
     std::atomic<unsigned> count_{};
+    std::atomic<bool> hints_seen_{}, hints_fallback_{};
 };
 struct received final {
     unsigned status_{};
@@ -202,9 +252,12 @@ struct received final {
     std::string encoding_;
     std::vector<std::pair<std::string, std::string>> headers_{};
     unsigned continues_{};
+    unsigned hints_{};
+    bool hints_before_final_{};
+    std::vector<std::pair<std::string, std::string>> hint_headers_{};
 };
 template <class stream_type>
-std::vector<received> requests(stream_type& socket, const std::vector<std::string>& paths, bool cancel = false, std::string_view authority = "www.example.com", std::string_view upload = {}, std::string_view encoding = {}, bool expect_continue = false, bool bounded = false) {
+std::vector<received> requests(stream_type& socket, const std::vector<std::string>& paths, bool cancel = false, std::string_view authority = "www.example.com", std::string_view upload = {}, std::string_view encoding = {}, bool expect_continue = false, bool bounded = false, std::atomic<bool>* hints_seen = nullptr) {
     auto client = ruvia::http2_connection::client();
     std::map<std::uint32_t, std::size_t> ids;
     std::vector<received> responses(paths.size());
@@ -241,6 +294,17 @@ std::vector<received> requests(stream_type& socket, const std::vector<std::strin
                     FLEXEDGE_REQUIRE(++responses[ids.at(interim->stream_id())].continues_ == 1);
                     const auto result = client.submit_data(interim->stream_id(), upload, ruvia::http2_end_stream::end_stream);
                     FLEXEDGE_REQUIRE(result == ruvia::http2_data_submit_status::accepted || result == ruvia::http2_data_submit_status::queued);
+                }
+                if (interim->head().status().value() == 103) {
+                    auto& response = responses[ids.at(interim->stream_id())];
+                    ++response.hints_;
+                    response.hints_before_final_ = response.status_ == 0;
+                    for (const auto& field : interim->head().headers()) {
+                        response.hint_headers_.emplace_back(field.name(), field.value());
+                    }
+                    if (hints_seen) {
+                        *hints_seen = true;
+                    }
                 }
             } else if (const auto* head = event->response_head()) {
                 responses[ids.at(head->stream_id())].status_ = head->head().status().value();
@@ -380,6 +444,55 @@ void verify(std::string_view storage) {
         const auto hit = requests(cached, {"/large"});
         FLEXEDGE_REQUIRE(hit[0].status_ == 200 && hit[0].body_ == std::string(512 * 1024, 'x'));
         FLEXEDGE_REQUIRE(plain.count() == count);
+    }
+    {
+        asio::ip::tcp::socket socket(clients);
+        socket.connect({asio::ip::address_v4::loopback(), port});
+        const auto result = requests(socket, {"/hints"}, false, "www.example.com",
+            {}, {}, false, true, &plain.hints_seen());
+        const auto& response = result[0];
+        FLEXEDGE_REQUIRE(response.hints_ == 1 && response.hints_before_final_ && !plain.hints_fallback());
+        FLEXEDGE_REQUIRE(response.status_ == 200 && response.body_ == "/hints");
+        std::vector<std::string> links;
+        for (const auto& [name, value] : response.hint_headers_) {
+            if (!flexedge::route_policy::ascii_equal(name, "Link")) {
+                continue;
+            }
+            std::string_view remaining = value;
+            while (!remaining.empty()) {
+                const auto comma = remaining.find(',');
+                links.emplace_back(flexedge::route_policy::trim_ows(remaining.substr(0, comma)));
+                remaining = comma == std::string_view::npos ? std::string_view{} : remaining.substr(comma + 1);
+            }
+        }
+        FLEXEDGE_REQUIRE((links == std::vector<std::string>{
+                                       "</style.css>; rel=preload; as=style", "</script.js>; rel=preload; as=script"}));
+        for (const auto& [name, value] : response.headers_) {
+            FLEXEDGE_REQUIRE(!flexedge::route_policy::ascii_equal(name, "Link"));
+        }
+        const auto before_hit = plain.count();
+        asio::ip::tcp::socket cached(clients);
+        cached.connect({asio::ip::address_v4::loopback(), port});
+        const auto hit = requests(cached, {"/hints"}, false, "www.example.com", {}, {}, false, true);
+        FLEXEDGE_REQUIRE(hit[0].status_ == 200 && hit[0].body_ == "/hints" && hit[0].hints_ == 0);
+        bool cache_hit{};
+        for (const auto& [name, value] : hit[0].headers_) {
+            FLEXEDGE_REQUIRE(!flexedge::route_policy::ascii_equal(name, "Link"));
+            if (flexedge::route_policy::ascii_equal(name, "X-Cache")) {
+                cache_hit = value == "HIT";
+            }
+        }
+        FLEXEDGE_REQUIRE(cache_hit && plain.count() == before_hit);
+    }
+    {
+        asio::ip::tcp::socket socket(clients);
+        socket.connect({asio::ip::address_v4::loopback(), port});
+        const auto before = plain.count();
+        const auto result = requests(socket, {"/hints-reset", "/after-hints-reset"},
+            false, "www.example.com", {}, {}, false, true);
+        FLEXEDGE_REQUIRE(result[0].hints_ == 1 && result[0].status_ == 502);
+        FLEXEDGE_REQUIRE(result[1].status_ == 200 && result[1].body_ == "/after-hints-reset");
+        FLEXEDGE_REQUIRE(plain.count() == before + 2);
     }
     site->set_revision(site->revision() + 1);
     site->set_response_compression_enabled(true);
