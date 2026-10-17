@@ -226,6 +226,7 @@ int main() try {
     stored_runtime.set<"cpu_count">(4);
     stored_runtime.set<"memory_total_bytes">(8LL << 30);
     stored_runtime.set<"disk_total_bytes">(100LL << 30);
+    stored_runtime.set<"disk_usage">(0.0);
     const auto stored_json = std::string(ruvia::to_json(stored_runtime));
     expect(stored_json.find("\"connected_ip_count\":0") != std::string::npos,
         "stored runtime must keep a zero connected IP count");
@@ -234,6 +235,8 @@ int main() try {
                parsed_runtime->memory_total_bytes_ == (8LL << 30) &&
                parsed_runtime->disk_total_bytes_ == (100LL << 30),
         "host capacity did not round-trip through stored runtime");
+    expect(parsed_runtime && parsed_runtime->disk_usage_ == 0.0,
+        "zero disk usage did not round-trip through stored runtime");
     expect(parsed_runtime && parsed_runtime->connected_ip_count_ == 0 &&
                parsed_runtime->connection_count_ == 2,
         "stored connected IP count did not round-trip");
@@ -243,6 +246,8 @@ int main() try {
         "legacy runtime must not invent host capacity");
     expect(legacy_runtime && !legacy_runtime->connected_ip_count_,
         "a runtime without connected IP count must stay without it");
+    expect(legacy_runtime && !legacy_runtime->disk_usage_,
+        "legacy runtime must not invent disk usage");
     service::node_runtime::node_runtime_dto runtime_dto;
     runtime_dto.set<"registration_status">("registered");
     runtime_dto.set<"connection_status">("online");

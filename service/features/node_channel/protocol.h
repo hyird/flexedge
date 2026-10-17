@@ -74,6 +74,7 @@ inline bool valid_heartbeat(const flexedge::node::v2::Heartbeat& value) {
                                                    value.memory_total_bytes() <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))) &&
            (!value.has_disk_total_bytes() || (value.disk_total_bytes() > 0 &&
                                                  value.disk_total_bytes() <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))) &&
+           (!value.has_disk_usage() || (std::isfinite(value.disk_usage()) && value.disk_usage() >= 0 && value.disk_usage() <= 1)) &&
            std::isfinite(value.load_1m()) && value.load_1m() >= 0 &&
            value.queued_log_events() <=
                static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) &&

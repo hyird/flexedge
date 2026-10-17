@@ -1,4 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
+import { lazy, Suspense } from 'react'
+import type { UseQueryResult } from '@tanstack/react-query'
 import { ChartTooltip, TrendChip, Widget } from '@heroui-pro/react'
 import { AreaChart } from '@heroui-pro/react/area-chart'
 import { BarChart } from '@heroui-pro/react/bar-chart'
@@ -16,6 +17,7 @@ import {
 import { cn } from '@/lib/utils'
 import { KpiQuantity } from '@/components/kpi-quantity'
 import { EmptyState, QueryNotice } from '@/components/page'
+import { cacheReason, cacheState } from './access_log_cache'
 import { ClientIpTooltip } from './client-ip-tooltip'
 import { clientIpDisplay } from './client-location'
 import type {
@@ -23,9 +25,9 @@ import type {
   WebsiteDashboardClientIpRanking,
   WebsiteDashboardRanking,
 } from './dashboard-schema'
-import { websiteDashboardQuery } from './data'
 import { todayTrafficStatistics } from './traffic-statistics'
 import { useOpenWebsiteTab, useWebsite } from './website-context'
+import { WebsiteRequestMetrics } from './website_request_metrics'
 
 const statusClassColors: Record<string, string> = {
   '1': 'var(--chart-1)',
@@ -34,13 +36,21 @@ const statusClassColors: Record<string, string> = {
   '4': 'var(--warning)',
   '5': 'var(--danger)',
 }
+const CountryTrafficMap = lazy(() =>
+  import('./country_traffic_map').then((module) => ({
+    default: module.CountryTrafficMap,
+  }))
+)
 
 /** Website detail “流量分析” tab: access-log based statistics. Subscribes to
  * the dashboard stream only while this tab is mounted. */
-export function WebsiteTraffic() {
+export function WebsiteAnalytics({
+  dashboard,
+}: {
+  dashboard: UseQueryResult<WebsiteDashboard>
+}) {
   const website = useWebsite()
   const openTab = useOpenWebsiteTab()
-  const dashboard = useQuery(websiteDashboardQuery(website.id))
   const data = dashboard.data
   const logging = website.config.access_log_enabled
 
@@ -241,6 +251,10 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
       <p className='-mt-3 text-xs text-muted'>
         统计基于访问日志，按控制台时区（UTC+8）汇总。
       </p>
+      <WebsiteRequestMetrics data={data} />
+      <Suspense fallback={<Skeleton className='h-80 rounded-2xl' />}>
+        <CountryTrafficMap data={data.countries} />
+      </Suspense>
 
       <div className='grid gap-6 xl:grid-cols-2'>
         <Widget className='min-w-0'>
@@ -392,7 +406,7 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
       <div className='grid gap-6 md:grid-cols-2 xl:grid-cols-3'>
         <Widget className='min-w-0'>
           <Widget.Header>
-            <Widget.Title>今日状态码</Widget.Title>
+            <Widget.Title>24小时状态码</Widget.Title>
           </Widget.Header>
           <Widget.Content className='flex flex-col justify-center'>
             {totalStatus ? (
@@ -400,7 +414,7 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
                 <PieChart
                   height={168}
                   width={168}
-                  aria-label='今日状态码分布'
+                  aria-label='24小时状态码分布'
                   className='w-42 shrink-0'
                 >
                   <PieChart.Pie
@@ -466,7 +480,29 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
             )}
           </Widget.Content>
         </Widget>
-        <Ranking title='国家 / 地区' data={data.countries} />
+        <Ranking
+          title='缓存状态'
+          data={data.cache_states.map((row) => ({
+            ...row,
+            label:
+              row.label === 'hit_memory'
+                ? 'HIT · L1内存'
+                : row.label === 'hit_disk'
+                  ? 'HIT · L2磁盘'
+                  : (cacheState({ cache_status: row.label })?.label ??
+                    '未记录'),
+          }))}
+        />
+        <Ranking
+          title='缓存处理原因'
+          data={data.cache_reasons.map((row) => ({
+            ...row,
+            label: cacheReason({
+              cache_reason: row.label === 'unknown' ? '' : row.label,
+            }),
+          }))}
+        />
+        <Ranking title='接入协议' data={data.protocols} mono />
         <Ranking title='域名' data={data.hosts} mono />
         <Ranking title='访问路径' data={data.paths} mono />
         <Ranking title='来源页面' data={data.referers} mono />

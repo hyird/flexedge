@@ -1,4 +1,4 @@
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, type UseQueryResult } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { Lock, Magnifier } from '@gravity-ui/icons'
 import { ListView, type DataGridColumn } from '@heroui-pro/react'
@@ -18,6 +18,7 @@ import { RelativeTime } from '@/components/relative-time'
 import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
 import { toastWriteSuccess } from '@/features/tasks/write-toast'
+import type { WebsiteDashboard } from './dashboard-schema'
 import { probeWebsiteDns } from './data'
 import type { Website, WebsiteDomain } from './types'
 import { useOpenWebsiteTab, useWebsite } from './website-context'
@@ -35,6 +36,7 @@ import {
   originHealthStatuses,
   sortedOriginStates,
 } from './website-display'
+import { WebsiteAnalytics } from './website_analytics'
 
 type OriginState = Website['runtime']['origin_states'][number]
 
@@ -51,7 +53,11 @@ function kpiStatus(part: number, total: number) {
 }
 
 /** `/websites/$websiteId` overview: deployment, domains, origin health, certificates. */
-export function WebsiteOverview() {
+export function WebsiteOverview({
+  dashboard,
+}: {
+  dashboard: UseQueryResult<WebsiteDashboard>
+}) {
   const website = useWebsite()
   const openTab = useOpenWebsiteTab()
   const probe = useMutation({
@@ -194,6 +200,7 @@ export function WebsiteOverview() {
 
   return (
     <div className='flex flex-col gap-6'>
+      <WebsiteAnalytics dashboard={dashboard} />
       <div className='grid gap-4 sm:grid-cols-3'>
         <KPI>
           <KPI.Header>

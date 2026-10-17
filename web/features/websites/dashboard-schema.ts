@@ -6,6 +6,10 @@ const seriesPoint = z.object({
   request_count: z.number().int(),
   response_bytes: z.number().int(),
   bandwidth_bps: z.number().int(),
+  cache_hit_requests: z.number().int().nonnegative(),
+  cache_hit_bytes: z.number().int().nonnegative(),
+  duration_ms: z.number().int().nonnegative(),
+  error_requests: z.number().int().nonnegative(),
 })
 const ranking = z.object({
   label: z.string(),
@@ -17,6 +21,26 @@ const clientIpRanking = ranking.extend({
   as_name: z.string(),
 })
 const websiteDashboardSchema = z.object({
+  statistics: z.object({
+    request_count: z.number().int().nonnegative(),
+    response_bytes: z.number().int().nonnegative(),
+    request_bytes: z.number().int().nonnegative(),
+    current_qps: z.number().nonnegative(),
+    peak_qps: z.number().nonnegative(),
+    average_duration_ms: z.number().nonnegative(),
+    p95_duration_ms: z.number().nonnegative(),
+    status_4xx_count: z.number().int().nonnegative(),
+    status_5xx_count: z.number().int().nonnegative(),
+    cache_known_requests: z.number().int().nonnegative(),
+    cache_known_bytes: z.number().int().nonnegative(),
+    cache_hit_requests: z.number().int().nonnegative(),
+    cache_hit_bytes: z.number().int().nonnegative(),
+    cache_memory_requests: z.number().int().nonnegative(),
+    cache_disk_requests: z.number().int().nonnegative(),
+    cache_revalidated_requests: z.number().int().nonnegative(),
+    cache_miss_requests: z.number().int().nonnegative(),
+    cache_bypass_requests: z.number().int().nonnegative(),
+  }),
   summary: z.object({
     previous_month_peak_bps: z.number().int(),
     current_month_peak_bps: z.number().int(),
@@ -27,6 +51,9 @@ const websiteDashboardSchema = z.object({
   }),
   hourly: z.array(seriesPoint),
   daily: z.array(seriesPoint),
+  cache_states: z.array(ranking),
+  cache_reasons: z.array(ranking),
+  protocols: z.array(ranking),
   status_codes: z.array(ranking),
   methods: z.array(ranking),
   countries: z.array(ranking),

@@ -55,6 +55,17 @@ int main() {
         // Nodes before 0.4.1 never send connected_ip_count: absent stays absent, 0 stays 0.
         REQUIRE(!report.connected_ip_count_.has_value());
         REQUIRE(!report.cpu_count_ && !report.memory_total_bytes_ && !report.disk_total_bytes_);
+        REQUIRE(!report.disk_usage_);
+        for (const auto ratio : {0.0, 0.5, 1.0}) {
+            heartbeat.set_disk_usage(ratio);
+            REQUIRE(service::node_channel::valid_heartbeat(heartbeat));
+            REQUIRE(service::node_channel::to_heartbeat_report(heartbeat).disk_usage_ == ratio);
+        }
+        for (const auto ratio : {-0.1, 1.1, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+            heartbeat.set_disk_usage(ratio);
+            REQUIRE(!service::node_channel::valid_heartbeat(heartbeat));
+        }
+        heartbeat.clear_disk_usage();
         heartbeat.set_cpu_count(4);
         heartbeat.set_memory_total_bytes(8ULL << 30);
         heartbeat.set_disk_total_bytes(100ULL << 30);

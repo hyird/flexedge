@@ -86,6 +86,8 @@ message Heartbeat {
     optional uint32 cpu_count = 17;
     optional uint64 memory_total_bytes = 18;
     optional uint64 disk_total_bytes = 19;
+    // Used / total capacity on the same filesystem. Absent when unavailable.
+    optional double disk_usage = 20;
 }
 
 message OriginHealth {

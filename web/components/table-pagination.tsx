@@ -24,7 +24,7 @@ export function TablePagination({
     <Pagination
       size='sm'
       aria-label='分页'
-      className='w-full flex-wrap justify-between gap-3'
+      className='w-full flex-wrap justify-end gap-3'
     >
       <Pagination.Summary className='flex items-center gap-3 text-xs text-muted'>
         <span className='tabular-nums'>共 {formatNumber(total)} 条</span>

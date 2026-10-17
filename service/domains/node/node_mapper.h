@@ -53,6 +53,9 @@ inline service::node_runtime::node_runtime_dto get_node_runtime_dto(auto& c,
     if (input.disk_total_bytes_) {
         output.set<"disk_total_bytes">(*input.disk_total_bytes_);
     }
+    if (input.disk_usage_) {
+        output.set<"disk_usage">(*input.disk_usage_);
+    }
     if (input.traffic_out_bps_) {
         output.set<"traffic_out_bps">(*input.traffic_out_bps_);
     }

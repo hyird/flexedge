@@ -3,7 +3,6 @@ import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import {
   ArrowLeft,
-  ChartLine,
   FileText,
   Gear,
   Globe,
@@ -24,6 +23,8 @@ import { AccessLogs } from './access-logs'
 import {
   isWebsiteNotFound,
   websiteDetailQuery,
+  websiteOverviewQuery,
+  websiteDashboardQuery,
   websiteSnapshotQuery,
 } from './data'
 import {
@@ -40,13 +41,11 @@ import {
 import { WebsiteLifecycleActions } from './website-lifecycle-actions'
 import { WebsiteOverview } from './website-overview'
 import { WebsiteSettingsPage } from './website-settings'
-import { WebsiteTraffic } from './website-traffic'
 
 const route = getRouteApi('/_authenticated/websites/$websiteId')
 
 const tabItems = [
   { id: 'overview', label: '概览', icon: <LayoutHeaderCells /> },
-  { id: 'traffic', label: '流量分析', icon: <ChartLine /> },
   { id: 'logs', label: '访问日志', icon: <FileText /> },
   { id: 'settings', label: '配置', icon: <Gear /> },
 ] as const
@@ -76,7 +75,16 @@ export function WebsiteDetailLayout() {
       tabGuard.request(() => setView({ tab: next, initial }))
   }
   const liveTab = tab === 'overview' || tab === 'settings'
-  const live = useQuery({ ...websiteDetailQuery(websiteId), enabled: liveTab })
+  const live = useQuery({
+    ...(tab === 'overview'
+      ? websiteOverviewQuery(websiteId)
+      : websiteDetailQuery(websiteId)),
+    enabled: liveTab,
+  })
+  const dashboard = useQuery({
+    ...websiteDashboardQuery(websiteId),
+    enabled: tab === 'overview',
+  })
   const snapshot = useQuery({
     ...websiteSnapshotQuery(websiteId),
     // A frame from the live tab is just as fresh; no need to read it again.
@@ -122,9 +130,7 @@ export function WebsiteDetailLayout() {
   const tabKey = `${arrivalKey}:${tab}`
   const content =
     tab === 'overview' ? (
-      <WebsiteOverview key={tabKey} />
-    ) : tab === 'traffic' ? (
-      <WebsiteTraffic key={tabKey} />
+      <WebsiteOverview key={tabKey} dashboard={dashboard} />
     ) : tab === 'logs' ? (
       <AccessLogs key={tabKey} />
     ) : (

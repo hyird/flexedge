@@ -113,8 +113,25 @@ function PolicyEditor({
     setEdits(next)
     draft.track(JSON.stringify(next) !== JSON.stringify(clean))
   }
-  const changeRules = (rules: CacheRule[]) =>
-    change({ ...value, config: { ...value.config, rules } })
+  const saveRules = async (rules: CacheRule[]) => {
+    const result = cachePolicyInputSchema.safeParse({
+      ...value,
+      config: { ...value.config, rules },
+    })
+    if (!result.success) {
+      setErrors(fieldErrors(result.error.issues))
+      throw new Error(result.error.issues[0]?.message ?? '缓存规则不正确')
+    }
+    setErrors({})
+    await draft.saveAsync(result.data)
+  }
+  const changeRules = (rules: CacheRule[]) => {
+    void saveRules(rules).catch(() => undefined)
+  }
+  const openRule = (rule: CacheRule) => {
+    draft.track(true)
+    setEditing(rule)
+  }
   const move = (index: number, offset: number) => {
     const rules = [...value.config.rules]
     const target = index + offset
@@ -151,6 +168,7 @@ function PolicyEditor({
           size='sm'
           aria-label={'启用规则 ' + rule.name}
           isSelected={rule.enabled}
+          isDisabled={draft.isSaving}
           onChange={(enabled) =>
             changeRules(
               value.config.rules.map((item) =>
@@ -159,9 +177,11 @@ function PolicyEditor({
             )
           }
         >
-          <Switch.Control>
-            <Switch.Thumb />
-          </Switch.Control>
+          <Switch.Content>
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+          </Switch.Content>
         </Switch>
       ),
     },
@@ -205,7 +225,8 @@ function PolicyEditor({
               variant='tertiary'
               className='px-2'
               aria-label={`编辑规则${rule.name}`}
-              onPress={() => setEditing(rule)}
+              isDisabled={draft.isSaving}
+              onPress={() => openRule(rule)}
             >
               编辑
             </Button>
@@ -214,7 +235,7 @@ function PolicyEditor({
               size='sm'
               variant='tertiary'
               aria-label={'上移 ' + rule.name}
-              isDisabled={index === 0}
+              isDisabled={draft.isSaving || index === 0}
               onPress={() => move(index, -1)}
             >
               <ArrowUp />
@@ -224,7 +245,9 @@ function PolicyEditor({
               size='sm'
               variant='tertiary'
               aria-label={'下移 ' + rule.name}
-              isDisabled={index === value.config.rules.length - 1}
+              isDisabled={
+                draft.isSaving || index === value.config.rules.length - 1
+              }
               onPress={() => move(index, 1)}
             >
               <ArrowDown />
@@ -234,6 +257,7 @@ function PolicyEditor({
               size='sm'
               variant='tertiary'
               aria-label={'删除规则 ' + rule.name}
+              isDisabled={draft.isSaving}
               onPress={() =>
                 changeRules(
                   value.config.rules.filter((item) => item.id !== rule.id)
@@ -284,7 +308,11 @@ function PolicyEditor({
           { id: 'websites', label: '引用网站（' + base.website_count + '）' },
         ]}
         selected={tab}
-        onSelectionChange={setTab}
+        onSelectionChange={(next) => {
+          if (draft.isSaving) return
+          draft.discard()
+          setTab(next)
+        }}
       >
         {tab === 'rules' ? (
           <Section
@@ -293,8 +321,8 @@ function PolicyEditor({
             actions={
               <Button
                 size='sm'
-                isDisabled={value.config.rules.length >= 128}
-                onPress={() => setEditing(newCacheRule())}
+                isDisabled={draft.isSaving || value.config.rules.length >= 128}
+                onPress={() => openRule(newCacheRule())}
               >
                 <Plus />
                 添加规则
@@ -312,6 +340,11 @@ function PolicyEditor({
                 description: '添加缓存条件后，匹配的内容才会缓存。',
               }}
             />
+            {draft.error && !editing && (
+              <p role='alert' className='text-sm text-danger'>
+                {apiErrorMessage(draft.error)}
+              </p>
+            )}
             {Object.entries(errors)
               .filter(([key]) => key.startsWith('config.rules'))
               .map(([key, error]) => (
@@ -321,38 +354,49 @@ function PolicyEditor({
               ))}
           </Section>
         ) : tab === 'config' ? (
-          <CachePolicyFields
-            value={value}
-            onChange={change}
-            errors={errors}
-            isBuiltin={base.is_builtin}
-          />
+          <>
+            <div inert={draft.isSaving}>
+              <CachePolicyFields
+                value={value}
+                onChange={change}
+                errors={errors}
+                isBuiltin={base.is_builtin}
+              />
+            </div>
+            {dirty && base.website_count > 0 && (
+              <Notice>
+                保存后将更新 {base.website_count} 个引用网站的配置。
+              </Notice>
+            )}
+            <SaveBar
+              isDirty={dirty}
+              isSaving={draft.isSaving}
+              onSave={save}
+              onDiscard={draft.discard}
+              error={
+                draft.error
+                  ? apiErrorMessage(draft.error)
+                  : Object.values(errors)[0]
+              }
+            />
+          </>
         ) : (
           <CachePolicyWebsites policyId={base.id} />
         )}
       </PageTabs>
-      {dirty && base.website_count > 0 && (
-        <Notice>保存后将更新 {base.website_count} 个引用网站的配置。</Notice>
-      )}
-      <SaveBar
-        isDirty={dirty}
-        isSaving={draft.isSaving}
-        onSave={save}
-        onDiscard={draft.discard}
-        error={
-          draft.error ? apiErrorMessage(draft.error) : Object.values(errors)[0]
-        }
-      />
       {editing && (
         <CacheRuleEditor
           key={editing.id}
           rule={editing}
-          onClose={() => setEditing(undefined)}
-          onSave={(rule) => {
+          onClose={() => {
+            setEditing(undefined)
+            draft.discard()
+          }}
+          onSave={async (rule) => {
             const existing = value.config.rules.some(
               (item) => item.id === rule.id
             )
-            changeRules(
+            await saveRules(
               existing
                 ? value.config.rules.map((item) =>
                     item.id === rule.id ? rule : item

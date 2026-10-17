@@ -29,6 +29,7 @@ struct runtime_metrics_snapshot final {
     std::optional<std::uint32_t> cpu_count_{};
     std::optional<std::uint64_t> memory_total_bytes_{};
     std::optional<std::uint64_t> disk_total_bytes_{};
+    std::optional<double> disk_usage_{};
     double cpu_usage_{};
     double memory_usage_{};
     std::int64_t traffic_out_bps_{};
@@ -53,6 +54,7 @@ public:
         const auto disk = std::filesystem::space(".", disk_error);
         if (!disk_error && disk.capacity > 0) {
             result.disk_total_bytes_ = disk.capacity;
+            result.disk_usage_ = 1.0 - static_cast<double>((std::min)(disk.free, disk.capacity)) / static_cast<double>(disk.capacity);
         }
         if (traffic_out_bytes) {
             const auto now = std::chrono::steady_clock::now();

@@ -72,13 +72,17 @@ public:
         summary.template set<"current_bandwidth_bps">(summary_row[3].template as<std::int64_t>().value_or(0));
         summary.template set<"today_unique_ips">(summary_row[4].template as<std::int64_t>().value_or(0));
         summary.template set<"today_response_bytes">(summary_row[5].template as<std::int64_t>().value_or(0));
+        co_await append_statistics(c, result, tenant_id, id, as_of);
 
         const auto hourly_rows = co_await c.db().query(
             "WITH buckets AS (SELECT generate_series(date_trunc('hour', $3::timestamptz) - "
             "INTERVAL '23 hours', date_trunc('hour', $3::timestamptz), INTERVAL '1 hour') AS "
             "bucket) SELECT TO_CHAR(buckets.bucket, 'YYYY-MM-DD\"T\"HH24:MI:SSOF'), "
             "COUNT(access.id)::bigint, COALESCE(SUM(access.response_bytes), 0)::bigint, "
-            "COALESCE(SUM(access.response_bytes) * 8 / 3600, 0)::bigint FROM buckets LEFT JOIN "
+            "COALESCE(SUM(access.response_bytes) * 8 / 3600, 0)::bigint, "
+            "COUNT(access.id) FILTER (WHERE access.cache_status IN ('hit_memory','hit_disk'))::bigint, "
+            "COALESCE(SUM(access.response_bytes) FILTER (WHERE access.cache_status IN ('hit_memory','hit_disk')),0)::bigint, "
+            "COALESCE(SUM(access.duration_ms),0)::bigint, COUNT(access.id) FILTER (WHERE access.status_code BETWEEN 400 AND 599)::bigint FROM buckets LEFT JOIN "
             "sys_website_access_log access ON access.tenant_id = $1 AND access.website_id = $2 "
             "AND access.occurred_at >= buckets.bucket AND access.occurred_at < buckets.bucket + "
             "INTERVAL '1 hour' GROUP BY buckets.bucket ORDER BY buckets.bucket",
@@ -95,7 +99,10 @@ public:
             "INTERVAL '1 day') AS day_local) SELECT TO_CHAR(buckets.bucket, "
             "'YYYY-MM-DD\"T\"HH24:MI:SSOF'), COUNT(access.id)::bigint, "
             "COALESCE(SUM(access.response_bytes), 0)::bigint, COALESCE(SUM(access.response_bytes) "
-            "* 8 / 86400, 0)::bigint FROM buckets LEFT JOIN sys_website_access_log access ON "
+            "* 8 / 86400, 0)::bigint, "
+            "COUNT(access.id) FILTER (WHERE access.cache_status IN ('hit_memory','hit_disk'))::bigint, "
+            "COALESCE(SUM(access.response_bytes) FILTER (WHERE access.cache_status IN ('hit_memory','hit_disk')),0)::bigint, "
+            "COALESCE(SUM(access.duration_ms),0)::bigint, COUNT(access.id) FILTER (WHERE access.status_code BETWEEN 400 AND 599)::bigint FROM buckets LEFT JOIN sys_website_access_log access ON "
             "access.tenant_id = $1 AND access.website_id = $2 AND access.occurred_at >= "
             "buckets.bucket AND access.occurred_at < buckets.bucket_end GROUP BY buckets.bucket, "
             "buckets.bucket_end ORDER BY buckets.bucket",
@@ -120,6 +127,52 @@ public:
     }
 
 private:
+    static ruvia::task<void> append_statistics(auto& c, website_dashboard_dto& result,
+        std::string_view tenant, std::string_view id, std::string_view as_of) {
+        const auto rows = co_await c.db().query(
+            "WITH logs AS (SELECT occurred_at,request_bytes,response_bytes,duration_ms,status_code,cache_status "
+            "FROM sys_website_access_log WHERE tenant_id=$1 AND website_id=$2 "
+            "AND occurred_at >= $3::timestamptz-INTERVAL '24 hours' AND occurred_at <= $3::timestamptz), "
+            "minutes AS (SELECT COUNT(*) AS requests FROM logs GROUP BY date_trunc('minute',occurred_at)) "
+            "SELECT COUNT(*)::bigint,COALESCE(SUM(response_bytes),0)::bigint,COALESCE(SUM(request_bytes),0)::bigint, "
+            "(COUNT(*) FILTER (WHERE occurred_at >= $3::timestamptz-INTERVAL '1 minute')/60.0)::double precision, "
+            "COALESCE((SELECT MAX(requests)/60.0 FROM minutes),0)::double precision, "
+            "COALESCE(AVG(duration_ms),0)::double precision, "
+            "COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms),0)::double precision, "
+            "COUNT(*) FILTER (WHERE status_code BETWEEN 400 AND 499)::bigint, "
+            "COUNT(*) FILTER (WHERE status_code BETWEEN 500 AND 599)::bigint, "
+            "COUNT(*) FILTER (WHERE cache_status<>'')::bigint, "
+            "COALESCE(SUM(response_bytes) FILTER (WHERE cache_status<>''),0)::bigint, "
+            "COUNT(*) FILTER (WHERE cache_status IN ('hit_memory','hit_disk'))::bigint, "
+            "COALESCE(SUM(response_bytes) FILTER (WHERE cache_status IN ('hit_memory','hit_disk')),0)::bigint, "
+            "COUNT(*) FILTER (WHERE cache_status='hit_memory')::bigint, "
+            "COUNT(*) FILTER (WHERE cache_status='hit_disk')::bigint, "
+            "COUNT(*) FILTER (WHERE cache_status='revalidated')::bigint, "
+            "COUNT(*) FILTER (WHERE cache_status='miss')::bigint, "
+            "COUNT(*) FILTER (WHERE cache_status='bypass')::bigint FROM logs",
+            tenant, id, as_of);
+        const auto& row = rows.front();
+        auto& statistics = result.template ensure<"statistics">();
+        statistics.template set<"request_count">(row[0].template as<std::int64_t>().value_or(0));
+        statistics.template set<"response_bytes">(row[1].template as<std::int64_t>().value_or(0));
+        statistics.template set<"request_bytes">(row[2].template as<std::int64_t>().value_or(0));
+        statistics.template set<"current_qps">(row[3].template as<double>().value_or(0));
+        statistics.template set<"peak_qps">(row[4].template as<double>().value_or(0));
+        statistics.template set<"average_duration_ms">(row[5].template as<double>().value_or(0));
+        statistics.template set<"p95_duration_ms">(row[6].template as<double>().value_or(0));
+        statistics.template set<"status_4xx_count">(row[7].template as<std::int64_t>().value_or(0));
+        statistics.template set<"status_5xx_count">(row[8].template as<std::int64_t>().value_or(0));
+        statistics.template set<"cache_known_requests">(row[9].template as<std::int64_t>().value_or(0));
+        statistics.template set<"cache_known_bytes">(row[10].template as<std::int64_t>().value_or(0));
+        statistics.template set<"cache_hit_requests">(row[11].template as<std::int64_t>().value_or(0));
+        statistics.template set<"cache_hit_bytes">(row[12].template as<std::int64_t>().value_or(0));
+        statistics.template set<"cache_memory_requests">(row[13].template as<std::int64_t>().value_or(0));
+        statistics.template set<"cache_disk_requests">(row[14].template as<std::int64_t>().value_or(0));
+        statistics.template set<"cache_revalidated_requests">(row[15].template as<std::int64_t>().value_or(0));
+        statistics.template set<"cache_miss_requests">(row[16].template as<std::int64_t>().value_or(0));
+        statistics.template set<"cache_bypass_requests">(row[17].template as<std::int64_t>().value_or(0));
+    }
+
     template <typename output_type, typename rows_type>
     static void append_buckets(output_type& output, const rows_type& rows) {
         for (const auto& row : rows) {
@@ -128,6 +181,10 @@ private:
             item.template set<"request_count">(row[1].template as<std::int64_t>().value_or(0));
             item.template set<"response_bytes">(row[2].template as<std::int64_t>().value_or(0));
             item.template set<"bandwidth_bps">(row[3].template as<std::int64_t>().value_or(0));
+            item.template set<"cache_hit_requests">(row[4].template as<std::int64_t>().value_or(0));
+            item.template set<"cache_hit_bytes">(row[5].template as<std::int64_t>().value_or(0));
+            item.template set<"duration_ms">(row[6].template as<std::int64_t>().value_or(0));
+            item.template set<"error_requests">(row[7].template as<std::int64_t>().value_or(0));
         }
     }
 
@@ -144,7 +201,7 @@ private:
     template <typename output_type>
     static ruvia::task<void> append_ranking(auto& c, output_type& output,
         std::string_view label_sql, std::string_view group_order_sql,
-        std::string_view tenant_id, std::string_view website_id, std::string_view as_of) {
+        std::string_view tenant_id, std::string_view website_id, std::string_view as_of, std::int64_t limit = 10) {
         const std::string sql = "SELECT " + std::string(label_sql) +
                                 ", COUNT(*)::bigint, COALESCE(SUM(access.response_bytes), "
                                 "0)::bigint FROM sys_website_access_log access WHERE "
@@ -152,16 +209,22 @@ private:
                                 "access.occurred_at >= $3::timestamptz - INTERVAL '24 hours' "
                                 "GROUP BY " +
                                 std::string(group_order_sql) + " ORDER BY COUNT(*) DESC, " +
-                                std::string(group_order_sql) + " ASC LIMIT 10";
-        const auto rows = co_await c.db().query(sql, tenant_id, website_id, as_of);
+                                std::string(group_order_sql) + " ASC LIMIT $4";
+        const auto rows = co_await c.db().query(sql, tenant_id, website_id, as_of, limit);
         append_rankings(output, rows);
         co_return;
     }
 
     static ruvia::task<void> append_dimension_rankings(auto& c, website_dashboard_dto& result,
         std::string_view tenant_id, std::string_view website_id, std::string_view as_of) {
+        co_await append_ranking(c, result.template ensure<"cache_states">(),
+            "COALESCE(NULLIF(access.cache_status,''),'unknown')", "1", tenant_id, website_id, as_of);
+        co_await append_ranking(c, result.template ensure<"cache_reasons">(),
+            "COALESCE(NULLIF(access.cache_reason,''),'unknown')", "1", tenant_id, website_id, as_of);
+        co_await append_ranking(c, result.template ensure<"protocols">(),
+            "access.protocol", "access.protocol", tenant_id, website_id, as_of);
         co_await append_ranking(c, result.template ensure<"status_codes">(),
-            "access.status_code::text", "access.status_code", tenant_id, website_id, as_of);
+            "access.status_code::text", "access.status_code", tenant_id, website_id, as_of, 500);
         co_await append_ranking(c, result.template ensure<"methods">(), "access.method",
             "access.method", tenant_id, website_id, as_of);
         co_await append_ranking(c, result.template ensure<"hosts">(), "access.host",
@@ -179,7 +242,7 @@ private:
 
     template <typename output_type>
     static void append_ordered_totals(output_type& output,
-        std::vector<std::pair<std::string, ranking_total>> totals) {
+        std::vector<std::pair<std::string, ranking_total>> totals, std::size_t limit) {
         std::ranges::sort(totals, [](const auto& left, const auto& right) {
             if (left.second.request_count_ != right.second.request_count_) {
                 return left.second.request_count_ > right.second.request_count_;
@@ -189,7 +252,7 @@ private:
             }
             return left.first < right.first;
         });
-        const auto count = std::min<std::size_t>(totals.size(), 10);
+        const auto count = std::min(totals.size(), limit);
         for (std::size_t index = 0; index < count; ++index) {
             const auto& total = totals[index];
             auto& item = output.emplace_back();
@@ -265,7 +328,8 @@ private:
         for (const auto& [country, total] : countries) {
             country_totals.emplace_back(country, total);
         }
-        append_ordered_totals(countries_output, std::move(country_totals));
+        const auto country_count = country_totals.size();
+        append_ordered_totals(countries_output, std::move(country_totals), country_count);
 
         std::vector<std::pair<std::string, ranking_total>> asn_totals;
         asn_totals.reserve(asns.size());
@@ -273,7 +337,7 @@ private:
             asn_totals.emplace_back(
                 total.as_name_.empty() ? asn : asn + " " + total.as_name_, total.traffic_);
         }
-        append_ordered_totals(asns_output, std::move(asn_totals));
+        append_ordered_totals(asns_output, std::move(asn_totals), 10);
 
         const auto append_top_client_ips = [](auto& output,
                                                const std::vector<client_ip_entry>& entries) {

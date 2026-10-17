@@ -29,6 +29,7 @@ export const nodeRuntimeSchema = z.object({
   cpu_count: z.number().int().positive().optional(),
   memory_total_bytes: z.number().int().positive().optional(),
   disk_total_bytes: z.number().int().positive().optional(),
+  disk_usage: z.number().min(0).max(1).optional(),
   traffic_out_bps: z.number().int().optional(),
   connection_count: z.number().int().optional(),
   connected_ip_count: z.number().int().optional(),

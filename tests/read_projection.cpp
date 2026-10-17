@@ -789,6 +789,51 @@ ruvia::task<void> verify_dashboard_console_days(read_context& c, ruvia::db_trans
     REQUIRE(integer(summary.get<"today_unique_ips">()) == 1);
 }
 
+ruvia::task<void> verify_dashboard_cache_statistics(read_context& c, ruvia::db_transaction& tx) {
+    constexpr std::string_view website{"00000000-0000-4000-8000-000000009013"};
+    (void)co_await tx.execute(
+        "INSERT INTO sys_website(id,tenant_id,cluster_id,revision,config) VALUES($1,$2,$3,1,$4::jsonb)",
+        website, tenant_a, cluster_a, website_config(9013, "site13.example", "cache-statistics", true));
+    std::int64_t index{};
+    for (const auto state : {"hit_memory", "hit_disk", "revalidated", "miss", "bypass", ""}) {
+        ++index;
+        (void)co_await tx.execute(
+            "INSERT INTO sys_website_access_log(tenant_id,occurred_at,node_id,website_id,protocol,method,host,target,status_code,request_bytes,response_bytes,duration_ms,cache_status,cache_reason) "
+            "VALUES($1,'2026-10-02T11:59:30Z',$2,$3,'http/2','GET','site13.example','/', $4,10,$5,$6,$7,'test')",
+            tenant_a, node_online, website, index == 4 ? 404 : index == 5 ? 503
+                                                                          : 200,
+            index * 100, index * 10, state);
+    }
+    const auto dashboard = co_await service::website::get_website_dashboard_service().dashboard(
+        c, std::string(tenant_a), std::string(website), "2026-10-02T12:00:00Z");
+    const auto& statistics = dashboard.get<"statistics">();
+    REQUIRE(integer(statistics.get<"request_count">()) == 6);
+    REQUIRE(integer(statistics.get<"response_bytes">()) == 2100);
+    REQUIRE(integer(statistics.get<"request_bytes">()) == 60);
+    REQUIRE(statistics.get<"current_qps">().value_ == 0.1);
+    REQUIRE(statistics.get<"peak_qps">().value_ == 0.1);
+    REQUIRE(statistics.get<"average_duration_ms">().value_ == 35);
+    REQUIRE(statistics.get<"p95_duration_ms">().value_ == 57.5);
+    REQUIRE(integer(statistics.get<"status_4xx_count">()) == 1);
+    REQUIRE(integer(statistics.get<"status_5xx_count">()) == 1);
+    REQUIRE(integer(statistics.get<"cache_known_requests">()) == 5);
+    REQUIRE(integer(statistics.get<"cache_known_bytes">()) == 1500);
+    REQUIRE(integer(statistics.get<"cache_hit_requests">()) == 2);
+    REQUIRE(integer(statistics.get<"cache_hit_bytes">()) == 300);
+    REQUIRE(integer(statistics.get<"cache_memory_requests">()) == 1);
+    REQUIRE(integer(statistics.get<"cache_disk_requests">()) == 1);
+    REQUIRE(integer(statistics.get<"cache_revalidated_requests">()) == 1);
+    REQUIRE(integer(statistics.get<"cache_miss_requests">()) == 1);
+    REQUIRE(integer(statistics.get<"cache_bypass_requests">()) == 1);
+    REQUIRE(dashboard.get<"cache_states">().size() == 6);
+    REQUIRE(dashboard.get<"protocols">()[0].get<"label">().view() == "http/2");
+    const auto& hour = dashboard.get<"hourly">()[22];
+    REQUIRE(integer(hour.get<"cache_hit_requests">()) == 2);
+    REQUIRE(integer(hour.get<"cache_hit_bytes">()) == 300);
+    REQUIRE(integer(hour.get<"duration_ms">()) == 210);
+    REQUIRE(integer(hour.get<"error_requests">()) == 2);
+}
+
 // Options use exactly the list projection, with no count or page boundary.
 ruvia::task<void> verify_options(read_context& c, ruvia::db_transaction& tx) {
     const auto& clusters = service::cluster::get_cluster_read_service();
@@ -888,6 +933,7 @@ ruvia::task<void> verify(ruvia::db_client& client) {
         co_await verify_dashboard_without_geoip(c);
     }
     co_await verify_dashboard_console_days(c, tx);
+    co_await verify_dashboard_cache_statistics(c, tx);
     co_await verify_dashboard_asns(c, tx);
     co_await verify_options(c, tx);
     co_await tx.rollback();
@@ -901,8 +947,7 @@ int main(int argc, char** argv) {
     service::config::geoip_configuration geoip;
     if (with_geoip) {
         const auto path = [](const char* name) {
-            const auto* value = std::getenv(name);
-            return std::filesystem::path(value ? value : "");
+            return std::filesystem::path(test_support::environment_variable(name).value_or(""));
         };
         geoip.ipv4_path_ = path("FLEXEDGE_XDB_V4_PATH");
         geoip.ipv6_path_ = path("FLEXEDGE_XDB_V6_PATH");

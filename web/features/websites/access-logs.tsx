@@ -555,7 +555,7 @@ export function AccessLogs() {
             ) : (
               <span className='text-[13px] text-muted tabular-nums'>
                 {filtered ? `匹配 ${rows?.length ?? 0} 条，` : ''}
-                已保留 {live.logs.length} / {liveLogCapacity} 条
+                {live.logs.length} / {liveLogCapacity} 条
               </span>
             )
           }

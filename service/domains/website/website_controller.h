@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "service/common/http.h"
 #include "service/domains/website/website_access_log_service.h"
@@ -160,17 +161,23 @@ private:
     }
 
     ruvia::task<void> dashboard_stream(ruvia::context& c) {
+        namespace live = service::live_resource;
         const auto tenant = service::middleware::current_tenant_id(c);
         const auto id = service::common::require_uuid_param(c, "id");
-        auto sub = service::live_resource::get_hub(c).subscribe(
-            c.worker(), tenant, service::live_resource::resource::access_history, id,
-            service::live_resource::query_key("dashboard"));
-        co_await service::live_resource::stream_snapshot(
-            c, std::move(sub),
+        std::vector<live::subscription_part> parts;
+        parts.push_back({live::resource::websites, id, live::query_key("detail")});
+        parts.push_back({live::resource::access_history, id, live::query_key("dashboard")});
+        auto sub = live::get_hub(c).subscribe(c.worker(), tenant, std::move(parts));
+        std::vector<live::snapshot_part> snapshots;
+        snapshots.push_back(live::make_snapshot_part("website",
+            [tenant, id](auto& read) -> ruvia::task<website_detail_response> {
+                co_return co_await read_detail(read, tenant, id);
+            }));
+        snapshots.push_back(live::make_snapshot_part("dashboard",
             [tenant, id](auto& read) -> ruvia::task<website_dashboard_response> {
                 co_return co_await read_dashboard(read, tenant, id);
-            },
-            "dashboard");
+            }));
+        co_await live::stream_snapshots(c, std::move(sub), std::move(snapshots));
     }
 
     ruvia::task<ruvia::http_response> create(ruvia::context& c) {

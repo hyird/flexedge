@@ -10,6 +10,7 @@ describe('liveMetrics', () => {
     connection_status,
     applied_node_spec_revision: 1,
     cpu_usage: 0.4,
+    disk_usage: 0,
     connected_ip_count: 0,
     health: 'degraded',
   })
@@ -17,6 +18,7 @@ describe('liveMetrics', () => {
   it('keeps an online node’s heartbeat metrics, including zero', () => {
     expect(liveMetrics(runtime('online'))).toMatchObject({
       cpu_usage: 0.4,
+      disk_usage: 0,
       connected_ip_count: 0,
       health: 'degraded',
     })

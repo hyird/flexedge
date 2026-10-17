@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { todayTrafficStatistics } from './traffic-statistics'
+import { cacheHitRates, todayTrafficStatistics } from './traffic-statistics'
 
 const summary = {
   previous_month_peak_bps: 0,
@@ -14,6 +14,10 @@ const bucket = (request_count: number) => ({
   request_count,
   response_bytes: 1024,
   bandwidth_bps: 0,
+  cache_hit_requests: 0,
+  cache_hit_bytes: 0,
+  duration_ms: 0,
+  error_requests: 0,
 })
 
 describe('today traffic statistics', () => {
@@ -62,4 +66,23 @@ describe('today traffic statistics', () => {
       requestsPerIp: undefined,
     })
   })
+})
+
+it('counts only observed cache states and keeps revalidation separate from direct hits', () => {
+  const statistics = {
+    request_count: 20,
+    cache_known_requests: 10,
+    cache_known_bytes: 1000,
+    cache_hit_requests: 4,
+    cache_hit_bytes: 700,
+    cache_revalidated_requests: 3,
+  }
+  expect(cacheHitRates(statistics)).toEqual({ requests: 0.4, bytes: 0.7 })
+  expect(
+    cacheHitRates({
+      ...statistics,
+      cache_known_requests: 0,
+      cache_known_bytes: 0,
+    })
+  ).toEqual({ requests: undefined, bytes: undefined })
 })

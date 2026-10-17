@@ -226,6 +226,26 @@ export function websiteDetailQuery(id: string | undefined) {
   })
 }
 
+/** Website and analytics events share the overview's one connection. */
+export function websiteOverviewQuery(id: string | undefined) {
+  return queryOptions({
+    retry: false,
+    meta: { inlineError: true },
+    queryKey: [...queryKeys.websites, 'overview', id],
+    queryFn: ({ queryKey, signal }) => {
+      if (!id) throw new Error('网站不存在')
+      return readLiveEvent(
+        streamPath('/websites/' + id + '/dashboard'),
+        'website',
+        queryKey,
+        signal,
+        (value) => parseResponseData(websiteSchema, value),
+        patchWebsiteOriginRuntime
+      )
+    },
+  })
+}
+
 /** Hosted zones for managed domains. The domains group and the editor's
  * validation share this snapshot, read only while some domain is managed;
  * the domains group shows failures inline with a retry. */

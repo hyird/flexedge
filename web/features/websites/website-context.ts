@@ -5,7 +5,7 @@ import type { Website } from './types'
 /** Starting values for a tab opened from inside the detail page (e.g. the
  * settings group); same shape as the create page's arrival request. */
 export type WebsiteArrival = NonNullable<HistoryState['website']>
-export type WebsiteDetailTab = 'overview' | 'traffic' | 'logs' | 'settings'
+export type WebsiteDetailTab = 'overview' | 'logs' | 'settings'
 
 type WebsiteDetailContext = {
   /** Live detail on the overview/settings tabs, a one-shot snapshot elsewhere. */

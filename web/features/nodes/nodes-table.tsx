@@ -230,14 +230,13 @@ export function NodesTable({
     {
       id: 'disk',
       header: '磁盘',
-      align: 'end',
       cell: (node) => (
-        <span
-          className='text-sm tabular-nums'
-          title='节点工作目录所在文件系统的总容量'
-        >
-          {formatBytes(node.runtime.disk_total_bytes)}
-        </span>
+        <MetricMeter
+          label={`${node.name} 磁盘`}
+          value={liveMetrics(node.runtime).disk_usage}
+          capacity={formatBytes(node.runtime.disk_total_bytes)}
+          className='w-32'
+        />
       ),
     },
     {

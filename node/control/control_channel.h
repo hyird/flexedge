@@ -194,6 +194,9 @@ private:
         if (metrics.disk_total_bytes_) {
             value->set_disk_total_bytes(*metrics.disk_total_bytes_);
         }
+        if (metrics.disk_usage_) {
+            value->set_disk_usage(*metrics.disk_usage_);
+        }
         value->set_cpu_usage(metrics.cpu_usage_);
         value->set_memory_usage(metrics.memory_usage_);
         value->set_traffic_out_bps(metrics.traffic_out_bps_);
