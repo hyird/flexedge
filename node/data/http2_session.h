@@ -5,10 +5,10 @@
 
 #include <charconv>
 #include <cstring>
-#include <functional>
 #include <map>
 #include <variant>
 
+#include <asio/any_completion_handler.hpp>
 #include <asio/post.hpp>
 #include <asio/ssl/stream.hpp>
 #include <asio/write.hpp>
@@ -19,7 +19,7 @@ namespace flexedge::node {
 class http2_session;
 class http2_stream_state final : public std::enable_shared_from_this<http2_stream_state> {
 public:
-    using completion = std::function<void(std::error_code, std::size_t)>;
+    using completion = asio::any_completion_handler<void(std::error_code, std::size_t)>;
     http2_stream_state(std::weak_ptr<http2_session> owner, asio::any_io_executor executor,
         std::uint32_t id, buffered_bytes_lease reservation)
         : owner_(std::move(owner)),
@@ -88,24 +88,22 @@ public:
     }
     template <class buffers, class handler_type>
     void async_read_some(const buffers& buffer, handler_type&& handler) {
-        auto owned = std::make_shared<std::decay_t<handler_type>>(std::forward<handler_type>(handler));
-        state_->read(asio::mutable_buffer(buffer), [owned](auto error, auto size) { (*owned)(error, size); });
+        state_->read(asio::mutable_buffer(buffer), std::forward<handler_type>(handler));
     }
     template <class buffers, class handler_type>
     void async_write_some(const buffers& buffer, handler_type&& handler) {
-        auto owned = std::make_shared<std::decay_t<handler_type>>(std::forward<handler_type>(handler));
         auto begin = asio::buffer_sequence_begin(buffer);
         const auto end = asio::buffer_sequence_end(buffer);
         while (begin != end && asio::buffer_size(*begin) == 0) {
             ++begin;
         }
         if (begin == end) {
-            asio::post(get_executor(), [owned] { (*owned)(std::error_code{}, std::size_t{}); });
+            asio::post(get_executor(), [completion = http2_stream_state::completion(std::forward<handler_type>(handler))]() mutable { completion(std::error_code{}, std::size_t{}); });
             return;
         }
         // async_write advances a buffer sequence after each partial completion.
         // This stream borrows only the first nonempty segment until its callback.
-        state_->write(asio::const_buffer(*begin), [owned](auto error, auto size) { (*owned)(error, size); });
+        state_->write(asio::const_buffer(*begin), std::forward<handler_type>(handler));
     }
 
 private:
@@ -392,7 +390,7 @@ inline void http2_stream_state::read(asio::mutable_buffer buffer, completion han
     if (input_offset_ == input_.size()) {
         std::string().swap(input_);
     }
-    asio::post(executor_, [handler = std::move(handler), size]() mutable { handler({}, size); });
+    asio::post(executor_, [handler = std::move(handler), size]() mutable { handler(std::error_code{}, size); });
 }
 inline void http2_stream_state::write(asio::const_buffer bytes, completion handler) {
     if (closed_ || written_) {
@@ -424,6 +422,10 @@ inline void http2_stream_state::abort() {
 }
 inline void http2_stream_state::close() {
     if (closed_) {
+        return;
+    }
+    if (written_) {
+        abort();
         return;
     }
     closed_ = true;

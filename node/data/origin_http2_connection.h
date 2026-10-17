@@ -36,17 +36,19 @@ public:
         flush();
     }
     bool reusable() const {
-        return !closed_ && !goaway_ && response_complete_;
+        return !closed_ && !goaway_ && response_complete_ && !upload_pending_ &&
+               !write_handler_ && !read_handler_ && queue_.empty() && !writing_ &&
+               !protocol_.wants_write() && !protocol_.has_queued_data(stream_id_);
     }
     void request(std::string_view bytes, completion handler) {
-        if (closed_ || write_handler_ || !response_complete_) {
-            handler(asio::error::operation_aborted, 0);
+        if (closed_ || goaway_ || (stream_id_ != 0 && !reusable())) {
+            complete(std::move(handler), asio::error::operation_aborted, 0);
             return;
         }
         http1_request_reader reader(2 * 1024 * 1024);
         std::string input(bytes);
         if (reader.consume(input) != http1_request_read_status::complete) {
-            handler(asio::error::invalid_argument, 0);
+            complete(std::move(handler), asio::error::invalid_argument, 0);
             return;
         }
         const auto& head = reader.request();
@@ -73,20 +75,28 @@ public:
             .headers_ = headers,
             .content_ = reader.has_body() ? ruvia::http2_request_content::known_length(body_.size()) : ruvia::http2_request_content::none()});
         if (!submitted.submitted()) {
-            handler(asio::error::fault, 0);
+            complete(std::move(handler), asio::error::fault, 0);
             close();
             return;
         }
         stream_id_ = submitted.submitted()->stream_id();
         response_complete_ = false;
+        upload_pending_ = true;
         chunked_ = false;
         write_size_ = bytes.size();
         write_handler_ = std::move(handler);
+        // The adapter owns the entire request now. Let the response reader run
+        // even when the peer withholds the upload's DATA window (RFC 9113 8.1).
+        asio::post(executor(), [self = shared_from_this()] {
+            if (auto handler = std::move(self->write_handler_)) {
+                handler({}, self->write_size_);
+            }
+        });
         pump();
     }
     void read(asio::mutable_buffer buffer, completion handler) {
         if (read_handler_) {
-            handler(asio::error::already_started, 0);
+            complete(std::move(handler), asio::error::already_started, 0);
             return;
         }
         read_buffer_ = buffer;
@@ -98,14 +108,16 @@ public:
             return;
         }
         closed_ = true;
+        upload_pending_ = false;
+        body_.clear();
         std::visit([](auto& stream) { std::error_code ignored;stream.lowest_layer().close(ignored); }, stream_);
         auto write = std::move(write_handler_), read = std::move(read_handler_);
         try {
             if (write) {
-                write(asio::error::operation_aborted, 0);
+                complete(std::move(write), asio::error::operation_aborted, 0);
             }
             if (read) {
-                read(asio::error::operation_aborted, 0);
+                complete(std::move(read), asio::error::operation_aborted, 0);
             }
         } catch (...) {
         }
@@ -117,8 +129,13 @@ private:
         std::size_t offset_{};
         std::optional<ruvia::http2_received_data_credit> credit_{};
     };
-    auto executor() {
+    asio::any_io_executor executor() {
         return std::visit([](auto& stream) -> asio::any_io_executor { return stream.get_executor(); }, stream_);
+    }
+    void complete(completion handler, std::error_code error, std::size_t size) {
+        asio::post(executor(), [handler = std::move(handler), error, size]() mutable {
+            handler(error, size);
+        });
     }
     void deliver() {
         if (!read_handler_) {
@@ -127,7 +144,7 @@ private:
         if (queue_.empty()) {
             if (closed_) {
                 auto handler = std::move(read_handler_);
-                handler(asio::error::eof, 0);
+                complete(std::move(handler), asio::error::eof, 0);
             }
             return;
         }
@@ -193,10 +210,17 @@ private:
                 }
                 response_complete_ = true;
             } else if (const auto* reset = event->stream_closed()) {
-                if (reset->stream_id() == stream_id_ && !response_complete_) {
+                if (reset->stream_id() != stream_id_) {
+                    continue;
+                }
+                if (!response_complete_) {
                     close();
                     return;
                 }
+                // END_STREAM already made the response valid. A later reset
+                // terminates only the remaining upload, not the queued response.
+                upload_pending_ = false;
+                body_.clear();
             } else if (event->goaway()) {
                 goaway_ = true;
             } else if (event->request_unprocessed()) {
@@ -210,7 +234,7 @@ private:
         if (closed_) {
             return;
         }
-        while (write_handler_ && body_offset_ < body_.size() && !protocol_.has_queued_data(stream_id_)) {
+        while (upload_pending_ && body_offset_ < body_.size() && !protocol_.has_queued_data(stream_id_)) {
             const auto size = (std::min)(std::size_t{16384}, body_.size() - body_offset_);
             const auto result = protocol_.submit_data(stream_id_, std::string_view(body_).substr(body_offset_, size),
                 body_offset_ + size == body_.size() ? ruvia::http2_end_stream::end_stream : ruvia::http2_end_stream::keep_open);
@@ -225,10 +249,9 @@ private:
         }
         flush();
         read_network();
-        if (write_handler_ && body_offset_ == body_.size() && !writing_ && !protocol_.wants_write() && !protocol_.has_queued_data(stream_id_)) {
-            auto handler = std::move(write_handler_);
+        if (upload_pending_ && body_offset_ == body_.size() && !writing_ && !protocol_.wants_write() && !protocol_.has_queued_data(stream_id_)) {
+            upload_pending_ = false;
             body_.clear();
-            handler({}, write_size_);
         }
     }
     void flush() {
@@ -292,6 +315,6 @@ private:
     std::size_t buffered_{};
     asio::mutable_buffer read_buffer_;
     completion read_handler_, write_handler_;
-    bool reading_{}, writing_{}, closed_{}, goaway_{}, chunked_{}, response_complete_{true};
+    bool reading_{}, writing_{}, closed_{}, goaway_{}, chunked_{}, upload_pending_{}, response_complete_{true};
 };
 }  // namespace flexedge::node
