@@ -1,3 +1,4 @@
+#include <deque>
 #include <fstream>
 #include <iostream>
 #include <thread>
@@ -54,20 +55,39 @@ private:
                         auto& request = self->requests_[id];
                         request.path_ = head->request().target();
                         request.head_.emplace(std::move(*head));
+                        request.early_ = request.path_ == "/early-reset" || request.path_ == "/early-no-reset" || request.path_ == "/early-large";
+                        if (request.early_) {
+                            ruvia::http_response response;
+                            response.status(ruvia::http_status::content_too_large);
+                            response.header("Cache-Control", "no-store");
+                            response.body(request.path_ == "/early-large" ? std::string(256 * 1024, 'e') : std::string{});
+                            FLEXEDGE_REQUIRE(self->protocol_.submit_buffered_response(id, response) == ruvia::http2_submit_status::accepted);
+                            if (request.path_ == "/early-reset") {
+                                FLEXEDGE_REQUIRE(self->protocol_.submit_reset(id, ruvia::http2_error_code::no_error) == ruvia::http2_submit_status::accepted);
+                            }
+                        }
                     } else if (auto* body = event->message_body_chunk()) {
-                        self->requests_.at(body->stream_id()).bytes_ += body->bytes().size();
+                        auto& request = self->requests_.at(body->stream_id());
+                        request.bytes_ += body->bytes().size();
+                        if (request.early_) {
+                            // Keep exact DATA credit: the upload must exhaust the
+                            // real peer window while its response remains readable.
+                            request.credits_.push_back(body->take_credit());
+                        }
                     } else if (const auto* end = event->message_end()) {
                         const auto id = end->stream_id();
                         auto& request = self->requests_.at(id);
                         const auto& path = request.path_;
-                        ruvia::http_response response;
-                        response.status(ruvia::http_status::ok);
-                        response.header("Cache-Control", "public, max-age=600");
-                        response.header("Content-Type", "text/plain");
-                        response.header("X-Origin-Protocol", "h2");
-                        response.body(path == "/large" ? std::string(512 * 1024, 'x') : path == "/upload" ? std::to_string(request.bytes_)
-                                                                                                          : path);
-                        FLEXEDGE_REQUIRE(self->protocol_.submit_buffered_response(id, response) == ruvia::http2_submit_status::accepted);
+                        if (!request.early_) {
+                            ruvia::http_response response;
+                            response.status(ruvia::http_status::ok);
+                            response.header("Cache-Control", "public, max-age=600");
+                            response.header("Content-Type", "text/plain");
+                            response.header("X-Origin-Protocol", "h2");
+                            response.body(path == "/large" ? std::string(512 * 1024, 'x') : path == "/upload" ? std::to_string(request.bytes_)
+                                                                                                              : path);
+                            FLEXEDGE_REQUIRE(self->protocol_.submit_buffered_response(id, response) == ruvia::http2_submit_status::accepted);
+                        }
                         (void)self->protocol_.release(std::move(*request.head_));
                         self->requests_.erase(id);
                     }
@@ -100,10 +120,12 @@ private:
         std::string path_{};
         std::size_t bytes_{};
         std::optional<ruvia::http2_request_head_event> head_{};
+        std::deque<ruvia::http2_received_data_credit> credits_{};
+        bool early_{};
     };
-    std::map<std::uint32_t, request> requests_;
     std::atomic<unsigned>& count_;
     ruvia::http2_connection protocol_;
+    std::map<std::uint32_t, request> requests_;
     std::array<char, 16384> input_{};
     std::pmr::string output_;
     bool writing_{};
@@ -157,7 +179,7 @@ struct received final {
     unsigned continues_{};
 };
 template <class stream_type>
-std::vector<received> requests(stream_type& socket, const std::vector<std::string>& paths, bool cancel = false, std::string_view authority = "www.example.com", std::string_view upload = {}, bool expect_continue = false) {
+std::vector<received> requests(stream_type& socket, const std::vector<std::string>& paths, bool cancel = false, std::string_view authority = "www.example.com", std::string_view upload = {}, bool expect_continue = false, bool bounded = false) {
     auto client = ruvia::http2_connection::client();
     std::map<std::uint32_t, std::size_t> ids;
     std::vector<received> responses(paths.size());
@@ -181,7 +203,7 @@ std::vector<received> requests(stream_type& socket, const std::vector<std::strin
     flush();
     std::array<char, 16384> input{};
     while (ended < paths.size()) {
-        if (expect_continue) {
+        if (expect_continue || bounded) {
             FLEXEDGE_REQUIRE(flexedge::testing::waitUntil(
                 [&] { return socket.lowest_layer().available() != 0; }, std::chrono::seconds(3)));
         }
@@ -209,10 +231,58 @@ std::vector<received> requests(stream_type& socket, const std::vector<std::strin
     }
     return responses;
 }
+std::string early_http1(std::uint16_t port, std::string_view path, std::string_view body) {
+    asio::io_context context;
+    asio::ip::tcp::socket socket(context);
+    socket.connect({asio::ip::address_v4::loopback(), port});
+    const auto wire = "POST " + std::string(path) + " HTTP/1.1\r\nHost: www.example.com\r\nContent-Length: " +
+                      std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + std::string(body);
+    asio::write(socket, asio::buffer(wire));
+    socket.non_blocking(true);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    std::string response;
+    std::array<char, 16384> input{};
+    for (;;) {
+        std::error_code error;
+        const auto size = socket.read_some(asio::buffer(input), error);
+        response.append(input.data(), size);
+        if (error == asio::error::eof) {
+            return response;
+        }
+        FLEXEDGE_REQUIRE(!error || error == asio::error::would_block || error == asio::error::try_again);
+        FLEXEDGE_REQUIRE(std::chrono::steady_clock::now() < deadline);
+        if (error) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+}
 ruvia::task<void> apply(data_plane& plane, const flexedge::testing::TestConfig& config) {
     auto pending = co_await config_activation::prepare(plane, std::make_shared<const compiled_config>(config.active, config.objects));
     co_await pending.commit();
 }
+void verify_pending_stream_close() {
+    asio::io_context io;
+    buffered_bytes_budget budget(1024);
+    auto stream = std::make_shared<http2_stream_state>(
+        std::weak_ptr<http2_session>{}, io.get_executor(), 1, budget.lease());
+    auto bytes = std::make_shared<std::string>("pending output");
+    std::weak_ptr<std::string> retained = bytes;
+    unsigned completions{};
+    stream->output_ = asio::buffer(*bytes);
+    stream->written_ = [bytes, owned = std::make_unique<int>(17), &completions](
+                           std::error_code error, std::size_t size) {
+        ++completions;
+        FLEXEDGE_REQUIRE(error == asio::error::operation_aborted && size == 0);
+        FLEXEDGE_REQUIRE(*owned == 17 && *bytes == "pending output");
+    };
+    bytes.reset();
+    stream->close();
+    stream->close();
+    FLEXEDGE_REQUIRE(completions == 0 && !retained.expired());
+    io.run();
+    FLEXEDGE_REQUIRE(completions == 1 && retained.expired());
+}
+
 void verify(std::string_view storage) {
     auto identity = flexedge::testing::make_identity("localhost", 8);
     const auto ca = std::filesystem::current_path() / "http2-origin-ca.pem";
@@ -301,6 +371,34 @@ void verify(std::string_view storage) {
         const auto result = requests(socket, {"/upload"}, false, "www.example.com", body, true);
         FLEXEDGE_REQUIRE(result[0].continues_ == 1);
         FLEXEDGE_REQUIRE(result[0].status_ == 200 && result[0].body_ == std::to_string(body.size()));
+    }
+    for (const std::string path : {"/early-reset", "/early-no-reset", "/early-large"}) {
+        // Ruvia advertises a 1 MiB request window. Exceed it without returning
+        // origin DATA credit, rather than relying on a mock or an empty upload.
+        const std::string upload(1536 * 1024, 'p');
+        const std::string expected = path == "/early-large" ? std::string(256 * 1024, 'e') : std::string{};
+        auto before = plain.count();
+        const auto result = early_http1(port, path, upload);
+        FLEXEDGE_REQUIRE(result.starts_with("HTTP/1.1 413 "));
+        const auto head_end = result.find("\r\n\r\n");
+        FLEXEDGE_REQUIRE(head_end != std::string::npos && result.substr(head_end + 4) == expected);
+        FLEXEDGE_REQUIRE(plain.count() == before + 1);
+        const auto following = "/after-http1" + path;
+        FLEXEDGE_REQUIRE(flexedge::testing::request(port, "www.example.com", {}, following).ends_with(following));
+        FLEXEDGE_REQUIRE(plain.count() == before + 2);
+        {
+            asio::ip::tcp::socket socket(clients);
+            socket.connect({asio::ip::address_v4::loopback(), port});
+            before = plain.count();
+            const auto control = "/control" + path;
+            const auto responses = requests(socket, {path, control}, false, "www.example.com", upload, false, true);
+            FLEXEDGE_REQUIRE(responses[0].status_ == 413 && responses[0].body_ == expected);
+            FLEXEDGE_REQUIRE(responses[1].status_ == 200 && responses[1].body_ == control);
+            FLEXEDGE_REQUIRE(plain.count() == before + 2);
+        }
+        const auto after = "/after-http2" + path;
+        FLEXEDGE_REQUIRE(flexedge::testing::request(port, "www.example.com", {}, after).ends_with(after));
+        FLEXEDGE_REQUIRE(plain.count() == before + 3);
     }
     {
         asio::ssl::context tls(asio::ssl::context::tls_client);
@@ -404,6 +502,7 @@ void verify(std::string_view storage) {
 }  // namespace
 int main() {
     try {
+        verify_pending_stream_close();
         verify("tiered");
         verify("disk");
         std::cout << "HTTP/2 ingress, origin and cache passed\n";
