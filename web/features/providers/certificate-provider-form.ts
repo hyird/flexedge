@@ -29,19 +29,19 @@ export function certificateProviderFormSchema(
         ctx.addIssue({
           code: 'custom',
           path: ['credential_mode'],
-          message: "Let's Encrypt 只支持邮箱接入方式",
+          message: "Let's Encrypt只支持邮箱接入方式",
         })
       if (!value.access_key && current?.credential_mode !== 'access_key')
         ctx.addIssue({
           code: 'custom',
           path: ['access_key'],
-          message: '请输入 API Access Key',
+          message: '请输入API Access Key',
         })
       else if (/\s/.test(value.access_key))
         ctx.addIssue({
           code: 'custom',
           path: ['access_key'],
-          message: 'API Access Key 不能包含空白字符',
+          message: 'API Access Key不能包含空白字符',
         })
     })
 }

@@ -248,7 +248,7 @@ function RuleEditor({
                 { id: 'prefix', label: '前缀' },
                 { id: 'exact', label: '精确' },
                 { id: 'suffix', label: '后缀' },
-                { id: 'regex', label: 'RE2 正则' },
+                { id: 'regex', label: 'RE2正则' },
               ]}
             />
             <Field
@@ -259,7 +259,7 @@ function RuleEditor({
               className='[&_input]:font-mono'
               hint={
                 rule.match_type === 'regex'
-                  ? '使用 RE2 语法，最多 9 个捕获组。'
+                  ? '使用RE2语法，最多 9 个捕获组。'
                   : undefined
               }
             />
@@ -413,7 +413,7 @@ function RuleEditor({
                   value={rule.redirect_url}
                   onChange={(redirect_url) => update({ redirect_url })}
                   error={error('redirect_url')}
-                  hint='以 /、http:// 或 https:// 开头。'
+                  hint='以 /、http:// 或https:// 开头。'
                   className='[&_input]:font-mono'
                 />
                 <Choice
@@ -497,7 +497,7 @@ function RuleEditor({
                 value={rule.query_string}
                 onChange={(query_string) => update({ query_string })}
                 error={error('query_string')}
-                hint='例如 key=value，不含开头问号。'
+                hint='例如key=value，不含开头问号。'
                 className='[&_input]:font-mono'
               />
             )}
@@ -510,7 +510,7 @@ function RuleEditor({
                 onChange={(request_headers_text) =>
                   update({ request_headers_text })
                 }
-                hint='每行 Header: value，回源时设置。'
+                hint='每行Header: value，回源时设置。'
                 error={error('request_headers_text')}
                 rows={3}
               />
@@ -520,7 +520,7 @@ function RuleEditor({
                 onChange={(response_headers_text) =>
                   update({ response_headers_text })
                 }
-                hint='每行 Header: value，返回客户端时设置。'
+                hint='每行Header: value，返回客户端时设置。'
                 error={error('response_headers_text')}
                 rows={3}
               />

@@ -147,10 +147,10 @@ export function HttpsSection({
   )
   return (
     <>
-      <Section title='HTTPS' description='启用后客户端可通过 TLS 访问网站。'>
+      <Section title='HTTPS' description='启用后客户端可通过TLS访问网站。'>
         <Toggle
-          label='启用 HTTPS'
-          hint='关闭时会同时解除证书绑定、HTTPS 跳转和 HSTS。'
+          label='启用HTTPS'
+          hint='关闭时会同时解除证书绑定、HTTPS跳转和HSTS。'
           selected={values.https_enabled}
           onChange={(enabled) =>
             replace((current) => setWebsiteHttpsEnabled(current, enabled))
@@ -237,11 +237,11 @@ export function HttpsSection({
               <FieldNotice>{errors.certificate_ids}</FieldNotice>
             </div>
           </Section>
-          <Section title='TLS 与跳转'>
+          <Section title='TLS与跳转'>
             <div className='flex flex-col gap-2'>
               <div className='max-w-xs'>
                 <Choice
-                  label='最低 TLS 版本'
+                  label='最低TLS版本'
                   value={values.minimum_tls_version}
                   onChange={(version) =>
                     update('minimum_tls_version', version as '1.2' | '1.3')
@@ -253,13 +253,13 @@ export function HttpsSection({
                 />
               </div>
               <Toggle
-                label='HTTP 自动跳转 HTTPS'
+                label='HTTP自动跳转HTTPS'
                 selected={values.force_https}
                 onChange={(selected) => update('force_https', selected)}
               />
               <Toggle
-                label='启用 HSTS'
-                hint='通知浏览器后续仅通过 HTTPS 访问。'
+                label='启用HSTS'
+                hint='通知浏览器后续仅通过HTTPS访问。'
                 selected={values.hsts_enabled}
                 onChange={(selected) => update('hsts_enabled', selected)}
               />
@@ -396,12 +396,12 @@ export function CompressionSection({
             </div>
             <div className='grid gap-4 lg:grid-cols-3'>
               <ArrayLines
-                label='MIME 类型'
+                label='MIME类型'
                 value={values.response_compression_mime_types}
                 onChange={(items) =>
                   update('response_compression_mime_types', items)
                 }
-                hint='每行一项，可使用 text/*。'
+                hint='每行一项，可使用text/*。'
               />
               <ArrayLines
                 label='扩展名'

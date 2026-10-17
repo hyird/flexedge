@@ -57,7 +57,7 @@ export function WebsiteOverview() {
   const probe = useMutation({
     mutationFn: () => probeWebsiteDns(website.id),
     onSuccess: () =>
-      toastWriteSuccess('DNS 探测已提交，结果会自动更新', {
+      toastWriteSuccess('DNS探测已提交，结果会自动更新', {
         resourceType: 'website',
         resourceId: website.id,
       }),
@@ -80,19 +80,16 @@ export function WebsiteOverview() {
       id: 'hostname',
       header: '域名',
       isRowHeader: true,
-      minWidth: 200,
       cell: (domain) => <Mono>{domain.hostname}</Mono>,
     },
     {
       id: 'mode',
       header: 'DNS',
-      minWidth: 90,
       cell: (domain) => (domain.dns_mode === 'managed' ? '托管' : '外部'),
     },
     {
       id: 'protocol',
       header: '接入协议',
-      minWidth: 90,
       cell: (domain) => (
         <span className='uppercase'>
           {domainState(domain)?.access_protocol || '—'}
@@ -102,7 +99,6 @@ export function WebsiteOverview() {
     {
       id: 'state',
       header: '解析状态',
-      minWidth: 110,
       cell: (domain) => (
         <StatusChip
           {...describeStatus(domainResolutionStatuses, resolution(domain))}
@@ -113,7 +109,6 @@ export function WebsiteOverview() {
     {
       id: 'verified',
       header: '最近验证',
-      minWidth: 120,
       cell: (domain) => (
         <RelativeTime value={domainState(domain)?.last_verified_at} />
       ),
@@ -121,7 +116,6 @@ export function WebsiteOverview() {
     {
       id: 'error',
       header: '备注',
-      minWidth: 200,
       cell: (domain) => (
         <TruncatedText text={domainState(domain)?.last_error} />
       ),
@@ -132,7 +126,6 @@ export function WebsiteOverview() {
       id: 'node',
       header: '节点',
       isRowHeader: true,
-      minWidth: 140,
       cell: (state) => (
         <Link
           to='/nodes/$nodeId'
@@ -146,7 +139,6 @@ export function WebsiteOverview() {
     {
       id: 'origin-group',
       header: '源站组',
-      minWidth: 100,
       cell: (state) => {
         const item = config.origins.find(
           (value) => value.id === state.origin_id
@@ -161,7 +153,6 @@ export function WebsiteOverview() {
     {
       id: 'origin',
       header: '源站地址',
-      minWidth: 220,
       cell: (state) => {
         const item = config.origins.find(
           (value) => value.id === state.origin_id
@@ -174,7 +165,6 @@ export function WebsiteOverview() {
     {
       id: 'status',
       header: '状态',
-      minWidth: 100,
       cell: (state) => (
         <StatusChip
           {...describeStatus(originHealthStatuses, state.status)}
@@ -185,7 +175,6 @@ export function WebsiteOverview() {
     {
       id: 'latency',
       header: '延迟',
-      minWidth: 80,
       cell: (state) => (
         <span className='tabular-nums'>{state.latency_millis} ms</span>
       ),
@@ -193,14 +182,12 @@ export function WebsiteOverview() {
     {
       id: 'checked',
       header: '检查时间',
-      minWidth: 160,
       cell: (state) =>
         formatDate(new Date(state.checked_at_unix_millis).toISOString()),
     },
     {
       id: 'error',
       header: '最近错误',
-      minWidth: 180,
       cell: (state) => <TruncatedText text={state.last_error} />,
     },
   ]
@@ -254,7 +241,7 @@ export function WebsiteOverview() {
           <KPI.Footer className='text-xs whitespace-nowrap text-muted'>
             {config.https_enabled
               ? `HTTPS · TLS ${config.minimum_tls_version}+`
-              : '仅 HTTP'}
+              : '仅HTTP'}
           </KPI.Footer>
         </KPI>
         <KPI>
@@ -281,7 +268,7 @@ export function WebsiteOverview() {
 
       <Section
         title='域名解析'
-        description='托管域名由系统写入 DNS 记录；外部域名需要自行解析到接入域名。'
+        description='托管域名由系统写入DNS记录；外部域名需要自行解析到接入域名。'
         actions={
           <Button
             size='sm'
@@ -290,7 +277,7 @@ export function WebsiteOverview() {
             onPress={() => probe.mutate()}
           >
             <Magnifier />
-            探测 DNS
+            探测DNS
           </Button>
         }
       >
@@ -300,7 +287,6 @@ export function WebsiteOverview() {
           columns={domainColumns}
           data={config.domains}
           isLoading={false}
-          minWidth={760}
           empty={{
             title: '还没有绑定域名',
             description: '在配置的“域名”分组中添加域名。',
@@ -325,7 +311,6 @@ export function WebsiteOverview() {
           data={sortedOriginStates(website)}
           getRowId={(state) => `${state.node_id}:${state.origin_id}`}
           isLoading={false}
-          minWidth={900}
           empty={{
             title: '等待节点上报',
             description: config.health_check_enabled
@@ -341,8 +326,8 @@ export function WebsiteOverview() {
             <EmptyState
               size='sm'
               icon={<Lock />}
-              title='未启用 HTTPS'
-              description='节点只接受 HTTP 请求。'
+              title='未启用HTTPS'
+              description='节点只接受HTTP请求。'
             />
           ) : website.certificates.length ? (
             <ListView
@@ -380,7 +365,7 @@ export function WebsiteOverview() {
             <Alert status='warning'>
               <Alert.Indicator />
               <Alert.Content>
-                <Alert.Title>已启用 HTTPS，但尚未绑定可用证书</Alert.Title>
+                <Alert.Title>已启用HTTPS，但尚未绑定可用证书</Alert.Title>
               </Alert.Content>
             </Alert>
           )}
@@ -400,7 +385,7 @@ export function WebsiteOverview() {
                 ),
               },
               {
-                label: '回源 Host',
+                label: '回源Host',
                 value: config.origin_host_header ? (
                   <Mono>{config.origin_host_header}</Mono>
                 ) : (

@@ -32,6 +32,7 @@ import {
   accessLogStatusClasses,
   type AccessLogsSearch,
 } from './access-log-search'
+import { cacheReason, cacheState } from './access_log_cache'
 import { ClientIpTooltip } from './client-ip-tooltip'
 import { formatClientLocation } from './client-location'
 import { websiteAccessLogHistoryQuery, websiteAccessLogsQuery } from './data'
@@ -48,27 +49,11 @@ const liveStates = {
   'paused' | 'connected' | 'interrupted' | 'connecting'
 >
 const liveStateReserve = statusReserve(liveStates)
-const cacheStates = {
-  hit_memory: { label: 'L1 命中', tone: 'success' },
-  hit_disk: { label: 'L2 命中', tone: 'success' },
-  miss: { label: '未命中', tone: 'warning' },
-  bypass: { label: '绕过', tone: 'default' },
-} as const
-const cacheStateReserve = ['L1 命中', 'L2 命中', '未命中', '绕过', '未上报']
-function cacheState(log: AccessLog) {
-  return (
-    cacheStates[log.cache_status as keyof typeof cacheStates] ?? {
-      label: '未上报',
-      tone: 'default' as const,
-    }
-  )
-}
 
 const columnText = {
   time: (log: AccessLog) => formatDate(log.occurred_at),
   node: (log: AccessLog) => log.node_name,
   status: (log: AccessLog) => String(log.status_code),
-  cache: (log: AccessLog) => cacheState(log).label,
   client: (log: AccessLog) => log.client_ip || '—',
   location: (log: AccessLog) => formatClientLocation(log.client_ip_location),
   duration: (log: AccessLog) => `${log.duration_ms} ms`,
@@ -95,7 +80,6 @@ function useColumnWidths(
     time: 190,
     node: 120,
     status: 80,
-    cache: 100,
     client: 130,
     location: 150,
     duration: 90,
@@ -267,21 +251,31 @@ export function AccessLogs() {
         cell: (log) => {
           const url = log.host + log.target
           return (
-            <Tooltip delay={300}>
-              <Button
-                size='sm'
-                variant='ghost'
-                className='h-auto w-max max-w-full justify-start gap-2 px-1 py-0.5 text-left'
-                aria-label={`查看请求 ${log.method} ${url}`}
-                onPress={() => setOpenLogId(log.id)}
-              >
-                <span className='shrink-0 font-semibold'>{log.method}</span>
-                <Mono className='min-w-0 truncate text-accent'>{url}</Mono>
-              </Button>
-              <Tooltip.Content className='max-w-120 break-all'>
-                {log.method} {url}
-              </Tooltip.Content>
-            </Tooltip>
+            <div className='flex min-w-0 items-center gap-2'>
+              <Tooltip delay={300}>
+                <Button
+                  size='sm'
+                  variant='ghost'
+                  className='h-auto w-max max-w-full min-w-0 justify-start gap-2 px-1 py-0.5 text-left'
+                  aria-label={`查看请求 ${log.method} ${url}`}
+                  onPress={() => setOpenLogId(log.id)}
+                >
+                  <span className='shrink-0 font-semibold'>{log.method}</span>
+                  <Mono className='min-w-0 truncate text-accent'>{url}</Mono>
+                </Button>
+                <Tooltip.Content className='max-w-120 break-all'>
+                  {log.method} {url}
+                </Tooltip.Content>
+              </Tooltip>
+              {cacheState(log) && (
+                <Tooltip delay={300}>
+                  <span className='inline-flex shrink-0' tabIndex={0}>
+                    <StatusChip {...cacheState(log)!} />
+                  </span>
+                  <Tooltip.Content>{cacheReason(log)}</Tooltip.Content>
+                </Tooltip>
+              )}
+            </div>
           )
         },
       },
@@ -289,13 +283,6 @@ export function AccessLogs() {
         id: 'status',
         header: '状态',
         cell: (log) => <StatusChip {...accessLogStatus(log.status_code)} />,
-      },
-      {
-        id: 'cache',
-        header: '缓存',
-        cell: (log) => (
-          <StatusChip {...cacheState(log)} reserve={cacheStateReserve} />
-        ),
       },
       {
         id: 'client',
@@ -311,7 +298,7 @@ export function AccessLogs() {
       },
       {
         id: 'location',
-        header: 'IP 归属',
+        header: 'IP归属',
         cell: (log) => {
           const location = formatClientLocation(log.client_ip_location)
           return (
@@ -446,7 +433,7 @@ export function AccessLogs() {
           search={{
             value: list.keyword,
             onChange: (q) => void list.setSearch({ q }),
-            placeholder: '搜索域名、路径、IP 或节点',
+            placeholder: '搜索域名、路径、IP或节点',
           }}
           filters={
             <>
@@ -538,7 +525,6 @@ export function AccessLogs() {
           onRetry={() =>
             history ? void historyQuery.refetch() : live.reconnect()
           }
-          minWidth={0}
           empty={
             filtered
               ? {
@@ -623,10 +609,13 @@ function AccessLogDetail({ log }: { log: AccessLog }) {
           { label: '协议', value: log.protocol },
           {
             label: '缓存',
-            value: (
-              <StatusChip {...cacheState(log)} reserve={cacheStateReserve} />
+            value: cacheState(log) ? (
+              <StatusChip {...cacheState(log)!} />
+            ) : (
+              '未上报'
             ),
           },
+          { label: '缓存原因', value: cacheReason(log) || '节点未上报原因' },
           {
             label: '节点',
             value: (
@@ -651,14 +640,14 @@ function AccessLogDetail({ log }: { log: AccessLog }) {
             ),
           },
           {
-            label: 'IP 归属',
+            label: 'IP归属',
             value: formatClientLocation(log.client_ip_location),
           },
           { label: '耗时', value: `${log.duration_ms} ms` },
           { label: '请求流量', value: formatBytes(log.request_bytes) },
           { label: '响应流量', value: formatBytes(log.response_bytes) },
           {
-            label: 'TLS 指纹',
+            label: 'TLS指纹',
             value: log.tls_fingerprint ? (
               <Mono className='break-all'>{log.tls_fingerprint}</Mono>
             ) : (

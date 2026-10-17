@@ -8,11 +8,14 @@ import { cn } from '@/lib/utils'
 export function MetricMeter({
   label,
   value,
+  capacity,
   className,
 }: {
   /** Accessible name, e.g. `CPU`. */
   label: string
   value?: number
+  /** Total CPU cores or memory capacity, shown beside the percentage. */
+  capacity?: string
   className?: string
 }) {
   const ratio =
@@ -34,9 +37,14 @@ export function MetricMeter({
               ? 'warning'
               : 'accent'
       }
-      className={cn('w-28 gap-1', className)}
+      className={cn('w-28 gap-x-2 gap-y-1 tabular-nums', className)}
     >
-      <Meter.Output className='col-span-full col-start-1 justify-self-start text-xs font-normal text-muted' />
+      <Meter.Output className='col-span-1 col-start-1 row-start-1 justify-self-start text-xs font-normal text-muted' />
+      {capacity !== undefined && (
+        <span className='col-start-2 row-start-1 justify-self-end text-xs whitespace-nowrap text-muted'>
+          {capacity}
+        </span>
+      )}
       <Meter.Track>
         <Meter.Fill />
       </Meter.Track>

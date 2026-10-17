@@ -48,7 +48,6 @@ export function DnsProvidersPage() {
       id: 'name',
       header: '账号',
       isRowHeader: true,
-      minWidth: 160,
       cell: (item) => (
         <span className='block truncate font-medium'>{item.name}</span>
       ),
@@ -56,19 +55,16 @@ export function DnsProvidersPage() {
     {
       id: 'provider',
       header: '服务商',
-      minWidth: 100,
       cell: (item) => providerLabel(item.provider),
     },
     {
       id: 'account',
       header: '账户标识',
-      minWidth: 140,
       cell: (item) => <Mono truncate>{item.account_id}</Mono>,
     },
     {
       id: 'token',
       header: '凭据',
-      minWidth: 100,
       cell: (item) => (
         <Mono className='text-muted'>{item.token_hint || '—'}</Mono>
       ),
@@ -76,7 +72,6 @@ export function DnsProvidersPage() {
     {
       id: 'zones',
       header: '托管域名',
-      minWidth: 90,
       align: 'end',
       cell: (item) =>
         item.zone_count ? (
@@ -93,7 +88,6 @@ export function DnsProvidersPage() {
     {
       id: 'status',
       header: '状态',
-      minWidth: 110,
       cell: (item) => {
         const chip = (
           <StatusChip
@@ -118,7 +112,6 @@ export function DnsProvidersPage() {
     {
       id: 'verified',
       header: '最近验证',
-      minWidth: 110,
       cell: (item) => (
         <RelativeTime
           value={item.last_verified_at}
@@ -129,14 +122,13 @@ export function DnsProvidersPage() {
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      width: 128,
       cell: (item) => (
         <div className='flex items-center gap-1'>
           <Button
             size='sm'
             variant='tertiary'
             className='px-2'
-            aria-label={`验证 DNS 账号 ${item.name}`}
+            aria-label={`验证DNS账号 ${item.name}`}
             isPending={actions.isVerifying(item.id)}
             onPress={() =>
               actions.verify({
@@ -152,7 +144,7 @@ export function DnsProvidersPage() {
             size='sm'
             variant='tertiary'
             className='px-2'
-            aria-label={`编辑 DNS 账号 ${item.name}`}
+            aria-label={`编辑DNS账号 ${item.name}`}
             onPress={() => void sheet.openEdit(item.id)}
           >
             编辑
@@ -182,23 +174,22 @@ export function DnsProvidersPage() {
         actions={createButton}
       />
       <DataTable
-        label='DNS 账号'
+        label='DNS账号'
         columns={columns}
         data={query.data?.list}
         isLoading={query.isPending}
         error={query.isError ? query.error : undefined}
         onRetry={() => query.refetch()}
-        minWidth={900}
         empty={
           filtered
             ? {
-                title: '没有匹配的 DNS 账号',
+                title: '没有匹配的DNS账号',
                 description: '调整搜索关键字后重试。',
               }
             : {
-                title: '还没有 DNS 账号',
+                title: '还没有DNS账号',
                 description:
-                  '添加 Cloudflare 或阿里云账号后，即可托管域名并自动同步解析记录。',
+                  '添加Cloudflare或阿里云账号后，即可托管域名并自动同步解析记录。',
               }
         }
         footer={

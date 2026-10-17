@@ -135,7 +135,6 @@ export function NodesTable({
           {
             id: 'cluster',
             header: '集群',
-            minWidth: 110,
             cell: (node: Node) => (
               <Link
                 to='/clusters/$clusterId'
@@ -152,7 +151,6 @@ export function NodesTable({
       id: 'name',
       header: '节点',
       isRowHeader: true,
-      minWidth: 130,
       cell: (node) => (
         <span className='block truncate font-medium'>{node.name}</span>
       ),
@@ -160,8 +158,6 @@ export function NodesTable({
     {
       id: 'ip',
       header: 'IP',
-      width: 160,
-      maxWidth: 160,
       cell: (node) => {
         const [primary, ...others] = node.config.endpoints
         if (!primary) return <span className='text-muted'>—</span>
@@ -192,8 +188,7 @@ export function NodesTable({
     },
     {
       id: 'dns-line',
-      header: 'DNS 线路',
-      minWidth: 110,
+      header: '线路',
       cell: (node) => {
         const zoneId = clusterZoneById.get(node.cluster_id)
         return (
@@ -207,43 +202,34 @@ export function NodesTable({
     {
       id: 'cpu',
       header: 'CPU',
-      minWidth: 128,
       cell: (node) => (
-        <div className='flex items-center gap-2'>
-          <span className='w-10 shrink-0 text-xs text-muted tabular-nums'>
-            {node.runtime.cpu_count === undefined
+        <MetricMeter
+          label={`${node.name} CPU`}
+          value={liveMetrics(node.runtime).cpu_usage}
+          capacity={
+            node.runtime.cpu_count === undefined
               ? '—'
-              : `${formatNumber(node.runtime.cpu_count)} 核`}
-          </span>
-          <MetricMeter
-            label={`${node.name} CPU`}
-            value={liveMetrics(node.runtime).cpu_usage}
-            className='w-16'
-          />
-        </div>
+              : `${formatNumber(node.runtime.cpu_count)} 核`
+          }
+          className='w-24'
+        />
       ),
     },
     {
       id: 'memory',
       header: '内存',
-      minWidth: 160,
       cell: (node) => (
-        <div className='flex items-center gap-2'>
-          <span className='w-16 shrink-0 text-xs text-muted tabular-nums'>
-            {formatBytes(node.runtime.memory_total_bytes)}
-          </span>
-          <MetricMeter
-            label={`${node.name} 内存`}
-            value={liveMetrics(node.runtime).memory_usage}
-            className='w-16'
-          />
-        </div>
+        <MetricMeter
+          label={`${node.name} 内存`}
+          value={liveMetrics(node.runtime).memory_usage}
+          capacity={formatBytes(node.runtime.memory_total_bytes)}
+          className='w-32'
+        />
       ),
     },
     {
       id: 'disk',
       header: '磁盘',
-      minWidth: 100,
       align: 'end',
       cell: (node) => (
         <span
@@ -257,7 +243,6 @@ export function NodesTable({
     {
       id: 'traffic',
       header: '带宽',
-      minWidth: 100,
       align: 'end',
       cell: (node) => (
         <span className='text-sm tabular-nums'>
@@ -268,7 +253,6 @@ export function NodesTable({
     {
       id: 'connections',
       header: '连接数',
-      minWidth: 80,
       align: 'end',
       cell: (node) => (
         <span className='text-sm tabular-nums'>
@@ -278,8 +262,7 @@ export function NodesTable({
     },
     {
       id: 'connected-ips',
-      header: '连接 IP',
-      minWidth: 80,
+      header: 'IP数',
       align: 'end',
       cell: (node) => (
         <span className='text-sm tabular-nums'>
@@ -290,13 +273,11 @@ export function NodesTable({
     {
       id: 'connection',
       header: '在线状态',
-      minWidth: 100,
       cell: (node) => <NodeConnectionChip runtime={node.runtime} />,
     },
     {
       id: 'status',
       header: '状态',
-      minWidth: 90,
       cell: (node) => (
         <StatusChip
           {...describeStatus(nodeStatuses, node.status)}
@@ -307,7 +288,6 @@ export function NodesTable({
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      width: 72,
       cell: (node) => (
         <LinkButton
           href={`/nodes/${node.id}`}
@@ -383,7 +363,6 @@ export function NodesTable({
         isLoading={query.isPending}
         error={query.isError ? query.error : undefined}
         onRetry={() => void query.refetch()}
-        minWidth={clusterId === undefined ? 1424 : 1304}
         empty={
           filtered
             ? {

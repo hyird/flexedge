@@ -61,7 +61,7 @@ inline bool clean_text(std::string_view value, std::size_t maximum) {
 }
 
 inline std::string hostname(std::string_view value) {
-    // Website route domains are DNS names, not IPv6 literals or wildcard patterns.
+    // Normalize a DNS binding or request authority; IPv6 literals use a separate path.
     value = value.substr(0, value.find(':'));
     if (value.ends_with('.')) {
         value.remove_suffix(1);
@@ -99,6 +99,25 @@ inline bool exact_hostname(std::string_view value) {
         }
     }
     return false;
+}
+
+// Bindings are normalized when indexed. An exact binding always wins; a wildcard
+// covers exactly one DNS label, matching the scope of a wildcard TLS certificate.
+template <typename index_type>
+[[nodiscard]] inline auto find_hostname(const index_type& index, std::string host) {
+    if (!exact_hostname(host)) {
+        return index.end();
+    }
+    const auto exact = index.find(host);
+    if (exact != index.end()) {
+        return exact;
+    }
+    const auto dot = host.find('.');
+    if (dot == std::string::npos) {
+        return index.end();
+    }
+    host.replace(0, dot, "*");
+    return index.find(host);
 }
 
 inline bool rewrite_mode(std::string_view mode) {

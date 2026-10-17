@@ -1,14 +1,18 @@
 #include <atomic>
+#include <future>
 #include <iostream>
 #include <set>
 #include <thread>
 
 #include <asio/read_until.hpp>
+#include <asio/ssl/context.hpp>
+#include <asio/ssl/stream.hpp>
 #include <asio/streambuf.hpp>
 
 #include "node/data/data_plane.h"
 #include "node/runtime/config_activation.h"
 #include "node/runtime/loop_shutdown.h"
+#include "tests/support/cache_directory.h"
 #include "tests/support/config_fixture.h"
 #include "tests/support/http_client.h"
 #include "tests/support/tls_identity.h"
@@ -38,8 +42,43 @@ public:
     std::uint16_t port() const {
         return acceptor_.local_endpoint().port();
     }
+    void finish_stream() {
+        release_stream_ = true;
+    }
+    void fail_stale(bool value) {
+        fail_stale_ = value;
+    }
+    unsigned validations() const {
+        return validations_;
+    }
+    bool stream_finished() const {
+        return stream_finished_;
+    }
 
 private:
+    struct stream_tail : std::enable_shared_from_this<stream_tail> {
+        stream_tail(origin* owner, std::shared_ptr<asio::ip::tcp::socket> peer)
+            : owner_(owner),
+              peer_(std::move(peer)),
+              timer_(peer_->get_executor()) {}
+        void wait() {
+            if (owner_->release_stream_) {
+                auto bytes = std::make_shared<std::string>(16384, 'b');
+                asio::async_write(*peer_, asio::buffer(*bytes), [self = shared_from_this(), bytes](std::error_code, std::size_t) {
+                    self->owner_->stream_finished_ = true;
+                    std::error_code ignored;
+                    self->peer_->close(ignored);
+                });
+            } else {
+                timer_.expires_after(std::chrono::milliseconds(5));
+                timer_.async_wait([self = shared_from_this()](std::error_code error) { if (!error){ self->wait();
+} });
+            }
+        }
+        origin* owner_;
+        std::shared_ptr<asio::ip::tcp::socket> peer_;
+        asio::steady_timer timer_;
+    };
     void accept() {
         acceptor_.async_accept([this](std::error_code error, asio::ip::tcp::socket socket) {
             if (error) {
@@ -52,6 +91,61 @@ private:
                     return;
                 }
                 ++hits_;
+                const std::string request_text(asio::buffers_begin(request->data()), asio::buffers_end(request->data()));
+                if (request_text.starts_with("GET /no-cache ") || request_text.starts_with("GET /private ") || request_text.starts_with("GET /no-store ")) {
+                    const auto control = request_text.starts_with("GET /private ") ? "private" : request_text.starts_with("GET /no-store ") ? "no-store"
+                                                                                                                                            : "no-cache";
+                    auto data = std::make_shared<std::string>(std::string("HTTP/1.1 200 OK\r\nCache-Control: ") + control +
+                                                              "\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody");
+                    asio::async_write(*peer, asio::buffer(*data), [peer, data](std::error_code, std::size_t) { std::error_code ignored; peer->close(ignored); });
+                    return;
+                }
+                if (request_text.starts_with("GET /revalidate ") || request_text.starts_with("GET /stale ")) {
+                    const bool validation = request_text.find("If-None-Match: \"cache-v1\"") != std::string::npos;
+                    const bool origin_failure = request_text.starts_with("GET /stale ") && fail_stale_;
+                    if (validation) {
+                        ++validations_;
+                    }
+                    std::string wire;
+                    if (origin_failure) {
+                        wire = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                    } else if (validation) {
+                        wire = "HTTP/1.1 304 Not Modified\r\nETag: \"cache-v1\"\r\nCache-Control: public, max-age=1\r\nConnection: close\r\n\r\n";
+                    } else {
+                        wire = "HTTP/1.1 200 OK\r\nETag: \"cache-v1\"\r\nCache-Control: public, max-age=1\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nvalidated";
+                    }
+                    auto data = std::make_shared<std::string>(std::move(wire));
+                    asio::async_write(*peer, asio::buffer(*data), [peer, data](std::error_code, std::size_t) {std::error_code ignored; peer->close(ignored); });
+                    return;
+                }
+                if (request_text.starts_with("GET /stream ")) {
+                    auto deferred = std::make_shared<stream_tail>(this, peer);
+                    auto first = std::make_shared<std::string>(
+                        "HTTP/1.1 200 OK\r\nCache-Control: public, max-age=600\r\n"
+                        "Connection: close\r\nContent-Type: application/octet-stream\r\nContent-Length: 32768\r\n\r\n" +
+                        std::string(16384, 'a'));
+                    asio::async_write(*peer, asio::buffer(*first), [deferred, first](std::error_code error, std::size_t) {
+                        if (!error) {
+                            deferred->wait();
+                        }
+                    });
+                    return;
+                }
+                if (request_text.starts_with("GET /events ")) {
+                    auto events = std::make_shared<std::string>(
+                        "HTTP/1.1 200 OK\r\nCache-Control: public, max-age=600\r\n"
+                        "Connection: close\r\nContent-Type: Text/Event-Stream; charset=utf-8\r\nContent-Length: 4096\r\n\r\n" +
+                        std::string(4096, 'e'));
+                    asio::async_write(*peer, asio::buffer(*events), [peer, events](std::error_code, std::size_t) { std::error_code ignored; peer->close(ignored); });
+                    return;
+                }
+                if (request_text.starts_with("GET /large ")) {
+                    auto bytes = std::make_shared<std::string>(
+                        "HTTP/1.1 200 OK\r\nCache-Control: public, max-age=600\r\nETag: \"large\"\r\nContent-Type: application/octet-stream\r\nContent-Length: 524288\r\nConnection: close\r\n\r\n" +
+                        std::string(262144, 'a') + std::string(262144, 'b'));
+                    asio::async_write(*peer, asio::buffer(*bytes), [peer, bytes](std::error_code, std::size_t) { std::error_code ignored; peer->close(ignored); });
+                    return;
+                }
                 auto bytes = std::make_shared<std::string>(
                     "HTTP/1.1 200 OK\r\nCache-Control: public, max-age=600\r\nETag: \"test\"\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody");
                 asio::async_write(*peer, asio::buffer(*bytes), [peer, bytes](std::error_code, std::size_t) {std::error_code ignored;peer->close(ignored); });
@@ -63,6 +157,8 @@ private:
     asio::ip::tcp::acceptor acceptor_;
     std::jthread thread_;
     std::atomic<unsigned> hits_{};
+    std::atomic<bool> release_stream_{}, stream_finished_{}, fail_stale_{};
+    std::atomic<unsigned> validations_{};
 };
 ruvia::task<void> activate(data_plane& plane, std::shared_ptr<const compiled_config> config) {
     auto pending = co_await config_activation::prepare(plane, std::move(config));
@@ -77,7 +173,9 @@ ruvia::task<std::vector<std::string>> cache_log_states(ruvia::channel_receiver<o
         }
         for (const auto& event : batch.value()->value().events()) {
             if (event.has_access_log()) {
-                states.push_back(event.access_log().cache_status());
+                const auto& access = event.access_log();
+                states.push_back(access.cache_revalidated() ? "revalidated" : access.cache_status());
+                states.push_back(access.cache_reason());
             }
         }
     }
@@ -88,7 +186,8 @@ void verify() {
     ruvia::event_loop_pool workers({.loop_count_ = 2}), control({.loop_count_ = 1});
     runtime_state runtime;
     auto [logs, log_receiver] = ruvia::make_channel<owned_log_batch>(control.loop(0).handle(), {.capacity_ = 64});
-    data_plane plane(workers, control.loop(0), runtime, logs);
+    flexedge::testing::temporary_cache_directory cache_directory;
+    data_plane plane(workers, control.loop(0), runtime, logs, cache_directory.path_);
     loop_shutdown shutdown(workers, control);
     workers.start();
     control.start();
@@ -130,6 +229,14 @@ void verify() {
     const auto head = request({}, "HEAD");
     FLEXEDGE_REQUIRE(head.find("X-Cache: HIT") != std::string::npos && !head.ends_with("body"));
     FLEXEDGE_REQUIRE(request("If-None-Match: \"test\"\r\n").starts_with("HTTP/1.1 304"));
+    const auto ranged = request("Range: bytes=1-2\r\n");
+    FLEXEDGE_REQUIRE(ranged.starts_with("HTTP/1.1 206") && ranged.ends_with("od"));
+    FLEXEDGE_REQUIRE(ranged.find("Content-Range: bytes 1-2/4") != std::string::npos);
+    FLEXEDGE_REQUIRE(request("Range: bytes=-2\r\n").ends_with("dy"));
+    FLEXEDGE_REQUIRE(request("Range: bytes=99-\r\n").starts_with("HTTP/1.1 416"));
+    const auto if_range = request("Range: bytes=1-2\r\nIf-Range: \"different\"\r\n");
+    FLEXEDGE_REQUIRE(if_range.starts_with("HTTP/1.1 200") && if_range.ends_with("body"));
+    FLEXEDGE_REQUIRE(source.hits() == 1);
     FLEXEDGE_REQUIRE(request("Cookie: private=1\r\n").find("X-Cache: BYPASS") != std::string::npos);
     FLEXEDGE_REQUIRE(source.hits() == 2);
     v2::CacheCommand command;
@@ -153,6 +260,54 @@ void verify() {
     const auto before = source.hits();
     FLEXEDGE_REQUIRE(request("Accept-Encoding: identity\r\n", "GET", "/prewarm").find("X-Cache: HIT") != std::string::npos);
     FLEXEDGE_REQUIRE(source.hits() == before);
+    {
+        const auto expected = std::string(262144, 'a') + std::string(262144, 'b');
+        FLEXEDGE_REQUIRE(request({}, "GET", "/large").ends_with(expected));
+        const auto origin_hits = source.hits();
+        const auto cached = request({}, "GET", "/large");
+        FLEXEDGE_REQUIRE(cached.find("X-Cache: HIT") != std::string::npos && cached.ends_with(expected));
+        FLEXEDGE_REQUIRE(request("Range: bytes=262142-262145\r\n", "GET", "/large").ends_with("aabb"));
+        const auto large_head = request({}, "HEAD", "/large");
+        FLEXEDGE_REQUIRE(large_head.find("Content-Length: 524288\r\n") != std::string::npos && large_head.ends_with("\r\n\r\n"));
+        FLEXEDGE_REQUIRE(request("If-None-Match: \"large\"\r\n", "GET", "/large").starts_with("HTTP/1.1 304"));
+        {
+            asio::io_context client_io;
+            asio::ip::tcp::socket interrupted(client_io);
+            interrupted.connect({asio::ip::address_v4::loopback(), port});
+            const std::string wire = "GET /large HTTP/1.1\r\nHost: www.example.com\r\nConnection: close\r\n\r\n";
+            asio::write(interrupted, asio::buffer(wire));
+            std::array<char, 128> first;
+            FLEXEDGE_REQUIRE(interrupted.read_some(asio::buffer(first)) > 0);
+            interrupted.set_option(asio::socket_base::linger(true, 0));
+            interrupted.close();
+        }
+        FLEXEDGE_REQUIRE(request({}, "GET", "/large").ends_with(expected));
+        FLEXEDGE_REQUIRE(source.hits() == origin_hits);
+        asio::io_context tls_io;
+        asio::ssl::context tls_context(asio::ssl::context::tls_client);
+        tls_context.set_verify_mode(asio::ssl::verify_none);
+        for (unsigned attempt = 0; attempt < 2; ++attempt) {
+            asio::ssl::stream<asio::ip::tcp::socket> encrypted(tls_io, tls_context);
+            FLEXEDGE_REQUIRE(SSL_set_tlsext_host_name(encrypted.native_handle(), "www.example.com") == 1);
+            encrypted.lowest_layer().connect({asio::ip::address_v4::loopback(), secure_port});
+            encrypted.handshake(asio::ssl::stream_base::client);
+            const std::string wire = "GET /large HTTP/1.1\r\nHost: www.example.com\r\nConnection: close\r\n\r\n";
+            asio::write(encrypted, asio::buffer(wire));
+            std::string received;
+            std::array<char, 16384> bytes;
+            std::error_code error;
+            do {
+                const auto count = encrypted.read_some(asio::buffer(bytes), error);
+                received.append(bytes.data(), count);
+            } while (!error);
+            FLEXEDGE_REQUIRE(error == asio::error::eof || error == asio::ssl::error::stream_truncated);
+            FLEXEDGE_REQUIRE(received.starts_with("HTTP/1.1 200 ") && received.ends_with(expected));
+            if (attempt == 1) {
+                FLEXEDGE_REQUIRE(received.find("X-Cache: HIT") != std::string::npos);
+            }
+        }
+        FLEXEDGE_REQUIRE(source.hits() == origin_hits + 1);
+    }
     policy.storage_ = "disk";
     site->set_revision(site->revision() + 1);
     site->clear_response_cache();
@@ -162,8 +317,115 @@ void verify() {
     control.loop(0).start(activate(plane, std::make_shared<const compiled_config>(config.active, config.objects))).get();
     FLEXEDGE_REQUIRE(request({}, "GET", "/disk").find("X-Cache: MISS") != std::string::npos);
     FLEXEDGE_REQUIRE(request({}, "GET", "/disk").find("X-Cache: HIT") != std::string::npos);
+    {
+        // Origin cannot finish until the client has observed its first body segment.
+        asio::io_context client_io;
+        asio::ip::tcp::socket client(client_io);
+        client.connect({asio::ip::address_v4::loopback(), port});
+        const std::string wire = "GET /stream HTTP/1.1\r\nHost: www.example.com\r\nConnection: close\r\n\r\n";
+        asio::write(client, asio::buffer(wire));
+        std::string received;
+        std::array<char, 8192> buffer{};
+        while (received.find("\r\n\r\n") == std::string::npos || received.ends_with("\r\n\r\n")) {
+            const auto count = client.read_some(asio::buffer(buffer));
+            received.append(buffer.data(), count);
+        }
+        FLEXEDGE_REQUIRE(!source.stream_finished());
+        const auto while_filling = source.hits();
+        auto follower = std::async(std::launch::async, [&] { return request({}, "GET", "/stream"); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(450));
+        FLEXEDGE_REQUIRE(source.hits() == while_filling);
+        source.finish_stream();
+        for (;;) {
+            std::error_code error;
+            const auto count = client.read_some(asio::buffer(buffer), error);
+            received.append(buffer.data(), count);
+            if (error) {
+                break;
+            }
+        }
+        const auto separator = received.find("\r\n\r\n");
+        FLEXEDGE_REQUIRE(received.substr(separator + 4) == std::string(16384, 'a') + std::string(16384, 'b'));
+        const auto follower_response = follower.get();
+        FLEXEDGE_REQUIRE(follower_response.find("X-Cache: HIT") != std::string::npos);
+        const auto hits = source.hits();
+        const auto cached = request({}, "GET", "/stream");
+        FLEXEDGE_REQUIRE(cached.find("X-Cache: HIT") != std::string::npos && cached.ends_with(std::string(16384, 'b')));
+        FLEXEDGE_REQUIRE(source.hits() == hits);
+    }
+    site->set_response_compression_enabled(true);
+    site->set_revision(site->revision() + 1);
+    config.setGeneration(11);
+    config.finalize();
+    control.loop(0).start(activate(plane, std::make_shared<const compiled_config>(config.active, config.objects))).get();
+    const auto before_events = source.hits();
+    for (int index = 0; index < 2; ++index) {
+        const auto events = request("Accept-Encoding: gzip\r\n", "GET", "/events");
+        FLEXEDGE_REQUIRE(events.find("Content-Encoding:") == std::string::npos);
+        FLEXEDGE_REQUIRE(events.ends_with(std::string(4096, 'e')));
+        FLEXEDGE_REQUIRE(events.find("X-Cache: HIT") == std::string::npos);
+    }
+    FLEXEDGE_REQUIRE(source.hits() == before_events + 2);
+    site->set_response_compression_enabled(false);
+    site->set_revision(site->revision() + 1);
+    policy.rules_[0].ttl_mode_ = "fixed";
+    policy.rules_[0].ttl_seconds_ = 1;
+    site->clear_response_cache();
+    flexedge::cache::to_proto(policy, *site->mutable_response_cache());
+    config.setGeneration(12);
+    config.finalize();
+    control.loop(0).start(activate(plane, std::make_shared<const compiled_config>(config.active, config.objects))).get();
+    FLEXEDGE_REQUIRE(request({}, "GET", "/revalidate").ends_with("validated"));
+    FLEXEDGE_REQUIRE(request({}, "GET", "/stale").ends_with("validated"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1150));
+    const auto before_validation = source.validations();
+    const auto validated = request({}, "GET", "/revalidate");
+    FLEXEDGE_REQUIRE(validated.starts_with("HTTP/1.1 200") && validated.ends_with("validated"));
+    FLEXEDGE_REQUIRE(validated.find("X-Cache: REVALIDATED") != std::string::npos);
+    FLEXEDGE_REQUIRE(source.validations() == before_validation + 1);
+    source.fail_stale(true);
+    const auto stale = request({}, "GET", "/stale");
+    FLEXEDGE_REQUIRE(stale.starts_with("HTTP/1.1 200") && stale.ends_with("validated"));
+    FLEXEDGE_REQUIRE(stale.find("X-Cache: STALE") != std::string::npos);
+    const auto configure_rule = [&] {
+        ++policy.revision_;
+        site->set_revision(site->revision() + 1);
+        site->clear_response_cache();
+        flexedge::cache::to_proto(policy, *site->mutable_response_cache());
+        config.setGeneration(config.release.generation() + 1);
+        config.finalize();
+        control.loop(0).start(activate(plane, std::make_shared<const compiled_config>(config.active, config.objects))).get();
+    };
+    policy.rules_[0].ttl_seconds_ = 600;
+    configure_rule();
+    for (unsigned repeat = 0; repeat < 2; ++repeat) {
+        FLEXEDGE_REQUIRE(request({}, "GET", "/no-cache").find("X-Cache: BYPASS") != std::string::npos);
+    }
+    policy.rules_[0].skip_no_cache_ = false;
+    configure_rule();
+    FLEXEDGE_REQUIRE(request({}, "GET", "/no-cache").find("X-Cache: MISS") != std::string::npos);
+    const auto cached_no_cache = request({}, "GET", "/no-cache");
+    FLEXEDGE_REQUIRE(cached_no_cache.find("X-Cache: HIT") != std::string::npos);
+    FLEXEDGE_REQUIRE(cached_no_cache.find("Cache-Control: no-cache") != std::string::npos);
+    for (const auto directive : {"Cache-Control: no-cache\r\n", "Cache-Control: max-age=0\r\n", "Pragma: no-cache\r\n"}) {
+        FLEXEDGE_REQUIRE(request(directive, "GET", "/no-cache").find("X-Cache: BYPASS") != std::string::npos);
+    }
+    FLEXEDGE_REQUIRE(request({}, "GET", "/no-cache").find("X-Cache: HIT") != std::string::npos);
+    policy.rules_[0].respect_request_no_cache_ = false;
+    configure_rule();
+    FLEXEDGE_REQUIRE(request({}, "GET", "/no-cache").find("X-Cache: MISS") != std::string::npos);
+    const auto before_ignored_refresh = source.hits();
+    for (const auto directive : {"Cache-Control: no-cache\r\n", "Cache-Control: max-age=0\r\n", "Pragma: no-cache\r\n"}) {
+        FLEXEDGE_REQUIRE(request(directive, "GET", "/no-cache").find("X-Cache: HIT") != std::string::npos);
+    }
+    FLEXEDGE_REQUIRE(source.hits() == before_ignored_refresh);
+    for (const auto target : {"/private", "/no-store"}) {
+        for (unsigned repeat = 0; repeat < 2; ++repeat) {
+            FLEXEDGE_REQUIRE(request({}, "GET", target).find("X-Cache: BYPASS") != std::string::npos);
+        }
+    }
     const auto states = control.loop(0).start(cache_log_states(log_receiver)).get();
-    for (const auto state : {"miss", "hit_memory", "hit_disk", "bypass"}) {
+    for (const auto state : {"miss", "hit_memory", "hit_disk", "revalidated", "bypass", "origin_not_modified", "origin_no_cache", "request_no_cache", "origin_private", "origin_no_store", "fresh"}) {
         FLEXEDGE_REQUIRE(std::ranges::find(states, state) != states.end());
     }
     shutdown.stop_and_join();

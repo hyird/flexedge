@@ -36,8 +36,8 @@ import type { DnsRecord, DnsZone } from './types'
 const typeItems = recordTypes.map((id) => ({ id, label: id }))
 
 const contentLabels: Record<DnsRecord['type'], string> = {
-  A: 'IPv4 地址',
-  AAAA: 'IPv6 地址',
+  A: 'IPv4地址',
+  AAAA: 'IPv6地址',
   CNAME: '目标',
   TXT: '内容',
   MX: '邮件服务器',
@@ -119,7 +119,7 @@ export function RecordForm({
         isOpen
         onClose={close}
         title={record ? `编辑记录 ${record.name} ${record.type}` : '添加记录'}
-        description={`为 ${zone.domain} 配置自定义解析记录，保存时直接更新 DNS 服务商。`}
+        description={`为 ${zone.domain} 配置自定义解析记录，保存时直接更新DNS服务商。`}
         onSubmit={submit}
         isSubmitting={draft.isSaving}
         error={
@@ -277,7 +277,7 @@ export function RecordForm({
               render={({ field }) => (
                 <div className='sm:col-span-2'>
                   <Toggle
-                    label='Cloudflare 代理'
+                    label='Cloudflare代理'
                     selected={field.value}
                     onChange={field.onChange}
                     disabled={disabled}

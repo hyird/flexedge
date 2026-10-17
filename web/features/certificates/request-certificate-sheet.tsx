@@ -104,7 +104,7 @@ export function RequestCertificateSheet({
       isOpen={isOpen}
       onClose={close}
       title='申请证书'
-      description='使用 DNS-01 验证签发，签发任务在后台执行，完成后可绑定到网站。'
+      description='使用DNS-01验证签发，签发任务在后台执行，完成后可绑定到网站。'
       onSubmit={submit}
       submitLabel='申请证书'
       isSubmitting={mutation.isPending}
@@ -115,7 +115,7 @@ export function RequestCertificateSheet({
         value={values.domain}
         onChange={setDomain}
         required
-        placeholder='www.example.com 或 *.example.com'
+        placeholder='www.example.com或 *.example.com'
         hint='支持通配符域名。'
         disabled={mutation.isPending}
         error={errors.domain}
@@ -162,7 +162,7 @@ export function RequestCertificateSheet({
           id: item.id,
           label: `${item.domain} · ${item.dns_provider_name}`,
         }))}
-        hint='证书域名必须属于该托管域名，签发时在其中写入 _acme-challenge 记录。'
+        hint='证书域名必须属于该托管域名，签发时在其中写入 _acme-challenge记录。'
         disabled={zones.isPending || mutation.isPending}
         error={errors.dns_zone_id}
       />

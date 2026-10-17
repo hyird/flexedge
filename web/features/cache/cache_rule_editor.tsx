@@ -143,8 +143,8 @@ export function CacheRuleEditor({
                   })
                 }
                 items={[
-                  { id: 'both', label: 'GET 和 HEAD' },
-                  { id: 'GET', label: '仅 GET' },
+                  { id: 'both', label: 'GET和HEAD' },
+                  { id: 'GET', label: '仅GET' },
                 ]}
               />
               <Field
@@ -168,7 +168,7 @@ export function CacheRuleEditor({
                 error={errors.max_object_bytes}
               />
               <Toggle
-                label='跳过带 Set-Cookie 的响应'
+                label='跳过带Set-Cookie的响应'
                 selected={value.skip_set_cookie}
                 onChange={(skip_set_cookie) => change({ skip_set_cookie })}
               />
@@ -181,9 +181,20 @@ export function CacheRuleEditor({
                 hint='0 表示保留源站的浏览器缓存设置。'
                 error={errors.browser_ttl_seconds}
               />
+              <Toggle
+                label='跳过源站no-cache'
+                selected={value.skip_no_cache}
+                onChange={(skip_no_cache) => change({ skip_no_cache })}
+              />
+              <Toggle
+                label='遵循浏览器刷新'
+                selected={value.respect_request_no_cache}
+                onChange={(respect_request_no_cache) =>
+                  change({ respect_request_no_cache })
+                }
+              />
               <Notice>
-                带身份认证、Cookie、Range 或升级协议的请求会绕过缓存；源站的
-                private、no-store 和 no-cache 始终生效。
+                关闭“跳过源站no-cache”后，按本规则缓存。开启“遵循浏览器刷新”时，刷新请求直接回源。private和no-store始终不缓存。
               </Notice>
             </div>
           )}

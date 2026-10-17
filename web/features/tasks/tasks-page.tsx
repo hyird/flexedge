@@ -75,13 +75,11 @@ export function TasksPage() {
       id: 'task',
       header: '任务',
       isRowHeader: true,
-      minWidth: 280,
       cell: (task) => <TaskCell task={task} />,
     },
     {
       id: 'status',
       header: '状态',
-      minWidth: 240,
       cell: (task) => (
         <span className='flex min-w-0 items-center gap-2 whitespace-nowrap'>
           <StatusChip
@@ -98,7 +96,6 @@ export function TasksPage() {
     {
       id: 'updated',
       header: '最近执行',
-      minWidth: 110,
       cell: (task) => (
         <RelativeTime value={task.updated_at} className='text-sm text-muted' />
       ),
@@ -106,7 +103,6 @@ export function TasksPage() {
     {
       id: 'failures',
       header: '失败次数',
-      minWidth: 90,
       align: 'end',
       cell: (task) => (
         <span
@@ -122,7 +118,6 @@ export function TasksPage() {
     {
       id: 'actions',
       header: <span className='sr-only'>详情</span>,
-      width: 72,
       cell: (task) => (
         <Button
           size='sm'
@@ -156,7 +151,7 @@ export function TasksPage() {
           search={{
             value: list.keyword,
             onChange: (q) => void list.setSearch({ q }),
-            placeholder: '搜索对象名称或 ID',
+            placeholder: '搜索对象名称或ID',
           }}
           filters={
             <>
@@ -195,7 +190,6 @@ export function TasksPage() {
           isLoading={query.isPending}
           error={query.isError ? query.error : undefined}
           onRetry={() => query.refetch()}
-          minWidth={820}
           empty={filtered ? { title: '没有匹配的任务' } : { title: '暂无任务' }}
           footer={
             <TablePagination

@@ -34,7 +34,7 @@ const task: Task = {
 }
 
 test('titles name the task type and the object; unknown codes stay raw', () => {
-  expect(taskTitle(task)).toBe('DNS 同步 · a-z.xin')
+  expect(taskTitle(task)).toBe('DNS同步 · a-z.xin')
   expect(taskTitle({ ...task, operation: 'delete' })).toBe(
     '删除托管域 · a-z.xin'
   )
@@ -178,7 +178,7 @@ test('a trace step of another task links to that task', () => {
           state: 'available',
           attempt_id: '7',
           step_count: 2,
-          steps: [{ code: 'dns_challenge', label: '写入 DNS 验证记录' }],
+          steps: [{ code: 'dns_challenge', label: '写入DNS验证记录' }],
         },
       },
     ],
@@ -192,11 +192,11 @@ test('a trace step of another task links to that task', () => {
       steps: [
         {
           code: 'dns_challenge',
-          label: '写入 DNS 验证记录',
+          label: '写入DNS验证记录',
           related_task: {
             resource_type: 'dns_zone',
             resource_id: 'zone-1',
-            label: 'DNS 同步 · a-z.xin',
+            label: 'DNS同步 · a-z.xin',
           },
         },
         { code: 'validate', label: '证书颁发机构验证' },
@@ -210,7 +210,7 @@ test('a trace step of another task links to that task', () => {
       createElement(AttemptTimeline, { task: ref, trace: summary })
     )
   )
-  expect(html).toContain('关联任务：DNS 同步 · a-z.xin')
+  expect(html).toContain('关联任务：DNS同步 · a-z.xin')
   expect(html).toContain('href="/tasks?task=dns_zone%3Azone-1"')
   expect(html).toContain('证书颁发机构验证')
   expect(html.match(/关联任务/g)).toHaveLength(1)

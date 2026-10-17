@@ -83,7 +83,7 @@ test('record rows list system records first and attach their sync state', () => 
 
 test('a rejected website CNAME keeps its failed state on the system row', () => {
   const lastError =
-    '主机记录 @ 已有 A 记录，不能再添加 CNAME；请删除或修改这些记录，或把该网站域名改为外部解析'
+    '主机记录 @ 已有A记录，不能再添加CNAME；请删除或修改这些记录，或把该网站域名改为外部解析'
   const rows = zoneRecordRows(
     zone({
       runtime: {

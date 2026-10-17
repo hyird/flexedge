@@ -330,15 +330,15 @@ export function OriginSettingsSection({
       <div className='flex flex-col gap-4'>
         <div className='grid gap-4 sm:grid-cols-2'>
           <Field
-            label='回源 Host'
+            label='回源Host'
             value={values.origin_host_header}
             onChange={(host) => update('origin_host_header', host)}
             error={errors.origin_host_header}
-            hint='$host 保留客户端请求域名，也可指定源站域名。'
+            hint='$host保留客户端请求域名，也可指定源站域名。'
             className='[&_input]:font-mono'
           />
           <Choice
-            label='回源 HTTP 版本'
+            label='回源HTTP版本'
             value={values.origin_http_version}
             onChange={(value) =>
               update('origin_http_version', value as 'auto' | 'http1' | 'http2')
@@ -348,7 +348,7 @@ export function OriginSettingsSection({
               { id: 'http1', label: 'HTTP/1.1' },
               { id: 'http2', label: 'HTTP/2' },
             ]}
-            hint='自动模式通过 TLS 协商；明文 HTTP/2 请选择 HTTP/2。'
+            hint='自动模式通过TLS协商；明文HTTP/2请选择HTTP/2。'
             error={errors.origin_http_version}
           />
           <NumberField
@@ -373,7 +373,7 @@ export function OriginSettingsSection({
           />
         </div>
         <Toggle
-          label='传递客户端 IP'
+          label='传递客户端IP'
           hint='通过转发头把客户端地址传给源站。'
           selected={values.pass_client_ip}
           onChange={(selected) => update('pass_client_ip', selected)}

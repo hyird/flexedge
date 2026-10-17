@@ -30,7 +30,7 @@ void verify_existing_tenants(const ruvia::db_config& base) {
     const test_support::postgres_test_database database(base);
     const ruvia::db_migrator migrator(database.config(), {.table_ = "schema_migrations"});
     auto migrations = service::config::schema_migrations;
-    migrations.pop_back();
+    std::erase_if(migrations, [](const auto& migration) { return migration.id() >= "0004_default_cache_policy"; });
     (void)migrator.migrate(migrations);
     const auto custom = [] {
         auto config = service::cache_config::default_policy();
@@ -52,7 +52,7 @@ void verify_existing_tenants(const ruvia::db_config& base) {
     }) == 0,
         "prepare existing tenants");
     const auto applied = migrator.migrate(service::config::schema_migrations);
-    require(applied.applied().size() == 1, "only default-policy migration applies to existing installations");
+    require(applied.applied().size() == 2, "default-policy and cache-reason migrations apply to existing installations");
     require(database.run([&](ruvia::db_client& client) -> ruvia::task<void> {
         co_await client.connect();
         auto db = client.handle();
@@ -72,6 +72,8 @@ void verify_existing_tenants(const ruvia::db_config& base) {
                     "seeded policy only caches static resources for one day");
                 require(policy.memory_percent_ == 10 && policy.disk_percent_ == 50,
                     "seeded policy uses percentage capacity limits");
+                require(policy.rules_[0].skip_no_cache_ && policy.rules_[0].respect_request_no_cache_,
+                    "saved rules without no-cache fields preserve their previous behavior");
                 require(row[2].value().value() == "enabled", "default policy is available for website selection");
                 ++seeded;
             } else {
@@ -132,6 +134,8 @@ void verify_fresh_install(const ruvia::db_config& base) {
             "fresh installation creates a default policy with its tenant");
         require(service::cache_config::parse(rows.front()[2].value().value()).rules_.size() == 1,
             "fresh installation policy has default rules");
+        require(service::cache_config::parse(rows.front()[2].value().value()).max_object_bytes_ == 64 * 1024 * 1024,
+            "fresh installation defaults to 64MiB cache objects");
         require(rows.front()[3].as<bool>().value(), "fresh installation policy is built-in");
         co_await verify_protected_default(db);
         (void)co_await db.execute("UPDATE sys_cache_policy SET description='保留用户修改',status='disabled'");
@@ -146,6 +150,31 @@ void verify_fresh_install(const ruvia::db_config& base) {
             "startup preserves edits to the default policy");
     }) == 0,
         "verify repeat startup preserves edits");
+}
+
+void verify_cache_reason_rollback(const ruvia::db_config& base) {
+    const test_support::postgres_test_database database(base);
+    const ruvia::db_migrator migrator(database.config(), {.table_ = "schema_migrations"});
+    auto previous = service::config::schema_migrations;
+    const auto migration = previous.back();
+    previous.pop_back();
+    (void)migrator.migrate(previous);
+    require(database.run([&](ruvia::db_client& client) -> ruvia::task<void> {
+        co_await client.connect();
+        auto db = client.handle();
+        auto transaction = co_await db.begin_transaction();
+        (void)co_await transaction.execute(migration.sql());
+        co_await transaction.rollback();
+        const auto columns = co_await db.query("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='sys_website_access_log' AND column_name='cache_reason'");
+        require(columns.front()[0].as<std::int64_t>().value() == 0, "cache-reason DDL rolls back atomically");
+        const auto constraint = co_await db.query("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='public.sys_website_access_log'::regclass AND conname='sys_website_access_log_cache_status_check'");
+        require(constraint.size() == 1 && constraint.front()[0].value().value().find("revalidated") == std::string_view::npos, "cache-status constraint rolls back with its column");
+    }) == 0,
+        "cache-reason migration rollback");
+    const auto applied = migrator.migrate(service::config::schema_migrations);
+    require(applied.applied().size() == 1, "cache-reason migration applies after rollback");
+    const auto repeated = migrator.migrate(service::config::schema_migrations);
+    require(repeated.applied().empty(), "cache-reason migration repeats without changes");
 }
 }  // namespace
 
@@ -175,7 +204,7 @@ int main() {
             auto transaction = co_await db.begin_transaction();
             const auto columns = co_await transaction.query("SELECT cache_policy_id FROM sys_website LIMIT 1");
             (void)columns;
-            (void)co_await transaction.query("SELECT cache_status FROM sys_website_access_log LIMIT 1");
+            (void)co_await transaction.query("SELECT cache_status,cache_reason FROM sys_website_access_log LIMIT 1");
             co_await transaction.execute("INSERT INTO sys_tenant(name,slug) VALUES('Cache QA','cache-qa')");
             co_await transaction.execute("INSERT INTO sys_cache_policy(tenant_id,name,config) SELECT id,'Policy','{}' FROM sys_tenant");
             co_await transaction.rollback();
@@ -189,6 +218,7 @@ int main() {
         }
         verify_existing_tenants(*base);
         verify_fresh_install(*base);
+        verify_cache_reason_rollback(*base);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

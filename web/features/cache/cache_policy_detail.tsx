@@ -77,7 +77,7 @@ function PolicyEditor({
 }) {
   const client = useQueryClient(),
     navigate = useNavigate()
-  const [tab, setTab] = useState<'rules' | 'config' | 'websites'>('rules')
+  const [tab, setTab] = useState<'config' | 'rules' | 'websites'>('config')
   const [edits, setEdits] = useState<CachePolicyInput>()
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [editing, setEditing] = useState<CacheRule>()
@@ -279,8 +279,8 @@ function PolicyEditor({
       <PageTabs
         label='缓存策略详情'
         items={[
-          { id: 'rules', label: '缓存规则' },
           { id: 'config', label: '基本配置' },
+          { id: 'rules', label: '缓存规则' },
           { id: 'websites', label: '引用网站（' + base.website_count + '）' },
         ]}
         selected={tab}

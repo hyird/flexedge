@@ -166,6 +166,17 @@ else()
     target_compile_options(flexedge_node_request_benchmark PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+# Real TCP cache throughput probe; opt-in, never a timing assertion in CTest.
+add_executable(flexedge_node_cache_benchmark EXCLUDE_FROM_ALL tools/node_cache_benchmark.cpp)
+target_include_directories(flexedge_node_cache_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(flexedge_node_cache_benchmark PRIVATE
+    flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto)
+if(MSVC)
+    target_compile_options(flexedge_node_cache_benchmark PRIVATE /W4 /bigobj /permissive- /utf-8 /wd4819)
+else()
+    target_compile_options(flexedge_node_cache_benchmark PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_executable(flexedge_node
     node/main.cpp
 )
@@ -405,6 +416,12 @@ if(BUILD_TESTING)
     flexedge_add_test(response_cache
         SOURCES tests/response_cache.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::http Threads::Threads)
+    flexedge_add_test(cache_features
+        SOURCES tests/cache_features.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::http Threads::Threads)
+    flexedge_add_test(response_streaming
+        SOURCES tests/response_streaming.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::http OpenSSL::Crypto)
     flexedge_add_test(cache_runtime
         SOURCES tests/cache_runtime.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto)
@@ -634,7 +651,7 @@ install(FILES "${FLEXEDGE_NODE_RELEASE_MANIFEST}"
     COMPONENT Server
 )
 if(FLEXEDGE_BUILD_WEB)
-    install(FILES "${FLEXEDGE_WEB_OUTPUT_DIR}/index.html"
+    install(DIRECTORY "${FLEXEDGE_WEB_OUTPUT_DIR}/"
         DESTINATION web
         COMPONENT Server
     )

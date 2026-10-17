@@ -179,14 +179,14 @@ const routeRuleSchema = z
     origin_group: z.string().trim().max(100),
     request_headers_text: z
       .string()
-      .refine(hasValidRouteHeaderText, '每行请填写为 Header: value')
+      .refine(hasValidRouteHeaderText, '每行请填写为Header: value')
       .refine(
         (value) => parseRouteHeaders(value).length <= maxRouteHeaders,
         `最多${maxRouteHeaders}个请求头`
       ),
     response_headers_text: z
       .string()
-      .refine(hasValidRouteHeaderText, '每行请填写为 Header: value')
+      .refine(hasValidRouteHeaderText, '每行请填写为Header: value')
       .refine(
         (value) => parseRouteHeaders(value).length <= maxRouteHeaders,
         `最多${maxRouteHeaders}个响应头`
@@ -225,7 +225,7 @@ const routeRuleSchema = z
           code: 'custom',
           path: ['path'],
           message:
-            '正则需符合 RE2 语法，最多512字节、9个捕获组；不支持前后查找或回溯引用',
+            '正则需符合RE2语法，最多512字节、9个捕获组；不支持前后查找或回溯引用',
         })
       }
     } else if (rule.match_type === 'suffix' && /[\s?#]/.test(rule.path)) {
@@ -321,7 +321,7 @@ const routeRuleSchema = z
       context.addIssue({
         code: 'custom',
         path: ['redirect_url'],
-        message: '跳转地址需以 /、http:// 或 https:// 开头',
+        message: '跳转地址需以 /、http:// 或https:// 开头',
       })
     }
     if (![301, 302, 307, 308].includes(rule.redirect_status)) {
@@ -345,7 +345,7 @@ export const websiteFormSchema = z
     domains: z.array(domainSchema).min(1, '至少添加一个域名').max(100),
     origins: z.array(originSchema).min(1, '至少添加一个源站').max(100),
     default_origin_group: z.string().trim().min(1, '请选择默认源站组').max(100),
-    origin_host_header: z.string().trim().min(1, '请输入回源 Host').max(253),
+    origin_host_header: z.string().trim().min(1, '请输入回源Host').max(253),
     origin_http_version: z.enum(['auto', 'http1', 'http2']).default('auto'),
     origin_connect_timeout_seconds: z.number().int().min(1).max(300),
     origin_read_timeout_seconds: z.number().int().min(1).max(600),
@@ -400,14 +400,14 @@ export const websiteFormSchema = z
       context.addIssue({
         code: 'custom',
         path: ['certificate_ids'],
-        message: '启用 HTTPS 必须绑定至少一张可用证书',
+        message: '启用HTTPS必须绑定至少一张可用证书',
       })
     }
     if (!values.https_enabled && values.certificate_ids.length > 0) {
       context.addIssue({
         code: 'custom',
         path: ['certificate_ids'],
-        message: '关闭 HTTPS 后不能保留证书绑定',
+        message: '关闭HTTPS后不能保留证书绑定',
       })
     }
     if (

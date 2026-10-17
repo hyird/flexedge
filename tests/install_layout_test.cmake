@@ -33,7 +33,32 @@ set(EXPECTED_FILES
     "xdb_lookup${EXECUTABLE_SUFFIX}"
 )
 if(EXPECT_WEB)
-    list(APPEND EXPECTED_FILES "web/index.html")
+    if(NOT EXISTS "${BUILD_DIR}/web/index.html")
+        message(FATAL_ERROR "frontend entry is missing")
+    endif()
+    foreach(EXTENSION js css woff2)
+        file(GLOB ASSETS "${BUILD_DIR}/web/assets/*.${EXTENSION}")
+        if(NOT ASSETS)
+            message(FATAL_ERROR "frontend ${EXTENSION} assets are missing")
+        endif()
+    endforeach()
+    file(GLOB_RECURSE WEB_FILES
+        LIST_DIRECTORIES false
+        RELATIVE "${BUILD_DIR}"
+        "${BUILD_DIR}/web/*"
+    )
+    foreach(WEB_FILE IN LISTS WEB_FILES)
+        string(TOLOWER "${WEB_FILE}" LOWER_WEB_FILE)
+        if(NOT WEB_FILE STREQUAL LOWER_WEB_FILE)
+            message(FATAL_ERROR "frontend filename must be lowercase: ${WEB_FILE}")
+        endif()
+        file(SHA256 "${BUILD_DIR}/${WEB_FILE}" SOURCE_HASH)
+        file(SHA256 "${STAGE_DIR}/${WEB_FILE}" INSTALLED_HASH)
+        if(NOT SOURCE_HASH STREQUAL INSTALLED_HASH)
+            message(FATAL_ERROR "installed frontend asset differs: ${WEB_FILE}")
+        endif()
+    endforeach()
+    list(APPEND EXPECTED_FILES ${WEB_FILES})
 endif()
 if(EXPECT_XDB_V4)
     list(APPEND EXPECTED_FILES "geo/ip2region_v4.xdb")

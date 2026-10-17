@@ -30,6 +30,8 @@ inline flexedge::cache::rule from_dto(const rule_dto& input) {
     result.max_object_bytes_ = input.get<"max_object_bytes">().value_;
     result.skip_set_cookie_ = input.get<"skip_set_cookie">().value_;
     result.browser_ttl_seconds_ = input.get<"browser_ttl_seconds">().value_;
+    result.skip_no_cache_ = input.get<"skip_no_cache">() ? input.get<"skip_no_cache">()->value_ : true;
+    result.respect_request_no_cache_ = input.get<"respect_request_no_cache">() ? input.get<"respect_request_no_cache">()->value_ : true;
     return result;
 }
 inline flexedge::cache::policy from_dto(const policy_dto& input) {
@@ -72,6 +74,8 @@ inline rule_dto to_dto(const flexedge::cache::rule& input, ruvia::model_options 
     result.set<"max_object_bytes">(input.max_object_bytes_);
     result.set<"skip_set_cookie">(input.skip_set_cookie_);
     result.set<"browser_ttl_seconds">(input.browser_ttl_seconds_);
+    result.set<"skip_no_cache">(input.skip_no_cache_);
+    result.set<"respect_request_no_cache">(input.respect_request_no_cache_);
     return result;
 }
 inline policy_dto to_dto(const flexedge::cache::policy& input, ruvia::model_options options = {}) {

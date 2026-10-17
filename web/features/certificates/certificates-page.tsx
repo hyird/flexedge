@@ -56,7 +56,6 @@ export function CertificatesPage() {
       id: 'domains',
       header: '证书域名',
       isRowHeader: true,
-      minWidth: 240,
       cell: (item) => (
         <div className='flex min-w-0 items-center gap-2'>
           <Mono truncate className='min-w-0 font-medium'>
@@ -76,13 +75,11 @@ export function CertificatesPage() {
     {
       id: 'issuer',
       header: '签发机构',
-      minWidth: 130,
       cell: (item) => item.issuer || providerLabel(item.certificate_provider),
     },
     {
       id: 'status',
       header: '状态',
-      minWidth: 110,
       cell: (item) => (
         <StatusChip
           {...describeStatus(certificateStatuses, item.status)}
@@ -93,7 +90,6 @@ export function CertificatesPage() {
     {
       id: 'expires',
       header: '有效期至',
-      minWidth: 190,
       // One line: a date slot as wide as `0000-00-00` (or `—`), then the
       // remaining days at a fixed position.
       cell: (item) => (
@@ -128,14 +124,12 @@ export function CertificatesPage() {
     {
       id: 'renewal',
       header: '续期',
-      minWidth: 80,
       cell: (item) => (item.config.auto_renew ? '自动' : '手动'),
     },
     {
       id: 'websites',
       header: '引用网站',
       align: 'end',
-      minWidth: 90,
       cell: (item) => (
         <span className='tabular-nums'>{item.website_count}</span>
       ),
@@ -143,7 +137,6 @@ export function CertificatesPage() {
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      width: 72,
       cell: (item) => (
         <LinkButton
           href={`/certificates/${item.id}`}
@@ -158,7 +151,7 @@ export function CertificatesPage() {
   return (
     <Page
       title='证书'
-      description='通过 DNS-01 验证签发的 HTTPS 证书：有效期、自动续期与向边缘节点的分发。'
+      description='通过DNS-01验证签发的HTTPS证书：有效期、自动续期与向边缘节点的分发。'
     >
       <ListToolbar
         search={{
@@ -207,7 +200,6 @@ export function CertificatesPage() {
         isLoading={query.isPending}
         error={query.isError ? query.error : undefined}
         onRetry={() => void query.refetch()}
-        minWidth={940}
         empty={
           filtered
             ? {
@@ -216,7 +208,7 @@ export function CertificatesPage() {
               }
             : {
                 title: '还没有证书',
-                description: '申请证书后即可在网站 HTTPS 配置中绑定。',
+                description: '申请证书后即可在网站HTTPS配置中绑定。',
               }
         }
         footer={

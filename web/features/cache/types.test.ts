@@ -11,6 +11,43 @@ import {
 } from './types'
 
 describe('cache policy boundaries', () => {
+  it('keeps no-cache controls enabled for saved rules without the new fields', () => {
+    const config = defaultCacheConfig()
+    const legacy = structuredClone(config.rules[0])
+    Reflect.deleteProperty(legacy, 'skip_no_cache')
+    Reflect.deleteProperty(legacy, 'respect_request_no_cache')
+    const parsed = cacheConfigSchema.parse({ ...config, rules: [legacy] })
+    expect(parsed.rules[0].skip_no_cache).toBe(true)
+    expect(parsed.rules[0].respect_request_no_cache).toBe(true)
+    const customized = cacheConfigSchema.parse({
+      ...config,
+      rules: [
+        { ...legacy, skip_no_cache: false, respect_request_no_cache: false },
+      ],
+    })
+    expect(customized.rules[0].skip_no_cache).toBe(false)
+    expect(customized.rules[0].respect_request_no_cache).toBe(false)
+  })
+  it('defaults to 64MiB and permits objects up to 256MiB', () => {
+    const config = defaultCacheConfig()
+    expect(config.max_object_bytes).toBe(64 * 1024 ** 2)
+    const maximum = 256 * 1024 ** 2
+    expect(
+      cacheConfigSchema.safeParse({ ...config, max_object_bytes: maximum })
+        .success
+    ).toBe(true)
+    expect(
+      cacheConfigSchema.safeParse({ ...config, max_object_bytes: maximum + 1 })
+        .success
+    ).toBe(false)
+    expect(
+      cacheConfigSchema.safeParse({
+        ...config,
+        max_object_bytes: maximum,
+        rules: [{ ...config.rules[0], max_object_bytes: maximum }],
+      }).success
+    ).toBe(true)
+  })
   it('rejects unsafe disk paths, invalid regex and conflicting size limits', () => {
     expect(
       cacheConfigSchema.safeParse({

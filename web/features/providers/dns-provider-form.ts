@@ -5,8 +5,8 @@ import { dnsPlatformSchema } from './types'
  * Cloudflare Account ID is 32 hex characters and its API Token 20–200
  * characters; an Aliyun AccessKey Secret is 16–256 characters. */
 export const dnsProviderTokenLength = {
-  cloudflare: { min: 20, max: 200, message: 'API Token 需为 20–200 个字符' },
-  aliyun: { min: 16, max: 256, message: 'AccessKey Secret 需为 16–256 个字符' },
+  cloudflare: { min: 20, max: 200, message: 'API Token需为 20–200 个字符' },
+  aliyun: { min: 16, max: 256, message: 'AccessKey Secret需为 16–256 个字符' },
 } as const
 
 const dnsProviderFormObject = z.object({
@@ -32,7 +32,7 @@ export function dnsProviderFormSchema(editing = false) {
       ctx.addIssue({
         code: 'custom',
         path: ['account_id'],
-        message: 'Cloudflare Account ID 为 32 位十六进制字符',
+        message: 'Cloudflare Account ID为 32 位十六进制字符',
       })
     if (editing && values.api_token === '') return
     const limit = dnsProviderTokenLength[values.provider]

@@ -117,7 +117,7 @@ ruvia::task<void> create_fixture(delivery_context& context) {
     auto db = context.db();
     (void)co_await db.execute("CREATE TABLE sys_node (id uuid, tenant_id uuid, cluster_id uuid, agent_id text, registration_status text, deleted_at timestamptz)");
     (void)co_await db.execute("CREATE TABLE sys_website (id uuid, tenant_id uuid, cluster_id uuid, deleted_at timestamptz)");
-    (void)co_await db.execute("CREATE TABLE sys_website_access_log (tenant_id uuid, occurred_at timestamptz, id uuid, node_id uuid, website_id uuid, client_ip varchar(64), protocol text, method text, host text, target text, status_code int, request_bytes bigint, response_bytes bigint, duration_ms bigint, user_agent text, referer text, request_headers text, request_body text, request_body_truncated bool, tls_fingerprint text, response_headers text, query_string text, cookies text, cache_status varchar(16) NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tenant_id,occurred_at,id))");
+    (void)co_await db.execute("CREATE TABLE sys_website_access_log (tenant_id uuid, occurred_at timestamptz, id uuid, node_id uuid, website_id uuid, client_ip varchar(64), protocol text, method text, host text, target text, status_code int, request_bytes bigint, response_bytes bigint, duration_ms bigint, user_agent text, referer text, request_headers text, request_body text, request_body_truncated bool, tls_fingerprint text, response_headers text, query_string text, cookies text, cache_status varchar(16) NOT NULL DEFAULT '', cache_reason varchar(64) NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tenant_id,occurred_at,id))");
     (void)co_await db.execute("CREATE TABLE sys_node_log (tenant_id uuid, occurred_at timestamptz, id uuid, node_id uuid, level text, category text, message text, created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tenant_id,occurred_at,id))");
     (void)co_await db.execute("CREATE TABLE sys_notification_outbox (id varchar(64) PRIMARY KEY, kind varchar(24) NOT NULL, payload text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), available_at timestamptz NOT NULL DEFAULT now(), attempts integer NOT NULL DEFAULT 0)");
     (void)co_await db.execute("INSERT INTO sys_node VALUES($1,$2,'a2d6e77d-4a0c-4796-93d5-755d3c6d3837',$3,'registered',NULL)", node_id, tenant_id, agent_id);
@@ -182,6 +182,8 @@ ruvia::task<void> verify_batch_ownership(delivery_context& context) {
     access->set_query_string("q='quoted'&id=$3");
     access->set_cookies("session=log-fixture");
     access->set_cache_status("hit_disk");
+    access->set_cache_reason("origin_not_modified");
+    access->set_cache_revalidated(true);
     const auto first_access = batch.events(0);
     const auto first_node = batch.events(1);
     *batch.add_events() = first_access;
@@ -198,8 +200,8 @@ ruvia::task<void> verify_batch_ownership(delivery_context& context) {
     co_await check_counts(context, 3, 2, 3);
     const auto stored = co_await db.query("SELECT request_bytes,response_bytes,duration_ms,user_agent,referer,request_headers,request_body,request_body_truncated,tls_fingerprint,response_headers,query_string,cookies,round(extract(epoch FROM occurred_at)*1000)::bigint,created_at IS NOT NULL FROM sys_website_access_log WHERE id=$1", first_access.access_log().id());
     const auto& expected = first_access.access_log();
-    const auto cache_status = co_await db.query("SELECT cache_status FROM sys_website_access_log WHERE id=$1", first_access.access_log().id());
-    require(cache_status.front()[0].value() == "hit_disk", "cache tier is persisted independently of captured response headers");
+    const auto cache_status = co_await db.query("SELECT cache_status,cache_reason FROM sys_website_access_log WHERE id=$1", first_access.access_log().id());
+    require(cache_status.front()[0].value() == "revalidated" && cache_status.front()[1].value() == "origin_not_modified", "cache tier is persisted independently of captured response headers");
     require(stored.size() == 1 && stored[0][0].as<std::int64_t>() == 1536 &&
                 stored[0][1].as<std::int64_t>() == 1099511627776ll && stored[0][2].as<int>() == 86400000 &&
                 stored[0][3].value() == expected.user_agent() && stored[0][4].value() == expected.referer() &&

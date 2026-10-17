@@ -172,7 +172,7 @@ export function NodeOverview() {
           </KPI.Content>
         </KPI>
         <CountKpi label='连接数' value={metrics.connection_count} />
-        <CountKpi label='连接 IP' value={metrics.connected_ip_count} />
+        <CountKpi label='连接IP' value={metrics.connected_ip_count} />
         <CountKpi
           label='1 分钟负载'
           value={metrics.load_1m}
@@ -185,7 +185,7 @@ export function NodeOverview() {
             columns={3}
             items={[
               {
-                label: 'CPU 数量',
+                label: 'CPU数量',
                 value:
                   runtime.cpu_count === undefined
                     ? '—'
@@ -204,7 +204,7 @@ export function NodeOverview() {
                 value: <NodeConnectionChip runtime={runtime} />,
               },
               {
-                label: 'Agent 版本',
+                label: 'Agent版本',
                 value: runtime.agent_version ? (
                   <Mono>{runtime.agent_version}</Mono>
                 ) : (

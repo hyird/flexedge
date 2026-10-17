@@ -98,7 +98,7 @@ export function WebsiteDetailLayout() {
           size='lg'
           icon={<Globe />}
           title='网站不存在'
-          description='该网站可能已被删除，或链接中的网站 ID 有误。'
+          description='该网站可能已被删除，或链接中的网站ID有误。'
           action={<LinkButton href='/websites'>返回网站列表</LinkButton>}
         />
       </Page>

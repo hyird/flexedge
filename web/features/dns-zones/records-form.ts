@@ -64,23 +64,23 @@ export function recordFormSchema(provider: string) {
           : values.content.length > 4096
             ? '记录值最多 4096 个字符'
             : values.type === 'A' && !z.ipv4().safeParse(content).success
-              ? '请输入有效的 IPv4 地址'
+              ? '请输入有效的IPv4地址'
               : values.type === 'AAAA' && !z.ipv6().safeParse(content).success
-                ? '请输入有效的 IPv6 地址'
+                ? '请输入有效的IPv6地址'
                 : undefined
       )
       issue(
         'ttl',
         provider === 'aliyun'
           ? integerIssue(values.ttl, aliyunMinTtl, 86400, {
-              required: '请输入 TTL',
-              integer: 'TTL 必须是整数',
-              range: '阿里云 DNS 的 TTL 必须在 600 到 86400 秒之间',
+              required: '请输入TTL',
+              integer: 'TTL必须是整数',
+              range: '阿里云DNS的TTL必须在 600 到 86400 秒之间',
             })
           : integerIssue(values.ttl, 1, 86400, {
-              required: '请输入 TTL',
-              integer: 'TTL 必须是整数',
-              range: 'TTL 范围为 1–86400 秒',
+              required: '请输入TTL',
+              integer: 'TTL必须是整数',
+              range: 'TTL范围为 1–86400 秒',
             })
       )
       if (values.type === 'MX')

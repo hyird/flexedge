@@ -48,7 +48,6 @@ export function CertificateProvidersPage() {
       id: 'provider',
       header: '服务商',
       isRowHeader: true,
-      minWidth: 170,
       cell: (item) => (
         <span className='font-medium'>{providerLabel(item.provider)}</span>
       ),
@@ -56,14 +55,12 @@ export function CertificateProvidersPage() {
     {
       id: 'mode',
       header: '接入方式',
-      minWidth: 120,
       cell: (item) =>
         item.credential_mode === 'email' ? '邮箱' : 'API Access Key',
     },
     {
       id: 'account',
       header: '账户',
-      minWidth: 220,
       cell: (item) => (
         <Mono truncate>
           {item.account_email || item.access_key_hint || '—'}
@@ -73,7 +70,6 @@ export function CertificateProvidersPage() {
     {
       id: 'status',
       header: '状态',
-      minWidth: 120,
       cell: (item) => {
         const chip = (
           <StatusChip
@@ -98,7 +94,6 @@ export function CertificateProvidersPage() {
     {
       id: 'verified',
       header: '最近验证',
-      minWidth: 120,
       cell: (item) => (
         <RelativeTime
           value={item.last_verified_at}
@@ -109,7 +104,6 @@ export function CertificateProvidersPage() {
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      width: 148,
       cell: (item) => (
         <div className='flex items-center gap-1'>
           <Button
@@ -168,7 +162,6 @@ export function CertificateProvidersPage() {
         isLoading={query.isPending}
         error={query.isError ? query.error : undefined}
         onRetry={() => query.refetch()}
-        minWidth={820}
         empty={
           filtered
             ? {
@@ -178,7 +171,7 @@ export function CertificateProvidersPage() {
             : {
                 title: '还没有证书服务商',
                 description:
-                  "添加 Let's Encrypt 或 ZeroSSL 凭据后，即可为网站申请受信任证书。",
+                  "添加Let's Encrypt或ZeroSSL凭据后，即可为网站申请受信任证书。",
               }
         }
         footer={

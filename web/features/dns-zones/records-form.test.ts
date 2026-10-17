@@ -49,19 +49,19 @@ test('record editing reports every invalid field with its own message', () => {
   })
   expect(
     issues('cloudflare', { ttl: '0', type: 'A', content: '1.2.3' })
-  ).toEqual({ ttl: 'TTL 范围为 1–86400 秒', content: '请输入有效的 IPv4 地址' })
+  ).toEqual({ ttl: 'TTL范围为 1–86400 秒', content: '请输入有效的IPv4地址' })
   expect(issues('cloudflare', { ttl: '86401' })).toEqual({
-    ttl: 'TTL 范围为 1–86400 秒',
+    ttl: 'TTL范围为 1–86400 秒',
   })
-  expect(issues('cloudflare', { ttl: '' })).toEqual({ ttl: '请输入 TTL' })
+  expect(issues('cloudflare', { ttl: '' })).toEqual({ ttl: '请输入TTL' })
   expect(issues('cloudflare', { ttl: '1.5' })).toEqual({
-    ttl: 'TTL 必须是整数',
+    ttl: 'TTL必须是整数',
   })
   expect(issues('aliyun', { ttl: '300' })).toEqual({
-    ttl: '阿里云 DNS 的 TTL 必须在 600 到 86400 秒之间',
+    ttl: '阿里云DNS的TTL必须在 600 到 86400 秒之间',
   })
   expect(issues('aliyun', { type: 'AAAA', content: '192.0.2.1' })).toEqual({
-    content: '请输入有效的 IPv6 地址',
+    content: '请输入有效的IPv6地址',
   })
   expect(issues('aliyun', { type: 'MX', priority: '-1' })).toEqual({
     priority: '优先级范围为 0–65535',

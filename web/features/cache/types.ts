@@ -50,6 +50,8 @@ export const cacheRuleSchema = z
     min_object_bytes: bytes,
     max_object_bytes: bytes,
     skip_set_cookie: z.boolean(),
+    skip_no_cache: z.boolean().default(true),
+    respect_request_no_cache: z.boolean().default(true),
     browser_ttl_seconds: z.number().int().min(0).max(31536000),
   })
   .superRefine((rule, ctx) => {
@@ -95,7 +97,9 @@ export const cacheConfigSchema = z
     disk_percent: z.number().int().min(0).max(100).default(0),
     memory_reserved_bytes: bytes.default(0),
     disk_reserved_bytes: bytes.default(0),
-    max_object_bytes: bytes.min(1).max(64 * 1024 ** 2),
+    max_object_bytes: bytes
+      .min(1)
+      .max(256 * 1024 ** 2, '单对象大小不能超过256MiB'),
     directory: z
       .string()
       .min(1)
@@ -258,7 +262,7 @@ export function defaultCacheConfig(): CacheConfig {
     disk_percent: 50,
     memory_reserved_bytes: 512 * 1024 ** 2,
     disk_reserved_bytes: 5 * 1024 ** 3,
-    max_object_bytes: 16 * 1024 ** 2,
+    max_object_bytes: 64 * 1024 ** 2,
     directory: 'cache',
     rules: defaultCacheRules(),
   }
@@ -279,6 +283,8 @@ export function newCacheRule(): CacheRule {
     min_object_bytes: 0,
     max_object_bytes: 0,
     skip_set_cookie: true,
+    skip_no_cache: true,
+    respect_request_no_cache: true,
     browser_ttl_seconds: 0,
   }
 }
@@ -288,6 +294,7 @@ export function defaultCacheRules(): CacheRule[] {
       ...newCacheRule(),
       name: '静态资源缓存一天',
       patterns: [
+        '.html',
         '.css',
         '.js',
         '.mjs',

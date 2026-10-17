@@ -685,6 +685,20 @@ ON CONFLICT(tenant_id,name) WHERE deleted_at IS NULL DO UPDATE SET is_builtin=tr
 END;
 $flexedge_default_cache$;
 )sql"}});
+    migrations.push_back(ruvia::db_migration{{
+        .id_ = "0005_access_log_cache_reason",
+        .sql_ = R"sql(DO $flexedge_cache_reason$
+BEGIN
+ALTER TABLE public.sys_website_access_log
+ADD COLUMN cache_reason varchar(64) DEFAULT '' NOT NULL;
+ALTER TABLE public.sys_website_access_log
+DROP CONSTRAINT sys_website_access_log_cache_status_check;
+ALTER TABLE public.sys_website_access_log
+ADD CONSTRAINT sys_website_access_log_cache_status_check
+CHECK(cache_status IN ('','hit_memory','hit_disk','revalidated','miss','bypass'));
+END;
+$flexedge_cache_reason$;
+)sql"}});
     return migrations;
 }();
 

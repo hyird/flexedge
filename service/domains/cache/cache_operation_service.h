@@ -95,14 +95,15 @@ public:
             command.add_website_ids(object);
             clusters.emplace(site->cluster_id_);
             for (const auto& domain : config.domains_) {
-                domains.emplace(domain.hostname_);
+                domains.emplace(flexedge::route_policy::hostname(domain.hostname_));
             }
         }
         ruvia::array<ruvia::string> urls({.resource_ = c.pool()});
         std::set<std::string> unique_urls;
         for (const auto& value : input.get<"urls">()) {
             const auto url = flexedge::cache::parse_url(value.view());
-            if (!url || !domains.contains(url->hostname_) || (scope == "prefix" && url->target_.find('?') != std::string::npos)) {
+            if (!url || flexedge::route_policy::find_hostname(domains, url->hostname_) == domains.end() ||
+                (scope == "prefix" && url->target_.find('?') != std::string::npos)) {
                 service::common::throw_app_error(19010, "URL必须属于所选网站，目录不能包含查询参数或片段", 422);
             }
             if (unique_urls.insert(url->value_).second) {

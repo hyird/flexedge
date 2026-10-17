@@ -54,7 +54,6 @@ export function DnsZonesPage() {
       id: 'domain',
       header: '域名',
       isRowHeader: true,
-      minWidth: 220,
       cell: (zone) => (
         <Mono truncate className='font-medium'>
           {zone.domain}
@@ -63,8 +62,7 @@ export function DnsZonesPage() {
     },
     {
       id: 'provider',
-      header: 'DNS 账号',
-      minWidth: 180,
+      header: 'DNS账号',
       cell: (zone) => (
         <span className='block truncate'>{zone.dns_provider_name}</span>
       ),
@@ -72,14 +70,12 @@ export function DnsZonesPage() {
     {
       id: 'provider-type',
       header: '服务商',
-      minWidth: 110,
       cell: (zone) => providerLabel(zone.dns_provider),
     },
     {
       id: 'records',
       header: '记录',
       align: 'end',
-      minWidth: 80,
       cell: (zone) => (
         <span className='tabular-nums'>
           {zone.config.records.length + zone.runtime.projected_records.length}
@@ -90,7 +86,6 @@ export function DnsZonesPage() {
       id: 'websites',
       header: '关联网站',
       align: 'end',
-      minWidth: 90,
       cell: (zone) => (
         <span className='tabular-nums'>{zone.website_count}</span>
       ),
@@ -98,7 +93,6 @@ export function DnsZonesPage() {
     {
       id: 'status',
       header: '同步状态',
-      minWidth: 130,
       cell: (zone) => (
         <StatusChip
           {...describeStatus(zoneSyncStatuses, zone.sync_status)}
@@ -109,7 +103,6 @@ export function DnsZonesPage() {
     {
       id: 'synced',
       header: '最近同步',
-      minWidth: 120,
       cell: (zone) => (
         <RelativeTime
           value={zone.last_synced_at}
@@ -120,7 +113,6 @@ export function DnsZonesPage() {
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      width: 72,
       cell: (zone) => (
         <LinkButton
           href={`/dns-zones/${zone.id}`}
@@ -135,7 +127,7 @@ export function DnsZonesPage() {
   return (
     <Page
       title='域名'
-      description='托管在 DNS 账号中的域名：自定义记录、系统自动记录与解析线路的同步状态。'
+      description='托管在DNS账号中的域名：自定义记录、系统自动记录与解析线路的同步状态。'
     >
       <ListToolbar
         search={{
@@ -146,7 +138,7 @@ export function DnsZonesPage() {
         filters={
           <>
             <FilterSelect
-              label='DNS 账号'
+              label='DNS账号'
               value={providerId ?? ''}
               onChange={(value) =>
                 void list.setSearch({ dns_provider_id: value || undefined })
@@ -181,7 +173,6 @@ export function DnsZonesPage() {
         isLoading={query.isPending}
         error={query.isError ? query.error : undefined}
         onRetry={() => void query.refetch()}
-        minWidth={900}
         empty={
           filtered
             ? {
@@ -191,7 +182,7 @@ export function DnsZonesPage() {
             : {
                 title: '还没有域名',
                 description:
-                  '从 DNS 账号导入域名后，即可为集群、证书和网站自动维护解析记录。',
+                  '从DNS账号导入域名后，即可为集群、证书和网站自动维护解析记录。',
               }
         }
         footer={

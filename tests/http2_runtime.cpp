@@ -1,3 +1,5 @@
+#include <ruvia/http/http_content_codec.h>
+
 #include <fstream>
 #include <iostream>
 #include <thread>
@@ -7,6 +9,7 @@
 #include "node/data/data_plane.h"
 #include "node/runtime/config_activation.h"
 #include "node/runtime/loop_shutdown.h"
+#include "tests/support/cache_directory.h"
 #include "tests/support/config_fixture.h"
 #include "tests/support/environment.h"
 #include "tests/support/http_client.h"
@@ -153,16 +156,18 @@ private:
 struct received final {
     unsigned status_{};
     std::string body_;
+    std::string encoding_;
 };
 template <class stream_type>
-std::vector<received> requests(stream_type& socket, const std::vector<std::string>& paths, bool cancel = false, std::string_view authority = "www.example.com", std::string_view upload = {}) {
+std::vector<received> requests(stream_type& socket, const std::vector<std::string>& paths, bool cancel = false, std::string_view authority = "www.example.com", std::string_view upload = {}, std::string_view encoding = {}) {
     auto client = ruvia::http2_connection::client();
     std::map<std::uint32_t, std::size_t> ids;
     std::vector<received> responses(paths.size());
     std::size_t ended{};
     for (std::size_t i = 0; i < paths.size(); ++i) {
+        const std::array<ruvia::http_header_view, 1> headers{{{"accept-encoding", encoding}}};
         const auto submitted = client.submit_request_head(ruvia::http2_regular_request_head_view{
-            .method_ = upload.empty() ? "GET" : "POST", .authority_ = authority, .target_ = std::string_view(paths[i]), .content_ = upload.empty() ? ruvia::http2_request_content::none() : ruvia::http2_request_content::known_length(upload.size())});
+            .method_ = upload.empty() ? "GET" : "POST", .authority_ = authority, .target_ = std::string_view(paths[i]), .headers_ = encoding.empty() ? std::span<const ruvia::http_header_view>{} : headers, .content_ = upload.empty() ? ruvia::http2_request_content::none() : ruvia::http2_request_content::known_length(upload.size())});
         FLEXEDGE_REQUIRE(submitted.submitted());
         ids[submitted.submitted()->stream_id()] = i;
         if (!upload.empty()) {
@@ -184,6 +189,11 @@ std::vector<received> requests(stream_type& socket, const std::vector<std::strin
         while (auto event = client.next_event()) {
             if (const auto* head = event->response_head()) {
                 responses[ids.at(head->stream_id())].status_ = head->head().status().value();
+                for (const auto& field : head->head().headers()) {
+                    if (flexedge::route_policy::ascii_equal(field.name(), "Content-Encoding")) {
+                        responses[ids.at(head->stream_id())].encoding_ = field.value();
+                    }
+                }
             } else if (auto* body = event->message_body_chunk()) {
                 responses[ids.at(body->stream_id())].body_.append(body->bytes());
             } else if (event->message_end()) {
@@ -215,7 +225,8 @@ void verify() {
     ruvia::event_loop_pool workers({.loop_count_ = 2}), control({.loop_count_ = 1});
     runtime_state runtime;
     auto [logs, log_receiver] = ruvia::make_channel<owned_log_batch>(control.loop(0).handle(), {.capacity_ = 128});
-    data_plane plane(workers, control.loop(0), runtime, logs);
+    flexedge::testing::temporary_cache_directory cache_directory;
+    data_plane plane(workers, control.loop(0), runtime, logs, cache_directory.path_);
     loop_shutdown shutdown(workers, control);
     workers.start();
     control.start();
@@ -226,12 +237,13 @@ void verify() {
     http.close();
     https.close();
     auto config = flexedge::testing::snapshot(false);
-    const auto edge_identity = flexedge::testing::make_identity("www.example.com", 9);
+    const auto edge_identity = flexedge::testing::make_identity("*.example.com", 9);
     config.mutableCertificate(0)->set_certificate_chain_pem(edge_identity.certificate_);
     config.mutableCertificate(0)->set_private_key_pem(edge_identity.private_key_);
     config.node_spec.mutable_endpoints(0)->set_http_port(port);
     config.node_spec.mutable_endpoints(0)->set_https_port(tls_port);
     auto* site = config.mutableWebsite();
+    site->mutable_domains(0)->set_hostname("*.example.com");
     site->set_health_check_enabled(false);
     site->set_response_compression_enabled(false);
     site->set_origin_http_version("http2");
@@ -258,6 +270,46 @@ void verify() {
     FLEXEDGE_REQUIRE(flexedge::testing::request(port, "www.example.com", {}, "/first").find("X-Cache: HIT") != std::string::npos);
     FLEXEDGE_REQUIRE(plain.count() == count);
     {
+        // A cached memory body exceeds the HTTP/2 flow-control window. The common
+        // response's head/body buffer sequence must complete without truncation.
+        asio::ip::tcp::socket cached(clients);
+        cached.connect({asio::ip::address_v4::loopback(), port});
+        const auto hit = requests(cached, {"/large"});
+        FLEXEDGE_REQUIRE(hit[0].status_ == 200 && hit[0].body_ == std::string(512 * 1024, 'x'));
+        FLEXEDGE_REQUIRE(plain.count() == count);
+    }
+    site->set_revision(site->revision() + 1);
+    site->set_response_compression_enabled(true);
+    config.setGeneration(4);
+    config.finalize();
+    control.loop(0).start(apply(plane, config)).get();
+    for (const auto algorithm : {"gzip", "br", "zstd"}) {
+        asio::ip::tcp::socket socket(clients);
+        socket.connect({asio::ip::address_v4::loopback(), port});
+        const auto result = requests(socket, {"/large"}, false, "www.example.com", {}, algorithm);
+        FLEXEDGE_REQUIRE(result[0].status_ == 200 && result[0].encoding_ == algorithm);
+        const auto decoded = ruvia::decode_http_content(*configured_coding(algorithm), result[0].body_,
+            {.max_decoded_bytes_ = 512 * 1024});
+        FLEXEDGE_REQUIRE(decoded.decoded() && decoded.decoded()->bytes() == std::string(512 * 1024, 'x'));
+        const auto before_hit = plain.count();
+        asio::ip::tcp::socket cached(clients);
+        cached.connect({asio::ip::address_v4::loopback(), port});
+        const auto hit = requests(cached, {"/large"}, false, "www.example.com", {}, std::string(algorithm) + ";q=1, identity;q=0.1");
+        FLEXEDGE_REQUIRE(hit[0].body_ == result[0].body_ && hit[0].encoding_ == algorithm);
+        FLEXEDGE_REQUIRE(plain.count() == before_hit);
+    }
+    {
+        asio::ip::tcp::socket socket(clients);
+        socket.connect({asio::ip::address_v4::loopback(), port});
+        const auto identity_response = requests(socket, {"/large"});
+        FLEXEDGE_REQUIRE(identity_response[0].encoding_.empty() && identity_response[0].body_ == std::string(512 * 1024, 'x'));
+    }
+    FLEXEDGE_REQUIRE(flexedge::testing::request(port, "assets.example.com", {}, "/wildcard")
+            .ends_with("/wildcard"));
+    for (const auto host : {"example.com", "a.b.example.com"}) {
+        FLEXEDGE_REQUIRE(flexedge::testing::request(port, host).starts_with("HTTP/1.1 421 "));
+    }
+    {
         asio::ip::tcp::socket socket(clients);
         socket.connect({asio::ip::address_v4::loopback(), port});
         const std::string body(256 * 1024, 'p');
@@ -268,12 +320,12 @@ void verify() {
         asio::ssl::context tls(asio::ssl::context::tls_client);
         tls.set_verify_mode(asio::ssl::verify_none);
         asio::ssl::stream<asio::ip::tcp::socket> socket(clients, tls);
-        SSL_set_tlsext_host_name(socket.native_handle(), "www.example.com");
+        SSL_set_tlsext_host_name(socket.native_handle(), "assets.example.com");
         constexpr unsigned char h2[]{2, 'h', '2'};
         SSL_set_alpn_protos(socket.native_handle(), h2, sizeof(h2));
         socket.lowest_layer().connect({asio::ip::address_v4::loopback(), tls_port});
         socket.handshake(asio::ssl::stream_base::client);
-        const auto result = requests(socket, {"/cancel", "/tls"}, true);
+        const auto result = requests(socket, {"/cancel", "/tls"}, true, "assets.example.com");
         FLEXEDGE_REQUIRE(result[1].status_ == 200 && result[1].body_ == "/tls");
     }
     {
@@ -293,7 +345,7 @@ void verify() {
     site->mutable_origins(0)->set_protocol("https");
     site->mutable_origins(0)->set_host("localhost");
     site->mutable_origins(0)->set_port(secure.port());
-    config.setGeneration(4);
+    config.setGeneration(5);
     config.finalize();
     control.loop(0).start(apply(plane, config)).get();
     FLEXEDGE_REQUIRE(flexedge::testing::request(port, "www.example.com", {}, "/secure-origin").ends_with("/secure-origin"));
@@ -314,7 +366,7 @@ void verify() {
         site->mutable_origins(0)->set_protocol("http");
         site->mutable_origins(0)->set_host("127.0.0.1");
         site->mutable_origins(0)->set_port(origin_port);
-        config.setGeneration(5);
+        config.setGeneration(6);
         config.finalize();
         control.loop(0).start(apply(plane, config)).get();
         asio::ip::tcp::socket socket(clients);

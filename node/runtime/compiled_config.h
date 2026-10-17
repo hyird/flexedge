@@ -74,12 +74,14 @@ public:
     }
 
     [[nodiscard]] const v2::Website* website(std::string_view host) const {
-        const auto found = routes_.find(flexedge::route_policy::hostname(host));
+        const auto found = flexedge::route_policy::find_hostname(routes_,
+            flexedge::route_policy::hostname(host));
         return found == routes_.end() ? nullptr : found->second.website_;
     }
 
     [[nodiscard]] const v2::Domain* domain(std::string_view host) const {
-        const auto found = routes_.find(flexedge::route_policy::hostname(host));
+        const auto found = flexedge::route_policy::find_hostname(routes_,
+            flexedge::route_policy::hostname(host));
         return found == routes_.end() ? nullptr : found->second.domain_;
     }
 

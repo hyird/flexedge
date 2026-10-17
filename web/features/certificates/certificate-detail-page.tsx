@@ -267,7 +267,7 @@ export function CertificateDetailPage() {
               },
               { label: '申请时间', value: formatDate(certificate.created_at) },
               {
-                label: 'SHA-256 指纹',
+                label: 'SHA-256指纹',
                 wide: true,
                 value: certificate.fingerprint_sha256 ? (
                   <span className='flex items-start gap-1'>
@@ -360,7 +360,7 @@ function ReferencingWebsites({ certificate }: { certificate: Certificate }) {
   return (
     <Section
       title={`引用网站 · ${certificate.website_count}`}
-      description='在 HTTPS 配置中绑定了此证书的网站，续期后自动更新。'
+      description='在HTTPS配置中绑定了此证书的网站，续期后自动更新。'
     >
       <WebsitesTable
         list={list}

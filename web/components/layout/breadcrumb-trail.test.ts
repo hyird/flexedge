@@ -32,11 +32,11 @@ describe('breadcrumb trail', () => {
       buildBreadcrumbTrail(
         '/websites/w1',
         matches,
-        new Map([['/_authenticated/websites/$websiteId', 'QA 网站']])
+        new Map([['/_authenticated/websites/$websiteId', 'QA网站']])
       )
     ).toEqual([
       { key: '/websites', label: '网站', href: '/websites' },
-      { key: '/_authenticated/websites/$websiteId', label: 'QA 网站' },
+      { key: '/_authenticated/websites/$websiteId', label: 'QA网站' },
     ])
   })
 

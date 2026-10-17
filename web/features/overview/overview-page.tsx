@@ -359,7 +359,7 @@ function OverviewKpis({
             >
               <CircleExclamation />
             </KPI.Icon>
-            <KPI.Title className='truncate'>5xx 比例</KPI.Title>
+            <KPI.Title className='truncate'>5xx比例</KPI.Title>
           </KPI.Header>
           <KPI.Content className='min-h-8 flex-none [&_.kpi__value]:text-xl'>
             {summary ? (
@@ -518,7 +518,6 @@ const nodeHealthColumns: DataGridColumn<Node>[] = [
     id: 'node',
     header: '节点',
     isRowHeader: true,
-    minWidth: 180,
     cell: (node) => (
       <Link href={`/nodes/${node.id}`} className='truncate font-medium'>
         {node.name}
@@ -528,7 +527,6 @@ const nodeHealthColumns: DataGridColumn<Node>[] = [
   {
     id: 'cluster',
     header: '集群',
-    minWidth: 140,
     cell: (node) => (
       <span className='truncate'>{node.cluster_name || '—'}</span>
     ),
@@ -536,7 +534,6 @@ const nodeHealthColumns: DataGridColumn<Node>[] = [
   {
     id: 'connection',
     header: '在线状态',
-    minWidth: 100,
     cell: (node) => <NodeConnectionChip runtime={node.runtime} />,
   },
   // CPU and memory count only while the node is online; otherwise the
@@ -544,7 +541,6 @@ const nodeHealthColumns: DataGridColumn<Node>[] = [
   {
     id: 'cpu',
     header: 'CPU',
-    minWidth: 160,
     cell: (node) => (
       <MetricMeter
         label={`${node.name} CPU`}
@@ -560,7 +556,6 @@ const nodeHealthColumns: DataGridColumn<Node>[] = [
   {
     id: 'memory',
     header: '内存',
-    minWidth: 160,
     cell: (node) => (
       <MetricMeter
         label={`${node.name} 内存`}
@@ -602,7 +597,6 @@ function NodeHealthPanel({
           isLoading={query.isPending}
           error={query.isError ? query.error : undefined}
           onRetry={query.refetch}
-          minWidth={640}
           empty={{
             title: '还没有节点',
             description: '添加节点并完成接入后，这里会显示运行状况。',
@@ -618,7 +612,6 @@ const taskColumns: DataGridColumn<Task>[] = [
     id: 'task',
     header: '任务',
     isRowHeader: true,
-    minWidth: 280,
     cell: (task) => (
       <Link
         href={taskHref(taskRefOf(task))}
@@ -631,7 +624,6 @@ const taskColumns: DataGridColumn<Task>[] = [
   {
     id: 'status',
     header: '状态',
-    minWidth: 100,
     cell: (task) => (
       <StatusChip
         {...describeStatus(taskStatuses, task.status)}
@@ -642,7 +634,6 @@ const taskColumns: DataGridColumn<Task>[] = [
   {
     id: 'updated_at',
     header: '最近执行',
-    minWidth: 100,
     cell: (task) => (
       <RelativeTime value={task.updated_at} className='text-muted' />
     ),
@@ -675,7 +666,6 @@ function RecentTasksPanel({
           isLoading={query.isPending}
           error={query.isError ? query.error : undefined}
           onRetry={query.refetch}
-          minWidth={640}
           empty={{ title: '暂无任务' }}
         />
       </Widget.Content>

@@ -18,6 +18,7 @@
 
 #include "common/route_policy.h"
 #include "node/data/http1_request_reader.h"
+#include "node/data/http_content_type.h"
 #include "node/data/route_rules.h"
 #include "node/proto/edge_control.pb.h"
 
@@ -56,20 +57,6 @@ struct origin_request_view final {
     bool has_body_{};
 };
 
-inline bool accepts_event_stream(std::string_view value) noexcept {
-    while (!value.empty()) {
-        const auto separator = value.find(',');
-        auto media_type = value.substr(0, separator);
-        value =
-            separator == std::string_view::npos ? std::string_view{} : value.substr(separator + 1);
-        media_type = flexedge::route_policy::trim_ows(media_type.substr(0, media_type.find(';')));
-        if (flexedge::route_policy::ascii_equal(media_type, "text/event-stream")) {
-            return true;
-        }
-    }
-    return false;
-}
-
 inline bool request_hop_by_hop_header(std::string_view name) noexcept {
     return flexedge::route_policy::ascii_equal(name, "Host") ||
            flexedge::route_policy::ascii_equal(name, "Connection") ||
@@ -83,11 +70,18 @@ inline bool request_hop_by_hop_header(std::string_view name) noexcept {
            flexedge::route_policy::ascii_equal(name, "Upgrade");
 }
 
+struct origin_cache_validation final {
+    std::string_view etag_{};
+    std::string_view modified_{};
+    bool enabled_{};
+};
+
 inline std::optional<prepared_origin_request>
 prepare_origin_request(const origin_request_view& incoming, const v2::Website& website,
     std::string_view incoming_host, std::string_view client_address, bool secure,
     bool upgrade_requested, bool close_after_response,
-    bool force_identity_encoding = false, const evaluated_route_policy* route = nullptr) {
+    bool force_identity_encoding = false, const evaluated_route_policy* route = nullptr,
+    origin_cache_validation validation = {}) {
     const auto authority =
         website.origin_host_header().empty() || website.origin_host_header() == "$host"
             ? flexedge::route_policy::hostname(incoming_host)
@@ -117,7 +111,8 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
         const auto encoding_header =
             force_identity_encoding &&
             flexedge::route_policy::ascii_equal(header.name(), "Accept-Encoding");
-        if ((upgrade_header || !request_hop_by_hop_header(header.name())) && !encoding_header &&
+        const bool validator = validation.enabled_ && (flexedge::route_policy::ascii_equal(header.name(), "If-None-Match") || flexedge::route_policy::ascii_equal(header.name(), "If-Modified-Since"));
+        if ((upgrade_header || !request_hop_by_hop_header(header.name())) && !encoding_header && !validator &&
             !(website.pass_client_ip() &&
                 flexedge::route_policy::ascii_equal(header.name(), "X-Forwarded-For"))) {
             if (!append(header.name(), header.value())) {
@@ -134,11 +129,24 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
         return std::nullopt;
     }
     for (const auto& mutation : mutations) {
+        if (validation.enabled_ && (flexedge::route_policy::ascii_equal(mutation.name(), "If-None-Match") ||
+                                       flexedge::route_policy::ascii_equal(mutation.name(), "If-Modified-Since"))) {
+            continue;
+        }
         if (!append(mutation.name(), mutation.value(), true)) {
             return std::nullopt;
         }
     }
 
+    if (validation.enabled_) {
+        if (!validation.etag_.empty()) {
+            if (!append("If-None-Match", validation.etag_, true)) {
+                return std::nullopt;
+            }
+        } else if (!validation.modified_.empty() && !append("If-Modified-Since", validation.modified_, true)) {
+            return std::nullopt;
+        }
+    }
     ruvia::http_client_request_view request;
     request.method_ = incoming.method_;
     const auto target = route ? route->rewritten_target() : incoming.target_;
@@ -187,7 +195,8 @@ inline std::optional<prepared_origin_request>
 prepare_origin_request(const http1_request_reader& parsed, const v2::Website& website,
     std::string_view incoming_host, std::string_view client_address, bool secure,
     bool upgrade_requested, bool close_after_response,
-    bool force_identity_encoding = false, const evaluated_route_policy* route = nullptr) {
+    bool force_identity_encoding = false, const evaluated_route_policy* route = nullptr,
+    origin_cache_validation validation = {}) {
     const auto body = parsed.body();
     if (!body) {
         return std::nullopt;
@@ -198,7 +207,7 @@ prepare_origin_request(const http1_request_reader& parsed, const v2::Website& we
                                       .body_ = *body,
                                       .has_body_ = parsed.has_body()},
         website, incoming_host, client_address, secure, upgrade_requested,
-        close_after_response, force_identity_encoding, route);
+        close_after_response, force_identity_encoding, route, validation);
 }
 
 }  // namespace flexedge::node

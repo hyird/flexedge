@@ -89,7 +89,7 @@ export function CertificateProviderSheet({
           ? `编辑证书服务商 ${providerLabel(provider.provider)}`
           : '添加证书服务商'
       }
-      description='用于 ACME 签发与续期证书；保存后在列表中验证，验证通过才能申请证书。'
+      description='用于ACME签发与续期证书；保存后在列表中验证，验证通过才能申请证书。'
       onSubmit={submit}
       submitLabel={provider ? '保存' : '添加服务商'}
       isSubmitting={draft.isSaving}

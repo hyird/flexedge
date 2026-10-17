@@ -25,25 +25,27 @@ public:
             return;
         }
         for (const auto* website : config.websites()) {
-            if (!website->enabled() || !website->https_enabled()) {
+            if (!website->enabled()) {
                 continue;
             }
             for (const auto& domain : website->domains()) {
-                if (!domain.https_enabled()) {
-                    continue;
+                SSL_CTX* native{};
+                if (domain.https_enabled()) {
+                    const auto* certificate = config.certificate(domain.certificate_digest());
+                    if (certificate == nullptr) {
+                        throw std::runtime_error("HTTPS domain certificate is missing");
+                    }
+                    auto context = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_server);
+                    configure(*context, *certificate, website->minimum_tls_version());
+                    native = context->native_handle();
+                    contexts_.push_back(std::move(context));
                 }
-                const auto* certificate = config.certificate(domain.certificate_digest());
-                if (certificate == nullptr) {
-                    throw std::runtime_error("HTTPS domain certificate is missing");
-                }
-                auto context = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_server);
-                configure(*context, *certificate, website->minimum_tls_version());
-                auto* native = context->native_handle();
+                // Keep HTTP-only bindings so an exact match cannot fall through
+                // to a broader HTTPS wildcard.
                 const auto hostname = flexedge::route_policy::hostname(domain.hostname());
                 if (!sni_.emplace(hostname, native).second) {
                     throw std::runtime_error("duplicate TLS SNI hostname");
                 }
-                contexts_.push_back(std::move(context));
             }
         }
         if (!contexts_.empty()) {
@@ -113,8 +115,9 @@ private:
             return SSL_TLSEXT_ERR_ALERT_FATAL;
         }
         try {
-            const auto found = set->sni_.find(flexedge::route_policy::hostname(raw));
-            if (found == set->sni_.end()) {
+            const auto found = flexedge::route_policy::find_hostname(set->sni_,
+                flexedge::route_policy::hostname(raw));
+            if (found == set->sni_.end() || found->second == nullptr) {
                 return SSL_TLSEXT_ERR_ALERT_FATAL;
             }
             if (SSL_set_SSL_CTX(ssl, found->second) == nullptr ||

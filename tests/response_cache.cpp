@@ -2,6 +2,7 @@
 
 #include <barrier>
 #include <iostream>
+#include <set>
 #include <thread>
 
 #define FLEXEDGE_REQUIRE(value)                                   \
@@ -29,8 +30,22 @@ v2::Website website() {
     flexedge::cache::to_proto(policy, *site.mutable_response_cache());
     return site;
 }
-buffered_proxy_response response(std::string body = "body") {
-    buffered_proxy_response value;
+struct response_value final {
+    std::uint16_t status_{200};
+    cache_headers headers_{};
+    std::string body_{};
+};
+bool store(response_cache& cache, const cache_ticket& ticket, const v2::CachePolicy& policy,
+    const flexedge::cache::rule& rule, const response_value& value, const cache_headers& request) {
+    auto fill = cache.begin_fill(policy, rule, {value.status_, value.headers_}, {});
+    if (!fill || !fill->append(value.body_)) {
+        cache.abandon(ticket);
+        return false;
+    }
+    return cache.store(ticket, policy, rule, *fill, request);
+}
+response_value response(std::string body = "body") {
+    response_value value;
     value.status_ = 200;
     value.body_ = std::move(body);
     value.headers_ = {{"Content-Type", "text/plain"}, {"Cache-Control", "public, max-age=600"}};
@@ -52,7 +67,7 @@ void verify() {
     FLEXEDGE_REQUIRE(fill.ticket_);
     FLEXEDGE_REQUIRE(second.lookup(site, rule, "http://example.com/a", {}).filling_);
     auto value = response();
-    FLEXEDGE_REQUIRE(first.store(*fill.ticket_, site.response_cache(), rule, value, {}));
+    FLEXEDGE_REQUIRE(store(first, *fill.ticket_, site.response_cache(), rule, value, {}));
     const auto retained = second.lookup(site, rule, "http://example.com/a", {}).response_;
     FLEXEDGE_REQUIRE(retained && *retained->body_ == "body");
     auto in_flight = first.lookup(site, rule, "http://example.com/b", {});
@@ -63,7 +78,7 @@ void verify() {
     refresh.add_website_ids("site");
     refresh.add_urls("http://example.com/a");
     FLEXEDGE_REQUIRE(second.invalidate(refresh).first == 1);
-    FLEXEDGE_REQUIRE(!first.store(*in_flight.ticket_, site.response_cache(), rule, value, {}));
+    FLEXEDGE_REQUIRE(!store(first, *in_flight.ticket_, site.response_cache(), rule, value, {}));
     FLEXEDGE_REQUIRE(*retained->body_ == "body");
     auto miss = first.lookup(site, rule, "http://example.com/a", {}, false);
     FLEXEDGE_REQUIRE(!miss.response_);
@@ -72,15 +87,36 @@ void verify() {
         auto ticket = first.lookup(site, rule, "http://example.com/private", {});
         auto private_response = response();
         private_response.headers_.emplace_back("Cache-Control", control);
-        FLEXEDGE_REQUIRE(!first.store(*ticket.ticket_, site.response_cache(), rule, private_response, {}));
+        FLEXEDGE_REQUIRE(!store(first, *ticket.ticket_, site.response_cache(), rule, private_response, {}));
     }
     FLEXEDGE_REQUIRE(!first.eligible("GET", {{"Cookie", "sid=secret"}}));
     FLEXEDGE_REQUIRE(!first.eligible("GET", {{"Authorization", "secret"}}));
-    FLEXEDGE_REQUIRE(!first.eligible("GET", {{"Range", "bytes=0-3"}}));
+    FLEXEDGE_REQUIRE(first.eligible("GET", {{"Range", "bytes=0-3"}}));
+    {
+        auto configurable = rule;
+        configurable.skip_no_cache_ = false;
+        auto origin_no_cache = response();
+        origin_no_cache.headers_.emplace_back("Cache-Control", "no-cache");
+        auto ticket = first.lookup(site, configurable, "http://example.com/configured", {});
+        FLEXEDGE_REQUIRE(store(first, *ticket.ticket_, site.response_cache(), configurable, origin_no_cache, {}));
+        const auto configured = second.lookup(site, configurable, "http://example.com/configured", {});
+        FLEXEDGE_REQUIRE(configured.response_);
+        first.discard(configured.key_, configured.response_->identity_);
+        for (const auto control : {"private", "no-store"}) {
+            origin_no_cache.headers_ = {{"Cache-Control", control}};
+            auto blocked = first.lookup(site, configurable, "http://example.com/blocked", {});
+            FLEXEDGE_REQUIRE(!store(first, *blocked.ticket_, site.response_cache(), configurable, origin_no_cache, {}));
+        }
+        auto legacy = site.response_cache();
+        legacy.mutable_rules(0)->clear_skip_no_cache();
+        legacy.mutable_rules(0)->clear_respect_request_no_cache();
+        const auto defaults = flexedge::cache::from_proto(legacy).rules_.front();
+        FLEXEDGE_REQUIRE(defaults.skip_no_cache_ && defaults.respect_request_no_cache_);
+    }
     auto variant = first.lookup(site, rule, "http://example.com/vary", {{"Accept-Language", "en"}});
     auto varied = response("english");
     varied.headers_.emplace_back("Vary", "Accept-Language");
-    FLEXEDGE_REQUIRE(first.store(*variant.ticket_, site.response_cache(), rule, varied, {{"Accept-Language", "en"}}));
+    FLEXEDGE_REQUIRE(store(first, *variant.ticket_, site.response_cache(), rule, varied, {{"Accept-Language", "en"}}));
     FLEXEDGE_REQUIRE(second.lookup(site, rule, "http://example.com/vary", {{"Accept-Language", "en"}}, false).response_);
     FLEXEDGE_REQUIRE(!second.lookup(site, rule, "http://example.com/vary", {{"Accept-Language", "zh"}}, false).response_);
 
@@ -96,7 +132,7 @@ void verify() {
                     const auto url = "http://example.com/" + std::to_string(worker) + "/" + std::to_string(index);
                     auto ticket = local.lookup(site, rule, url, {});
                     auto body = response(url);
-                    if (!ticket.ticket_ || !local.store(*ticket.ticket_, site.response_cache(), rule, body, {})) {
+                    if (!ticket.ticket_ || !store(local, *ticket.ticket_, site.response_cache(), rule, body, {})) {
                         ++failures;
                     }
                 }
@@ -112,7 +148,7 @@ void verify() {
     auto disk_site = site;
     disk_site.mutable_response_cache()->set_storage("disk");
     auto disk = first.lookup(disk_site, rule, "http://example.com/disk", {});
-    FLEXEDGE_REQUIRE(first.store(*disk.ticket_, disk_site.response_cache(), rule, value, {}));
+    FLEXEDGE_REQUIRE(store(first, *disk.ticket_, disk_site.response_cache(), rule, value, {}));
     auto disk_object = second.lookup(disk_site, rule, "http://example.com/disk", {}, false).response_;
     FLEXEDGE_REQUIRE(disk_object && disk_object->file_ && std::filesystem::exists(disk_object->file_->path_));
     const auto file = disk_object->file_->path_;
@@ -134,7 +170,7 @@ void verify() {
             const auto url = "http://example.com/tiered/" + std::to_string(index);
             auto ticket = first.lookup(tiered, rule, url, {});
             auto payload = response(std::string(512, static_cast<char>('a' + index)));
-            FLEXEDGE_REQUIRE(first.store(*ticket.ticket_, tiered.response_cache(), rule, payload, {}));
+            FLEXEDGE_REQUIRE(store(first, *ticket.ticket_, tiered.response_cache(), rule, payload, {}));
         };
         for (int i = 0; i < 3; ++i) {
             store_tiered(i);
@@ -144,7 +180,17 @@ void verify() {
         const auto expiry = cold->expires_at_;
         // Touch 1 before promoting 0: 2 becomes the least recently used L1 object.
         FLEXEDGE_REQUIRE(second.lookup(tiered, rule, "http://example.com/tiered/1", {}, false).response_->body_);
-        auto hot = second.lookup(tiered, rule, "http://example.com/tiered/0", {}).response_;
+        auto lookup = second.lookup(tiered, rule, "http://example.com/tiered/0", {});
+        FLEXEDGE_REQUIRE(lookup.response_ && !lookup.response_->body_);
+        buffered_bytes_budget promotion_budget(1024);
+        auto promotion = second.begin_promotion(*lookup.response_, tiered.response_cache(), promotion_budget.lease());
+        FLEXEDGE_REQUIRE(promotion && promotion->append(std::string(256, 'a')));
+        FLEXEDGE_REQUIRE(!second.lookup(tiered, rule, "http://example.com/tiered/0", {}, false).response_->body_);
+        FLEXEDGE_REQUIRE(promotion->append(std::string(256, 'a')));
+        second.promote(lookup.key_, lookup.response_, tiered.response_cache(), *promotion);
+        promotion.reset();
+        FLEXEDGE_REQUIRE(promotion_budget.used_bytes() == 0);
+        auto hot = second.lookup(tiered, rule, "http://example.com/tiered/0", {}, false).response_;
         FLEXEDGE_REQUIRE(hot && hot->file_ && hot->body_ && *hot->body_ == std::string(512, 'a'));
         FLEXEDGE_REQUIRE(hot->expires_at_ == expiry && !cold->body_);
         // Inspecting 2 itself touches its LRU position, so inspect immutable roots here.
@@ -164,13 +210,108 @@ void verify() {
         first.invalidate(clean);
         FLEXEDGE_REQUIRE(!second.lookup(tiered, rule, "http://example.com/tiered/0", {}, false).response_);
     }
+    {
+        // Disk filling must not retain an object-sized memory copy or publish a prefix.
+        auto streamed = site;
+        streamed.mutable_response_cache()->set_storage("disk");
+        streamed.mutable_response_cache()->set_max_object_bytes(128 * 1024);
+        const auto ticket = first.lookup(streamed, rule, "http://example.com/stream", {});
+        buffered_bytes_budget budget(8);
+        auto disk_fill = first.begin_fill(streamed.response_cache(), rule, {200, response().headers_}, budget.lease());
+        FLEXEDGE_REQUIRE(disk_fill);
+        const std::string chunk(16384, 's');
+        for (int i = 0; i < 8; ++i) {
+            FLEXEDGE_REQUIRE(disk_fill->append(chunk));
+            FLEXEDGE_REQUIRE(disk_fill->memory_bytes() == 0 && budget.used_bytes() == 0);
+            FLEXEDGE_REQUIRE(!second.lookup(streamed, rule, "http://example.com/stream", {}, false).response_);
+        }
+        bool partial_file{};
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(directory)) {
+            if (entry.path().extension() == ".tmp") {
+                std::ifstream partial(entry.path(), std::ios::binary);
+                std::string prefix(chunk.size(), '\0');
+                partial.read(prefix.data(), static_cast<std::streamsize>(prefix.size()));
+                partial_file = prefix == chunk;
+            }
+        }
+        FLEXEDGE_REQUIRE(partial_file);
+        FLEXEDGE_REQUIRE(first.store(*ticket.ticket_, streamed.response_cache(), rule, *disk_fill, {}));
+        auto hit = second.lookup(streamed, rule, "http://example.com/stream", {}, false).response_;
+        FLEXEDGE_REQUIRE(hit && hit->file_ && !hit->body_ && hit->body_bytes_ == 128 * 1024);
+        std::ifstream input(hit->file_->path_, std::ios::binary);
+        const std::string bytes((std::istreambuf_iterator<char>(input)), {});
+        FLEXEDGE_REQUIRE(bytes == std::string(128 * 1024, 's'));
+        input.close();
+        disk_fill.reset();
+        auto aborted = first.begin_fill(streamed.response_cache(), rule, {200, response().headers_}, budget.lease());
+        FLEXEDGE_REQUIRE(aborted && aborted->append(chunk));
+        FLEXEDGE_REQUIRE(!aborted->append(std::string(128 * 1024, 'x')));
+        aborted.reset();
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(directory)) {
+            FLEXEDGE_REQUIRE(entry.path().extension() != ".tmp");
+        }
+        auto unfinished = first.begin_fill(streamed.response_cache(), rule, {200, response().headers_}, budget.lease());
+        FLEXEDGE_REQUIRE(unfinished && unfinished->append(chunk));
+        unfinished.reset();
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(directory)) {
+            FLEXEDGE_REQUIRE(entry.path().extension() != ".tmp");
+        }
+        // Invalidation during a streamed promotion must not resurrect an object.
+        auto tiered = streamed;
+        tiered.mutable_response_cache()->set_storage("tiered");
+        auto pending_promotion = second.begin_promotion(*hit, tiered.response_cache(), {});
+        FLEXEDGE_REQUIRE(pending_promotion && pending_promotion->append(bytes));
+        const auto pending_key = second.lookup(streamed, rule, "http://example.com/stream", {}, false).key_;
+        first.invalidate(clean);
+        second.promote(pending_key, hit, tiered.response_cache(), *pending_promotion);
+        FLEXEDGE_REQUIRE(!second.lookup(streamed, rule, "http://example.com/stream", {}, false).response_);
+        auto tiny_memory = first.begin_fill(site.response_cache(), rule, {200, response().headers_}, budget.lease());
+        FLEXEDGE_REQUIRE(tiny_memory && !tiny_memory->append(chunk));
+        FLEXEDGE_REQUIRE(budget.used_bytes() == 0);
+        first.invalidate(clean);
+    }
+    {
+        auto encoded = site;
+        encoded.set_response_compression_enabled(true);
+        encoded.add_response_compression_algorithms("br");
+        encoded.add_response_compression_algorithms("gzip");
+        const cache_headers original{{"Accept-Encoding", "gzip;q=1, br;q=0.5"}};
+        const auto ticket = first.lookup(encoded, rule, "http://example.com/encoded", original);
+        auto compressed = response("gzip representation");
+        compressed.headers_.emplace_back("Content-Encoding", "gzip");
+        compressed.headers_.emplace_back("Vary", "Accept-Encoding, Accept-Language");
+        FLEXEDGE_REQUIRE(store(first, *ticket.ticket_, encoded.response_cache(), rule, compressed, original));
+        FLEXEDGE_REQUIRE(second.lookup(encoded, rule, "http://example.com/encoded",
+                                   {{"Accept-Encoding", "BR;q=0.1, GZIP"}}, false)
+                .response_);
+        FLEXEDGE_REQUIRE(!second.lookup(encoded, rule, "http://example.com/encoded",
+                                    {{"Accept-Encoding", "gzip;q=0, br"}}, false)
+                .response_);
+        FLEXEDGE_REQUIRE(!second.lookup(encoded, rule, "http://example.com/encoded",
+                                    {{"Accept-Encoding", "gzip"}, {"Accept-Language", "zh"}}, false)
+                .response_);
+        FLEXEDGE_REQUIRE(!second.lookup(encoded, rule, "http://example.com/encoded", {}, false).response_);
+        first.invalidate(clean);
+        FLEXEDGE_REQUIRE(!first.begin_fill(site.response_cache(), rule,
+            {200, {{"Content-Type", "Text/Event-Stream; charset=utf-8"}}}, {}));
+        FLEXEDGE_REQUIRE(!first.eligible("GET", {{"Accept", "application/json, Text/Event-Stream"}}));
+    }
     for (const auto& entry : std::filesystem::directory_iterator(directory / "cache")) {
         std::filesystem::remove(entry.path());
     }
     std::filesystem::remove(directory / "cache");
-    std::filesystem::remove(directory);
+    std::filesystem::remove_all(directory);
     FLEXEDGE_REQUIRE(flexedge::cache::parse_url("http://EXAMPLE.com:80/a")->value_ == "http://example.com/a");
     FLEXEDGE_REQUIRE(!flexedge::cache::parse_url("http://user@example.com/"));
+    const std::set<std::string> domains{"*.example.com", "example.org"};
+    for (const auto address : {"https://ASSETS.Example.com:443/a", "http://example.org/a"}) {
+        const auto url = flexedge::cache::parse_url(address);
+        FLEXEDGE_REQUIRE(url && flexedge::route_policy::find_hostname(domains, url->hostname_) != domains.end());
+    }
+    for (const auto address : {"https://example.com/a", "https://a.b.example.com/a", "https://badexample.com/a"}) {
+        const auto url = flexedge::cache::parse_url(address);
+        FLEXEDGE_REQUIRE(url && flexedge::route_policy::find_hostname(domains, url->hostname_) == domains.end());
+    }
     auto invalid = flexedge::cache::from_proto(site.response_cache());
     invalid.directory_ = "../escape";
     FLEXEDGE_REQUIRE(!flexedge::cache::validate(invalid).empty());

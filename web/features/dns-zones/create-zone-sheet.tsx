@@ -69,7 +69,7 @@ export function CreateZoneSheet({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const next = {
-      provider: provider ? undefined : '请选择 DNS 账号',
+      provider: provider ? undefined : '请选择DNS账号',
       domain: domain ? undefined : '请选择要托管的域名',
     }
     setErrors(next)
@@ -81,7 +81,7 @@ export function CreateZoneSheet({
       isOpen={isOpen}
       onClose={close}
       title='添加域名'
-      description='从 DNS 账号导入尚未托管的域名，添加后立即同步记录与解析线路。'
+      description='从DNS账号导入尚未托管的域名，添加后立即同步记录与解析线路。'
       onSubmit={submit}
       submitLabel='添加并同步'
       isSubmitting={mutation.isPending}
@@ -90,10 +90,10 @@ export function CreateZoneSheet({
       <QueryNotice
         query={providers}
         onRetry={() => void providers.refetch()}
-        title='DNS 账号加载失败'
+        title='DNS账号加载失败'
       />
       <Choice
-        label='DNS 账号'
+        label='DNS账号'
         required
         value={provider}
         onChange={(value) => {
@@ -109,7 +109,7 @@ export function CreateZoneSheet({
         error={errors.provider}
       />
       {providers.isSuccess && !providers.data.length && (
-        <Notice>还没有 DNS 账号，请先在「服务商 › DNS」中添加。</Notice>
+        <Notice>还没有DNS账号，请先在「服务商 › DNS」中添加。</Notice>
       )}
       <Choice
         label='域名'
@@ -126,7 +126,7 @@ export function CreateZoneSheet({
         disabled={!provider || available.isPending || mutation.isPending}
         hint={
           !provider
-            ? '先选择 DNS 账号'
+            ? '先选择DNS账号'
             : available.isPending
               ? '正在查询账号下的可用域名…'
               : undefined

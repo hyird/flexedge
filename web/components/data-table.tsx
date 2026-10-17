@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode, useMemo } from 'react'
+import { type ReactNode } from 'react'
 import { DataGrid, type DataGridColumn } from '@heroui-pro/react'
 import { Skeleton, Table } from '@heroui/react'
 import { cn } from '@/lib/utils'
@@ -21,7 +21,7 @@ function defaultRowId(item: object) {
     (typeof item.id === 'string' || typeof item.id === 'number')
   )
     return item.id
-  throw new Error('DataTable 行缺少 id，请提供 getRowId')
+  throw new Error('DataTable行缺少id，请提供getRowId')
 }
 
 /** Free text in a cell (errors, notes): one line, truncated at `className`'s
@@ -42,34 +42,13 @@ export function TruncatedText({
   )
 }
 
-/** The grid lays columns out by content (auto table layout), so a column's
- * `width`/`minWidth` is enforced by a sized header block: the column never
- * narrows below it, whatever its cells currently show. */
-function withEnforcedWidth<T>(column: DataGridColumn<T>): DataGridColumn<T> {
-  const minWidth =
-    typeof column.width === 'number' ? column.width : column.minWidth
-  if (minWidth === undefined || typeof column.header === 'function')
-    return column
-  return {
-    ...column,
-    header: (
-      <span
-        className='block'
-        style={{ minWidth: `calc(${minWidth}px - 2rem)` }}
-      >
-        {column.header}
-      </span>
-    ),
-  }
-}
-
 /** Pro DataGrid with the console's list states: layout-shaped skeleton while
  * the first rows load (the grid then mounts with them, so its columns and
  * scrollbars never re-lay out from an empty first frame), an Alert + retry
  * on error (stale rows stay visible), an empty state inside the grid, a
  * sticky header and an internal scroll viewport that scrolls horizontally on
  * narrow screens. Rows keep one height across state changes: cells never
- * wrap, column `width`/`minWidth` are enforced, status cells use
+ * wrap, columns size to their content and fill the table, status cells use
  * `StatusChip`'s `reserve`. */
 export function DataTable<T extends object>({
   label,
@@ -81,7 +60,6 @@ export function DataTable<T extends object>({
   empty,
   getRowId = defaultRowId,
   getChildren,
-  minWidth = 760,
   footer,
   variant = 'primary',
   fit = false,
@@ -104,8 +82,6 @@ export function DataTable<T extends object>({
   getRowId?: (item: T) => string | number
   /** Hierarchical rows use the first row-header column for expansion. */
   getChildren?: (item: T) => T[] | undefined
-  /** Minimum table width before horizontal scrolling starts (px). */
-  minWidth?: number
   /** Usually a `TablePagination`. */
   footer?: ReactNode
   /** Use `secondary` inside an existing Section or Widget surface. */
@@ -115,15 +91,12 @@ export function DataTable<T extends object>({
   /** Render only visible rows, using the shared fixed row and header heights. */
   virtualized?: boolean
 }) {
-  const tableColumns = useMemo(() => columns.map(withEnforcedWidth), [columns])
-  // Tailwind cannot see runtime widths, so the class reads a CSS variable.
-  const widthVariable = {
-    '--data-table-min-width': `${minWidth}px`,
-  } as CSSProperties
   return (
     <div
-      className={cn('flex min-w-0 flex-col gap-3', fit && 'min-h-0 flex-1')}
-      style={widthVariable}
+      className={cn(
+        'flex w-full min-w-0 flex-col gap-3',
+        fit && 'min-h-0 flex-1'
+      )}
     >
       <QueryNotice
         query={{ isError: error !== undefined, error }}
@@ -148,7 +121,7 @@ export function DataTable<T extends object>({
             <Table.ScrollContainer>
               <Table.Content
                 aria-label={`${label}加载中`}
-                className='min-w-(--data-table-min-width)'
+                className='w-full table-auto'
               >
                 <Table.Header>
                   {columns.map((column, index) => (
@@ -156,25 +129,13 @@ export function DataTable<T extends object>({
                       key={column.id}
                       isRowHeader={index === 0}
                       className={column.headerClassName}
-                      width={column.width}
-                      minWidth={column.minWidth}
-                      maxWidth={column.maxWidth}
                       aria-label={
                         typeof column.header === 'string'
                           ? column.header
                           : column.id
                       }
                     >
-                      <span
-                        className='block'
-                        style={{
-                          minWidth:
-                            typeof column.width === 'number' ||
-                            column.minWidth !== undefined
-                              ? `calc(${typeof column.width === 'number' ? column.width : column.minWidth}px - 2rem)`
-                              : undefined,
-                        }}
-                      >
+                      <span className='block'>
                         <Skeleton
                           className={cn(
                             'h-3.5 w-20 max-w-full rounded-md',
@@ -214,7 +175,7 @@ export function DataTable<T extends object>({
         <DataGrid
           aria-label={label}
           data={data}
-          columns={tableColumns}
+          columns={columns}
           getRowId={getRowId}
           getChildren={getChildren}
           virtualized={virtualized}
@@ -233,7 +194,7 @@ export function DataTable<T extends object>({
             variant === 'primary' &&
               'overflow-hidden rounded-2xl bg-surface shadow-surface'
           )}
-          contentClassName='min-w-(--data-table-min-width)'
+          contentClassName='w-full table-auto'
           renderEmptyState={() => (
             <EmptyState
               size='sm'

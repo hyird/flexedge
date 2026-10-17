@@ -10,7 +10,7 @@ export function NodesPage() {
   return (
     <Page
       title='节点'
-      description='边缘节点的接入状态与实时负载。每 5 秒更新负载。CPU 显示逻辑核数，内存、磁盘显示总容量，带宽按 bit/s 计。'
+      description='边缘节点的接入状态与实时负载。每 5 秒更新负载。CPU显示逻辑核数，内存、磁盘显示总容量，带宽按bit/s计。'
     >
       <NodesTable
         list={list}

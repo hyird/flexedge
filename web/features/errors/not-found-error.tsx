@@ -9,7 +9,7 @@ export function NotFoundError() {
     <ErrorLayout
       code='404'
       title='页面不存在'
-      description='地址可能输入有误，或资源已被删除。可以返回概览，或使用 Ctrl K 搜索页面和资源。'
+      description='地址可能输入有误，或资源已被删除。可以返回概览，或使用Ctrl K搜索页面和资源。'
       actions={
         <>
           <Button

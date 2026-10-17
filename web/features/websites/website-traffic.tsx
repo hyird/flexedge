@@ -175,7 +175,7 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
         </KPI>
         <KPI className='h-26 min-w-0 gap-1 px-4 py-3'>
           <KPI.Header className='mb-0'>
-            <KPI.Title>今日独立 IP</KPI.Title>
+            <KPI.Title>今日独立IP</KPI.Title>
           </KPI.Header>
           <KPI.Content className='min-h-0 grid-cols-1 content-start justify-items-start gap-y-1'>
             <KPI.Value value={summary.today_unique_ips} />
@@ -186,8 +186,8 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
               className='text-xs whitespace-nowrap'
             >
               {today.requestsPerIp === undefined
-                ? '每 IP — 次'
-                : `每 IP ${new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 1 }).format(today.requestsPerIp)} 次`}
+                ? '每IP — 次'
+                : `每IP ${new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 1 }).format(today.requestsPerIp)} 次`}
             </Chip>
           </KPI.Content>
         </KPI>
@@ -471,16 +471,16 @@ function TrafficContent({ data }: { data: WebsiteDashboard }) {
         <Ranking title='访问路径' data={data.paths} mono />
         <Ranking title='来源页面' data={data.referers} mono />
         <Ranking title='请求方法' data={data.methods} mono />
-        <Ranking title='ASN 分布' data={data.asns} mono />
+        <Ranking title='ASN分布' data={data.asns} mono />
         <Ranking
-          title='客户端 IP · 按流量'
+          title='客户端IP · 按流量'
           data={data.client_ips_by_bytes}
           metric='bytes'
           clientIps
           mono
         />
         <Ranking
-          title='客户端 IP · 按请求'
+          title='客户端IP · 按请求'
           data={data.client_ips_by_requests}
           clientIps
           mono

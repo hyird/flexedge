@@ -227,7 +227,7 @@ function CommandPaletteDialog({
         )}
       </Command.List>
       <Command.Footer className='justify-between gap-3 text-xs'>
-        <span>↑↓ 选择 · Enter 打开 · Esc 关闭</span>
+        <span>↑↓ 选择 · Enter打开 · Esc关闭</span>
         {failed ? (
           <span className='text-danger'>部分资源搜索失败</span>
         ) : (

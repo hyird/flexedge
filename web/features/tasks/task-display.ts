@@ -13,7 +13,7 @@ import {
 export const taskTypeLabels = {
   cache: '缓存操作',
   website: '网站检查',
-  dns_zone: 'DNS 同步',
+  dns_zone: 'DNS同步',
   certificate: '证书签发',
   provider: '服务商验证',
   node: '节点配置下发',

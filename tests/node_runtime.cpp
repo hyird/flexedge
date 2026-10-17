@@ -63,6 +63,7 @@
 #include "node/runtime/state_cipher.h"
 #include "node/runtime/state_store.h"
 #include "node/runtime/upgrade_record.h"
+#include "tests/support/cache_directory.h"
 #include "tests/support/config_fixture.h"
 #include "tests/support/http_client.h"
 #include "tests/support/tls_identity.h"
@@ -638,7 +639,8 @@ void verify_listener_reload() {
     ruvia::event_loop_pool control({.loop_count_ = 1});
     runtime_state runtime;
     auto [sender, receiver] = ruvia::make_channel<owned_log_batch>(control.loop(0).handle(), {.capacity_ = 32});
-    data_plane plane(workers, control.loop(0), runtime, sender);
+    flexedge::testing::temporary_cache_directory cache_directory;
+    data_plane plane(workers, control.loop(0), runtime, sender, cache_directory.path_);
     loop_shutdown shutdown(workers, control);
     workers.start();
     control.start();
@@ -1058,43 +1060,9 @@ int main(int argc, char* argv[]) {
         REQUIRE(streamed.complete());
         REQUIRE(streamed.consume_body("extra") == flexedge::node::origin_response_body_status::failure);
 
-        // Buffering decodes the body and re-frames it with Content-Length.
-        flexedge::node::buffered_bytes_budget codec_budget(1024 * 1024);
-        flexedge::node::origin_response_codec buffered(origin_exchange_state(), false, nullptr,
-            codec_budget.lease());
-        REQUIRE(buffered.consume_head("HTTP/1.1 100 Continue\r\nX-Ignored: yes\r\n\r\n"
-                                      "HTTP/1.1 200 OK\r\n"
-                                      "Connection: keep-alive, X-Remove\r\n"
-                                      "X-Remove: secret\r\n"
-                                      "Transfer-Encoding: chunked\r\n"
-                                      "Trailer: X-Checksum\r\n"
-                                      "X-Test: value\r\n\r\n"
-                                      "4\r\nbo") == flexedge::node::origin_response_head_status::ready);
-        REQUIRE(buffered.consume_body("dy\r\n0\r\n\r\n") ==
-                flexedge::node::origin_response_body_status::accepted);
-        REQUIRE(buffered.complete());
-        auto buffered_response = buffered.take_response();
-        REQUIRE(buffered_response.status_ == 200);
-        REQUIRE(buffered_response.headers_.size() == 1);
-        REQUIRE(buffered_response.headers_.front().first == "X-Test");
-        REQUIRE(buffered_response.body_ == "body");
-        REQUIRE(codec_budget.used_bytes() == 4);
-        std::string buffered_wire;
-        REQUIRE(buffered.frame(buffered_response, buffered_wire));
-        REQUIRE(buffered_wire ==
-                "HTTP/1.1 200 OK\r\nX-Test: value\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody");
-        REQUIRE(codec_budget.used_bytes() == buffered_wire.size());
-        buffered_response.reservation_ = {};
-        REQUIRE(codec_budget.used_bytes() == 0);
-
         flexedge::node::origin_response_codec malformed(origin_exchange_state(), false, nullptr);
         REQUIRE(malformed.consume_head("HTTP/1.1 20x Bad Status\r\n\r\n") ==
                 flexedge::node::origin_response_head_status::failure);
-        flexedge::node::buffered_bytes_budget tiny_codec_budget(8);
-        flexedge::node::origin_response_codec over_budget(origin_exchange_state(), false, nullptr,
-            tiny_codec_budget.lease());
-        REQUIRE(over_budget.consume_head("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") ==
-                flexedge::node::origin_response_head_status::exhausted);
 
         flexedge::node::buffered_bytes_budget budget(8192);
         auto first_reservation = budget.lease();
@@ -1119,83 +1087,6 @@ int main(int argc, char* argv[]) {
         auto rejected_request_bytes = request_budget.lease();
         REQUIRE(!rejected_request_bytes.try_grow(1));
         REQUIRE(request_budget.rejected_reservations() == 1);
-
-        constexpr std::string_view compression_accept = "gzip;q=0.5, br, zstd;q=0.8";
-        flexedge::node::buffered_proxy_response compression_response;
-        compression_response.status_ = 200;
-        compression_response.headers_.emplace_back("Content-Type", "text/plain; charset=utf-8");
-        compression_response.body_.assign(4096, 'a');
-        flexedge::node::buffered_bytes_budget compression_budget(
-            flexedge::node::maximum_response_buffer_bytes);
-        compression_response.reservation_ = compression_budget.lease();
-        REQUIRE(compression_response.reservation_.try_grow(compression_response.body_.size()));
-        flexedge::node::v2::Website compression_website;
-        compression_website.set_response_compression_enabled(true);
-        compression_website.set_response_compression_min_bytes(256);
-        compression_website.set_response_compression_max_bytes(32 * 1024 * 1024);
-        compression_website.add_response_compression_algorithms("br");
-        compression_website.add_response_compression_mime_types("text/*");
-        compression_website.add_response_compression_extensions(".txt");
-        compression_website.add_response_compression_excluded_extensions(".apk");
-        flexedge::node::apply_response_compression(compression_website, "", compression_accept,
-            compression_response);
-        REQUIRE(flexedge::node::response_header(compression_response, "Content-Encoding") == "br");
-        REQUIRE(flexedge::node::response_header(compression_response, "Vary") == "Accept-Encoding");
-        auto decoded_compression = ruvia::decode_http_content(
-            ruvia::http_content_coding::brotli, compression_response.body_, {.max_decoded_bytes_ = 4096});
-        REQUIRE(decoded_compression.decoded() != nullptr);
-        REQUIRE(decoded_compression.decoded()->bytes() == std::string(4096, 'a'));
-        REQUIRE(compression_budget.used_bytes() == 4096);
-
-        auto plain_compression_response = [] {
-            flexedge::node::buffered_proxy_response response;
-            response.status_ = 200;
-            response.headers_.emplace_back("Content-Type", "text/plain");
-            response.body_.assign(4096, 'a');
-            return response;
-        };
-        auto excluded_compression_response = plain_compression_response();
-        flexedge::node::apply_response_compression(compression_website,
-            "/download/package.APK?token=1", compression_accept, excluded_compression_response);
-        REQUIRE(flexedge::node::response_header(excluded_compression_response, "Content-Encoding")
-                .empty());
-
-        auto partial_compression_response = plain_compression_response();
-        partial_compression_response.status_ = 206;
-        flexedge::node::apply_response_compression(compression_website, "", compression_accept,
-            partial_compression_response);
-        REQUIRE(
-            flexedge::node::response_header(partial_compression_response, "Content-Encoding").empty());
-
-        auto limited_compression_website = compression_website;
-        limited_compression_website.set_response_compression_max_bytes(1024);
-        auto limited_compression_response = plain_compression_response();
-        flexedge::node::apply_response_compression(limited_compression_website, "",
-            compression_accept, limited_compression_response);
-        REQUIRE(
-            flexedge::node::response_header(limited_compression_response, "Content-Encoding").empty());
-
-        flexedge::node::buffered_bytes_budget exhausted_compression_budget(
-            flexedge::node::maximum_response_buffer_bytes);
-        auto held_compression_budget = exhausted_compression_budget.lease();
-        REQUIRE(held_compression_budget.try_grow(exhausted_compression_budget.maximum_bytes()));
-        auto overloaded_compression_response = plain_compression_response();
-        overloaded_compression_response.reservation_ = exhausted_compression_budget.lease();
-        flexedge::node::apply_response_compression(compression_website, "", compression_accept,
-            overloaded_compression_response);
-        REQUIRE(flexedge::node::response_header(overloaded_compression_response, "Content-Encoding")
-                .empty());
-
-        auto origin_encoded = ruvia::encode_http_content(
-            ruvia::http_content_coding::gzip, std::string(4096, 'a'), {.max_encoded_bytes_ = 4096});
-        REQUIRE(origin_encoded.encoded() != nullptr);
-        auto recompressed_response = plain_compression_response();
-        recompressed_response.body_.assign(origin_encoded.encoded()->bytes());
-        recompressed_response.headers_.emplace_back("Content-Encoding", "gzip");
-        const auto original_encoded_body = recompressed_response.body_;
-        flexedge::node::apply_response_compression(compression_website, "", compression_accept,
-            recompressed_response);
-        REQUIRE(recompressed_response.body_ == original_encoded_body);
 
         flexedge::node::state_cipher state_cipher(std::string(64, '1'));
         const auto sealed_state = state_cipher.seal("device-encrypted-private-state");
@@ -1305,6 +1196,32 @@ int main(int argc, char* argv[]) {
 
         const auto no_redirect = compiled(snapshot(false));
         REQUIRE(!flexedge::node::http_to_https_redirect(*no_redirect, "www.example.com", "/"));
+
+        auto wildcard_snapshot = snapshot();
+        wildcard_snapshot.mutableWebsite()->mutable_domains(0)->set_hostname("*.Example.COM.");
+        wildcard_snapshot.duplicateWebsite();
+        auto* exact_website = wildcard_snapshot.contents.back().mutable_website();
+        exact_website->set_id("exact-website");
+        exact_website->clear_domains();
+        auto* exact_domain = exact_website->add_domains();
+        exact_domain->set_hostname("www.example.com");
+        exact_domain->set_https_enabled(true);
+        exact_domain->set_certificate_digest(
+            wildcard_snapshot.mutableWebsite()->domains(0).certificate_digest());
+        const auto wildcard_config = compiled(std::move(wildcard_snapshot));
+        REQUIRE(wildcard_config->website("www.example.com")->id() == "exact-website");
+        REQUIRE(wildcard_config->website("ASSETS.Example.COM.:443")->id() == "website-1");
+        REQUIRE(wildcard_config->domain("assets.example.com")->hostname() == "*.Example.COM.");
+        REQUIRE(!wildcard_config->domain("http.example.com")->https_enabled());
+        for (const auto host : {"example.com", "a.b.example.com", "badexample.com",
+                 "example.com.evil", "*.example.com", ".example.com", "bad_host.example.com"}) {
+            REQUIRE(wildcard_config->website(host) == nullptr);
+            REQUIRE(wildcard_config->domain(host) == nullptr);
+        }
+        const auto wildcard_redirect = flexedge::node::http_to_https_redirect(
+            *wildcard_config, "ASSETS.Example.COM:80", "/asset?q=1");
+        REQUIRE(wildcard_redirect);
+        REQUIRE(wildcard_redirect->location_ == "https://assets.example.com/asset?q=1");
 
         // Objects published before http2_enabled was retired carry field 14 in number order.
         // Nodes hash the bytes they hold, so those objects verify as published; nodes that
@@ -1589,16 +1506,16 @@ int main(int argc, char* argv[]) {
             REQUIRE(entries.front().message().starts_with("request rejected: invalid HTTP Host header:"));
             REQUIRE(entries.front().message().find("node config") == std::string::npos);
         }
-        // Reset a real client only after its request reaches the origin. Both buffered
-        // responses and streamed relays must record its departure at info level.
-        for (const auto buffer_response : {false, true}) {
+        // Reset a real client only after its request reaches the origin. Compression
+        // and passthrough streams must record its departure at info level.
+        for (const auto compress_response : {false, true}) {
             asio::io_context reset_context;
             asio::ip::tcp::acceptor reset_acceptor(reset_context,
                 {asio::ip::address_v4::loopback(), 0});
             auto reset_config = snapshot(false);
             reset_config.setGeneration(next_generation++);
             auto* website = reset_config.mutableWebsite();
-            website->set_response_compression_enabled(buffer_response);
+            website->set_response_compression_enabled(compress_response);
             website->set_health_check_enabled(false);
             website->mutable_origins(0)->set_host("127.0.0.1");
             website->mutable_origins(0)->set_port(reset_acceptor.local_endpoint().port());
@@ -1637,9 +1554,7 @@ int main(int argc, char* argv[]) {
             const auto entries = collect_node_logs();
             REQUIRE(entries.size() == 1);
             REQUIRE(entries.front().level() == "info");
-            REQUIRE(entries.front().message().starts_with(buffer_response
-                                                              ? "client response write failed:"
-                                                              : "client relay write failed:"));
+            REQUIRE(entries.front().message().starts_with("client relay write failed:"));
         }
         // An origin resetting the connection remains an actual upstream failure.
         {
@@ -2190,6 +2105,8 @@ int main(int argc, char* argv[]) {
             origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto compression_port = compression_acceptor.local_endpoint().port();
         std::atomic<bool> saw_single_rewrite{false};
+        std::atomic<bool> received_compressed_prefix{false};
+        std::atomic<bool> streamed_before_origin_finished{false};
         std::jthread compression_server([&](std::stop_token stop_token) {
             asio::ip::tcp::socket socket(origin_context);
             if (!accept_until_stopped(compression_acceptor, socket, stop_token)) {
@@ -2203,8 +2120,11 @@ int main(int argc, char* argv[]) {
             const auto response =
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4096\r\n"
                 "Connection: close\r\n\r\n" +
-                body;
+                body.substr(0, 2048);
             asio::write(socket, asio::buffer(response));
+            streamed_before_origin_finished.store(waitUntil(
+                [&] { return received_compressed_prefix.load(); }, std::chrono::seconds(3)));
+            asio::write(socket, asio::buffer(body.data() + 2048, body.size() - 2048));
         });
         auto compression_snapshot = snapshot(false);
         compression_snapshot.setGeneration(next_generation++);
@@ -2221,8 +2141,26 @@ int main(int argc, char* argv[]) {
         compression_route->set_rewrite_mode("replace_prefix");
         compression_route->set_rewrite_path("/a/once");
         publish(std::move(compression_snapshot));
-        const auto compressed_proxy_response =
-            request(port, "www.example.com", "Accept-Encoding: gzip\r\n");
+        const auto compressed_proxy_response = [&] {
+            asio::ip::tcp::socket socket(origin_context);
+            socket.connect({asio::ip::address_v4::loopback(), port});
+            const std::string incoming = "GET /a?q=1 HTTP/1.1\r\nHost: www.example.com\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n";
+            asio::write(socket, asio::buffer(incoming));
+            std::string response;
+            std::array<char, 4096> buffer{};
+            std::error_code error;
+            while (!error) {
+                const auto size = socket.read_some(asio::buffer(buffer), error);
+                response.append(buffer.data(), size);
+                const auto head_end = response.find("\r\n\r\n");
+                if (head_end != std::string::npos && response.size() > head_end + 40) {
+                    received_compressed_prefix.store(true);
+                }
+            }
+            REQUIRE(error == asio::error::eof);
+            return response;
+        }();
+        REQUIRE(streamed_before_origin_finished.load());
         REQUIRE(compressed_proxy_response.find("Content-Encoding: gzip\r\n") != std::string::npos);
         REQUIRE(saw_single_rewrite.load());
         REQUIRE(compressed_proxy_response.find("Vary: Accept-Encoding\r\n") != std::string::npos);
@@ -2230,7 +2168,22 @@ int main(int argc, char* argv[]) {
         REQUIRE(compressed_body_offset != std::string::npos);
         auto decoded_proxy_response = ruvia::decode_http_content(
             ruvia::http_content_coding::gzip,
-            std::string_view(compressed_proxy_response).substr(compressed_body_offset + 4),
+            [&] {
+                ruvia::http1_chunked_body_decoder decoder;
+                std::string decoded;
+                auto input = std::string_view(compressed_proxy_response).substr(compressed_body_offset + 4);
+                for (;;) {
+                    const auto step = decoder.decode(input);
+                    if (const auto* chunk = step.body_chunk()) {
+                        decoded.append(chunk->bytes());
+                        input.remove_prefix(chunk->consumed_bytes());
+                    } else {
+                        REQUIRE(step.complete());
+                        break;
+                    }
+                }
+                return decoded;
+            }(),
             {.max_decoded_bytes_ = 4096});
         REQUIRE(decoded_proxy_response.decoded() != nullptr);
         REQUIRE(decoded_proxy_response.decoded()->bytes() == std::string(4096, 'a'));
@@ -2287,7 +2240,7 @@ int main(int argc, char* argv[]) {
             origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto tls_origin_port = tls_origin_acceptor.local_endpoint().port();
         std::jthread tls_origin_server([&](std::stop_token stop_token) {
-            for (int request_index = 0; request_index < 8; ++request_index) {
+            for (int request_index = 0; request_index < 12; ++request_index) {
                 asio::ip::tcp::socket origin_socket(origin_context);
                 if (!accept_until_stopped(tls_origin_acceptor, origin_socket, stop_token)) {
                     return;
@@ -2380,6 +2333,44 @@ int main(int argc, char* argv[]) {
             REQUIRE(count_ips(std::span(connected_workers).first(1)) == 1);
             held.lowest_layer().close();
             REQUIRE(connected_ips_reach(0));
+        }
+
+        const auto wildcard_identity = make_identity("*.example.com", 5);
+        auto wildcard_tls_snapshot = snapshot(false);
+        wildcard_tls_snapshot.setGeneration(next_generation++);
+        auto* wildcard_tls_website = wildcard_tls_snapshot.mutableWebsite();
+        wildcard_tls_website->mutable_origins(0)->set_host("127.0.0.1");
+        wildcard_tls_website->mutable_origins(0)->set_port(tls_origin_port);
+        wildcard_tls_website->mutable_domains(0)->set_hostname("*.Example.COM.");
+        wildcard_tls_snapshot.mutableCertificate(0)->set_certificate_chain_pem(wildcard_identity.certificate_);
+        wildcard_tls_snapshot.mutableCertificate(0)->set_private_key_pem(wildcard_identity.private_key_);
+        auto* exact_certificate = wildcard_tls_snapshot.addCertificate();
+        exact_certificate->set_id("exact-certificate");
+        exact_certificate->set_certificate_chain_pem(api_identity.certificate_);
+        exact_certificate->set_private_key_pem(api_identity.private_key_);
+        auto* exact_tls_domain = wildcard_tls_snapshot.mutableWebsite()->add_domains();
+        exact_tls_domain->set_hostname("api.example.com");
+        exact_tls_domain->set_https_enabled(true);
+        exact_tls_domain->set_certificate_digest(flexedge::node::artifact_digest(
+            flexedge::node::serialize_artifact(wildcard_tls_snapshot.contents.back())));
+        publish(std::move(wildcard_tls_snapshot));
+        publish_tls(loops.loop(0), tls_contexts, runtime.config());
+        const auto wildcard_response = tls_request(https_port, "assets.example.com");
+        REQUIRE(wildcard_response.peer_common_name_ == "*.example.com");
+        REQUIRE(wildcard_response.bytes_.starts_with("HTTP/1.1 200 OK\r\n"));
+        REQUIRE(tls_request(https_port, "ASSETS.Example.COM", "assets.example.com.:443")
+                .bytes_.starts_with("HTTP/1.1 200 OK\r\n"));
+        REQUIRE(tls_request(https_port, "api.example.com").peer_common_name_ == "api.example.com");
+        // Sharing a wildcard certificate does not authorize domain fronting.
+        REQUIRE(tls_request(https_port, "assets.example.com", "other.example.com")
+                .bytes_.starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
+        for (const auto version : {TLS1_2_VERSION, TLS1_3_VERSION}) {
+            for (const auto host : {"example.com", "a.b.example.com", "http.example.com",
+                     "*.example.com", "assets.example.com:443"}) {
+                require_tls_rejection(https_port, host, version, SSL_AD_UNRECOGNIZED_NAME);
+            }
+            require_tls_rejection(https_port, {}, version,
+                version == TLS1_3_VERSION ? SSL_AD_MISSING_EXTENSION : SSL_AD_HANDSHAKE_FAILURE);
         }
 
         const auto refreshed_identity = make_identity("refreshed.example.com", 3);

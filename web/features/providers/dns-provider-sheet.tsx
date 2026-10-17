@@ -83,7 +83,7 @@ export function DnsProviderSheet({
     <FormSheet
       isOpen
       onClose={onClose}
-      title={provider ? `编辑 DNS 账号 ${provider.name}` : '添加 DNS 账号'}
+      title={provider ? `编辑DNS账号 ${provider.name}` : '添加DNS账号'}
       description={
         provider
           ? '可修改账号名称或轮换访问密钥；平台和账户标识创建后不可修改。'
@@ -147,7 +147,7 @@ export function DnsProviderSheet({
             kind='dns'
             provider={provider}
             label='删除账号'
-            title={`删除 DNS 账号 ${provider.name}？`}
+            title={`删除DNS账号 ${provider.name}？`}
             description='删除后将无法再用该账号同步解析记录。仍有托管域名时，删除会被拒绝。'
             isDisabled={draft.isSaving}
             onRemoved={onClose}

@@ -20,7 +20,7 @@ inline flexedge::cache::policy default_policy() {
     result.rules_ = {
         {.id_ = "cache-static",
             .name_ = "静态资源缓存一天",
-            .patterns_ = {".css", ".js", ".mjs", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif",
+            .patterns_ = {".html", ".css", ".js", ".mjs", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif",
                 ".svg", ".ico", ".woff", ".woff2", ".ttf", ".otf"},
             .ttl_mode_ = "fixed",
             .ttl_seconds_ = 86400},

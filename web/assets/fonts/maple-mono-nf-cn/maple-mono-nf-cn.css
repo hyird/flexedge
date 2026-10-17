@@ -1,6 +1,6 @@
 /* Maple Mono NF CN v7.9，沿用 CloudTerminal 的原始 WOFF2 分块与 unicode-range。
    来源与转换信息见 source.json；字体按 LICENSE.txt 的 OFL-1.1 分发。
-   使用相对路径，使 Vite 将字体内联至控制台的单文件构建。 */
+   使用相对路径，由 Vite 输出带内容哈希的独立字体资源。 */
 
 @font-face {
   font-family: 'Maple Mono NF CN';

@@ -276,7 +276,6 @@ const topWebsiteColumns: DataGridColumn<TopWebsiteRow>[] = [
     id: 'name',
     header: '网站',
     isRowHeader: true,
-    minWidth: 160,
     cell: (site) => (
       <Link href={`/websites/${site.website_id}`} className='font-medium'>
         {site.name}
@@ -304,7 +303,6 @@ const topWebsiteColumns: DataGridColumn<TopWebsiteRow>[] = [
   {
     id: 'share',
     header: '占比',
-    minWidth: 140,
     cell: (site) => (
       <Meter
         aria-label={`${site.name} 流量占比`}
@@ -328,11 +326,11 @@ export function TopWebsitesPanel({ query }: { query: TrafficQuery }) {
   return (
     <Widget className='min-w-0 lg:col-span-7'>
       <Widget.Header>
-        <Widget.Title>流量 Top 网站</Widget.Title>
+        <Widget.Title>流量Top网站</Widget.Title>
       </Widget.Header>
       <Widget.Content className='p-0'>
         <DataTable
-          label='流量 Top 网站'
+          label='流量Top网站'
           variant='secondary'
           columns={topWebsiteColumns}
           data={traffic ? topWebsiteRows(traffic) : undefined}
@@ -340,7 +338,6 @@ export function TopWebsitesPanel({ query }: { query: TrafficQuery }) {
           error={query.isError ? query.error : undefined}
           onRetry={query.refetch}
           getRowId={(site) => site.website_id}
-          minWidth={520}
           empty={
             state === 'no_websites'
               ? {

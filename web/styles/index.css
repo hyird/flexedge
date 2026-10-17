@@ -3,7 +3,7 @@
 @import '@heroui-pro/react/css';
 @import '../assets/fonts/maple-mono-nf-cn/maple-mono-nf-cn.css';
 
-/* 与 CloudTerminal 统一：正文与代码都使用随单文件构建内联的 Nerd Font。 */
+/* 与 CloudTerminal 统一：正文与代码都使用按需加载的 Nerd Font 字体资源。 */
 @theme {
   --font-sans:
     'Maple Mono NF CN', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;

@@ -17,7 +17,7 @@ export const websiteSections = [
   {
     id: 'https',
     label: 'HTTPS',
-    description: '证书绑定、TLS 版本与 HTTPS 跳转。',
+    description: '证书绑定、TLS版本与HTTPS跳转。',
   },
   {
     id: 'origins',
@@ -27,7 +27,7 @@ export const websiteSections = [
   {
     id: 'origin-settings',
     label: '回源',
-    description: '回源 Host、超时与客户端地址传递。',
+    description: '回源Host、超时与客户端地址传递。',
   },
   {
     id: 'health',
@@ -37,7 +37,7 @@ export const websiteSections = [
   {
     id: 'routes',
     label: '路由规则',
-    description: 'URL 跳转、URL 重写与按规则选择源站。',
+    description: 'URL跳转、URL重写与按规则选择源站。',
   },
   {
     id: 'cache',

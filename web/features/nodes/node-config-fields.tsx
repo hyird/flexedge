@@ -118,7 +118,7 @@ export function NodeConfigFields({
                 label: cluster.name,
               }))}
               error={fieldState.error?.message}
-              hint='DNS 线路来自集群的托管域名'
+              hint='DNS线路来自集群的托管域名'
               disabled={disabled || clusters.isPending}
               required
             />
@@ -153,7 +153,7 @@ export function NodeConfigFields({
       />
       <QueryNotice
         query={lines}
-        title='DNS 线路加载失败'
+        title='DNS线路加载失败'
         onRetry={() => void lines.refetch()}
       />
       {endpointError && <Notice>{endpointError}</Notice>}
@@ -182,11 +182,11 @@ export function NodeConfigFields({
               name={`endpoints.${index}.ip_address`}
               render={({ field, fieldState }) => (
                 <Field
-                  label={`IP 地址 ${index + 1}`}
+                  label={`IP地址 ${index + 1}`}
                   value={field.value}
                   onChange={field.onChange}
                   error={fieldState.error?.message}
-                  placeholder='203.0.113.10 或 IPv6'
+                  placeholder='203.0.113.10 或IPv6'
                   required
                   disabled={disabled}
                 />
@@ -197,7 +197,7 @@ export function NodeConfigFields({
               name={`endpoints.${index}.line_code`}
               render={({ field, fieldState }) => (
                 <Choice
-                  label='DNS 线路'
+                  label='DNS线路'
                   value={field.value}
                   onChange={field.onChange}
                   items={available}
@@ -211,7 +211,7 @@ export function NodeConfigFields({
                 size='sm'
                 variant='ghost'
                 isIconOnly
-                aria-label={`移除 IP 地址 ${index + 1}`}
+                aria-label={`移除IP地址 ${index + 1}`}
                 className='sm:mt-6'
                 isDisabled={endpoints.fields.length === 1 || disabled}
                 onPress={() => endpoints.remove(index)}
@@ -239,7 +239,7 @@ export function NodeConfigFields({
       }
     >
       <Plus className='size-4' />
-      添加 IP
+      添加IP
     </Button>
   )
   return (
@@ -250,7 +250,7 @@ export function NodeConfigFields({
       <Group
         variant={variant}
         title='服务端点'
-        description={`最多 ${maxEndpoints} 个唯一 IP，每个 IP 指定一条 DNS 线路。`}
+        description={`最多 ${maxEndpoints} 个唯一IP，每个IP指定一条DNS线路。`}
         actions={addEndpoint}
       >
         {endpointRows}

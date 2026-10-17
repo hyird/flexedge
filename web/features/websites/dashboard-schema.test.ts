@@ -34,7 +34,7 @@ describe('website dashboard contract', () => {
   it('preserves ASN totals independently of the capped client IP rankings', () => {
     const asns = [
       { label: 'AS4134 Chinanet', request_count: 123, response_bytes: 4096 },
-      { label: '未知 ASN', request_count: 7, response_bytes: 512 },
+      { label: '未知ASN', request_count: 7, response_bytes: 512 },
     ]
     expect(parseWebsiteDashboard({ ...dashboard, asns }).asns).toEqual(asns)
     expect(() =>

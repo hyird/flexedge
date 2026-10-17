@@ -229,6 +229,8 @@ message AccessLog {
     string cookies = 20;
     uint64 request_bytes = 21;
     string cache_status = 22; // hit_memory, hit_disk, miss, bypass; empty on older nodes
+    string cache_reason = 23; // Cache decision reason code; empty on older nodes
+    bool cache_revalidated = 24; // Origin validated an existing cached representation
 }
 
 message NodeLog {
@@ -407,6 +409,8 @@ message CacheRule {
     int64 max_object_bytes = 13;
     bool skip_set_cookie = 14;
     int64 browser_ttl_seconds = 15;
+    optional bool skip_no_cache = 16;
+    optional bool respect_request_no_cache = 17;
 }
 
 message CacheCommand {

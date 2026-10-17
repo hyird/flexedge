@@ -49,7 +49,7 @@ export function ClusterSheet({
         onClose()
       }}
       title='创建集群'
-      description='接入域名由主机前缀和托管域名组合生成，网站通过 CNAME 指向它接入集群节点。'
+      description='接入域名由主机前缀和托管域名组合生成，网站通过CNAME指向它接入集群节点。'
       onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
       submitLabel='创建集群'
       isSubmitting={mutation.isPending}

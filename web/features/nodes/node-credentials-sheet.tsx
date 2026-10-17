@@ -47,8 +47,8 @@ export function NodeCredentialsSheet({
       title='节点接入凭据'
       description={
         nodeName
-          ? `在节点 ${nodeName} 的服务器上以 root 运行安装命令，节点将使用以下凭据接入控制面。`
-          : '在节点服务器上以 root 运行安装命令，节点将使用以下凭据接入控制面。'
+          ? `在节点 ${nodeName} 的服务器上以root运行安装命令，节点将使用以下凭据接入控制面。`
+          : '在节点服务器上以root运行安装命令，节点将使用以下凭据接入控制面。'
       }
     >
       {credentials && (
@@ -73,19 +73,18 @@ export function NodeCredentialsSheet({
               {command}
             </pre>
             <p className='text-xs text-muted'>
-              需要 Linux 与 systemd；脚本会下载节点程序、写入凭据并启动
-              flexedge-node 服务。
+              需要Linux与systemd；脚本会下载节点程序、写入凭据并启动flexedge-node服务。
             </p>
           </div>
           <SecretValue
             label='Node ID'
             value={credentials.node_id}
-            copyLabel='复制 Node ID'
+            copyLabel='复制Node ID'
           />
           <SecretValue
             label='Secret'
             value={credentials.secret}
-            copyLabel='复制 Secret'
+            copyLabel='复制Secret'
           />
         </>
       )}

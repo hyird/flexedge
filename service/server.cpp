@@ -132,8 +132,7 @@ void configure_document_root(ruvia::application& app, const std::filesystem::pat
         .root_ = std::move(web_root),
         .static_options_ =
             {
-                .cache_control_ = "no-cache",
-                .index_file_ = "index.html",
+                .cache_control_ = "public, max-age=31536000, immutable",
             },
         .precompress_gzip_ = true,
         .precompress_max_bytes_ = 64u * 1024u * 1024u,
@@ -348,6 +347,19 @@ void configure_http_server(ruvia::application& app, const std::filesystem::path&
 }
 
 }  // namespace
+
+class frontend_controller final {
+public:
+    RUVIA_ROUTES_BEGIN(frontend_controller)
+    RUVIA_GET("/", index);
+    RUVIA_GET("/index.html", index);
+    RUVIA_ROUTES_END
+
+private:
+    ruvia::task<ruvia::http_response> index(ruvia::context& c) {
+        co_return serve_spa_index(c);
+    }
+};
 
 // 健康检查。
 class health_controller final {

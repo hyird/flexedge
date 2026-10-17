@@ -6,8 +6,8 @@
 
 #include "ruvia/web/model.h"
 
-#include "service/features/website_config/mapper.h"
 #include "service/features/node_runtime/transport.h"
+#include "service/features/website_config/mapper.h"
 
 namespace service::website {
 
@@ -155,7 +155,8 @@ RUVIA_MODEL(
     RUVIA_OPTIONAL_FIELD_NAME("response_headers", response_headers, ruvia::string, RUVIA_OMIT_EMPTY),
     RUVIA_OPTIONAL_FIELD_NAME("query_string", query_string, ruvia::string, RUVIA_OMIT_EMPTY),
     RUVIA_OPTIONAL_FIELD(cookies, ruvia::string, RUVIA_OMIT_EMPTY),
-    RUVIA_REQUIRED_FIELD(cache_status, ruvia::string));
+    RUVIA_REQUIRED_FIELD(cache_status, ruvia::string),
+    RUVIA_REQUIRED_FIELD(cache_reason, ruvia::string));
 RUVIA_MODEL(website_access_log_tail_data_dto,
     RUVIA_REQUIRED_FIELD(list, ruvia::array<website_access_log_dto>),
     RUVIA_OPTIONAL_FIELD(cursor, ruvia::string, RUVIA_OMIT_EMPTY));

@@ -46,7 +46,6 @@ export function ClustersPage() {
       id: 'name',
       header: '集群',
       isRowHeader: true,
-      minWidth: 180,
       cell: (cluster) => (
         <span className='block truncate font-medium'>{cluster.name}</span>
       ),
@@ -54,13 +53,11 @@ export function ClustersPage() {
     {
       id: 'access-domain',
       header: '接入域名',
-      minWidth: 200,
       cell: (cluster) => <Mono truncate>{cluster.access_domain}</Mono>,
     },
     {
       id: 'zone',
       header: '托管域名',
-      minWidth: 180,
       cell: (cluster) => (
         <Link
           to='/dns-zones/$zoneId'
@@ -74,7 +71,6 @@ export function ClustersPage() {
     {
       id: 'nodes',
       header: '节点在线',
-      minWidth: 120,
       cell: (cluster) => (
         <span className='text-sm whitespace-nowrap tabular-nums'>
           {cluster.online_node_count} / {cluster.node_count}
@@ -84,7 +80,6 @@ export function ClustersPage() {
     {
       id: 'status',
       header: '状态',
-      minWidth: 100,
       cell: (cluster) => (
         <StatusChip
           {...describeStatus(enablementStatuses, cluster.status)}
@@ -95,7 +90,6 @@ export function ClustersPage() {
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      width: 72,
       cell: (cluster) => (
         <LinkButton
           href={`/clusters/${cluster.id}`}
@@ -116,7 +110,7 @@ export function ClustersPage() {
   return (
     <Page
       title='集群'
-      description='按集群组织边缘节点；每个集群拥有一个接入域名，网站通过 CNAME 接入。'
+      description='按集群组织边缘节点；每个集群拥有一个接入域名，网站通过CNAME接入。'
     >
       <ListToolbar
         search={{
@@ -162,7 +156,6 @@ export function ClustersPage() {
         isLoading={query.isPending}
         error={query.isError ? query.error : undefined}
         onRetry={() => void query.refetch()}
-        minWidth={760}
         empty={
           filtered
             ? {

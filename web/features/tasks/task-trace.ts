@@ -30,7 +30,7 @@ export const stepOutcomes = {
 
 export const callOutcomes = {
   ok: '成功',
-  http_error: 'HTTP 错误',
+  http_error: 'HTTP错误',
   transport_error: '请求未完成',
   cancelled: '已取消',
   invalid_response: '响应无法解析',
@@ -41,7 +41,7 @@ export const transportErrors = {
   timeout: '请求超时',
   resolve_failed: '域名解析失败',
   connect_failed: '无法建立连接',
-  tls_failed: 'TLS 握手失败',
+  tls_failed: 'TLS握手失败',
   response_too_large: '响应过大',
   io_error: '读写错误',
   protocol_error: '协议错误',

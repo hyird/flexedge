@@ -37,7 +37,6 @@ import {
   OriginSettingsSection,
   OriginsSection,
 } from './website-origin-section'
-import { WebsiteCacheSection } from './website_cache_section'
 import { WebsiteRouteEditor } from './website-route-editor'
 import {
   collectWebsiteFormErrors,
@@ -54,6 +53,7 @@ import {
   HttpsSection,
   LogsSection,
 } from './website-settings-sections'
+import { WebsiteCacheSection } from './website_cache_section'
 
 const settingsRoute = getRouteApi('/_authenticated/websites/$websiteId')
 
@@ -123,7 +123,7 @@ function EditorSkeleton() {
     <div
       aria-busy
       aria-label='正在加载网站配置'
-      className='grid gap-6 lg:grid-cols-[11rem_minmax(0,1fr)]'
+      className='grid gap-4 lg:grid-cols-[6rem_minmax(0,1fr)]'
     >
       <div className='flex gap-2 lg:flex-col'>
         {websiteSections.map((section) => (
@@ -170,7 +170,7 @@ function SectionNav({
       variant='secondary'
       orientation={wide ? 'vertical' : 'horizontal'}
       align='start'
-      className='w-full min-w-0 gap-6 lg:items-start'
+      className='w-full min-w-0 gap-4 lg:items-start'
     >
       {/* HeroUI's ScrollShadow only writes the overflow flags of the current
        * orientation, so crossing the breakpoint would leave a stale
@@ -178,7 +178,7 @@ function SectionNav({
        * a fresh list per orientation starts clean. */}
       <Tabs.ListContainer
         key={wide ? 'vertical' : 'horizontal'}
-        className='min-w-0 lg:sticky lg:top-4 lg:w-44 lg:shrink-0'
+        className='min-w-0 lg:sticky lg:top-4 lg:w-max lg:shrink-0'
       >
         <Tabs.List aria-label='网站配置分组' className='lg:w-full'>
           {websiteSections.map((item) => {

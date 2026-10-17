@@ -43,7 +43,7 @@ describe('website settings sections', () => {
   it('targets the earliest failing group and route rule', () => {
     const errors = {
       'route_rules.3.path': '请输入匹配路径',
-      'route_rules.1.redirect_url': '跳转地址需以 /、http:// 或 https:// 开头',
+      'route_rules.1.redirect_url': '跳转地址需以 /、http:// 或https:// 开头',
       response_compression_algorithms: '启用压缩时至少选择一种算法',
     }
     expect(firstWebsiteErrorTarget(errors)).toEqual({

@@ -10,7 +10,7 @@ export function WebsitesPage() {
   return (
     <Page
       title='网站'
-      description='接入边缘节点的网站：域名、源站、HTTPS 与发布状态。'
+      description='接入边缘节点的网站：域名、源站、HTTPS与发布状态。'
     >
       <WebsitesTable list={list} />
     </Page>

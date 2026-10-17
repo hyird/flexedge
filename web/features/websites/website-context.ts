@@ -24,7 +24,7 @@ export const WebsiteContext = createContext<WebsiteDetailContext | null>(null)
 
 function useDetailContext() {
   const context = useContext(WebsiteContext)
-  if (!context) throw new Error('useWebsite 只能在网站详情布局内使用')
+  if (!context) throw new Error('useWebsite只能在网站详情布局内使用')
   return context
 }
 

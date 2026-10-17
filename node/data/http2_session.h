@@ -94,7 +94,18 @@ public:
     template <class buffers, class handler_type>
     void async_write_some(const buffers& buffer, handler_type&& handler) {
         auto owned = std::make_shared<std::decay_t<handler_type>>(std::forward<handler_type>(handler));
-        state_->write(asio::const_buffer(buffer), [owned](auto error, auto size) { (*owned)(error, size); });
+        auto begin = asio::buffer_sequence_begin(buffer);
+        const auto end = asio::buffer_sequence_end(buffer);
+        while (begin != end && asio::buffer_size(*begin) == 0) {
+            ++begin;
+        }
+        if (begin == end) {
+            asio::post(get_executor(), [owned] { (*owned)(std::error_code{}, std::size_t{}); });
+            return;
+        }
+        // async_write advances a buffer sequence after each partial completion.
+        // This stream borrows only the first nonempty segment until its callback.
+        state_->write(asio::const_buffer(*begin), [owned](auto error, auto size) { (*owned)(error, size); });
     }
 
 private:

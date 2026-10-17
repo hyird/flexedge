@@ -80,14 +80,12 @@ export function ZoneRecords() {
     {
       id: 'type',
       header: '类型',
-      minWidth: 88,
       cell: ({ record }) => record.type,
     },
     {
       id: 'name',
       header: '名称',
       isRowHeader: true,
-      minWidth: 170,
       cell: ({ record }) => (
         <span title={record.name} className='block max-w-56 truncate'>
           {record.name}
@@ -97,7 +95,6 @@ export function ZoneRecords() {
     {
       id: 'content',
       header: '内容',
-      minWidth: 240,
       cell: ({ record }) => (
         <span title={record.content} className='block max-w-80 truncate'>
           {record.type === 'MX' && record.priority !== undefined && (
@@ -112,7 +109,6 @@ export function ZoneRecords() {
           {
             id: 'line',
             header: '线路',
-            minWidth: 150,
             cell: ({ record }: ZoneRecordRow) => (
               <span className='block max-w-48 truncate'>
                 {lineLabels.get(record.line_code) ?? record.line_code}
@@ -124,7 +120,6 @@ export function ZoneRecords() {
     {
       id: 'ttl',
       header: 'TTL',
-      minWidth: 80,
       align: 'end',
       cell: ({ record }) => (
         <span className='tabular-nums'>
@@ -137,14 +132,13 @@ export function ZoneRecords() {
           {
             id: 'proxy',
             header: '代理',
-            minWidth: 90,
             cell: ({ record }: ZoneRecordRow) =>
               record.type === 'TXT' || record.type === 'MX' ? (
                 <span className='text-muted'>—</span>
               ) : record.proxied ? (
                 '已代理'
               ) : (
-                '仅 DNS'
+                '仅DNS'
               ),
           },
         ]
@@ -152,7 +146,6 @@ export function ZoneRecords() {
     {
       id: 'sync',
       header: '同步',
-      minWidth: 110,
       cell: ({ state }) =>
         state?.last_error ? (
           <Tooltip delay={200}>
@@ -178,7 +171,6 @@ export function ZoneRecords() {
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      minWidth: 80,
       align: 'end',
       cell: ({ record, source }) =>
         source === 'system' ? (
@@ -207,7 +199,7 @@ export function ZoneRecords() {
   ]
   return (
     <Section
-      title={`DNS 记录 · ${rows.length}`}
+      title={`DNS记录 · ${rows.length}`}
       contentClassName='flex flex-col gap-3'
     >
       <ListToolbar
@@ -254,15 +246,14 @@ export function ZoneRecords() {
         }
       />
       <DataTable
-        label='DNS 记录'
+        label='DNS记录'
         variant='secondary'
         columns={columns}
         data={page.list}
         isLoading={false}
         getRowId={({ record, source }) => `${source}:${record.id}`}
-        minWidth={860}
         empty={{
-          title: filtered ? '没有匹配的记录' : '还没有 DNS 记录',
+          title: filtered ? '没有匹配的记录' : '还没有DNS记录',
           description: filtered ? '调整搜索词或筛选条件后重试。' : undefined,
         }}
         footer={

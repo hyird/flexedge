@@ -19,9 +19,9 @@ const endpointSchema = z.object({
   ip_address: z
     .string()
     .trim()
-    .min(1, '请输入 IP 地址')
+    .min(1, '请输入IP地址')
     .max(45)
-    .refine(isNodeIpAddress, 'IP 地址格式不正确'),
+    .refine(isNodeIpAddress, 'IP地址格式不正确'),
   line_code: z.string().trim().min(1, '请输入线路代码').max(64),
 })
 
@@ -31,7 +31,7 @@ export const nodeFormSchema = z.object({
   status: z.enum(statusIds(nodeStatuses)),
   endpoints: z
     .array(endpointSchema)
-    .min(1, '至少配置一个 IP')
+    .min(1, '至少配置一个IP')
     .max(8)
     .superRefine((endpoints, ctx) => {
       const ids = new Set<string>(),
@@ -41,13 +41,13 @@ export const nodeFormSchema = z.object({
           ctx.addIssue({
             code: 'custom',
             path: [index, 'ip_address'],
-            message: 'Endpoint ID 不能重复，请重新添加此项',
+            message: 'Endpoint ID不能重复，请重新添加此项',
           })
         if (addresses.has(endpoint.ip_address))
           ctx.addIssue({
             code: 'custom',
             path: [index, 'ip_address'],
-            message: 'IP 地址不能重复',
+            message: 'IP地址不能重复',
           })
         ids.add(endpoint.id)
         addresses.add(endpoint.ip_address)

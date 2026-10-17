@@ -16,7 +16,9 @@ RUVIA_MODEL(rule_dto,
     RUVIA_REQUIRED_FIELD(min_object_bytes, ruvia::int64),
     RUVIA_REQUIRED_FIELD(max_object_bytes, ruvia::int64),
     RUVIA_REQUIRED_FIELD(skip_set_cookie, ruvia::bool_value),
-    RUVIA_REQUIRED_FIELD(browser_ttl_seconds, ruvia::int64));
+    RUVIA_REQUIRED_FIELD(browser_ttl_seconds, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD(skip_no_cache, ruvia::bool_value),
+    RUVIA_OPTIONAL_FIELD(respect_request_no_cache, ruvia::bool_value));
 RUVIA_MODEL(policy_dto,
     RUVIA_REQUIRED_FIELD(storage, ruvia::string),
     RUVIA_REQUIRED_FIELD(memory_bytes, ruvia::int64),

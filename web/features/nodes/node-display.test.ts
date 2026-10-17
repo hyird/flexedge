@@ -31,7 +31,7 @@ describe('liveMetrics', () => {
 describe('heartbeatSummary', () => {
   const heartbeat = '2026-10-14T08:00:05Z'
 
-  it('shows a fresh heartbeat as 刚刚 with its UTC time', () => {
+  it('shows a fresh heartbeat as刚刚with its UTC time', () => {
     expect(
       heartbeatSummary(
         { last_heartbeat_at: heartbeat },

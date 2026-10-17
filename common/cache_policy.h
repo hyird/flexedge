@@ -11,6 +11,8 @@
 
 namespace flexedge::cache {
 
+inline constexpr std::int64_t maximum_object_bytes{256 * 1024 * 1024};
+
 struct rule final {
     std::string id_{};
     std::string name_{};
@@ -27,6 +29,8 @@ struct rule final {
     std::int64_t max_object_bytes_{0};
     bool skip_set_cookie_{true};
     std::int64_t browser_ttl_seconds_{0};
+    bool skip_no_cache_{true};
+    bool respect_request_no_cache_{true};
 };
 
 struct policy final {
@@ -40,7 +44,7 @@ struct policy final {
     std::int64_t disk_percent_{};
     std::int64_t memory_reserved_bytes_{};
     std::int64_t disk_reserved_bytes_{};
-    std::int64_t max_object_bytes_{16 * 1024 * 1024};
+    std::int64_t max_object_bytes_{64 * 1024 * 1024};
     std::string directory_{"cache"};
     std::vector<rule> rules_{};
 };
@@ -81,12 +85,12 @@ struct policy final {
         value.disk_percent_ < 0 || value.disk_percent_ > 100 ||
         value.memory_reserved_bytes_ < 0 || value.memory_reserved_bytes_ > maximum_capacity ||
         value.disk_reserved_bytes_ < 0 || value.disk_reserved_bytes_ > maximum_capacity ||
-        value.max_object_bytes_ < 1 || value.max_object_bytes_ > 64 * 1024 * 1024 ||
+        value.max_object_bytes_ < 1 || value.max_object_bytes_ > maximum_object_bytes ||
         (value.storage_ == "memory" && value.memory_percent_ == 0 && value.memory_bytes_ < value.max_object_bytes_) ||
         (value.storage_ != "memory" && value.disk_percent_ == 0 && value.disk_bytes_ < value.max_object_bytes_) ||
         (value.storage_ == "tiered" && value.memory_percent_ == 0 && value.memory_bytes_ < 1) ||
         !safe_directory(value.directory_)) {
-        return "缓存存储配置不正确，单对象上限为64 MiB且不能超过所选存储容量";
+        return "缓存存储配置不正确，单对象上限为256MiB且不能超过所选存储容量";
     }
     if (value.rules_.size() > 128) {
         return "每个策略最多128条规则";
@@ -169,6 +173,8 @@ void to_proto(const policy& input, proto_type& output) {
         target.set_max_object_bytes(source.max_object_bytes_);
         target.set_skip_set_cookie(source.skip_set_cookie_);
         target.set_browser_ttl_seconds(source.browser_ttl_seconds_);
+        target.set_skip_no_cache(source.skip_no_cache_);
+        target.set_respect_request_no_cache(source.respect_request_no_cache_);
     }
 }
 
@@ -180,7 +186,7 @@ template <typename proto_type>
     result.memory_reserved_bytes_ = input.memory_reserved_bytes();
     result.disk_reserved_bytes_ = input.disk_reserved_bytes();
     for (const auto& source : input.rules()) {
-        result.rules_.push_back({.id_ = source.id(), .name_ = source.name(), .enabled_ = source.enabled(), .match_type_ = source.match_type(), .patterns_ = {source.patterns().begin(), source.patterns().end()}, .action_ = source.action(), .ttl_mode_ = source.ttl_mode(), .ttl_seconds_ = source.ttl_seconds(), .ignore_query_ = source.ignore_query(), .methods_ = {source.methods().begin(), source.methods().end()}, .status_codes_ = {source.status_codes().begin(), source.status_codes().end()}, .min_object_bytes_ = source.min_object_bytes(), .max_object_bytes_ = source.max_object_bytes(), .skip_set_cookie_ = source.skip_set_cookie(), .browser_ttl_seconds_ = source.browser_ttl_seconds()});
+        result.rules_.push_back({.id_ = source.id(), .name_ = source.name(), .enabled_ = source.enabled(), .match_type_ = source.match_type(), .patterns_ = {source.patterns().begin(), source.patterns().end()}, .action_ = source.action(), .ttl_mode_ = source.ttl_mode(), .ttl_seconds_ = source.ttl_seconds(), .ignore_query_ = source.ignore_query(), .methods_ = {source.methods().begin(), source.methods().end()}, .status_codes_ = {source.status_codes().begin(), source.status_codes().end()}, .min_object_bytes_ = source.min_object_bytes(), .max_object_bytes_ = source.max_object_bytes(), .skip_set_cookie_ = source.skip_set_cookie(), .browser_ttl_seconds_ = source.browser_ttl_seconds(), .skip_no_cache_ = source.has_skip_no_cache() ? source.skip_no_cache() : true, .respect_request_no_cache_ = source.has_respect_request_no_cache() ? source.respect_request_no_cache() : true});
     }
     return result;
 }

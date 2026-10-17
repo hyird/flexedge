@@ -100,7 +100,7 @@ export function ZoneOverview({
               ),
             },
             {
-              label: 'DNS 账号',
+              label: 'DNS账号',
               value: zone.dns_provider_name,
             },
             { label: '平台', value: providerLabel(zone.dns_provider) },
@@ -122,7 +122,7 @@ export function ZoneOverview({
             },
             { label: '自动检查', value: '约每 10 分钟' },
             { label: '添加时间', value: formatDate(zone.created_at) },
-            { label: '域名 ID', value: <Mono>{zone.id}</Mono> },
+            { label: '域名ID', value: <Mono>{zone.id}</Mono> },
           ]}
         />
       </Section>

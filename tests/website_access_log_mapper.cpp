@@ -49,7 +49,7 @@ public:
     }
 };
 
-using access_log_row = std::array<access_log_field, 23>;
+using access_log_row = std::array<access_log_field, 24>;
 
 access_log_row make_row(std::optional<std::string> client_ip) {
     access_log_row row{};
@@ -68,6 +68,7 @@ access_log_row make_row(std::optional<std::string> client_ip) {
     row[12].text_ = "3";
     row[17].text_ = "f";
     row[22].text_ = "hit_disk";
+    row[23].text_ = "fresh";
     return row;
 }
 
@@ -126,6 +127,7 @@ void verify_missing_xdb() {
     require(!service::geoip::get_xdb_database().available(), "absent XDB paths loaded a database");
     const auto json = map_to_json("1.2.3.4");
     require(contains(json, "\"cache_status\":\"hit_disk\""), "cache tier must be present independently of response headers");
+    require(contains(json, "\"cache_reason\":\"fresh\""), "cache reason must be present independently of response headers");
     require(contains(json, "\"client_ip\":\"1.2.3.4\""), "client IP missing without XDB");
     require(!contains(json, "\"client_ip_location\""), "location present without XDB");
     require_without_asn(json, "missing XDB");

@@ -49,6 +49,7 @@ using access_log_entity = ruvia::db_entity<"sys_website_access_log",
     ruvia::db_column<"query_string", std::pmr::string, ruvia::db_column_options{.nullable_ = true}>,
     ruvia::db_column<"cookies", std::pmr::string, ruvia::db_column_options{.nullable_ = true}>,
     ruvia::db_column<"cache_status", std::pmr::string, ruvia::db_column_options{.data_type_ = ruvia::db_data_type::varchar, .length_ = 16, .default_expression_ = ruvia::fixed_string{"''"}}>,
+    ruvia::db_column<"cache_reason", std::pmr::string, ruvia::db_column_options{.data_type_ = ruvia::db_data_type::varchar, .length_ = 64, .default_expression_ = ruvia::fixed_string{"''"}}>,
     ruvia::db_column<"created_at", std::pmr::string, ruvia::db_column_options{.data_type_ = ruvia::db_data_type::timestamp_tz, .default_expression_ = ruvia::fixed_string{"CURRENT_TIMESTAMP"}}>>;
 
 using node_log_entity = ruvia::db_entity<"sys_node_log",

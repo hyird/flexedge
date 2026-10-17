@@ -48,7 +48,7 @@ const summarySample = {
     },
     {
       code: 'validate_ttl',
-      label: '校验 TTL',
+      label: '校验TTL',
       outcome: 'completed',
       duration_ms: 0,
       call_count: 0,
@@ -138,7 +138,7 @@ const logSample = {
   at: '2026-10-14T14:16:49.138000+00',
   offset_ms: 5015,
   level: 'warning',
-  message: 'Cloudflare API 连接失败，15 秒后重试',
+  message: 'Cloudflare API连接失败，15 秒后重试',
   repeat_count: 1,
 }
 // §2.3 call.
@@ -176,7 +176,7 @@ const stepSample = {
   offset_ms: 12,
   duration_ms: 5012,
   outcome: 'failed',
-  error: 'Cloudflare API 连接失败',
+  error: 'Cloudflare API连接失败',
   related_task: null,
   call_count: 1,
   omitted_calls: 0,
@@ -192,7 +192,7 @@ const traceSample = {
   state: 'available',
   attempt: 3,
   outcome: 'failed',
-  error: 'Cloudflare API 连接失败',
+  error: 'Cloudflare API连接失败',
   started_at: '2026-10-14T14:16:44.123456+00',
   emitted_at: '2026-10-14T14:16:49.150034+00',
   duration_ms: 5026,
@@ -215,7 +215,7 @@ const abridgedStep = {
   code: 'validation',
   label: '证书颁发机构验证',
   outcome: 'failed',
-  error: 'DNS 验证失败：Incorrect TXT record',
+  error: 'DNS验证失败：Incorrect TXT record',
   calls: [
     {
       kind: 'http',
@@ -256,7 +256,7 @@ const attemptBase = {
   attempt: 3,
   operation: 'sync',
   outcome: 'failed',
-  error: 'Cloudflare API 连接失败',
+  error: 'Cloudflare API连接失败',
   started_at: '2026-10-14T14:16:44.123456+00',
   emitted_at: '2026-10-14T14:16:49.150034+00',
   duration_ms: 5026,
@@ -318,7 +318,7 @@ test('trace schemas read the contract samples', () => {
     subject: 'example.com',
     duration_ms: 5012,
     outcome: 'failed',
-    error: 'Cloudflare API 连接失败',
+    error: 'Cloudflare API连接失败',
     related_task: null,
     calls: [
       {
@@ -579,7 +579,7 @@ test('the timeline renders from the summary before the full trace arrives', () =
   for (const label of [
     '加载同步状态',
     '解密凭据',
-    '校验 TTL',
+    '校验TTL',
     '查找远程托管域名',
     '记录失败',
   ])
@@ -652,7 +652,7 @@ test('the full trace fills in the failed step error, calls and logs', () => {
       logs: [{ ...logSample, repeat_count: 3 }],
     },
   ])
-  expect(html).toMatch(/text-danger">Cloudflare API 连接失败<\/p>/)
+  expect(html).toMatch(/text-danger">Cloudflare API连接失败<\/p>/)
   // Transport failures read as short text instead of a status 0.
   expect(html).toContain('无法建立连接')
   // HTTP: method, host + path, status, provider ids, the response excerpt.
@@ -732,7 +732,7 @@ test('capture and omission metadata never add notes or hide saved excerpts', () 
     expect(html).toContain('saved response')
     expect(html).toContain('edge-hk.cdn.example.net')
     expect(html).toContain('15 秒后重试')
-    expect(html).toContain('Cloudflare API 连接失败')
+    expect(html).toContain('Cloudflare API连接失败')
     expect(html.split('已隐藏').length - 1).toBe(1)
     for (const note of [
       '截断',

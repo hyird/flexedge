@@ -8,6 +8,7 @@
 #include <ruvia/http/http_status.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -19,9 +20,10 @@
 #include <vector>
 
 #include "common/route_policy.h"
-#include "node/data/buffered_proxy_response.h"
+#include "node/data/cache_response_head.h"
 #include "node/data/origin_request_codec.h"
 #include "node/data/response_cache.h"
+#include "node/data/response_compression.h"
 
 namespace flexedge::node {
 
@@ -38,41 +40,40 @@ enum class origin_response_body_status { accepted,
 // one place: hop-by-hop fields (RFC 9110 section 7.6.1) and fields named by Connection
 // are dropped, and HSTS and route response headers replace any origin value.
 //
-// A streaming codec emits the rewritten head through take_output(); the caller relays
-// every later body byte verbatim, so Transfer-Encoding and Content-Length pass through
-// and the codec only tracks where the message ends. A buffering codec decodes the body
-// into take_response() for response compression, and frame() re-frames it with
-// Content-Length, dropping the transfer coding and its trailers.
+// Every read emits bounded wire bytes through take_output(). Compressed responses
+// decode transfer framing, encode incrementally and emit fresh chunk framing. Cache
+// output contains only the current read; its worker-owned consumer handles storage.
 class origin_response_codec final {
 public:
     // `route` and the immutable route program backing its header views must outlive
-    // the codec, including serialization by frame() for buffered responses.
+    // the codec, including its compression policy and borrowed request target.
     origin_response_codec(ruvia::http1_client_exchange_state response_exchange, bool hsts_enabled,
         const evaluated_route_policy* route)
         : parser_(std::make_unique<ruvia::http1_client_response_parser>(std::move(response_exchange))),
           hsts_enabled_(hsts_enabled),
           route_(route) {}
 
-    // Buffers the response; every retained head and body byte is charged to `reservation`.
-    origin_response_codec(ruvia::http1_client_exchange_state response_exchange, bool hsts_enabled,
-        const evaluated_route_policy* route, buffered_bytes_lease reservation)
-        : origin_response_codec(std::move(response_exchange), hsts_enabled, route) {
-        buffered_.emplace();
-        buffered_->reservation_ = std::move(reservation);
+    void set_compression(const v2::Website& website, std::string_view target,
+        std::string_view accept_encoding, buffered_bytes_lease reservation) {
+        compression_website_ = &website;
+        compression_target_ = target;
+        accept_encoding_ = accept_encoding;
+        compression_reservation_ = std::move(reservation);
     }
 
-    void capture_for_cache(std::size_t limit, buffered_bytes_lease reservation) {
-        captured_.emplace();
-        captured_->reservation_ = std::move(reservation);
-        capture_limit_ = limit;
+    void capture_for_cache() {
+        capture_enabled_ = true;
     }
-    [[nodiscard]] std::optional<buffered_proxy_response> take_capture() {
-        auto result = std::move(captured_);
+    void stop_cache_capture() noexcept {
+        capture_enabled_ = false;
         captured_.reset();
-        return result;
+        std::string().swap(capture_output_);
     }
-    [[nodiscard]] std::size_t buffered_body_size() const {
-        return buffered_ ? buffered_->body_.size() : 0;
+    [[nodiscard]] const cache_response_head* cache_head() const noexcept {
+        return captured_ ? &*captured_ : nullptr;
+    }
+    [[nodiscard]] std::string take_cache_output() {
+        return std::exchange(capture_output_, {});
     }
     void set_browser_cache_ttl(std::int64_t seconds, const std::vector<std::int64_t>& statuses) {
         browser_cache_ttl_ = seconds;
@@ -81,11 +82,68 @@ public:
     void set_cache_status(std::string value) {
         cache_status_ = std::move(value);
     }
+    void set_cache_rule(const flexedge::cache::rule& rule) noexcept {
+        cache_rule_ = &rule;
+    }
+    [[nodiscard]] std::string_view cache_bypass_reason() const noexcept {
+        return cache_bypass_reason_;
+    }
 
     [[nodiscard]] origin_response_head_status consume_head(std::string_view bytes) {
-        if (buffered_ && !buffered_->reservation_.try_grow(bytes.size())) {
+        try {
+            return consume_head_impl(bytes);
+        } catch (const std::bad_alloc&) {
             return origin_response_head_status::exhausted;
+        } catch (const ruvia::http_content_encoder_error&) {
+            return origin_response_head_status::failure;
         }
+    }
+
+    [[nodiscard]] origin_response_body_status consume_body(std::string_view bytes) {
+        try {
+            return consume_body_impl(bytes);
+        } catch (const std::bad_alloc&) {
+            return origin_response_body_status::exhausted;
+        } catch (const ruvia::http_content_encoder_error&) {
+            return origin_response_body_status::failure;
+        }
+    }
+
+    [[nodiscard]] origin_response_body_status consume_eof() {
+        if (!eof_completes_response()) {
+            return origin_response_body_status::failure;
+        }
+        try {
+            finish_body();
+            return origin_response_body_status::accepted;
+        } catch (const std::bad_alloc&) {
+            return origin_response_body_status::exhausted;
+        } catch (const ruvia::http_content_encoder_error&) {
+            return origin_response_body_status::failure;
+        }
+    }
+
+    [[nodiscard]] std::string take_output() {
+        return std::exchange(output_, {});
+    }
+    [[nodiscard]] bool complete() const noexcept {
+        return complete_;
+    }
+    [[nodiscard]] bool tunnel() const noexcept {
+        return tunnel_;
+    }
+    [[nodiscard]] bool origin_reusable() const noexcept {
+        return complete_ && !tunnel_ && origin_reusable_;
+    }
+    [[nodiscard]] bool eof_completes_response() const noexcept {
+        return body_kind_ == body_kind::close_delimited;
+    }
+    [[nodiscard]] std::optional<std::uint16_t> status_code() const noexcept {
+        return status_code_;
+    }
+
+private:
+    [[nodiscard]] origin_response_head_status consume_head_impl(std::string_view bytes) {
         head_bytes_.append(bytes);
         for (;;) {
             auto result = parser_->parse(std::string_view(head_bytes_).substr(head_offset_));
@@ -108,13 +166,23 @@ public:
             tunnel_ = parsed->plan().protocol_upgrade() != nullptr;
             status_code_ = static_cast<std::uint16_t>(parsed->head().status().value());
             configure_body(parsed->plan());
+            if (tunnel_ || is_event_stream_content_type(response_header(parsed->head(), "Content-Type"))) {
+                cache_bypass_reason_ = tunnel_ ? "origin_upgrade" : "origin_event_stream";
+                stop_cache_capture();
+                browser_cache_ttl_ = 0;
+                if (!cache_status_.empty()) {
+                    cache_status_ = "BYPASS";
+                }
+            }
+            configure_compression(parsed->head(), parsed->plan());
             if (browser_cache_ttl_ > 0) {
                 cache_headers headers;
                 for (const auto& header : parsed->head().headers()) {
                     headers.emplace_back(header.name(), header.value());
                 }
                 const auto control = cache_header(headers, "Cache-Control");
-                if (cache_has_directive(control, "private") || cache_has_directive(control, "no-store") || cache_has_directive(control, "no-cache") ||
+                if (cache_has_directive(control, "private") || cache_has_directive(control, "no-store") ||
+                    (cache_has_directive(control, "no-cache") && (!cache_rule_ || cache_rule_->skip_no_cache_)) ||
                     !cache_header(headers, "Set-Cookie").empty() ||
                     std::ranges::find(browser_cache_statuses_, *status_code_) == browser_cache_statuses_.end() ||
                     (route_ && std::ranges::any_of(route_->response_headers(), [](const auto& field) { return flexedge::route_policy::ascii_equal(field.name(), "Cache-Control"); }))) {
@@ -122,32 +190,22 @@ public:
                 }
             }
             const auto body = std::string_view(head_bytes_).substr(head_offset_);
-            origin_response_body_status status{};
-            if (captured_) {
+            if (capture_enabled_) {
+                captured_.emplace();
                 captured_->status_ = *status_code_;
                 capture_fields(parsed->head(), *captured_);
-                std::size_t header_bytes{};
-                for (const auto& field : captured_->headers_) {
-                    header_bytes += field.first.size() + field.second.size();
-                }
-                if (tunnel_ || !captured_->reservation_.try_grow(header_bytes)) {
-                    captured_.reset();
+                if (cache_rule_ && *status_code_ != 304) {
+                    cache_bypass_reason_ = response_cache::response_bypass_reason(*cache_rule_, *captured_);
+                    if (!cache_bypass_reason_.empty()) {
+                        cache_status_ = "BYPASS";
+                        stop_cache_capture();
+                    }
                 }
             }
-            if (buffered_) {
-                if (tunnel_) {
-                    return origin_response_head_status::failure;
-                }
-                buffered_->status_ = *status_code_;
-                capture_fields(parsed->head(), *buffered_);
-                status = consume_body(body);
-            } else {
-                // Informational responses are relayed as received.
-                output_.assign(head_bytes_, 0, head_start);
-                append_head(parsed->head());
-                output_.append(body);
-                status = consume_body(body);
-            }
+            // Informational responses are relayed as received.
+            output_.assign(head_bytes_, 0, head_start);
+            append_head(parsed->head());
+            const auto status = consume_body_impl(body);
             release_head();
             switch (status) {
                 case origin_response_body_status::accepted:
@@ -161,7 +219,7 @@ public:
         }
     }
 
-    [[nodiscard]] origin_response_body_status consume_body(std::string_view bytes) {
+    [[nodiscard]] origin_response_body_status consume_body_impl(std::string_view bytes) {
         if (complete_) {
             return bytes.empty() ? origin_response_body_status::accepted
                                  : origin_response_body_status::failure;
@@ -172,13 +230,27 @@ public:
                     return origin_response_body_status::failure;
                 }
                 remaining_ -= bytes.size();
-                complete_ = remaining_ == 0;
-                return retain(bytes);
+                retain(bytes);
+                if (!compressed_) {
+                    output_.append(bytes);
+                }
+                if (remaining_ == 0) {
+                    finish_body();
+                }
+                return origin_response_body_status::accepted;
             case body_kind::chunked:
+                if (!compressed_) {
+                    output_.append(bytes);
+                }
                 return consume_chunked(bytes);
             case body_kind::close_delimited:
-                return retain(bytes);
+                retain(bytes);
+                if (!compressed_) {
+                    output_.append(bytes);
+                }
+                return origin_response_body_status::accepted;
             case body_kind::tunnel:
+                output_.append(bytes);
                 return origin_response_body_status::accepted;
             case body_kind::none:
                 break;
@@ -187,62 +259,7 @@ public:
                              : origin_response_body_status::failure;
     }
 
-    // Streaming: the rewritten head and the body bytes that arrived with it.
-    [[nodiscard]] std::string take_output() {
-        return std::move(output_);
-    }
-
-    // Buffering: the response once complete(), or once the origin closed a
-    // close-delimited body (eof_completes_response()).
-    [[nodiscard]] buffered_proxy_response take_response() {
-        auto response = std::move(*buffered_);
-        buffered_.reset();
-        return response;
-    }
-
-    // Serializes a buffered response for the client. Fails when the response budget
-    // cannot also hold the framed copy; on success the reservation covers `wire` only.
-    [[nodiscard]] bool frame(buffered_proxy_response& response, std::string& wire) const {
-        const auto length = std::to_string(response.body_.size());
-        append_status_line(wire, response.status_);
-        for (const auto& [name, value] : response.headers_) {
-            if (!replaced(name)) {
-                append_field(wire, name, value);
-            }
-        }
-        append_route_headers(wire);
-        append_field(wire, "Content-Length", length);
-        append_closing_headers(wire);
-        const auto retained_bytes = response.reservation_.bytes();
-        if (!response.reservation_.try_grow(wire.size() + response.body_.size())) {
-            return false;
-        }
-        wire.reserve(wire.size() + response.body_.size());
-        wire.append(response.body_);
-        std::string().swap(response.body_);
-        response.reservation_.shrink(retained_bytes);
-        return true;
-    }
-
-    [[nodiscard]] bool complete() const noexcept {
-        return complete_;
-    }
-    [[nodiscard]] bool tunnel() const noexcept {
-        return tunnel_;
-    }
-    [[nodiscard]] bool origin_reusable() const noexcept {
-        return complete_ && !tunnel_ && origin_reusable_;
-    }
-    [[nodiscard]] bool eof_completes_response() const noexcept {
-        return body_kind_ == body_kind::close_delimited;
-    }
-    [[nodiscard]] std::optional<std::uint16_t> status_code() const noexcept {
-        return status_code_;
-    }
-
-private:
     static constexpr std::size_t max_head_bytes = 1024 * 1024;
-    static constexpr std::size_t max_buffered_body_bytes = 64 * 1024 * 1024;
 
     enum class body_kind { none,
         known_length,
@@ -289,9 +306,127 @@ private:
         });
     }
 
+    std::string response_header(const ruvia::http_client_response_head& head, std::string_view name) const {
+        std::string value;
+        bool replaced_by_route{};
+        if (route_) {
+            for (const auto& field : route_->response_headers()) {
+                if (flexedge::route_policy::ascii_equal(field.name(), name)) {
+                    if (!value.empty()) {
+                        value.append(", ");
+                    }
+                    value.append(field.value());
+                    replaced_by_route = true;
+                }
+            }
+        }
+        if (!replaced_by_route) {
+            for (const auto& field : head.headers()) {
+                if (flexedge::route_policy::ascii_equal(field.name(), name)) {
+                    if (!value.empty()) {
+                        value.append(", ");
+                    }
+                    value.append(field.value());
+                }
+            }
+        }
+        return value;
+    }
+    void configure_compression(const ruvia::http_client_response_head& head,
+        const ruvia::http1_client_response_plan& plan) {
+        if (!compression_website_ || tunnel_ || plan.without_content() || plan.zero_content()) {
+            return;
+        }
+        const auto header = [&](std::string_view name) { return response_header(head, name); };
+        // A preceding transfer coding is not a representation we can compress or cache.
+        const auto transfer = header("Transfer-Encoding");
+        if (!transfer.empty() && !flexedge::route_policy::ascii_equal(
+                                     flexedge::route_policy::trim_ows(transfer), "chunked")) {
+            stop_cache_capture();
+            return;
+        }
+        const auto choice = select_response_compression(*compression_website_, compression_target_,
+            accept_encoding_, *status_code_,
+            plan.known_length() ? std::optional<std::size_t>(plan.known_length()->content_length())
+                                : std::nullopt,
+            header);
+        if (choice.vary_) {
+            for (const auto& field : head.headers()) {
+                if (flexedge::route_policy::ascii_equal(field.name(), "Vary") && !replaced(field.name())) {
+                    if (!vary_.empty()) {
+                        vary_.append(", ");
+                    }
+                    vary_.append(field.value());
+                }
+            }
+            if (route_) {
+                for (const auto& field : route_->response_headers()) {
+                    if (flexedge::route_policy::ascii_equal(field.name(), "Vary")) {
+                        if (!vary_.empty()) {
+                            vary_.append(", ");
+                        }
+                        vary_.append(field.value());
+                    }
+                }
+            }
+            const auto tokens = cache_tokens(vary_);
+            if (std::ranges::find(tokens, "accept-encoding") == tokens.end() &&
+                std::ranges::find(tokens, "*") == tokens.end()) {
+                if (!vary_.empty()) {
+                    vary_.append(", ");
+                }
+                vary_.append("Accept-Encoding");
+            }
+        }
+        if (choice.coding_ != ruvia::http_content_coding::identity) {
+            try {
+                compressor_ = std::make_unique<response_compressor>(choice.coding_, std::move(compression_reservation_));
+                compressed_ = true;
+                content_encoding_ = ruvia::http_content_coding_token(choice.coding_);
+            } catch (const std::bad_alloc&) {
+                // No response bytes have been sent. Serve the original representation.
+            } catch (const ruvia::http_content_encoder_error&) {
+            }
+        }
+    }
+
+    // Apply representation changes equally to client headers and cache metadata.
+    void representation_field(std::string_view name, std::string_view value, const auto& emit) const {
+        if (!vary_.empty() && flexedge::route_policy::ascii_equal(name, "Vary")) {
+            return;
+        }
+        if (compressed_) {
+            if (flexedge::route_policy::ascii_equal(name, "Content-Length") ||
+                flexedge::route_policy::ascii_equal(name, "Transfer-Encoding") ||
+                flexedge::route_policy::ascii_equal(name, "Trailer") ||
+                flexedge::route_policy::ascii_equal(name, "Content-Encoding") ||
+                flexedge::route_policy::ascii_equal(name, "Content-MD5") ||
+                flexedge::route_policy::ascii_equal(name, "Digest") ||
+                flexedge::route_policy::ascii_equal(name, "Content-Digest") ||
+                flexedge::route_policy::ascii_equal(name, "Repr-Digest") ||
+                flexedge::route_policy::ascii_equal(name, "Accept-Ranges")) {
+                return;
+            }
+            if (flexedge::route_policy::ascii_equal(name, "ETag") && value.starts_with('"')) {
+                emit(name, "W/" + std::string(value));
+                return;
+            }
+        }
+        emit(name, value);
+    }
+
+    void representation_fields(const auto& emit) const {
+        if (!vary_.empty()) {
+            emit("Vary", vary_);
+        }
+        if (compressed_) {
+            emit("Content-Encoding", content_encoding_);
+        }
+    }
+
     // Fields the proxy sets itself.
-    [[nodiscard]] bool replaced(std::string_view name) const noexcept {
-        if (browser_cache_ttl_ > 0 && (flexedge::route_policy::ascii_equal(name, "Cache-Control") || flexedge::route_policy::ascii_equal(name, "Expires"))) {
+    [[nodiscard]] bool replaced(std::string_view name, bool for_cache = false) const noexcept {
+        if (!for_cache && browser_cache_ttl_ > 0 && (flexedge::route_policy::ascii_equal(name, "Cache-Control") || flexedge::route_policy::ascii_equal(name, "Expires"))) {
             return true;
         }
         if (!cache_status_.empty() && flexedge::route_policy::ascii_equal(name, "X-Cache")) {
@@ -325,7 +460,8 @@ private:
             return;
         }
         for (const auto& mutation : route_->response_headers()) {
-            append_field(output, mutation.name(), mutation.value());
+            representation_field(mutation.name(), mutation.value(),
+                [&](auto name, auto value) { append_field(output, name, value); });
         }
     }
 
@@ -362,31 +498,41 @@ private:
                 replaced(name)) {
                 continue;
             }
-            append_field(output_, name, header.value());
+            representation_field(name, header.value(),
+                [&](auto key, auto value) { append_field(output_, key, value); });
         }
         append_route_headers(output_);
+        representation_fields([&](auto name, auto value) { append_field(output_, name, value); });
+        if (compressed_) {
+            append_field(output_, "Transfer-Encoding", "chunked");
+        }
         append_closing_headers(output_);
     }
 
-    // The buffered body is decoded and re-framed, so its framing fields and the trailer
-    // declaration are dropped with the hop-by-hop fields.
-    void capture_fields(const ruvia::http_client_response_head& head, buffered_proxy_response& target) {
+    // Cache bytes exclude transfer framing, so its fields and the trailer declaration
+    // are dropped with the hop-by-hop fields.
+    void capture_fields(const ruvia::http_client_response_head& head, cache_response_head& target) {
         const auto options = connection_options(head);
         for (const auto& header : head.headers()) {
             const auto name = header.name();
             if (hop_by_hop(name) || connection_option(options, name) ||
                 flexedge::route_policy::ascii_equal(name, "Content-Length") ||
-                flexedge::route_policy::ascii_equal(name, "Trailer")) {
+                flexedge::route_policy::ascii_equal(name, "Trailer") || replaced(name, true)) {
                 continue;
             }
-            target.headers_.emplace_back(name, header.value());
+            representation_field(name, header.value(),
+                [&](auto key, auto value) { target.headers_.emplace_back(key, value); });
         }
+        if (route_) {
+            for (const auto& field : route_->response_headers()) {
+                representation_field(field.name(), field.value(),
+                    [&](auto key, auto value) { target.headers_.emplace_back(key, value); });
+            }
+        }
+        representation_fields([&](auto name, auto value) { target.headers_.emplace_back(name, value); });
     }
 
     void release_head() noexcept {
-        if (buffered_) {
-            buffered_->reservation_.shrink(head_bytes_.size());
-        }
         std::string().swap(head_bytes_);
         head_offset_ = 0;
     }
@@ -419,26 +565,38 @@ private:
         complete_ = true;
     }
 
-    // Body bytes are relayed by the caller when streaming and kept when buffering.
-    [[nodiscard]] origin_response_body_status retain(std::string_view bytes) {
-        if (captured_ && !bytes.empty()) {
-            if (bytes.size() > capture_limit_ - (std::min)(capture_limit_, captured_->body_.size()) || !captured_->reservation_.try_grow(bytes.size())) {
-                captured_.reset();
-            } else {
-                captured_->body_.append(bytes);
-            }
+    void capture(std::string_view bytes) {
+        if (captured_) {
+            capture_output_.append(bytes);
         }
-        if (!buffered_ || bytes.empty()) {
-            return origin_response_body_status::accepted;
+    }
+
+    void append_chunk(std::string_view bytes) {
+        capture(bytes);
+        if (bytes.empty()) {
+            return;
         }
-        if (bytes.size() > max_buffered_body_bytes - buffered_->body_.size()) {
-            return origin_response_body_status::failure;
+        char length[2 * sizeof(std::size_t)];
+        const auto result = std::to_chars(length, length + sizeof(length), bytes.size(), 16);
+        output_.append(length, result.ptr).append("\r\n").append(bytes).append("\r\n");
+    }
+
+    void retain(std::string_view bytes) {
+        if (compressor_) {
+            append_chunk(compressor_->write(bytes));
+            compressor_->clear_output();
+        } else {
+            capture(bytes);
         }
-        if (!buffered_->reservation_.try_grow(bytes.size())) {
-            return origin_response_body_status::exhausted;
+    }
+
+    void finish_body() {
+        if (compressor_) {
+            append_chunk(compressor_->finish());
+            output_.append("0\r\n\r\n");
+            compressor_.reset();
         }
-        buffered_->body_.append(bytes);
-        return origin_response_body_status::accepted;
+        complete_ = true;
     }
 
     // Ruvia leaves incomplete chunk framing unconsumed; it waits in chunk_framing_ until
@@ -453,16 +611,16 @@ private:
         for (;;) {
             const auto step = chunked_->decode(input.substr(offset));
             if (const auto* chunk = step.body_chunk()) {
-                if (const auto status = retain(chunk->bytes());
-                    status != origin_response_body_status::accepted) {
-                    return status;
-                }
+                retain(chunk->bytes());
                 offset += chunk->consumed_bytes();
                 continue;
             }
             if (const auto* end = step.complete()) {
                 offset += end->consumed_bytes();
-                complete_ = true;
+                if (offset != input.size()) {
+                    return origin_response_body_status::failure;
+                }
+                finish_body();
                 std::string().swap(chunk_framing_);
                 return offset == input.size() ? origin_response_body_status::accepted
                                               : origin_response_body_status::failure;
@@ -509,12 +667,22 @@ private:
     std::string head_bytes_;
     std::size_t head_offset_{};
     std::string output_;
-    std::optional<buffered_proxy_response> buffered_;
-    std::optional<buffered_proxy_response> captured_;
-    std::size_t capture_limit_{};
+    const v2::Website* compression_website_{};
+    std::string_view compression_target_;
+    std::string_view accept_encoding_;
+    buffered_bytes_lease compression_reservation_;
+    std::unique_ptr<response_compressor> compressor_;
+    std::string content_encoding_;
+    std::string vary_;
+    bool compressed_{};
+    std::optional<cache_response_head> captured_;
+    std::string capture_output_{};
+    bool capture_enabled_{};
     std::int64_t browser_cache_ttl_{};
     std::vector<std::int64_t> browser_cache_statuses_{};
     std::string cache_status_;
+    const flexedge::cache::rule* cache_rule_{};
+    std::string_view cache_bypass_reason_{};
     body_kind body_kind_{body_kind::none};
     std::size_t remaining_{};
     std::optional<ruvia::http1_chunked_body_decoder> chunked_;

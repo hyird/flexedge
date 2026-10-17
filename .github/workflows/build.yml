@@ -107,6 +107,10 @@ jobs:
           test -x build/artifact/install-node.sh
           test -f build/artifact/node-release.manifest
           test -f build/artifact/systemd/flexedge.service
+          test -s build/artifact/web/index.html
+          test -d build/artifact/web/assets
+          test -n "$(find build/artifact/web/assets -type f -name '*.js' -print -quit)"
+          test -n "$(find build/artifact/web/assets -type f -name '*.css' -print -quit)"
           bash -n build/artifact/install-node.sh
           grep -q '/api/agent/node' build/artifact/install-node.sh
           expected_sha256="$(awk -F= '$1 == "sha256" { print $2 }' build/artifact/node-release.manifest)"

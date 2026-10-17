@@ -166,8 +166,8 @@ function DnsSyncDetail({ detail }: { detail: DetailOf<'dns_sync'> }) {
           <Table variant='secondary' className={compactTable}>
             <Table.ScrollContainer className='max-h-80 overflow-y-auto'>
               <Table.Content
-                aria-label='DNS 记录变更'
-                className='min-w-[400px]'
+                aria-label='DNS记录变更'
+                className='w-full table-auto'
               >
                 <Table.Header>
                   <Table.Column isRowHeader>记录</Table.Column>
@@ -256,7 +256,7 @@ function CertificateDetail({ detail }: { detail: DetailOf<'certificate'> }) {
                   </Mono>,
                 ],
                 [
-                  'SHA-256 指纹',
+                  'SHA-256指纹',
                   detail.fingerprint_sha256 ? (
                     <span
                       key='fingerprint'
@@ -303,7 +303,7 @@ function WebsiteDomainsDetail({
         <Table.ScrollContainer>
           <Table.Content
             aria-label='域名解析检查结果'
-            className='min-w-[440px]'
+            className='w-full table-auto'
           >
             <Table.Header>
               <Table.Column isRowHeader>域名</Table.Column>
@@ -369,8 +369,8 @@ function WebsiteDomainsDetail({
 
 const externalAccounts = {
   '': '—',
-  reused: '复用已保存的 EAB 凭据',
-  fetched: '本次新获取 EAB 凭据',
+  reused: '复用已保存的EAB凭据',
+  fetched: '本次新获取EAB凭据',
   not_required: '不需要',
 } as const
 
@@ -391,7 +391,7 @@ function ProviderDetail({
         items={[
           [
             kind === 'dns'
-              ? 'DNS 服务商'
+              ? 'DNS服务商'
               : kind === 'certificate'
                 ? '证书颁发机构'
                 : '服务商',
@@ -416,7 +416,7 @@ function ProviderDetail({
                 ] satisfies [string, ReactNode][])
               : ([
                   [
-                    'ACME 目录',
+                    'ACME目录',
                     detail.directory_url ? (
                       <Mono key='directory' className='text-xs break-all'>
                         {detail.directory_url}
@@ -499,7 +499,7 @@ function NodeApplyDetail({ detail }: { detail: DetailOf<'node_apply'> }) {
               <UnknownValue key='source' value={detail.source} />
             ),
           ],
-          ['Agent 版本', detail.agent_version || '—'],
+          ['Agent版本', detail.agent_version || '—'],
           ...(failed
             ? ([
                 [

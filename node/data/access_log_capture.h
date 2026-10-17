@@ -45,8 +45,13 @@ public:
     [[nodiscard]] bool client_abort_enabled() const noexcept {
         return client_abort_enabled_;
     }
-    void cache_status(std::string_view value) {
+    void cache_status(std::string_view value, std::string_view reason = {}, bool revalidated = false) {
         cache_status_ = value;
+        cache_reason_ = reason;
+        cache_revalidated_ = revalidated;
+    }
+    [[nodiscard]] std::string_view cache_status() const noexcept {
+        return cache_status_;
     }
 
     // `wire` starts with the HTTP/1.1 response head sent to the client.
@@ -88,6 +93,8 @@ public:
                 .query_string_ = query_string_,
                 .cookies_ = cookies_,
                 .cache_status_ = cache_status_,
+                .cache_reason_ = cache_reason_,
+                .cache_revalidated_ = cache_revalidated_,
             });
         } catch (...) {
             // A record that cannot be queued is dropped like one rejected by a full buffer.
@@ -227,6 +234,7 @@ private:
     std::string cookies_;
     std::string tls_fingerprint_;
     std::string cache_status_{"bypass"};
+    std::string cache_reason_{"not_evaluated"};
     std::array<bool, 5> status_code_ranges_{true, true, true, true, true};
     bool secure_{};
     bool enabled_{};
@@ -234,6 +242,7 @@ private:
     bool client_abort_enabled_{};
     bool request_body_truncated_{};
     bool recorded_{};
+    bool cache_revalidated_{};
 };
 
 }  // namespace flexedge::node

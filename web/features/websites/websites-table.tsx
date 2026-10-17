@@ -92,7 +92,6 @@ export function WebsitesTable({
       id: 'name',
       header: '网站',
       isRowHeader: true,
-      minWidth: 150,
       cell: (website) => (
         <span className='block truncate font-medium'>
           {websiteName(website)}
@@ -102,7 +101,6 @@ export function WebsitesTable({
     {
       id: 'domains',
       header: '域名',
-      minWidth: 200,
       cell: (website) => {
         const [primary, ...others] = website.config.domains
         return primary ? (
@@ -130,7 +128,6 @@ export function WebsitesTable({
           {
             id: 'cluster',
             header: '集群',
-            minWidth: 130,
             cell: (website: Website) => (
               <Link
                 to='/clusters/$clusterId'
@@ -145,7 +142,6 @@ export function WebsitesTable({
     {
       id: 'origin',
       header: '默认源站',
-      minWidth: 120,
       cell: (website) => {
         const origin = defaultOrigin(website)
         return (
@@ -160,7 +156,6 @@ export function WebsitesTable({
     {
       id: 'deployment',
       header: '发布状态',
-      minWidth: 180,
       cell: (website) => (
         <div className='flex items-center gap-2'>
           <StatusChip
@@ -177,7 +172,6 @@ export function WebsitesTable({
     {
       id: 'https',
       header: 'HTTPS',
-      minWidth: 110,
       cell: (website) => (
         <StatusChip
           {...describeStatus(
@@ -193,7 +187,6 @@ export function WebsitesTable({
     {
       id: 'status',
       header: '状态',
-      minWidth: 100,
       cell: (website) => (
         <StatusChip
           {...describeStatus(enablementStatuses, website.status)}
@@ -204,7 +197,6 @@ export function WebsitesTable({
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      width: 72,
       cell: (website) => (
         <LinkButton
           href={`/websites/${website.id}`}
@@ -272,7 +264,6 @@ export function WebsitesTable({
         isLoading={query.isPending}
         error={query.isError ? query.error : undefined}
         onRetry={() => void query.refetch()}
-        minWidth={clusterId ? 896 : 1056}
         empty={
           filtered
             ? {
@@ -283,7 +274,7 @@ export function WebsitesTable({
               ? {
                   title: '没有网站引用此证书',
                   description:
-                    '在网站配置的 HTTPS 分组中选择此证书后会显示在这里。',
+                    '在网站配置的HTTPS分组中选择此证书后会显示在这里。',
                 }
               : {
                   title: '还没有网站',

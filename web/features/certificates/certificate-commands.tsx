@@ -70,7 +70,7 @@ export function useCertificateCommands({
           onClose={() => setRenewing(undefined)}
           tone='accent'
           title={`立即续期证书 ${primaryDomain(renewing)}？`}
-          description='将通过 DNS-01 验证重新签发证书，签发成功后自动分发到引用它的网站。当前证书在新证书生效前继续使用。'
+          description='将通过DNS-01验证重新签发证书，签发成功后自动分发到引用它的网站。当前证书在新证书生效前继续使用。'
           confirmLabel='立即续期'
           onConfirm={() => renewing && renew.mutateAsync(renewing)}
         />
@@ -82,8 +82,7 @@ export function useCertificateCommands({
             <>
               删除后无法恢复，
               <Mono>{removing?.domains.join('、')}</Mono>{' '}
-              的证书文件与续期任务一并移除。仍被网站引用的证书无法删除，请先在网站
-              HTTPS 配置中解除绑定。
+              的证书文件与续期任务一并移除。仍被网站引用的证书无法删除，请先在网站HTTPS配置中解除绑定。
             </>
           }
           confirmLabel='删除证书'

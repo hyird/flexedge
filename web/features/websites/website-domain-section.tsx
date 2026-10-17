@@ -22,8 +22,8 @@ import type { WebsiteFormErrors, WebsiteSectionProps } from './website-sections'
 type WebsiteDomain = WebsiteFormValues['domains'][number]
 
 const dnsModeItems = [
-  { id: 'managed', label: '托管 DNS' },
-  { id: 'external', label: '外部 DNS' },
+  { id: 'managed', label: '托管DNS' },
+  { id: 'external', label: '外部DNS' },
 ]
 
 /** Why a zone is not ready yet; every zone stays selectable regardless. */
@@ -198,7 +198,7 @@ export function DomainsSection({
       description={
         accessDomain ? (
           <>
-            外部 DNS：将域名 CNAME 到 <Mono>{accessDomain}</Mono>
+            外部DNS：将域名CNAME到 <Mono>{accessDomain}</Mono>
           </>
         ) : undefined
       }
@@ -264,7 +264,7 @@ export function DomainsSection({
             </div>
             <div className='flex flex-col gap-3 sm:flex-row sm:items-start'>
               <Choice
-                label='DNS 模式'
+                label='DNS模式'
                 value={domain.dns_mode}
                 items={dnsModeItems}
                 onChange={(mode) =>
