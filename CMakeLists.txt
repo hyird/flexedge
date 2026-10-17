@@ -340,7 +340,7 @@ if(BUILD_TESTING)
     set_tests_properties(flexedge_website_aggregate PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     flexedge_add_test(deployment_source
         SOURCES tests/deployment_source.cpp
-        LIBRARIES ruvia::web
+        LIBRARIES flexedge_route_policy ruvia::web
     )
     set_tests_properties(flexedge_deployment_source PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     flexedge_add_test(delivery_object
@@ -424,6 +424,10 @@ if(BUILD_TESTING)
     flexedge_add_test(origin_request_codec
         SOURCES tests/origin_request_codec.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::http OpenSSL::Crypto
+    )
+    flexedge_add_test(http1_request_reader
+        SOURCES tests/http1_request_reader.cpp
+        LIBRARIES ruvia::http
     )
     flexedge_add_test(node_runtime BIG_OBJECT
         SOURCES tests/node_runtime.cpp

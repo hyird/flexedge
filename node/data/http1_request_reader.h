@@ -72,8 +72,15 @@ public:
 
 private:
     http1_request_read_status consume_head(std::string& buffer) {
-        head_bytes_.append(buffer);
-        buffer.clear();
+        if (head_bytes_.empty()) {
+            // Parsed fields borrow this storage; transfer it before parsing and
+            // retain it independently of the body buffer's later reallocations.
+            initial_input_capacity_ = buffer.capacity();
+            head_bytes_.swap(buffer);
+        } else {
+            head_bytes_.append(buffer);
+            buffer.clear();
+        }
         parser_.parse_head(head_bytes_, state_, header_search_offset_);
         if (state_.failure() != nullptr) {
             return http1_request_read_status::bad_request;
@@ -87,9 +94,8 @@ private:
             return http1_request_read_status::need_more;
         }
         header_bytes_ = head->header_bytes();
-        buffer.assign(std::string_view(head_bytes_).substr(header_bytes_));
-        head_bytes_.resize(header_bytes_);
-        if (const auto* known = state_.body_plan_.known_length()) {
+        const auto* known = state_.body_plan_.known_length();
+        if (known != nullptr) {
             const auto content_length = known->content_length();
             if (content_length > ruvia::default_max_buffered_body_bytes) {
                 return http1_request_read_status::bad_request;
@@ -106,6 +112,16 @@ private:
                 .trailer_role_ = ruvia::http1_chunk_trailer_role::request,
             });
         }
+        if (known != nullptr && known->content_length() > head_bytes_.size() - header_bytes_) {
+            // Preserve the feed buffer's growth granularity for incomplete fixed bodies,
+            // never preallocate a peer's declared Content-Length.
+            const auto capacity = initial_input_capacity_ < known->content_length()
+                                      ? initial_input_capacity_
+                                      : known->content_length();
+            buffer.reserve(capacity);
+        }
+        buffer.assign(std::string_view(head_bytes_).substr(header_bytes_));
+        head_bytes_.resize(header_bytes_);
         return http1_request_read_status::complete;
     }
 
@@ -175,6 +191,7 @@ private:
     ruvia::http1_server_request_parser parser_;
     ruvia::http1_server_request_parse_state state_;
     std::string head_bytes_;
+    std::size_t initial_input_capacity_{};
     std::size_t header_search_offset_{};
     std::size_t header_bytes_{};
     std::optional<std::size_t> known_length_;
