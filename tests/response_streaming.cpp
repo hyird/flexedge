@@ -363,6 +363,46 @@ void informational_progress() {
         }
     }
 }
+void connection_field_boundaries() {
+    const auto site = policy("gzip");
+    std::string wire =
+        "HTTP/1.1 200 OK\r\nX-First: sensitive\r\nContent-Length: 2\r\nConnection: ";
+    for (unsigned index = 0; index < 128; ++index) {
+        wire.append("unused,");
+    }
+    wire.append(
+        " X-FIRST , x-last ,\tX-REPEATED ,, \r\n"
+        "Connection: other\r\n"
+        "X-Repeated: sensitive-one\r\nx-repeated: sensitive-two\r\n");
+    // Exactly 64 fields: the first/last nominated fields exercise both mask edges.
+    for (unsigned index = 0; index < 57; ++index) {
+        wire.append("X-Fill-").append(std::to_string(index)).append(": safe-").append(std::to_string(index)).append("\r\n");
+    }
+    wire.append("X-Last: sensitive\r\n\r\nok");
+    origin_response_codec codec(exchange(site), false, nullptr);
+    codec.capture_for_cache();
+    FLEXEDGE_REQUIRE(codec.consume_head(wire) == origin_response_head_status::ready);
+    FLEXEDGE_REQUIRE(codec.complete() && codec.cache_head());
+    const auto output = codec.take_output();
+    ruvia::http1_client_response_parser downstream(exchange(site));
+    const auto parsed = downstream.parse(output);
+    FLEXEDGE_REQUIRE(parsed.parsed() && parsed.parsed()->head().status().value() == 200);
+    cache_headers fields;
+    for (const auto& field : parsed.parsed()->head().headers()) {
+        fields.emplace_back(field.name(), field.value());
+    }
+    const auto body = std::string_view(output).substr(parsed.parsed()->consumed_bytes());
+    FLEXEDGE_REQUIRE((parsed.parsed()->plan().chunked() ? unchunk(body, true) : std::string(body)) == "ok");
+    FLEXEDGE_REQUIRE(codec.take_cache_output() == "ok");
+    for (const auto* headers : {static_cast<const cache_headers*>(&fields), &codec.cache_head()->headers_}) {
+        for (const auto name : {"X-First", "X-Last", "X-Repeated"}) {
+            FLEXEDGE_REQUIRE(cache_header(*headers, name).empty());
+        }
+        FLEXEDGE_REQUIRE(cache_header(*headers, "X-Fill-0") == "safe-0");
+        FLEXEDGE_REQUIRE(cache_header(*headers, "X-Fill-56") == "safe-56");
+    }
+}
+
 void large_stream() {
     auto site = policy("gzip");
     constexpr std::size_t size = 72 * 1024 * 1024;
@@ -394,6 +434,7 @@ int main() {
         independent_cache_directives();
         response_side_sse();
         informational_progress();
+        connection_field_boundaries();
         large_stream();
         std::cout << "response streaming passed\n";
         return 0;

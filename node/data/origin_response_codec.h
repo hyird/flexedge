@@ -8,6 +8,7 @@
 #include <ruvia/http/http_status.h>
 
 #include <algorithm>
+#include <bit>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -201,10 +202,11 @@ private:
                 }
             }
             const auto body = std::string_view(head_bytes_).substr(head_offset_);
+            const auto nominations = connection_fields(parsed->head());
             if (capture_enabled_) {
                 captured_.emplace();
                 captured_->status_ = *status_code_;
-                capture_fields(parsed->head(), *captured_);
+                capture_fields(parsed->head(), *captured_, nominations);
                 if (cache_rule_ && *status_code_ != 304) {
                     cache_bypass_reason_ = response_cache::response_bypass_reason(*cache_rule_, *captured_);
                     if (!cache_bypass_reason_.empty()) {
@@ -213,7 +215,7 @@ private:
                     }
                 }
             }
-            append_head(parsed->head());
+            append_head(parsed->head(), nominations);
             const auto status = consume_body_impl(body);
             release_head();
             switch (status) {
@@ -285,10 +287,14 @@ private:
                flexedge::route_policy::ascii_equal(name, "Upgrade");
     }
 
-    // Field names listed by Connection; the views borrow `head`.
-    static std::vector<std::string_view> connection_options(const ruvia::http_client_response_head& head) {
-        std::vector<std::string_view> options;
-        for (const auto& header : head.headers()) {
+    // Ruvia bounds parsed fields to 64. Record matching field positions, not an
+    // unbounded token list; duplicate field lines each retain their own bit.
+    static std::uint64_t connection_fields(const ruvia::http_client_response_head& head) noexcept {
+        static_assert(ruvia::max_http_header_fields <= 64);
+        const auto fields = head.headers();
+        const auto all = fields.size() == 64 ? ~std::uint64_t{} : (std::uint64_t{1} << fields.size()) - 1;
+        std::uint64_t nominated{};
+        for (const auto& header : fields) {
             if (!flexedge::route_policy::ascii_equal(header.name(), "Connection")) {
                 continue;
             }
@@ -297,7 +303,12 @@ private:
                 const auto comma = value.find(',');
                 const auto option = flexedge::route_policy::trim_ows(value.substr(0, comma));
                 if (!option.empty()) {
-                    options.push_back(option);
+                    for (auto remaining = all & ~nominated; remaining != 0; remaining &= remaining - 1) {
+                        const auto index = static_cast<std::size_t>(std::countr_zero(remaining));
+                        if (flexedge::route_policy::ascii_equal(option, fields[index].name())) {
+                            nominated |= std::uint64_t{1} << index;
+                        }
+                    }
                 }
                 if (comma == std::string_view::npos) {
                     break;
@@ -305,14 +316,7 @@ private:
                 value.remove_prefix(comma + 1);
             }
         }
-        return options;
-    }
-
-    static bool connection_option(const std::vector<std::string_view>& options,
-        std::string_view name) noexcept {
-        return std::ranges::any_of(options, [&](std::string_view option) {
-            return flexedge::route_policy::ascii_equal(name, option);
-        });
+        return nominated;
     }
 
     std::string response_header(const ruvia::http_client_response_head& head, std::string_view name) const {
@@ -489,12 +493,14 @@ private:
     }
 
     void append_informational_head(const ruvia::http_client_response_head& head) {
-        const auto options = connection_options(head);
+        auto nominations = connection_fields(head);
         append_status_line(output_, static_cast<std::uint16_t>(head.status().value()));
         for (const auto& header : head.headers()) {
+            const auto nominated = (nominations & 1) != 0;
+            nominations >>= 1;
             if (!hop_by_hop(header.name()) &&
                 !flexedge::route_policy::ascii_equal(header.name(), "Content-Length") &&
-                !connection_option(options, header.name())) {
+                !nominated) {
                 append_field(output_, header.name(), header.value());
             }
         }
@@ -502,11 +508,12 @@ private:
     }
 
     // The relayed body keeps its framing, so the streaming head keeps Transfer-Encoding.
-    void append_head(const ruvia::http_client_response_head& head) {
-        const auto options = connection_options(head);
+    void append_head(const ruvia::http_client_response_head& head, std::uint64_t nominations) {
         append_status_line(output_, status_code_.value_or(502));
         const auto framing_forbidden = head.status().value() < 200 || head.status().value() == 204;
         for (const auto& header : head.headers()) {
+            const auto nominated = (nominations & 1) != 0;
+            nominations >>= 1;
             const auto name = header.name();
             const auto upgrade_field =
                 tunnel_ && (flexedge::route_policy::ascii_equal(name, "Connection") ||
@@ -514,7 +521,7 @@ private:
             const auto framing_field = flexedge::route_policy::ascii_equal(name, "Transfer-Encoding");
             if ((framing_forbidden && (framing_field || flexedge::route_policy::ascii_equal(name, "Content-Length"))) ||
                 (!upgrade_field && !framing_field &&
-                    (hop_by_hop(name) || connection_option(options, name))) ||
+                    (hop_by_hop(name) || nominated)) ||
                 replaced(name)) {
                 continue;
             }
@@ -531,11 +538,13 @@ private:
 
     // Cache bytes exclude transfer framing, so its fields and the trailer declaration
     // are dropped with the hop-by-hop fields.
-    void capture_fields(const ruvia::http_client_response_head& head, cache_response_head& target) {
-        const auto options = connection_options(head);
+    void capture_fields(const ruvia::http_client_response_head& head, cache_response_head& target,
+        std::uint64_t nominations) {
         for (const auto& header : head.headers()) {
+            const auto nominated = (nominations & 1) != 0;
+            nominations >>= 1;
             const auto name = header.name();
-            if (hop_by_hop(name) || connection_option(options, name) ||
+            if (hop_by_hop(name) || nominated ||
                 flexedge::route_policy::ascii_equal(name, "Content-Length") ||
                 flexedge::route_policy::ascii_equal(name, "Trailer") || replaced(name, true)) {
                 continue;
