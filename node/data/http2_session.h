@@ -230,11 +230,11 @@ private:
                         (void)protocol_.submit_reset(id, ruvia::http2_error_code::enhance_your_calm);
                         continue;
                     }
-                    const auto expect = head->request().header("Expect");
+                    const auto expectation = head->expectation_plan(ruvia::http_unsupported_expectation_policy::ignore);
                     const bool immediate = !head->snapshot().body_open_;
                     stream->request_.emplace(std::move(*head));
                     streams_.emplace(id, stream);
-                    if (expect && flexedge::route_policy::ascii_equal(*expect, "100-continue") && !immediate) {
+                    if (expectation.send_continue() != nullptr && !immediate) {
                         (void)protocol_.submit_interim_response_head(id, ruvia::http_interim_response_head(ruvia::http_status_code::from_value(100)));
                     }
                     if (immediate) {
@@ -490,7 +490,10 @@ inline void http2_stream_state::pump() {
                     if (request_hop_by_hop_header(field.name()) && !flexedge::route_policy::ascii_equal(field.name(), "Content-Length")) {
                         continue;
                     }
-                    response.header(field.name(), field.value());
+                    const auto mode = response.header(field.name())
+                                          ? ruvia::http_response_header_mode::append
+                                          : ruvia::http_response_header_mode::replace;
+                    response.header(field.name(), field.value(), {.mode_ = mode});
                 }
                 if (protocol.submit_streaming_response_head(id_, std::move(response)) != ruvia::http2_submit_status::accepted) {
                     abort();

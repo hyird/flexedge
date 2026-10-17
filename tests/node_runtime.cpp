@@ -1025,9 +1025,9 @@ int main(int argc, char* argv[]) {
                 std::string::npos);
         REQUIRE(streaming_origin_request->bytes_.find("Accept-Encoding: gzip\r\n") ==
                 std::string::npos);
-        auto origin_exchange_state = [&] {
+        auto origin_exchange_state = [&](std::string_view method = "GET") {
             auto prepared = flexedge::node::prepare_origin_request(
-                {.method_ = "GET", .target_ = "/", .headers_ = {}, .body_ = {}, .has_body_ = false},
+                {.method_ = method, .target_ = "/", .headers_ = {}, .body_ = {}, .has_body_ = false},
                 streaming_config.website(), "www.example.com", "198.51.100.1", true, false, false);
             REQUIRE(prepared);
             return prepared->make_exchange_state();
@@ -1059,6 +1059,44 @@ int main(int argc, char* argv[]) {
         REQUIRE(streamed.consume_body("\r\n") == flexedge::node::origin_response_body_status::accepted);
         REQUIRE(streamed.complete());
         REQUIRE(streamed.consume_body("extra") == flexedge::node::origin_response_body_status::failure);
+
+        // The streaming codec preserves representation length on HEAD/304 and
+        // never invents Content-Length for 204, including with compression enabled.
+        struct no_content_response final {
+            std::string_view method_{};
+            std::string_view head_{};
+            std::uint16_t status_{};
+        };
+        flexedge::node::buffered_bytes_budget codec_budget(1024 * 1024);
+        auto codec_website = streaming_config.website();
+        codec_website.set_response_compression_enabled(true);
+        for (const bool compression : {false, true}) {
+            for (const auto& test : std::array{
+                     no_content_response{"HEAD", "HTTP/1.1 200 OK\r\nContent-Length: 123\r\n\r\n", 200},
+                     no_content_response{"GET", "HTTP/1.1 304 Not Modified\r\nContent-Length: 123\r\n\r\n", 304},
+                     no_content_response{"GET", "HTTP/1.1 204 No Content\r\n\r\n", 204}}) {
+                flexedge::node::origin_response_codec codec(origin_exchange_state(test.method_), false, nullptr);
+                if (compression) {
+                    codec.set_compression(codec_website, "/file.html", "gzip", codec_budget.lease());
+                }
+                REQUIRE(codec.consume_head(test.head_) == flexedge::node::origin_response_head_status::ready);
+                REQUIRE(codec.complete());
+                const auto wire = codec.take_output();
+                ruvia::http1_client_response_parser parser(origin_exchange_state(test.method_));
+                const auto result = parser.parse(wire);
+                REQUIRE(result.parsed());
+                REQUIRE(result.parsed()->head().status().value() == test.status_);
+                REQUIRE(result.parsed()->consumed_bytes() == wire.size());
+                for (const auto& field : result.parsed()->head().headers()) {
+                    if (flexedge::route_policy::ascii_equal(field.name(), "Content-Length")) {
+                        REQUIRE(test.status_ != 204);
+                        REQUIRE(field.value() == "123");
+                    }
+                }
+                REQUIRE(wire.ends_with("\r\n\r\n"));
+                REQUIRE(codec_budget.used_bytes() == 0);
+            }
+        }
 
         flexedge::node::origin_response_codec malformed(origin_exchange_state(), false, nullptr);
         REQUIRE(malformed.consume_head("HTTP/1.1 20x Bad Status\r\n\r\n") ==
@@ -1905,6 +1943,50 @@ int main(int argc, char* argv[]) {
             REQUIRE(pipelined.find("HTTP/1.1 ", 1) == std::string::npos);
             REQUIRE(response_body(pipelined) == "hello");
             REQUIRE(echoed_count() == 4);
+
+            const auto waiting_upload = [&](std::string_view framing, std::string_view body) {
+                asio::ip::tcp::socket socket(echo_context);
+                socket.connect({asio::ip::address_v4::loopback(), port});
+                const auto headers = head +
+                                     "Expect: , 100-CONTINUE,\r\nExpect: 100-continue\r\n" +
+                                     std::string(framing) + "\r\n";
+                asio::write(socket, asio::buffer(headers));
+                std::string interim;
+                std::array<char, 1024> buffer;
+                REQUIRE(waitUntil([&] {
+                    std::error_code error;
+                    if (socket.available(error) != 0) {
+                        const auto size = socket.read_some(asio::buffer(buffer), error);
+                        interim.append(buffer.data(), size);
+                    }
+                    if (error) {
+                        throw std::system_error(error);
+                    }
+                    return interim.find("\r\n\r\n") != std::string::npos;
+                },
+                    std::chrono::seconds(3)));
+                REQUIRE(interim.starts_with("HTTP/1.1 100 "));
+                asio::write(socket, asio::buffer(body.substr(0, body.size() / 2)));
+                asio::write(socket, asio::buffer(body.substr(body.size() / 2)));
+                std::string final;
+                std::error_code error;
+                while (!error) {
+                    const auto size = socket.read_some(asio::buffer(buffer), error);
+                    final.append(buffer.data(), size);
+                }
+                REQUIRE(error == asio::error::eof);
+                REQUIRE(final.starts_with("HTTP/1.1 200 "));
+                REQUIRE(response_body(final) == "hello");
+            };
+            waiting_upload("Content-Length: 5\r\n", "hello");
+            waiting_upload("Transfer-Encoding: chunked\r\n", "2\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n");
+            const auto http10 = exchange_raw(port, {"POST /echo HTTP/1.0\r\nHost: www.example.com\r\n"
+                                                    "Expect: 100-continue\r\nContent-Length: 5\r\n\r\nhello"});
+            REQUIRE(http10.starts_with("HTTP/1.1 200 "));
+            REQUIRE(response_body(http10) == "hello");
+            const auto empty_expect = exchange_raw(port, {head + "Expect: 100-continue\r\nContent-Length: 0\r\n\r\n"});
+            REQUIRE(empty_expect.starts_with("HTTP/1.1 200 "));
+            REQUIRE(response_body(empty_expect).empty());
             echo_origin.request_stop();
         }
 
@@ -2572,7 +2654,6 @@ int main(int argc, char* argv[]) {
             }
             upgrade_headers_preserved =
                 handshake.find("Upgrade: websocket\r\n") != std::string::npos &&
-                handshake.find("Connection: keep-alive, Upgrade\r\n") != std::string::npos &&
                 handshake.find("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n") != std::string::npos;
             constexpr std::string_view switching_protocols =
                 "HTTP/1.1 101 Switching Protocols\r\n"

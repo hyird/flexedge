@@ -207,6 +207,7 @@ public:
 
 private:
     static constexpr std::size_t max_request_bytes = 2 * 1024 * 1024;
+    using cached_file_buffer = std::array<char, 65536>;
 
     enum class timeout_action { close,
         failover };
@@ -793,6 +794,10 @@ private:
                 return;
             }
         }
+        if (!cached_head_only_ && !cached_response_->body_ && cached_response_->body_bytes_ != 0) {
+            // Allocate before committing headers; retain through every write callback.
+            cached_buffer_ = std::make_unique_for_overwrite<cached_file_buffer>();
+        }
         response_pending_ = true;
         const auto self = this->shared_from_this();
         if (cached_response_->body_ && !cached_head_only_) {
@@ -844,14 +849,14 @@ private:
         if (cached_response_->body_) {
             bytes = asio::buffer(cached_response_->body_->data() + cached_offset_, remaining);
         } else {
-            const auto size = (std::min)(remaining, cached_buffer_.size());
-            cached_file_.read(cached_buffer_.data(), static_cast<std::streamsize>(size));
+            const auto size = (std::min)(remaining, cached_buffer_->size());
+            cached_file_.read(cached_buffer_->data(), static_cast<std::streamsize>(size));
             if (static_cast<std::size_t>(cached_file_.gcount()) != size) {
                 finish_cached(std::make_error_code(std::errc::io_error));
                 return;
             }
-            bytes = asio::buffer(cached_buffer_.data(), size);
-            if (cache_promotion_ && !cache_promotion_->append(std::string_view(cached_buffer_.data(), size))) {
+            bytes = asio::buffer(cached_buffer_->data(), size);
+            if (cache_promotion_ && !cache_promotion_->append(std::string_view(cached_buffer_->data(), size))) {
                 cache_promotion_.reset();
             }
         }
@@ -949,7 +954,7 @@ private:
                 .allow_http2_ = !upgrade_requested_ && website_->origin_http_version() != "http1",
                 .require_http2_ = !upgrade_requested_ && website_->origin_http_version() == "http2",
             },
-            prepared_request_->bytes_, std::move(response));
+            std::string_view(prepared_request_->bytes_), std::move(response));
         arm(connect_timeout_, attempt, timeout_action::failover);
         const auto self = this->shared_from_this();
         exchange_->send([self, attempt](const std::error_code& error) {
@@ -1211,7 +1216,12 @@ private:
                     reply(ruvia::http_status::content_too_large);
                     return;
                 case http1_request_read_status::need_more:
-                    read();
+                    if (!continue_sent_ && request_reader_.expects_continue()) {
+                        continue_sent_ = true;
+                        send_continue();
+                    } else {
+                        read();
+                    }
                     return;
             }
         } catch (const std::exception& error) {
@@ -1221,6 +1231,21 @@ private:
             log("request handling failed with unknown exception", "error");
             close();
         }
+    }
+
+    void send_continue() {
+        static constexpr std::string_view bytes = "HTTP/1.1 100 Continue\r\n\r\n";
+        const auto self = this->shared_from_this();
+        // No read or final write overlaps this interim response.
+        asio::async_write(stream_, asio::buffer(bytes),
+            [self](const std::error_code& error, std::size_t size) {
+                self->context_.metrics_.traffic_out(size);
+                if (error) {
+                    self->close();
+                } else {
+                    self->read();
+                }
+            });
     }
 
     void read() {
@@ -1314,7 +1339,7 @@ private:
     std::unique_ptr<cache_fill> cache_promotion_{};
     std::string cached_key_{};
     std::ifstream cached_file_{};
-    std::array<char, 65536> cached_buffer_{};
+    std::unique_ptr<cached_file_buffer> cached_buffer_;
     std::size_t cached_offset_{};
     std::size_t cached_end_{};
     bool cached_stale_{};
@@ -1325,6 +1350,7 @@ private:
     bool tunnel_{};
     bool hsts_enabled_{};
     bool closed_{};
+    bool continue_sent_{};
     bool response_pending_{};
 };
 

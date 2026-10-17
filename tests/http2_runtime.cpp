@@ -157,9 +157,11 @@ struct received final {
     unsigned status_{};
     std::string body_;
     std::string encoding_;
+    std::vector<std::pair<std::string, std::string>> headers_{};
+    unsigned continues_{};
 };
 template <class stream_type>
-std::vector<received> requests(stream_type& socket, const std::vector<std::string>& paths, bool cancel = false, std::string_view authority = "www.example.com", std::string_view upload = {}, std::string_view encoding = {}) {
+std::vector<received> requests(stream_type& socket, const std::vector<std::string>& paths, bool cancel = false, std::string_view authority = "www.example.com", std::string_view upload = {}, std::string_view encoding = {}, bool expect_continue = false) {
     auto client = ruvia::http2_connection::client();
     std::map<std::uint32_t, std::size_t> ids;
     std::vector<received> responses(paths.size());
@@ -167,10 +169,10 @@ std::vector<received> requests(stream_type& socket, const std::vector<std::strin
     for (std::size_t i = 0; i < paths.size(); ++i) {
         const std::array<ruvia::http_header_view, 1> headers{{{"accept-encoding", encoding}}};
         const auto submitted = client.submit_request_head(ruvia::http2_regular_request_head_view{
-            .method_ = upload.empty() ? "GET" : "POST", .authority_ = authority, .target_ = std::string_view(paths[i]), .headers_ = encoding.empty() ? std::span<const ruvia::http_header_view>{} : headers, .content_ = upload.empty() ? ruvia::http2_request_content::none() : ruvia::http2_request_content::known_length(upload.size())});
+            .method_ = upload.empty() ? "GET" : "POST", .authority_ = authority, .target_ = std::string_view(paths[i]), .headers_ = encoding.empty() ? std::span<const ruvia::http_header_view>{} : headers, .content_ = upload.empty() ? ruvia::http2_request_content::none() : ruvia::http2_request_content::known_length(upload.size()), .expectation_ = expect_continue ? ruvia::http_client_request_expectation::continue_value : ruvia::http_client_request_expectation::none});
         FLEXEDGE_REQUIRE(submitted.submitted());
         ids[submitted.submitted()->stream_id()] = i;
-        if (!upload.empty()) {
+        if (!upload.empty() && !expect_continue) {
             const auto result = client.submit_data(submitted.submitted()->stream_id(), upload, ruvia::http2_end_stream::end_stream);
             FLEXEDGE_REQUIRE(result == ruvia::http2_data_submit_status::accepted || result == ruvia::http2_data_submit_status::queued);
         }
@@ -184,15 +186,26 @@ std::vector<received> requests(stream_type& socket, const std::vector<std::strin
     flush();
     std::array<char, 16384> input{};
     while (ended < paths.size()) {
+        if (expect_continue) {
+            FLEXEDGE_REQUIRE(flexedge::testing::waitUntil(
+                [&] { return socket.lowest_layer().available() != 0; }, std::chrono::seconds(3)));
+        }
         const auto size = socket.read_some(asio::buffer(input));
         FLEXEDGE_REQUIRE(client.feed(std::string_view(input.data(), size)) != ruvia::http2_feed_result::protocol_failure);
         while (auto event = client.next_event()) {
-            if (const auto* head = event->response_head()) {
+            if (const auto* interim = event->informational_head()) {
+                if (interim->head().status().value() == 100 && expect_continue) {
+                    FLEXEDGE_REQUIRE(++responses[ids.at(interim->stream_id())].continues_ == 1);
+                    const auto result = client.submit_data(interim->stream_id(), upload, ruvia::http2_end_stream::end_stream);
+                    FLEXEDGE_REQUIRE(result == ruvia::http2_data_submit_status::accepted || result == ruvia::http2_data_submit_status::queued);
+                }
+            } else if (const auto* head = event->response_head()) {
                 responses[ids.at(head->stream_id())].status_ = head->head().status().value();
                 for (const auto& field : head->head().headers()) {
                     if (flexedge::route_policy::ascii_equal(field.name(), "Content-Encoding")) {
                         responses[ids.at(head->stream_id())].encoding_ = field.value();
                     }
+                    responses[ids.at(head->stream_id())].headers_.emplace_back(field.name(), field.value());
                 }
             } else if (auto* body = event->message_body_chunk()) {
                 responses[ids.at(body->stream_id())].body_.append(body->bytes());
@@ -208,7 +221,7 @@ ruvia::task<void> apply(data_plane& plane, const flexedge::testing::TestConfig& 
     auto pending = co_await config_activation::prepare(plane, std::make_shared<const compiled_config>(config.active, config.objects));
     co_await pending.commit();
 }
-void verify() {
+void verify(std::string_view storage) {
     auto identity = flexedge::testing::make_identity("localhost", 8);
     const auto ca = std::filesystem::current_path() / "http2-origin-ca.pem";
     {
@@ -251,6 +264,7 @@ void verify() {
     site->mutable_origins(0)->set_port(plain.port());
     flexedge::cache::policy policy;
     policy.id_ = "h2-cache";
+    policy.storage_ = storage;
     flexedge::cache::rule rule;
     rule.id_ = "all";
     rule.name_ = "all";
@@ -309,11 +323,35 @@ void verify() {
     for (const auto host : {"example.com", "a.b.example.com"}) {
         FLEXEDGE_REQUIRE(flexedge::testing::request(port, host).starts_with("HTTP/1.1 421 "));
     }
+    FLEXEDGE_REQUIRE(flexedge::testing::request(port, "www.example.com", {}, "/first").ends_with("/first"));
+    const auto replay_count = plain.count();
+    {
+        asio::ip::tcp::socket socket(clients);
+        socket.connect({asio::ip::address_v4::loopback(), port});
+        const auto replay = requests(socket, {"/large"});
+        FLEXEDGE_REQUIRE(replay[0].status_ == 200 && replay[0].body_ == std::string(512 * 1024, 'x'));
+        FLEXEDGE_REQUIRE(plain.count() == replay_count);
+    }
+    {
+        asio::ip::tcp::socket socket(clients);
+        socket.connect({asio::ip::address_v4::loopback(), port});
+        const auto replay = requests(socket, {"/large", "/first"}, true);
+        FLEXEDGE_REQUIRE(replay[1].status_ == 200 && replay[1].body_ == "/first");
+        FLEXEDGE_REQUIRE(plain.count() == replay_count);
+    }
     {
         asio::ip::tcp::socket socket(clients);
         socket.connect({asio::ip::address_v4::loopback(), port});
         const std::string body(256 * 1024, 'p');
         const auto result = requests(socket, {"/upload"}, false, "www.example.com", body);
+        FLEXEDGE_REQUIRE(result[0].status_ == 200 && result[0].body_ == std::to_string(body.size()));
+    }
+    {
+        asio::ip::tcp::socket socket(clients);
+        socket.connect({asio::ip::address_v4::loopback(), port});
+        const std::string body(256 * 1024, 'e');
+        const auto result = requests(socket, {"/upload"}, false, "www.example.com", body, {}, true);
+        FLEXEDGE_REQUIRE(result[0].continues_ == 1);
         FLEXEDGE_REQUIRE(result[0].status_ == 200 && result[0].body_ == std::to_string(body.size()));
     }
     {
@@ -358,7 +396,12 @@ void verify() {
             source.accept(accepted);
             std::array<char, 4096> request{};
             accepted.read_some(asio::buffer(request));
-            const std::string response = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nclose-delimited";
+            const std::string response =
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n"
+                "Set-Cookie: session=abc; Path=/\r\n"
+                "Set-Cookie: theme=dark; Path=/\r\n"
+                "Vary: Accept-Encoding\r\n"
+                "Vary: Accept-Language\r\n\r\nclose-delimited";
             asio::write(accepted, asio::buffer(response));
         });
         site->set_revision(site->revision() + 1);
@@ -373,6 +416,30 @@ void verify() {
         socket.connect({asio::ip::address_v4::loopback(), port});
         const auto result = requests(socket, {"/close"});
         FLEXEDGE_REQUIRE(result[0].status_ == 200 && result[0].body_ == "close-delimited");
+        const auto values = [&](std::string_view name) {
+            std::vector<std::string> selected;
+            for (const auto& [field, value] : result[0].headers_) {
+                if (flexedge::route_policy::ascii_equal(field, name)) {
+                    selected.push_back(value);
+                }
+            }
+            return selected;
+        };
+        FLEXEDGE_REQUIRE((values("Set-Cookie") ==
+                          std::vector<std::string>{"session=abc; Path=/", "theme=dark; Path=/"}));
+        std::vector<std::string> vary;
+        for (const auto& value : values("Vary")) {
+            std::string_view remaining = value;
+            while (!remaining.empty()) {
+                const auto comma = remaining.find(',');
+                const auto token = flexedge::route_policy::trim_ows(remaining.substr(0, comma));
+                if (!token.empty()) {
+                    vary.emplace_back(token);
+                }
+                remaining = comma == std::string_view::npos ? std::string_view{} : remaining.substr(comma + 1);
+            }
+        }
+        FLEXEDGE_REQUIRE((vary == std::vector<std::string>{"Accept-Encoding", "Accept-Language"}));
     }
     shutdown.stop_and_join();
 #ifdef _WIN32
@@ -389,7 +456,8 @@ void verify() {
 }  // namespace
 int main() {
     try {
-        verify();
+        verify("tiered");
+        verify("disk");
         std::cout << "HTTP/2 ingress, origin and cache passed\n";
         return 0;
     } catch (const std::exception& error) {
