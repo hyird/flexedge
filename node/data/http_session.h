@@ -709,12 +709,12 @@ private:
             } catch (const std::bad_alloc&) {
             }
         }
-        const auto etag = cache_header(cached_response_->headers_, "ETag");
+        const auto etag = cache_single_header(cached_response_->headers_, "ETag");
         bool unchanged{};
         if (const auto conditions = ruvia::get_http_etag_preconditions(parsed.request(), etag); conditions.if_none_match_.present_) {
             unchanged = conditions.if_none_match_.matches();
         } else if (const auto modified_since = parsed.request().header("If-Modified-Since")) {
-            const auto modified = cache_http_time(cache_header(cached_response_->headers_, "Last-Modified"));
+            const auto modified = cache_http_time(cache_single_header(cached_response_->headers_, "Last-Modified"));
             const auto requested = cache_http_time(*modified_since);
             unchanged = modified && requested && *modified <= *requested;
         }
@@ -726,9 +726,9 @@ private:
                     std::optional<std::time_t> modified;
                     bool strong_date{};
                     if (!condition->starts_with('"') && !condition->starts_with("W/")) {
-                        modified = ruvia::parse_http_date(cache_header(cached_response_->headers_, "Last-Modified"));
+                        modified = ruvia::parse_http_date(cache_single_header(cached_response_->headers_, "Last-Modified"));
                         if (modified) {
-                            const auto date = ruvia::parse_http_date(cache_header(cached_response_->headers_, "Date"));
+                            const auto date = ruvia::parse_http_date(cache_single_header(cached_response_->headers_, "Date"));
                             // Without shared-clock provenance, retain a conservative clock-skew margin.
                             strong_date = date && std::difftime(*date, *modified) >= 60;
                         }

@@ -75,6 +75,19 @@ inline std::string cache_header(const cache_headers& headers, std::string_view n
     }
     return result;
 }
+// Single-valued metadata borrows immutable header storage; duplicate lines are invalid.
+inline std::string_view cache_single_header(const cache_headers& headers, std::string_view name) noexcept {
+    const std::string* found{};
+    for (const auto& [key, value] : headers) {
+        if (flexedge::route_policy::ascii_equal(key, name)) {
+            if (found) {
+                return {};
+            }
+            found = &value;
+        }
+    }
+    return found ? std::string_view(*found) : std::string_view{};
+}
 inline std::vector<std::string> cache_tokens(std::string_view input) {
     std::vector<std::string> result;
     while (!input.empty()) {
