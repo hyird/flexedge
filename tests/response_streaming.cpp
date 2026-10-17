@@ -480,7 +480,7 @@ void range_projection() {
     FLEXEDGE_REQUIRE(wire.find("bytes 2-3/10\r\n\r\n23") != std::string::npos);
     FLEXEDGE_REQUIRE(wire.find("bytes 8-9/10\r\n\r\n89") != std::string::npos);
     FLEXEDGE_REQUIRE(captured == "0123456789" && codec.cache_head()->status_ == 200);
-    for (const auto [condition, allowed] : {
+    for (const auto& [condition, allowed] : {
              std::pair<std::string_view, bool>{"\"v1\"", true},
              {"W/\"v1\"", false},
              {"", false},

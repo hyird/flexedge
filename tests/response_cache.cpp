@@ -106,7 +106,7 @@ void cloudflare_defaults() {
     FLEXEDGE_REQUIRE(cache_browser_ttl(rule, {200, {}}) == -1);
     rule.browser_ttl_mode_ = "default";
     rule.browser_ttl_seconds_ = 0;
-    for (const auto [status, seconds] : std::array<std::pair<std::uint16_t, int>, 6>{{{200, 7200}, {301, 7200}, {302, 1200}, {303, 1200}, {404, 180}, {410, 180}}}) {
+    for (const auto& [status, seconds] : std::array<std::pair<std::uint16_t, int>, 6>{{{200, 7200}, {301, 7200}, {302, 1200}, {303, 1200}, {404, 180}, {410, 180}}}) {
         const auto url = "http://example.com/status/" + std::to_string(status);
         const auto ticket = cache.lookup(site, rule, url, {});
         FLEXEDGE_REQUIRE(store(cache, *ticket.ticket_, site.response_cache(), rule, {status, {}, "body"}, {}));
