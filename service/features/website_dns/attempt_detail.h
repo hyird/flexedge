@@ -45,9 +45,24 @@ public:
 
     void record_check(website_domain_check check) {
         ++checked_count_;
+        if (check.status_ != "verified") {
+            ++failed_count_;
+            if (first_error_.empty()) {
+                first_error_ = check.hostname_ + "：" + check.error_;
+            }
+        }
         if (checks_.size() < service::sync_runtime::detail_list_items) {
             checks_.push_back(std::move(check));
         }
+    }
+
+    [[nodiscard]] std::string error() const {
+        if (failed_count_ == 0) {
+            return {};
+        }
+        bool truncated = false;
+        return service::sync_runtime::bounded_detail_text(
+            std::to_string(failed_count_) + " 个域名解析异常，首个 " + first_error_, truncated, 1000);
     }
 
     [[nodiscard]] std::string to_json(std::pmr::memory_resource* resource) const noexcept {
@@ -90,6 +105,8 @@ private:
     std::string expected_target_;
     std::size_t domain_count_{};
     std::size_t checked_count_{};
+    std::size_t failed_count_{};
+    std::string first_error_;
     std::vector<website_domain_check> checks_;
 };
 

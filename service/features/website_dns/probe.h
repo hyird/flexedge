@@ -115,7 +115,14 @@ inline ruvia::task<std::vector<std::string>> resolve_answers(service::background
         trace.mark_invalid_response("公共 DNS 探测响应无效");
         throw std::runtime_error("公共 DNS 探测响应无效");
     }
+    const auto status = static_cast<std::int64_t>(*parsed->get<"status">());
+    if (status != 0 && status != 3) {
+        throw std::runtime_error("公共 DNS 查询失败，状态码 " + std::to_string(status));
+    }
     std::vector<std::string> result;
+    if (status == 3) {
+        co_return result;
+    }
     if (const auto& answers = parsed->get<"answer">(); answers) {
         for (const auto& answer : *answers) {
             const auto& type = answer.get<"type">();

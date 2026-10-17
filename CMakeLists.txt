@@ -288,6 +288,11 @@ if(BUILD_TESTING)
         LIBRARIES ruvia::web OpenSSL::Crypto
     )
     set_tests_properties(flexedge_dns_maintenance PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90)
+    flexedge_add_test(website_dns_maintenance
+        SOURCES tests/website_dns_maintenance.cpp
+        LIBRARIES ruvia::web OpenSSL::Crypto
+    )
+    set_tests_properties(flexedge_website_dns_maintenance PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90)
     flexedge_add_test(dns_management BIG_OBJECT
         SOURCES tests/dns_management.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto

@@ -11,6 +11,7 @@
 #include "service/features/sync_runtime/state.h"
 #include "service/features/sync_runtime/work_commit.h"
 #include "service/features/sync_runtime/worker.h"
+#include "service/features/website_dns/maintenance.h"
 #include "service/features/website_dns/runtime.h"
 
 namespace service::website_dns {
@@ -57,7 +58,7 @@ inline ruvia::task<void> reconcile_markers(service::background::task_context& co
 }
 
 inline ruvia::task<void> process_marker(service::background::task_context& context,
-    const service::sync_runtime::claimed_marker& marker) {
+    const service::sync_runtime::claimed_marker& marker, bool inspection = false) {
     service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::website_domains, "web",
         marker.claimed_at_);
     const auto lease = service::sync_runtime::make_running_lease(marker.tenant_id_, marker.id_, marker.version_,
@@ -66,7 +67,7 @@ inline ruvia::task<void> process_marker(service::background::task_context& conte
     website_domain_attempt attempt;
     std::exception_ptr exception;
     try {
-        co_await probe_website(context, trace, marker.resource_id_, lease, marker.version_, attempt);
+        co_await probe_website(context, trace, marker.resource_id_, lease, marker.version_, attempt, inspection);
     } catch (...) {
         exception = std::current_exception();
     }
@@ -82,8 +83,21 @@ inline ruvia::task<void> process_marker(service::background::task_context& conte
 }  // namespace detail
 
 inline ruvia::task<void> run_worker(service::background::task_context& context) {
-    co_await service::sync_runtime::run_marker_worker(context, service::sync_runtime::marker_resource_type::website,
-        detail::reconcile_markers, detail::process_marker);
+    auto maintain = [next_repair = std::chrono::steady_clock::time_point{}](service::background::task_context& owned) mutable -> ruvia::task<void> {
+        if (std::chrono::steady_clock::now() >= next_repair) {
+            co_await detail::reconcile_markers(owned);
+            next_repair = std::chrono::steady_clock::now() + service::sync_runtime::reconciliation_interval;
+        }
+        const auto limit = service::sync_runtime::describe(service::sync_runtime::marker_resource_type::website).claims_per_round_;
+        for (std::size_t count = 0; count < limit && !owned.get_stop_token().stop_requested(); ++count) {
+            const auto inspection = co_await detail::claim_due_check(owned);
+            if (!inspection) {
+                break;
+            }
+            co_await detail::process_marker(owned, *inspection, true);
+        }
+    };
+    co_await service::sync_runtime::run_marker_worker(context, service::sync_runtime::marker_resource_type::website, maintain, [](service::background::task_context& owned, const service::sync_runtime::claimed_marker& marker) { return detail::process_marker(owned, marker); }, {}, std::chrono::seconds(15));
 }
 
 }  // namespace service::website_dns

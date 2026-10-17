@@ -353,7 +353,6 @@ inline void marker_changed(service::live_resource::notifications::resource_notif
         .changed(describe(resource_type).resource_, resource_id);
 }
 
-
 inline ruvia::db_expression equals(ruvia::db_query& query, ruvia::db_expression left, ruvia::db_expression right) {
     return query.binary(left, ruvia::db_binary_operator::equal, right);
 }
@@ -365,7 +364,6 @@ inline ruvia::db_expression now_plus(ruvia::db_query& query, std::chrono::second
 }
 
 }  // namespace detail
-
 
 // Queues work on a resource at `version`: the resource's one task. The
 // marker coalesces: a newer (or the same) version resets the task to queued
@@ -480,9 +478,11 @@ inline ruvia::task<bool> renew_running_lease(database_type& database, const runn
 // under the event and lease identity captured by this writer.
 class running_result_writer final {
 public:
-    running_result_writer(ruvia::db_transaction& transaction, const running_marker_lease& lease)
+    running_result_writer(ruvia::db_transaction& transaction, const running_marker_lease& lease,
+        std::chrono::seconds settled_check_interval = {})
         : transaction_(transaction),
-          lease_(lease) {}
+          lease_(lease),
+          settled_check_interval_(settled_check_interval) {}
     running_result_writer(const running_result_writer&) = delete;
     running_result_writer& operator=(const running_result_writer&) = delete;
     running_result_writer(running_result_writer&&) = delete;
@@ -506,7 +506,7 @@ private:
                                                                                transition.value(std::int64_t{1})))
                                     : transition.value(std::int64_t{0}))
             .set("next_attempt_at", retry ? detail::now_plus(transition, std::chrono::seconds(retry_delay_seconds))
-                                          : transition.call("now"))
+                                          : detail::now_plus(transition, completed || terminal ? settled_check_interval_ : std::chrono::seconds{}))
             .set("lease_owner", transition.null_value())
             .set("lease_until", transition.null_value())
             .set("wait_task_id", waiting ? transition.value(result.wait_task_id()) : transition.null_value())
@@ -643,11 +643,12 @@ public:
         } else {
             const auto released = co_await transaction_.execute(
                 "UPDATE sys_sync_task SET lease_owner = NULL, lease_until = NULL, "
-                "next_attempt_at = CASE WHEN $5::boolean THEN NOW() ELSE next_attempt_at END, "
+                "next_attempt_at = CASE WHEN $5::boolean THEN NOW() WHEN $6::bigint > 0 "
+                "THEN NOW() + $6 * INTERVAL '1 second' ELSE next_attempt_at END, "
                 "updated_at = CASE WHEN $5::boolean THEN NOW() ELSE updated_at END "
                 "WHERE tenant_id = $1 AND id = $2 AND version = $3 AND lease_owner = $4 AND lease_until > NOW()",
                 lease_.marker_.tenant_id_, lease_.marker_.marker_id_, lease_.marker_.version_, lease_.owner_,
-                action == quiet_action::release);
+                action == quiet_action::release, settled_check_interval_.count());
             if (released.affected_rows() == 0) {
                 co_return finish(result_kind::stale);
             }
@@ -749,10 +750,15 @@ private:
 
     ruvia::db_transaction& transaction_;
     const running_marker_lease lease_;
+    // Settled tasks may be inspected again without re-queuing or changing their UI state.
+    const std::chrono::seconds settled_check_interval_;
     std::optional<task_result> result_;
     std::vector<marker_waiter> resumed_;
     bool trace_required_{};
-    enum class phase { open, writing, ready, committed };
+    enum class phase { open,
+        writing,
+        ready,
+        committed };
     phase phase_{phase::open};
 };
 

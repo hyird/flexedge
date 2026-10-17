@@ -20,6 +20,7 @@
 #include "service/features/website_dns/attempt_detail.h"
 #include "service/features/website_dns/flattening.h"
 #include "service/features/website_dns/mapper.h"
+#include "service/features/website_dns/persistence.h"
 #include "service/features/website_dns/probe.h"
 
 namespace service::website_dns {
@@ -31,7 +32,7 @@ complete_stale_website_task(service::background::task_context& context,
     auto completion = co_await context.db().begin_transaction();
     service::sync_runtime::running_result_writer writer(completion, marker);
     (void)co_await writer.quiet(revision_changed ? service::sync_runtime::quiet_action::release
-                                               : service::sync_runtime::quiet_action::complete);
+                                                 : service::sync_runtime::quiet_action::complete);
     co_await writer.commit(context);
     co_return;
 }
@@ -147,7 +148,7 @@ probe_website_domains(service::background::task_context& context, service::attem
 inline ruvia::task<void> probe_website(service::background::task_context& context,
     service::attempt_trace::recorder& trace, const std::string& website_id,
     const service::sync_runtime::running_marker_lease& marker,
-    std::int64_t expected_revision, website_domain_attempt& attempt) {
+    std::int64_t expected_revision, website_domain_attempt& attempt, bool inspection = false) {
     auto load_step = trace.begin_step(service::attempt_trace::step_code::load_website);
     auto db = context.db();
     const auto rows = co_await db.query(
@@ -196,26 +197,7 @@ inline ruvia::task<void> probe_website(service::background::task_context& contex
         checked_at, marker, attempt);
     auto save_step = trace.begin_step(service::attempt_trace::step_code::save_runtime);
 
-    const auto json = ruvia::to_json(to_output(output, {.resource_ = context.pool()}),
-        {.resource_ = context.pool()});
-    auto completion = co_await db.begin_transaction();
-    const auto updated = co_await completion.execute(
-        "UPDATE sys_website SET runtime = $2::jsonb WHERE id = $1 AND revision = $3 AND "
-        "tenant_id = $4 AND deleted_at IS NULL",
-        website_id, std::string_view(json), expected_revision, marker.marker_.tenant_id_);
-    service::sync_runtime::running_result_writer writer(completion, marker);
-    if (updated.affected_rows() == 0) {
-        (void)co_await writer.quiet(service::sync_runtime::quiet_action::release);
-    } else {
-        if (!co_await service::sync_runtime::renew_running_lease(completion, marker)) {
-            throw std::runtime_error("网站同步标记 lease 已失效");
-        }
-        const auto result = co_await writer.record(service::sync_runtime::attempt_result::completed(), attempt.to_json(context.pool()));
-        if (!result.changed()) {
-            throw std::runtime_error("网站同步标记 lease 已失效");
-        }
-    }
-    co_await writer.commit(context, trace);
+    co_await persist_website_check(context, trace, marker, output, attempt, inspection);
     save_step.complete();
     co_return;
 }
