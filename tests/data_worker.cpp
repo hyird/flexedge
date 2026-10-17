@@ -47,20 +47,20 @@ ruvia::task<std::shared_ptr<const origin_health_snapshot>> check_streaks(origin_
     target.failure(2);
     target.success(2);
     target.failure(2);
-    FLEXEDGE_REQUIRE(health.snapshot()->healthy("website", "origin"));
+    FLEXEDGE_REQUIRE(health.snapshot()->healthy({"website", "origin"}));
     target.failure(2);
-    FLEXEDGE_REQUIRE(!health.snapshot()->healthy("website", "origin"));
-    FLEXEDGE_REQUIRE(before->healthy("website", "origin"));
+    FLEXEDGE_REQUIRE(!health.snapshot()->healthy({"website", "origin"}));
+    FLEXEDGE_REQUIRE(before->healthy({"website", "origin"}));
     const auto unhealthy = health.snapshot();
     auto pending = health.prepare(keys, {});
     target.success(2);
     target.success(2);
     health.activate(std::move(pending));
-    FLEXEDGE_REQUIRE(health.snapshot()->healthy("website", "origin"));
+    FLEXEDGE_REQUIRE(health.snapshot()->healthy({"website", "origin"}));
     health.activate(health.prepare({}, {}));
     health.activate(health.prepare(keys, {}));
     target.failure(1);
-    FLEXEDGE_REQUIRE(health.snapshot()->healthy("website", "origin"));
+    FLEXEDGE_REQUIRE(health.snapshot()->healthy({"website", "origin"}));
     co_return unhealthy;
 }
 

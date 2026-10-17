@@ -151,6 +151,21 @@ else()
     target_compile_options(xdb_lookup PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+# Explicit opt-in target: timing runs are not CTest assertions or part of normal builds.
+add_executable(flexedge_node_request_benchmark EXCLUDE_FROM_ALL
+    tools/node_request_benchmark.cpp
+    tools/node_request_allocations.cpp
+)
+target_include_directories(flexedge_node_request_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(flexedge_node_request_benchmark
+    PRIVATE flexedge_node_protocol flexedge_route_policy OpenSSL::Crypto
+)
+if(MSVC)
+    target_compile_options(flexedge_node_request_benchmark PRIVATE /W4 /bigobj /permissive- /utf-8 /wd4819)
+else()
+    target_compile_options(flexedge_node_request_benchmark PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_executable(flexedge_node
     node/main.cpp
 )
@@ -386,6 +401,10 @@ if(BUILD_TESTING)
     flexedge_add_test(origin_health
         SOURCES tests/origin_health.cpp
         LIBRARIES Threads::Threads
+    )
+    flexedge_add_test(origin_selection
+        SOURCES tests/origin_selection.cpp
+        LIBRARIES flexedge_node_protocol Threads::Threads
     )
     flexedge_add_test(node_runtime BIG_OBJECT
         SOURCES tests/node_runtime.cpp

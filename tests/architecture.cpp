@@ -1,6 +1,7 @@
 #include <ruvia/web/model_json.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <exception>
@@ -10,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "node/data/origin_selection.h"
 #include "node/data/route_rules.h"
@@ -183,6 +185,12 @@ int run_architecture_tests() {
         auto* final_header = last->add_request_headers();
         final_header->set_name("x-value");
         final_header->set_value("new");
+        auto* first_response = first->add_response_headers();
+        first_response->set_name("X-Result");
+        first_response->set_value("first");
+        auto* final_response = last->add_response_headers();
+        final_response->set_name("x-result");
+        final_response->set_value("last");
         flexedge::node::route_program phased_program(phased);
         auto result = flexedge::node::evaluate_route_rules(phased_program, phased, "GET", "/old/item?v=1");
         REQUIRE(result && result->origin_group() == "last");
@@ -190,6 +198,23 @@ int run_architecture_tests() {
         REQUIRE(result->request_headers().size() == 2);
         REQUIRE(result->request_headers()[0].value() == "yes");
         REQUIRE(result->request_headers()[1].value() == "new");
+        REQUIRE(result->request_headers()[1].name() == "x-value");
+        REQUIRE(result->response_headers().size() == 1);
+        REQUIRE(result->response_headers()[0].name() == "x-result");
+        REQUIRE(result->response_headers()[0].value() == "last");
+        std::vector<std::pair<std::string, std::string>> forwarded{
+            {"X-Value", "incoming"}, {"Accept", "text/plain"}, {"x-value", "duplicate"}};
+        flexedge::node::apply_route_headers(forwarded, result->request_headers());
+        REQUIRE(forwarded.size() == 3);
+        REQUIRE(forwarded[0].first == "Accept");
+        REQUIRE(forwarded[1].first == "X-Keep" && forwarded[1].second == "yes");
+        REQUIRE(forwarded[2].first == "x-value" && forwarded[2].second == "new");
+        final_header->set_value("source-edited");
+        REQUIRE(result->request_headers()[1].value() == "new");
+        REQUIRE(flexedge::node::evaluate_route_rules(
+                    phased_program, phased, "GET", "/old/item?v=1")
+                    ->request_headers()[1]
+                    .value() == "new");
         last->set_enabled(false);
         REQUIRE(flexedge::node::evaluate_route_rules(phased_program, phased, "GET", "/old/item?v=1")->origin_group() == "last");
         phased_program = flexedge::node::route_program(phased);
@@ -253,15 +278,60 @@ int run_architecture_tests() {
         REQUIRE(result && result->id() == "captured-proxy");
         REQUIRE(result->rewritten_target() == "/new/a%2Fb/books/$?tag=two&tag=three&flag");
         REQUIRE(flexedge::node::evaluate_route_rules(
-            program, captured, "GET", "/old/books/a%2Fb?tag=one")->id().empty());
+            program, captured, "GET", "/old/books/a%2Fb?tag=one")
+                ->id()
+                .empty());
         rewrite->set_rewrite_path("/changed");
         REQUIRE(flexedge::node::evaluate_route_rules(
-            program, captured, "GET", "/old/books/a%2Fb", "", headers)->id() == "captured-proxy");
+                    program, captured, "GET", "/old/books/a%2Fb", "", headers)
+                    ->id() == "captured-proxy");
         program = flexedge::node::route_program(captured);
         result = flexedge::node::evaluate_route_rules(
             program, captured, "GET", "/old/books/a%2Fb", "", headers);
         REQUIRE(result && result->id().empty());
         REQUIRE(result->rewritten_target() == "/changed?tag=two&tag=three&flag");
+    }
+    {
+        flexedge::node::v2::Website lifetime;
+        auto add = [&](std::string_view action, std::string_view type, std::string_view path) {
+            auto* rule = lifetime.add_route_rules();
+            rule->set_id("retained-" + std::to_string(lifetime.route_rules_size()));
+            rule->set_enabled(true);
+            rule->set_action(std::string(action));
+            rule->set_match_type(std::string(type));
+            rule->set_path(std::string(path));
+            return rule;
+        };
+        auto* short_rewrite = add("rewrite", "exact", "/short");
+        short_rewrite->set_rewrite_mode("replace_path");
+        short_rewrite->set_rewrite_path("/s");
+        auto* captured_rewrite = add("rewrite", "regex", "^/owned/(.*)$");
+        captured_rewrite->set_rewrite_mode("replace_path");
+        captured_rewrite->set_rewrite_path("/rewritten/${1}");
+        auto* redirect = add("redirect", "regex", "^/redirect/(.*)$");
+        redirect->set_redirect_url("/to/${1}");
+        redirect->set_redirect_status(307);
+        const flexedge::node::route_program program(lifetime);
+        const std::array<std::string, 5> targets{
+            "/unchanged?", "/short?q=1", "/owned/a-long-capture-that-exceeds-small-string-storage?x=2",
+            "/redirect/a?q=3", "/redirect/a-long-capture-that-exceeds-small-string-storage?q=4"};
+        std::vector<flexedge::node::evaluated_route_policy> retained;
+        for (const auto& target : targets) {
+            auto result = flexedge::node::evaluate_route_rules(program, lifetime, "GET", target);
+            REQUIRE(result);
+            retained.push_back(std::move(*result));
+            result.reset();
+        }
+        // Results survive destruction of intermediate evaluations and relocation;
+        // the source program and unchanged request buffers remain pinned.
+        REQUIRE(retained[0].rewritten_target() == "/unchanged?");
+        REQUIRE(retained[1].rewritten_target() == "/s?q=1");
+        REQUIRE(retained[2].rewritten_target() ==
+                "/rewritten/a-long-capture-that-exceeds-small-string-storage?x=2");
+        REQUIRE(retained[3].redirect_url() == "/to/a?q=3");
+        REQUIRE(retained[4].redirect_url() ==
+                "/to/a-long-capture-that-exceeds-small-string-storage?q=4");
+        REQUIRE(retained[3].action() == "redirect" && retained[3].id() == "retained-3");
     }
     using service::sync_runtime::marker_operation;
     using service::sync_runtime::marker_resource_type;
@@ -505,9 +575,23 @@ int run_architecture_tests() {
     flexedge::node::route_program route_program(route_website);
     auto matched = flexedge::node::evaluate_route_rules(route_program, route_website, "GET", "/api/v1?q=1");
     REQUIRE(matched && matched->id() == route->id());
-    const auto route_origins = flexedge::node::origin_candidates(route_website, 0, &*matched);
-    REQUIRE(route_origins.size() == 1);
-    REQUIRE(route_origins.front()->id() == "origin-route");
+    {
+        flexedge::node::origin_cursor route_origins(matched->origins(), 0, nullptr);
+        REQUIRE(route_origins.next() == route_origin);
+        REQUIRE(route_origins.next() == nullptr);
+    }
+    route->add_origin_ids("origin-default");
+    route_program = flexedge::node::route_program(route_website);
+    matched = flexedge::node::evaluate_route_rules(route_program, route_website, "GET", "/api/v1?q=1");
+    REQUIRE(matched && matched->origin_group() == "api");
+    REQUIRE(matched->origin_ids().size() == 1 && matched->origin_ids()[0] == "origin-default");
+    {
+        flexedge::node::origin_cursor explicit_origins(matched->origins(), 0, nullptr);
+        REQUIRE(explicit_origins.next() == default_origin);
+        REQUIRE(explicit_origins.next() == nullptr);
+    }
+    route->clear_origin_ids();
+    route_program = flexedge::node::route_program(route_website);
     route_website.mutable_route_rules()->SwapElements(0, 1);
     REQUIRE(flexedge::node::evaluate_route_rules(route_program, route_website, "GET", "/api/v1?q=1")->id() == route->id());
     route_program = flexedge::node::route_program(route_website);
@@ -522,9 +606,10 @@ int run_architecture_tests() {
     REQUIRE(rewritten && rewritten->rewritten_target() == "/internal?q=1");
     route->clear_rewrite_path();
     route_program = flexedge::node::route_program(route_website);
-    const auto default_origins = flexedge::node::origin_candidates(route_website, 0);
-    REQUIRE(default_origins.size() == 1);
-    REQUIRE(default_origins.front()->id() == "origin-default");
+    const flexedge::node::origin_plan default_plan(route_website, route_website.default_origin_group());
+    flexedge::node::origin_cursor default_origins(default_plan, 0, nullptr);
+    REQUIRE(default_origins.next() == default_origin);
+    REQUIRE(default_origins.next() == nullptr);
     REQUIRE(flexedge::node::evaluate_route_rules(route_program, route_website, "POST", "/api/v1")->id() == fallback_route->id());
     std::vector<std::pair<std::string, std::string>> route_headers{{"X-Route", "old"},
         {"Accept", "application/json"}};
@@ -657,51 +742,65 @@ int run_architecture_tests() {
         constexpr std::string_view condition_target = "/?tag=one&tag=two&space=a+b&escaped=%2B&flag";
         flexedge::node::route_program condition_program(conditioned);
         REQUIRE(flexedge::node::evaluate_route_rules(
-            condition_program, conditioned, "GET", condition_target, "", headers)->id() == "condition");
+                    condition_program, conditioned, "GET", condition_target, "", headers)
+                    ->id() == "condition");
         selected_condition->set_op("not_equals");
         condition_program = flexedge::node::route_program(conditioned);
         REQUIRE(flexedge::node::evaluate_route_rules(
-            condition_program, conditioned, "GET", condition_target, "", headers)->id().empty());
+            condition_program, conditioned, "GET", condition_target, "", headers)
+                ->id()
+                .empty());
         selected_condition->set_source("query");
         selected_condition->set_name("tag");
         selected_condition->set_op("equals");
         selected_condition->set_value("two");
         condition_program = flexedge::node::route_program(conditioned);
         REQUIRE(flexedge::node::evaluate_route_rules(
-            condition_program, conditioned, "GET", condition_target)->id() == "condition");
+                    condition_program, conditioned, "GET", condition_target)
+                    ->id() == "condition");
         selected_condition->set_op("not_equals");
         selected_condition->set_value("one");
         condition_program = flexedge::node::route_program(conditioned);
         REQUIRE(flexedge::node::evaluate_route_rules(
-            condition_program, conditioned, "GET", condition_target)->id().empty());
+            condition_program, conditioned, "GET", condition_target)
+                ->id()
+                .empty());
         selected_condition->set_name("space");
         selected_condition->set_op("equals");
         selected_condition->set_value("a b");
         condition_program = flexedge::node::route_program(conditioned);
         REQUIRE(flexedge::node::evaluate_route_rules(
-            condition_program, conditioned, "GET", condition_target)->id() == "condition");
+                    condition_program, conditioned, "GET", condition_target)
+                    ->id() == "condition");
         selected_condition->set_name("escaped");
         selected_condition->set_value("+");
         condition_program = flexedge::node::route_program(conditioned);
         REQUIRE(flexedge::node::evaluate_route_rules(
-            condition_program, conditioned, "GET", condition_target)->id() == "condition");
+                    condition_program, conditioned, "GET", condition_target)
+                    ->id() == "condition");
         selected_condition->set_name("flag");
         selected_condition->clear_value();
         condition_program = flexedge::node::route_program(conditioned);
         REQUIRE(flexedge::node::evaluate_route_rules(
-            condition_program, conditioned, "GET", condition_target)->id() == "condition");
+                    condition_program, conditioned, "GET", condition_target)
+                    ->id() == "condition");
         selected_condition->set_name("missing");
         selected_condition->set_op("absent");
         condition_program = flexedge::node::route_program(conditioned);
         REQUIRE(flexedge::node::evaluate_route_rules(
-            condition_program, conditioned, "GET", condition_target)->id() == "condition");
+                    condition_program, conditioned, "GET", condition_target)
+                    ->id() == "condition");
         REQUIRE(flexedge::node::evaluate_route_rules(
-            condition_program, conditioned, "GET", "/?tag=%")->id().empty());
+            condition_program, conditioned, "GET", "/?tag=%")
+                ->id()
+                .empty());
         selected_condition->set_op("not_equals");
         selected_condition->set_value("x");
         condition_program = flexedge::node::route_program(conditioned);
         REQUIRE(flexedge::node::evaluate_route_rules(
-            condition_program, conditioned, "GET", condition_target)->id().empty());
+            condition_program, conditioned, "GET", condition_target)
+                ->id()
+                .empty());
         REQUIRE(!policy::get_query_values("/?tag=%FF"));
         REQUIRE(!policy::get_query_values("/?tag=%G1"));
         REQUIRE(!policy::condition_options("header", "X Bad", "equals", "yes"));
@@ -759,7 +858,8 @@ int run_architecture_tests() {
         optional_capture->set_redirect_url("/b/${1}");
         rich_program = flexedge::node::route_program(rich);
         REQUIRE(flexedge::node::evaluate_route_rules(
-            rich_program, rich, "GET", "/a")->redirect_url() == "/b/");
+                    rich_program, rich, "GET", "/a")
+                    ->redirect_url() == "/b/");
         regex->set_redirect_status(308);
         flexedge::node::validate_route_rules(rich);
         regex->set_redirect_status(303);

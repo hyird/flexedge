@@ -100,7 +100,7 @@ public:
     [[nodiscard]] origin_health_target target(std::string_view website_id,
         std::string_view origin_id) {
         const auto current = snapshot();
-        const auto* origin = current->find(website_id, origin_id);
+        const auto* origin = current->find({website_id, origin_id});
         if (origin == nullptr) {
             return {};
         }

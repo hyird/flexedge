@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "common/route_match.h"
+#include "node/data/origin_selection.h"
 #include "node/runtime/compiled_config.h"
 
 namespace flexedge::node {
@@ -100,12 +101,14 @@ struct compiled_route_rule final {
     std::uint32_t redirect_status_{};
     std::string origin_group_;
     std::vector<std::string> origin_ids_;
+    std::size_t origin_plan_index_{};
     std::vector<v2::HeaderMutation> request_headers_;
     std::vector<v2::HeaderMutation> response_headers_;
 };
 
 struct compiled_website_routes final {
     std::string default_origin_group_;
+    std::vector<origin_plan> origin_plans_;
     std::vector<compiled_route_rule> rules_;
     std::vector<std::size_t> redirects_;
     std::vector<std::size_t> transforms_;
@@ -115,6 +118,13 @@ struct compiled_website_routes final {
 inline compiled_website_routes compile_website_routes(const v2::Website& website) {
     compiled_website_routes result;
     result.default_origin_group_ = website.default_origin_group();
+    result.origin_plans_.emplace_back(website, website.default_origin_group());
+    const auto effective_group = [&](std::string_view group) {
+        if (group.empty()) {
+            group = result.default_origin_group_;
+        }
+        return group.empty() ? std::string_view{"default"} : group;
+    };
     result.rules_.reserve(static_cast<std::size_t>(website.route_rules_size()));
     for (const auto& source : website.route_rules()) {
         if (!source.enabled()) {
@@ -212,6 +222,22 @@ inline compiled_website_routes compile_website_routes(const v2::Website& website
         rule.redirect_status_ = source.redirect_status();
         rule.origin_group_ = source.origin_group();
         rule.origin_ids_.assign(source.origin_ids().begin(), source.origin_ids().end());
+        if (rule.action_ == route_action::proxy) {
+            const auto group = effective_group(rule.origin_group_);
+            if (!rule.origin_ids_.empty() || group != effective_group({})) {
+                const auto previous = std::ranges::find_if(result.rules_, [&](const auto& candidate) {
+                    return candidate.action_ == route_action::proxy &&
+                           candidate.origin_ids_ == rule.origin_ids_ &&
+                           (!rule.origin_ids_.empty() || effective_group(candidate.origin_group_) == group);
+                });
+                if (previous != result.rules_.end()) {
+                    rule.origin_plan_index_ = previous->origin_plan_index_;
+                } else {
+                    rule.origin_plan_index_ = result.origin_plans_.size();
+                    result.origin_plans_.emplace_back(website, group, rule.origin_ids_);
+                }
+            }
+        }
         rule.request_headers_.assign(source.request_headers().begin(), source.request_headers().end());
         rule.response_headers_.assign(source.response_headers().begin(), source.response_headers().end());
         const auto index = result.rules_.size();
@@ -233,8 +259,9 @@ inline compiled_website_routes compile_website_routes(const v2::Website& website
 }  // namespace detail
 
 // Construct and retain on one data worker only: RE2 objects never cross worker boundaries.
-// Website pointers are identity keys, not an execution-time protobuf dependency. A session
-// pins the source configuration and this program together in its worker execution view.
+// The source Website and this program must both outlive every evaluated policy and
+// origin cursor: origin plans borrow source origins, and policies borrow compiled rules.
+// A session pins both together in its worker execution view.
 class route_program final {
 public:
     explicit route_program(const v2::Website& website) {

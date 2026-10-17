@@ -302,14 +302,10 @@ private:
     }
 
     bool select_origin_candidates(const v2::Website& website) {
-        origins_ = origin_candidates(website, sequence_, route_);
-        const auto health = context_.health_.snapshot();
-        std::stable_partition(origins_.begin(), origins_.end(), [&](const v2::Origin* origin) {
-            return health->healthy(website.id(), origin->id());
-        });
+        origins_ = origin_cursor(route_->origins(), sequence_, context_.health_.snapshot());
         healthy_threshold_ = website.healthy_threshold();
         unhealthy_threshold_ = website.unhealthy_threshold();
-        return !origins_.empty();
+        return !route_->origins().empty();
     }
 
     void handle_request(const http1_request_reader& parsed) {
@@ -369,7 +365,8 @@ private:
             reply(ruvia::http_status::bad_request);
             return;
         }
-        std::string headers = "Location: " + location + "\r\n";
+        std::string headers{"Location: "};
+        headers.append(location).append("\r\n");
         for (const auto& header : route.response_headers()) {
             headers.append(header.name()).append(": ").append(header.value()).append("\r\n");
         }
@@ -448,13 +445,13 @@ private:
         ++origin_attempt_;
         cancel_timer();
         discard_exchange();
-        if (origin_index_ >= origins_.size()) {
+        const auto* origin = origins_.next();
+        if (origin == nullptr) {
             reply(ruvia::http_status::bad_gateway);
             return;
         }
-        const auto& origin = *origins_[origin_index_++];
-        current_health_ = context_.health_.target(website_->id(), origin.id());
-        start_origin_attempt(origin, origin_attempt_);
+        current_health_ = context_.health_.target(website_->id(), origin->id());
+        start_origin_attempt(*origin, origin_attempt_);
     }
 
     void start_origin_attempt(const v2::Origin& origin, std::uint64_t attempt) {
@@ -796,8 +793,7 @@ private:
     const v2::Website* website_{};
     std::optional<evaluated_route_policy> effective_route_;
     const evaluated_route_policy* route_{};
-    std::vector<const v2::Origin*> origins_;
-    std::size_t origin_index_{};
+    origin_cursor origins_;
     std::uint64_t origin_attempt_{};
     origin_health_target current_health_;
     std::uint32_t healthy_threshold_{1};

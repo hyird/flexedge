@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "common/route_match.h"
@@ -123,45 +124,78 @@ private:
 
 }  // namespace detail
 
+// Header names and values borrow the immutable route program, never a temporary
+// protobuf or an earlier evaluation result.
+class route_header_view final {
+public:
+    explicit route_header_view(const v2::HeaderMutation& mutation) noexcept
+        : name_(mutation.name()),
+          value_(mutation.value()) {}
+
+    [[nodiscard]] std::string_view name() const noexcept {
+        return name_;
+    }
+    [[nodiscard]] std::string_view value() const noexcept {
+        return value_;
+    }
+
+private:
+    std::string_view name_;
+    std::string_view value_;
+};
+
+// Metadata/header views borrow `route_program`; an unchanged target borrows the
+// request buffer. Both must outlive this result, including retries and serialization.
+// Owned targets live in the variant itself, so moving a result cannot leave a view
+// pointing into the moved-from result's small-string storage.
 class evaluated_route_policy final {
 public:
-    [[nodiscard]] const std::string& id() const noexcept {
+    explicit evaluated_route_policy(const detail::compiled_website_routes& plan) noexcept
+        : origin_group_(plan.default_origin_group_),
+          origin_plan_(&plan.origin_plans_.front()) {}
+
+    [[nodiscard]] std::string_view id() const noexcept {
         return id_;
     }
-    [[nodiscard]] const std::string& action() const noexcept {
+    [[nodiscard]] std::string_view action() const noexcept {
         return action_;
     }
-    [[nodiscard]] const std::string& origin_group() const noexcept {
+    [[nodiscard]] std::string_view origin_group() const noexcept {
         return origin_group_;
     }
-    [[nodiscard]] const std::vector<std::string>& origin_ids() const noexcept {
+    [[nodiscard]] std::span<const std::string> origin_ids() const noexcept {
         return origin_ids_;
     }
-    [[nodiscard]] const std::string& redirect_url() const noexcept {
+    [[nodiscard]] const origin_plan& origins() const noexcept {
+        return *origin_plan_;
+    }
+    [[nodiscard]] std::string_view redirect_url() const noexcept {
         return redirect_url_;
     }
     [[nodiscard]] std::uint32_t redirect_status() const noexcept {
         return redirect_status_;
     }
-    [[nodiscard]] const std::string& rewritten_target() const noexcept {
-        return rewritten_target_;
+    [[nodiscard]] std::string_view rewritten_target() const noexcept {
+        return std::visit([](const auto& target) -> std::string_view { return target; },
+            rewritten_target_);
     }
-    [[nodiscard]] const std::vector<v2::HeaderMutation>& request_headers() const noexcept {
+    [[nodiscard]] std::span<const route_header_view> request_headers() const noexcept {
         return request_headers_;
     }
-    [[nodiscard]] const std::vector<v2::HeaderMutation>& response_headers() const noexcept {
+    [[nodiscard]] std::span<const route_header_view> response_headers() const noexcept {
         return response_headers_;
     }
 
-    std::string id_;
-    std::string action_{"proxy"};
-    std::string origin_group_;
-    std::vector<std::string> origin_ids_;
+    std::string_view id_;
+    std::string_view action_{"proxy"};
+    std::string_view origin_group_;
+    std::span<const std::string> origin_ids_;
+    const origin_plan* origin_plan_;
     std::string redirect_url_;
     std::uint32_t redirect_status_{};
-    std::string rewritten_target_;
-    std::vector<v2::HeaderMutation> request_headers_;
-    std::vector<v2::HeaderMutation> response_headers_;
+    std::variant<std::string_view, std::string> rewritten_target_;
+    std::vector<route_header_view> request_headers_;
+    std::vector<route_header_view> response_headers_;
 };
 
 namespace detail {
@@ -250,25 +284,31 @@ namespace detail {
 
 [[nodiscard]] inline std::string route_redirect_location(std::string_view target,
     const compiled_route_rule& rule) {
-    auto destination = rule.redirect_url_;
+    std::string_view destination = rule.redirect_url_;
+    std::optional<std::string> expanded;
     if (rule.match_ == route_match_kind::regex) {
-        auto expanded = expand_route_captures(rule.redirect_template_, target.substr(0, target.find('?')), *rule.pattern_);
+        expanded = expand_route_captures(rule.redirect_template_, target.substr(0, target.find('?')), *rule.pattern_);
         if (!expanded) {
             return {};
         }
-        destination = std::move(*expanded);
+        destination = *expanded;
     }
     return apply_route_query(destination, target, rule.query_, rule.query_string_);
 }
 
 }  // namespace detail
 
-// Each phase matches immutable input. Own the resolved policy through origin retries.
+// Each phase matches immutable input; retain the program and request through retries.
 [[nodiscard]] inline std::optional<evaluated_route_policy> evaluate_route_rules(
     const route_program& program, const v2::Website& website,
     std::string_view method, std::string_view target, std::string_view host = {},
     std::span<const std::pair<std::string_view, std::string_view>> headers = {}) {
     const auto& plan = program.website(website);
+    if (plan.rules_.empty()) {
+        evaluated_route_policy result(plan);
+        result.rewritten_target_ = target;
+        return result;
+    }
     const auto normalized_host = flexedge::route_policy::hostname(host);
     const detail::route_match_context incoming(method, target, normalized_host, headers);
     for (const auto index : plan.redirects_) {
@@ -280,15 +320,19 @@ namespace detail {
         if (location.empty()) {
             return std::nullopt;
         }
-        evaluated_route_policy result;
+        evaluated_route_policy result(plan);
         result.id_ = rule.id_;
         result.action_ = "redirect";
         result.redirect_url_ = std::move(location);
         result.redirect_status_ = rule.redirect_status_;
-        result.response_headers_ = rule.response_headers_;
+        result.response_headers_.reserve(rule.response_headers_.size());
+        for (const auto& mutation : rule.response_headers_) {
+            result.response_headers_.emplace_back(mutation);
+        }
         return result;
     }
-    std::string rewritten(target);
+    evaluated_route_policy result(plan);
+    result.rewritten_target_ = target;
     for (const auto index : plan.transforms_) {
         const auto& rule = plan.rules_[index];
         if (!detail::route_matches(rule, incoming)) {
@@ -299,38 +343,42 @@ namespace detail {
             if (!path) {
                 return std::nullopt;
             }
-            const auto candidate = detail::apply_route_query(*path, target, rule.query_, rule.query_string_);
+            auto candidate = detail::apply_route_query(*path, target, rule.query_, rule.query_string_);
             if (candidate.empty()) {
                 return std::nullopt;
             }
             // Every transform matches the original input; path changes retain the query
             // selected by an earlier rule instead of chaining transformations.
+            const auto rewritten = result.rewritten_target();
             const auto query_at = rewritten.find('?');
-            rewritten = candidate.substr(0, candidate.find('?')) +
-                        (query_at == std::string::npos ? "" : rewritten.substr(query_at));
+            const auto candidate_query = candidate.find('?');
+            if (candidate_query != std::string::npos) {
+                candidate.erase(candidate_query);
+            }
+            if (query_at != std::string_view::npos) {
+                candidate.append(rewritten.substr(query_at));
+            }
+            result.rewritten_target_ = std::move(candidate);
         }
         if (rule.query_ != detail::route_query_kind::preserve) {
-            rewritten = detail::apply_route_query(rewritten, target, rule.query_, rule.query_string_);
+            result.rewritten_target_ = detail::apply_route_query(
+                result.rewritten_target(), target, rule.query_, rule.query_string_);
         }
     }
-    evaluated_route_policy result;
-    result.action_ = "proxy";
-    result.origin_group_ = plan.default_origin_group_;
-    result.rewritten_target_ = std::move(rewritten);
     std::optional<detail::route_match_context> rewritten_context;
-    if (result.rewritten_target_ != target) {
-        rewritten_context.emplace(incoming.with_target(result.rewritten_target_));
+    if (result.rewritten_target() != target) {
+        rewritten_context.emplace(incoming.with_target(result.rewritten_target()));
     }
     const auto& proxy_context = rewritten_context ? *rewritten_context : incoming;
-    auto merge_headers = [](std::vector<v2::HeaderMutation>& destination, const auto& changes) {
+    auto merge_headers = [](std::vector<route_header_view>& destination, const auto& changes) {
         for (const auto& change : changes) {
             const auto found = std::ranges::find_if(destination, [&](const auto& existing) {
                 return flexedge::route_policy::ascii_equal(existing.name(), change.name());
             });
             if (found != destination.end()) {
-                *found = change;
+                *found = route_header_view(change);
             } else {
-                destination.push_back(change);
+                destination.emplace_back(change);
             }
         }
     };
@@ -342,6 +390,7 @@ namespace detail {
         result.id_ = rule.id_;
         result.origin_group_ = rule.origin_group_;
         result.origin_ids_ = rule.origin_ids_;
+        result.origin_plan_ = &plan.origin_plans_[rule.origin_plan_index_];
         merge_headers(result.request_headers_, rule.request_headers_);
         merge_headers(result.response_headers_, rule.response_headers_);
     }
