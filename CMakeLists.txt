@@ -415,7 +415,7 @@ if(BUILD_TESTING)
     set_tests_properties(flexedge_http2_runtime PROPERTIES TIMEOUT 60)
     flexedge_add_test(cache_migration
         SOURCES tests/cache_migration.cpp
-        LIBRARIES flexedge_route_policy ruvia::web)
+        LIBRARIES flexedge_route_policy ruvia::web OpenSSL::Crypto)
     set_tests_properties(flexedge_cache_migration PROPERTIES SKIP_RETURN_CODE 77)
     flexedge_add_test(origin_selection
         SOURCES tests/origin_selection.cpp

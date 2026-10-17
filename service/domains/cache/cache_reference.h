@@ -4,8 +4,21 @@
 
 #include "service/common/http.h"
 #include "service/domains/cache/cache_entity.h"
+#include "service/features/cache_config/defaults.h"
 #include "service/features/cache_config/mapper.h"
 namespace service::cache {
+// Called in the transaction that creates a tenant. Existing tenant policies are
+// seeded once by the installation migration, never reset by startup or reads.
+inline ruvia::task<void> create_default_policy(ruvia::db_transaction& db, const std::string& tenant) {
+    const auto config = ruvia::to_json(service::cache_config::to_dto(service::cache_config::default_policy()));
+    (void)co_await db.execute(
+        "INSERT INTO sys_cache_policy(tenant_id,name,description,status,is_builtin,config) "
+        "VALUES($1,$2,$3,'enabled',true,$4::jsonb) "
+        "ON CONFLICT(tenant_id,name) WHERE deleted_at IS NULL DO NOTHING",
+        tenant, service::cache_config::default_policy_name,
+        service::cache_config::default_policy_description, config);
+}
+
 // Policy mutation and website binding use the same transaction lock before
 // aggregate locks, so a concurrent delete or republish cannot miss a binding.
 inline ruvia::task<void> lock_bindings(ruvia::db_transaction& db, const std::string& tenant) {

@@ -18,6 +18,7 @@
 #include <asio/co_spawn.hpp>
 #include <asio/use_future.hpp>
 
+#include "service/domains/cache/cache_reference.h"
 #include "service/utils/password.h"
 #include "service/utils/sensitive_string.h"
 
@@ -78,10 +79,11 @@ inline ruvia::task<void> initialize(ruvia::db_client& database,
     }
 
     const auto password_hash = service::utils::hash_password(config->password());
-    (void)co_await transaction.execute(
+    const auto tenants = co_await transaction.query(
         "INSERT INTO sys_tenant (name, slug, status) VALUES ($1, "
-        "CONCAT('tenant-', LEFT(gen_random_uuid()::text, 12)), 'enabled')",
+        "CONCAT('tenant-', LEFT(gen_random_uuid()::text, 12)), 'enabled') RETURNING id",
         tenant_name);
+    co_await service::cache::create_default_policy(transaction, std::string(tenants.front()[0].value().value()));
     (void)co_await transaction.execute(
         "INSERT INTO sys_admin (username, password_hash, nickname, status) VALUES "
         "($1, $2, $3, 'enabled')",

@@ -133,17 +133,7 @@ export function CacheOperations({
       id: 'name',
       header: operation === 'clean' ? '缓存策略' : '网站',
       isRowHeader: true,
-      minWidth: 170,
-      cell: (item) => (
-        <Button
-          size='sm'
-          variant='tertiary'
-          className='justify-start px-0'
-          onPress={() => setDetail(item)}
-        >
-          {item.name || '已删除的资源'}
-        </Button>
-      ),
+      cell: (item) => <span>{item.name || '已删除的资源'}</span>,
     },
     {
       id: 'scope',
@@ -154,7 +144,6 @@ export function CacheOperations({
     {
       id: 'status',
       header: '状态',
-      minWidth: 100,
       cell: (item) => (
         <StatusChip
           {...describeStatus(taskStatuses, item.status)}
@@ -173,21 +162,27 @@ export function CacheOperations({
     {
       id: 'updated',
       header: '更新时间',
-      minWidth: 175,
       cell: (item) => formatDate(item.updated_at),
     },
     {
       id: 'error',
       header: '执行信息',
-      minWidth: 200,
       cell: (item) => <TruncatedText text={item.error} />,
     },
     {
       id: 'actions',
       header: '操作',
-      minWidth: 170,
       cell: (item) => (
         <div className='flex gap-1'>
+          <Button
+            size='sm'
+            variant='tertiary'
+            className='px-2'
+            aria-label={`查看执行详情${item.name || '已删除的资源'}`}
+            onPress={() => setDetail(item)}
+          >
+            详情
+          </Button>
           <LinkButton
             href={taskHref({ resourceType: 'cache', resourceId: item.id })}
             variant='tertiary'
@@ -285,7 +280,7 @@ export function CacheOperations({
               rows={7}
               hint={
                 scope === 'prefix'
-                  ? '每行一个完整URL目录，例如 https://example.com/static/，最多100项。'
+                  ? '每行一个完整URL目录，例如https://example.com/static/，最多100项。'
                   : '每行一个完整HTTP/HTTPS URL，最多100项，域名须属于所选网站。'
               }
               error={errors.urls}

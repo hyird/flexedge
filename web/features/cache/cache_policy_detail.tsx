@@ -135,29 +135,17 @@ function PolicyEditor({
     {
       id: 'order',
       header: '顺序',
-      width: 64,
       cell: (rule) => value.config.rules.indexOf(rule) + 1,
     },
     {
       id: 'name',
       header: '规则名称',
       isRowHeader: true,
-      minWidth: 160,
-      cell: (rule) => (
-        <Button
-          size='sm'
-          variant='tertiary'
-          className='justify-start px-0'
-          onPress={() => setEditing(rule)}
-        >
-          {rule.name}
-        </Button>
-      ),
+      cell: (rule) => <span>{rule.name}</span>,
     },
     {
       id: 'enabled',
       header: '状态',
-      minWidth: 85,
       cell: (rule) => (
         <Switch
           size='sm'
@@ -180,7 +168,6 @@ function PolicyEditor({
     {
       id: 'match',
       header: '匹配条件',
-      minWidth: 220,
       cell: (rule) => (
         <span
           className='block max-w-72 truncate'
@@ -199,7 +186,6 @@ function PolicyEditor({
     {
       id: 'ttl',
       header: '缓存时间',
-      minWidth: 130,
       cell: (rule) =>
         rule.action === 'bypass'
           ? '—'
@@ -210,11 +196,19 @@ function PolicyEditor({
     {
       id: 'actions',
       header: '操作',
-      minWidth: 135,
       cell: (rule) => {
         const index = value.config.rules.indexOf(rule)
         return (
           <div className='flex gap-1'>
+            <Button
+              size='sm'
+              variant='tertiary'
+              className='px-2'
+              aria-label={`编辑规则${rule.name}`}
+              onPress={() => setEditing(rule)}
+            >
+              编辑
+            </Button>
             <Button
               isIconOnly
               size='sm'
@@ -256,22 +250,28 @@ function PolicyEditor({
   return (
     <Page
       title={base.name}
-      description='网站直接应用此缓存策略，保存后统一分发。'
+      description={
+        base.is_builtin
+          ? '系统内置策略，支持编辑缓存配置，不允许改名或删除。'
+          : '网站直接应用此缓存策略，保存后统一分发。'
+      }
       actions={
         <>
           <StatusChip {...describeStatus(enablementStatuses, base.status)} />
           <LinkButton href='/cache' state={{ cache: { tab: 'policies' } }}>
             返回缓存中心
           </LinkButton>
-          <Button
-            size='sm'
-            variant='danger-soft'
-            isDisabled={dirty || draft.isSaving}
-            onPress={() => setRemoving(true)}
-          >
-            <TrashBin />
-            删除策略
-          </Button>
+          {!base.is_builtin && (
+            <Button
+              size='sm'
+              variant='danger-soft'
+              isDisabled={dirty || draft.isSaving}
+              onPress={() => setRemoving(true)}
+            >
+              <TrashBin />
+              删除策略
+            </Button>
+          )}
         </>
       }
     >
@@ -321,7 +321,12 @@ function PolicyEditor({
               ))}
           </Section>
         ) : tab === 'config' ? (
-          <CachePolicyFields value={value} onChange={change} errors={errors} />
+          <CachePolicyFields
+            value={value}
+            onChange={change}
+            errors={errors}
+            isBuiltin={base.is_builtin}
+          />
         ) : (
           <CachePolicyWebsites policyId={base.id} />
         )}

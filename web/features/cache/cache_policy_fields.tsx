@@ -34,10 +34,12 @@ export function CachePolicyFields({
   value,
   onChange,
   errors = {},
+  isBuiltin = false,
 }: {
   value: CachePolicyInput
   onChange: (value: CachePolicyInput) => void
   errors?: Record<string, string>
+  isBuiltin?: boolean
 }) {
   const config = value.config
   const change = (patch: Partial<typeof config>) =>
@@ -54,6 +56,8 @@ export function CachePolicyFields({
             required
             maxLength={100}
             value={value.name}
+            disabled={isBuiltin}
+            hint={isBuiltin ? '系统内置策略不允许改名或删除。' : undefined}
             onChange={(name) => onChange({ ...value, name })}
             error={errors.name}
           />
@@ -84,7 +88,7 @@ export function CachePolicyFields({
       </Section>
       <Section
         title='缓存存储'
-        description='容量按节点计算，同一节点上的所有网站与 Worker 共享策略容量。'
+        description='容量按节点计算，同一节点上的所有网站与Worker共享策略容量。'
       >
         <div className='grid gap-4 sm:grid-cols-2'>
           <Choice
@@ -127,7 +131,7 @@ export function CachePolicyFields({
                 label='缓存目录'
                 value={config.directory}
                 onChange={(directory) => change({ directory })}
-                hint='节点数据目录内的相对路径，例如 cache。'
+                hint='节点数据目录内的相对路径，例如cache。'
                 error={errors['config.directory']}
               />
             </>
@@ -155,10 +159,10 @@ function CacheCapacityFields({
   const label =
     kind === 'memory'
       ? config.storage === 'tiered'
-        ? 'L1 内存'
+        ? 'L1内存'
         : '内存'
       : config.storage === 'tiered'
-        ? 'L2 磁盘'
+        ? 'L2磁盘'
         : '磁盘'
   return (
     <div className='flex flex-col gap-4 rounded-xl border border-border p-4'>
@@ -202,7 +206,7 @@ function CacheCapacityFields({
         value={config[reserve]}
         onChange={(value) => change({ [reserve]: value })}
         error={errors[`config.${reserve}`]}
-        hint='达到预留线时停止新增并按 LRU 回收；其他进程的占用会影响实际可缓存容量。'
+        hint='达到预留线时停止新增并按LRU回收；其他进程的占用会影响实际可缓存容量。'
       />
     </div>
   )

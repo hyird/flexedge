@@ -658,6 +658,33 @@ $flexedge_cache$)sql"}});
 ALTER TABLE public.sys_website_access_log ADD COLUMN cache_status varchar(16) DEFAULT '' NOT NULL
 CHECK (cache_status IN ('','hit_memory','hit_disk','miss','bypass'));
 )sql"}});
+    // Freeze the seed payload in this migration so later default changes cannot
+    // alter its checksum. Existing names and subsequent user edits are preserved.
+    migrations.push_back(ruvia::db_migration{{.id_ = "0004_default_cache_policy", .sql_ = R"sql(DO $flexedge_default_cache$
+BEGIN
+ALTER TABLE public.sys_cache_policy ADD COLUMN is_builtin boolean DEFAULT false NOT NULL;
+ALTER TABLE public.sys_cache_policy ADD CONSTRAINT ck_cache_policy_builtin
+CHECK (NOT is_builtin OR (name='默认缓存策略' AND deleted_at IS NULL));
+CREATE UNIQUE INDEX uk_cache_policy_builtin ON public.sys_cache_policy(tenant_id) WHERE is_builtin;
+INSERT INTO public.sys_cache_policy(tenant_id,name,description,status,is_builtin,config)
+SELECT tenant.id, '默认缓存策略', '系统预置策略，可直接编辑。静态资源缓存一天。', 'enabled', true,
+$cache_config${
+  "storage":"tiered","memory_bytes":67108864,"disk_bytes":1073741824,
+  "memory_percent":10,"disk_percent":50,"memory_reserved_bytes":536870912,"disk_reserved_bytes":5368709120,
+  "max_object_bytes":16777216,"directory":"cache",
+  "rules":[{
+    "id":"cache-static","name":"静态资源缓存一天","enabled":true,"match_type":"extension",
+    "patterns":[".css",".js",".mjs",".jpg",".jpeg",".png",".gif",".webp",".avif",".svg",".ico",".woff",".woff2",".ttf",".otf"],
+    "action":"cache","ttl_mode":"fixed","ttl_seconds":86400,"ignore_query":false,
+    "methods":["GET","HEAD"],"status_codes":[200],"min_object_bytes":0,"max_object_bytes":0,
+    "skip_set_cookie":true,"browser_ttl_seconds":0
+  }]
+}$cache_config$::jsonb
+FROM public.sys_tenant AS tenant WHERE tenant.deleted_at IS NULL
+ON CONFLICT(tenant_id,name) WHERE deleted_at IS NULL DO UPDATE SET is_builtin=true;
+END;
+$flexedge_default_cache$;
+)sql"}});
     return migrations;
 }();
 

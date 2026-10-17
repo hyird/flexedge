@@ -76,7 +76,7 @@ export const cacheRuleSchema = z
         rule.match_type === 'extension' &&
         !/^\.[^/?#*\s.][^/?#*\s]*$/.test(pattern)
       )
-        issue('扩展名请填写 .js、.css 等格式')
+        issue('扩展名请填写 .js、.css等格式')
       if (rule.match_type === 'regex') {
         try {
           RE2JS.compile(pattern)
@@ -115,7 +115,7 @@ export const cacheConfigSchema = z
       ctx.addIssue({
         code: 'custom',
         path: ['memory_bytes'],
-        message: 'L1 内存容量必须大于0',
+        message: 'L1内存容量必须大于0',
       })
     const capacity =
       config.storage === 'memory' ? config.memory_bytes : config.disk_bytes
@@ -160,6 +160,7 @@ export const cachePolicyInputSchema = z.object({
 })
 export const cachePolicySchema = cachePolicyInputSchema.extend({
   id: z.string().uuid(),
+  is_builtin: z.boolean(),
   revision: z.number().int().positive(),
   website_count: z.number().int().nonnegative(),
   created_at: z.string(),
@@ -220,7 +221,7 @@ export const cacheOperationInputSchema = z
         ctx.addIssue({
           code: 'custom',
           path: ['urls'],
-          message: '请填写完整的 HTTP/HTTPS URL；目录不含查询参数',
+          message: '请填写完整的HTTP/HTTPS URL；目录不含查询参数',
         })
       }
     }
@@ -283,13 +284,6 @@ export function newCacheRule(): CacheRule {
 }
 export function defaultCacheRules(): CacheRule[] {
   return [
-    {
-      ...newCacheRule(),
-      name: '接口请求不缓存',
-      match_type: 'prefix',
-      patterns: ['/api/'],
-      action: 'bypass',
-    },
     {
       ...newCacheRule(),
       name: '静态资源缓存一天',

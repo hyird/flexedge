@@ -13,21 +13,11 @@ export function CachePolicyWebsites({ policyId }: { policyId: string }) {
       id: 'name',
       header: '网站名称',
       isRowHeader: true,
-      minWidth: 180,
-      cell: (item) => (
-        <LinkButton
-          href={'/websites/' + item.id}
-          variant='tertiary'
-          className='justify-start px-0'
-        >
-          {item.name}
-        </LinkButton>
-      ),
+      cell: (item) => <span>{item.name}</span>,
     },
     {
       id: 'domains',
       header: '域名',
-      minWidth: 220,
       cell: (item) => (
         <span
           className='block max-w-96 truncate'
@@ -46,6 +36,19 @@ export function CachePolicyWebsites({ policyId }: { policyId: string }) {
       id: 'cache',
       header: '缓存',
       cell: (item) => (item.cache_enabled ? '已启用' : '已关闭'),
+    },
+    {
+      id: 'actions',
+      header: '操作',
+      cell: (item) => (
+        <LinkButton
+          href={'/websites/' + item.id}
+          className='px-2'
+          aria-label={`查看网站${item.name}`}
+        >
+          详情
+        </LinkButton>
+      ),
     },
   ]
   return (

@@ -95,21 +95,11 @@ function CachePolicyList() {
       id: 'name',
       header: '策略名称',
       isRowHeader: true,
-      minWidth: 165,
-      cell: (item) => (
-        <LinkButton
-          href={'/cache/' + item.id}
-          variant='tertiary'
-          className='justify-start px-0 font-medium'
-        >
-          {item.name}
-        </LinkButton>
-      ),
+      cell: (item) => <span className='font-medium'>{item.name}</span>,
     },
     {
       id: 'status',
       header: '状态',
-      minWidth: 85,
       cell: (item) => (
         <StatusChip {...describeStatus(enablementStatuses, item.status)} />
       ),
@@ -125,7 +115,6 @@ function CachePolicyList() {
     {
       id: 'capacity',
       header: '容量 / 单对象',
-      minWidth: 240,
       cell: (item) => (
         <div className='flex flex-col gap-0.5 py-1 text-xs'>
           {item.config.storage !== 'disk' && (
@@ -155,8 +144,20 @@ function CachePolicyList() {
     {
       id: 'updated',
       header: '更新时间',
-      minWidth: 160,
       cell: (item) => formatDate(item.updated_at),
+    },
+    {
+      id: 'actions',
+      header: '操作',
+      cell: (item) => (
+        <LinkButton
+          href={'/cache/' + item.id}
+          className='px-2'
+          aria-label={`查看缓存策略${item.name}`}
+        >
+          详情
+        </LinkButton>
+      ),
     },
   ]
   return (
@@ -249,7 +250,7 @@ function CreatePolicy({ onClose }: { onClose: () => void }) {
     <FormSheet
       isOpen
       title='创建缓存策略'
-      description='预置接口绕过与静态资源缓存规则，创建后可调整顺序、条件和时间，再由网站应用。'
+      description='预置静态资源缓存规则，创建后可调整条件和时间，再由网站应用。'
       onClose={onClose}
       isSubmitting={mutation.isPending}
       onSubmit={(event) => {

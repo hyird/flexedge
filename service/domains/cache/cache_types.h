@@ -8,6 +8,7 @@ RUVIA_MODEL(policy_input, RUVIA_REQUIRED_FIELD(name, ruvia::string),
     RUVIA_REQUIRED_FIELD(config, service::cache_config::policy_dto));
 RUVIA_MODEL(policy_dto, RUVIA_REQUIRED_FIELD(id, ruvia::string), RUVIA_REQUIRED_FIELD(name, ruvia::string),
     RUVIA_REQUIRED_FIELD(description, ruvia::string), RUVIA_REQUIRED_FIELD(status, ruvia::string),
+    RUVIA_REQUIRED_FIELD(is_builtin, ruvia::bool_value),
     RUVIA_REQUIRED_FIELD(revision, ruvia::int64), RUVIA_REQUIRED_FIELD(config, service::cache_config::policy_dto),
     RUVIA_REQUIRED_FIELD(website_count, ruvia::int64), RUVIA_REQUIRED_FIELD(created_at, ruvia::string),
     RUVIA_REQUIRED_FIELD(updated_at, ruvia::string));

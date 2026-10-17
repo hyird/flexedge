@@ -86,6 +86,9 @@ public:
                 if (previous->template get<"revision">() != expected) {
                     service::common::throw_app_error(19004, "缓存策略已被修改，请重新加载", 412);
                 }
+                if (previous->template get<"is_builtin">() && previous->template get<"name">() != std::string_view(name)) {
+                    service::common::throw_app_error(19014, "系统内置缓存策略不允许改名", 409);
+                }
                 const auto previous_config = ruvia::to_json(service::cache_config::to_dto(service::cache_config::parse(previous->template get<"config">()), {}));
                 if (previous->template get<"name">() == std::string_view(name) && previous->template get<"description">() == std::string_view(description) && previous->template get<"status">() == std::string_view(status) && previous_config == config) {
                     co_await tx.commit();
@@ -131,6 +134,9 @@ public:
         if (previous->template get<"revision">() != expected) {
             service::common::throw_app_error(19004, "缓存策略已被修改，请重新加载", 412);
         }
+        if (previous->template get<"is_builtin">()) {
+            service::common::throw_app_error(19013, "系统内置缓存策略不能删除", 409);
+        }
         const auto references = co_await service::website::cache_policy_reference_count(tx, tenant, id);
         if (references > 0) {
             service::common::throw_app_error(19006, "策略仍被网站引用，解除引用后才能删除", 409);
@@ -146,6 +152,7 @@ private:
         result.set<"name">(row.template get<"name">());
         result.set<"description">(row.template get<"description">());
         result.set<"status">(row.template get<"status">());
+        result.set<"is_builtin">(row.template get<"is_builtin">());
         result.set<"revision">(row.template get<"revision">());
         result.set<"created_at">(row.template get<"created_at">());
         result.set<"updated_at">(row.template get<"updated_at">());

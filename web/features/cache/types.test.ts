@@ -56,7 +56,7 @@ describe('cache policy boundaries', () => {
     expect(first.memory_percent).toBe(10)
     expect(first.disk_percent).toBe(50)
     expect(first.disk_reserved_bytes).toBe(5 * 1024 ** 3)
-    expect(first.rules.map((rule) => rule.action)).toEqual(['bypass', 'cache'])
+    expect(first.rules.map((rule) => rule.action)).toEqual(['cache'])
     expect(first.rules[0].id).not.toBe(second.rules[0].id)
     expect(
       cacheConfigSchema.safeParse({ ...first, memory_percent: 101 }).success
