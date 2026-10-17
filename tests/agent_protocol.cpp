@@ -56,6 +56,18 @@ int main() {
         REQUIRE(!report.connected_ip_count_.has_value());
         REQUIRE(!report.cpu_count_ && !report.memory_total_bytes_ && !report.disk_total_bytes_);
         REQUIRE(!report.disk_usage_);
+        REQUIRE(!report.cache_memory_bytes_ && !report.cache_disk_bytes_);
+        heartbeat.set_cache_memory_bytes(0);
+        heartbeat.set_cache_disk_bytes(1ULL << 32);
+        REQUIRE(service::node_channel::valid_heartbeat(heartbeat));
+        const auto cache_report = service::node_channel::to_heartbeat_report(heartbeat);
+        REQUIRE(cache_report.cache_memory_bytes_ == 0 && cache_report.cache_disk_bytes_ == (1LL << 32));
+        heartbeat.set_cache_memory_bytes((std::numeric_limits<std::uint64_t>::max)());
+        REQUIRE(!service::node_channel::valid_heartbeat(heartbeat));
+        heartbeat.clear_cache_memory_bytes();
+        heartbeat.set_cache_disk_bytes((std::numeric_limits<std::uint64_t>::max)());
+        REQUIRE(!service::node_channel::valid_heartbeat(heartbeat));
+        heartbeat.clear_cache_disk_bytes();
         for (const auto ratio : {0.0, 0.5, 1.0}) {
             heartbeat.set_disk_usage(ratio);
             REQUIRE(service::node_channel::valid_heartbeat(heartbeat));

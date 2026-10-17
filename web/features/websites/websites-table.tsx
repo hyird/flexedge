@@ -199,7 +199,8 @@ export function WebsitesTable({
       header: <span className='sr-only'>操作</span>,
       cell: (website) => (
         <LinkButton
-          href={`/websites/${website.id}`}
+          href='/websites'
+          state={{ website: { id: website.id } }}
           className='px-2'
           aria-label={`网站 ${websiteName(website)} 的详情`}
         >

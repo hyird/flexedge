@@ -67,11 +67,11 @@ test('a task is addressed as <resource_type>:<resource_id> in the URL', () => {
 test('tasks link to their resource pages; providers open the list of resource_kind searched for the account', () => {
   expect(
     taskTarget({ ...task, resource_type: 'website', resource_id: 'w 1' })
-  ).toBe('/websites/w%201')
-  expect(taskTarget(task)).toBe('/dns-zones/zone-1')
+  ).toEqual({ href: '/websites', state: { website: { id: 'w 1' } } })
+  expect(taskTarget(task)).toEqual({ href: '/dns-zones/zone-1' })
   expect(
     taskTarget({ ...task, resource_type: 'node', resource_id: 'n1' })
-  ).toBe('/nodes/n1')
+  ).toEqual({ href: '/nodes/n1' })
   expect(
     taskTarget({
       ...task,
@@ -79,10 +79,16 @@ test('tasks link to their resource pages; providers open the list of resource_ki
       resource_kind: 'certificate',
       name: 'ZeroSSL',
     })
-  ).toBe('/providers/certificate?q=ZeroSSL')
+  ).toEqual({
+    href: '/providers?q=ZeroSSL',
+    state: { providers: { tab: 'certificate' } },
+  })
   expect(
     taskTarget({ ...task, resource_type: 'provider', resource_kind: 'dns' })
-  ).toBe('/providers/dns?q=a-z.xin')
+  ).toEqual({
+    href: '/providers?q=a-z.xin',
+    state: { providers: { tab: 'dns' } },
+  })
   expect(taskTarget({ ...task, resource_type: 'gateway' })).toBeUndefined()
 })
 
@@ -105,7 +111,7 @@ test('each task has at most one note, in priority order', () => {
   expect(taskNote({ ...task, status: 'failed' })).toBeNull()
 })
 
-test('recent tasks list active ones first, then by last update', () => {
+test('recent tasks use execution time regardless of status', () => {
   const at = (minute: number) => `2026-10-15T08:0${minute}:00.000000+00`
   const list = [
     { ...task, resource_id: 'old-done', updated_at: at(1) },
@@ -124,10 +130,10 @@ test('recent tasks list active ones first, then by last update', () => {
     },
   ]
   expect(recentTaskOrder(list).map((item) => item.resource_id)).toEqual([
-    'new-running',
-    'old-queued',
     'new-done',
+    'new-running',
     'old-done',
+    'old-queued',
   ])
 })
 

@@ -42,7 +42,8 @@ export function CachePolicyWebsites({ policyId }: { policyId: string }) {
       header: '操作',
       cell: (item) => (
         <LinkButton
-          href={'/websites/' + item.id}
+          href='/websites'
+          state={{ website: { id: item.id } }}
           className='px-2'
           aria-label={`查看网站${item.name}`}
         >

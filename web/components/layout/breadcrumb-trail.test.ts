@@ -23,20 +23,20 @@ describe('breadcrumb trail', () => {
     const matches = [
       { id: '/_authenticated', pathname: '/' },
       {
-        id: '/_authenticated/websites/$websiteId',
-        pathname: '/websites/w1',
+        id: '/_authenticated/websites/',
+        pathname: '/websites',
         breadcrumb: '网站详情',
       },
     ]
     expect(
       buildBreadcrumbTrail(
-        '/websites/w1',
+        '/websites',
         matches,
-        new Map([['/_authenticated/websites/$websiteId', 'QA网站']])
+        new Map([['/_authenticated/websites/', 'QA网站']])
       )
     ).toEqual([
       { key: '/websites', label: '网站', href: '/websites' },
-      { key: '/_authenticated/websites/$websiteId', label: 'QA网站' },
+      { key: '/_authenticated/websites/', label: 'QA网站' },
     ])
   })
 

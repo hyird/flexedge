@@ -138,6 +138,11 @@ public:
     basic_http_session& operator=(const basic_http_session&) = delete;
 
     ~basic_http_session() {
+        // All asynchronous owners have finished, including partial writes
+        // completed by cancellation. A long connection publishes one final log.
+        if (access_log_.streaming()) {
+            access_log_.record(access_log_.final_status(), proxied_response_bytes_, client_address_, end_reason_);
+        }
         if (client_key_) {
             context_.clients_.closed(*client_key_);
         }
@@ -172,11 +177,12 @@ public:
         }
     }
 
-    void close() noexcept {
+    void close(std::string_view reason = "shutdown") noexcept {
         if (closed_) {
             return;
         }
         closed_ = true;
+        end_reason_ = reason;
         if (cache_ticket_ && context_.cache_) {
             try {
                 context_.cache_->abandon(*cache_ticket_);
@@ -296,6 +302,7 @@ private:
         cancel_timer();
         discard_exchange();
         access_log_.response_head(bytes);
+        access_log_.first_byte();
         response_reservation_ = std::move(reservation);
         response_bytes_ = std::move(bytes);
         const auto self = this->shared_from_this();
@@ -784,6 +791,7 @@ private:
         }
         response_bytes_.append("\r\n");
         access_log_.response_head(response_bytes_);
+        access_log_.first_byte();
         cached_head_only_ = unchanged || cached_status_ == 416 || parsed.request().method() == "HEAD";
         if (cached_response_->file_ && !cached_response_->body_ && !cached_head_only_) {
             cached_file_.open(cached_response_->file_->path_, std::ios::binary);
@@ -885,7 +893,7 @@ private:
             if (action == timeout_action::failover) {
                 self->try_next_origin();
             } else {
-                self->close();
+                self->close("timeout");
             }
         });
     }
@@ -1034,6 +1042,10 @@ private:
             }
             self->current_health_.success(self->healthy_threshold_);
             self->tunnel_ = response.tunnel();
+            self->access_log_.response_status(status);
+            if (self->tunnel_) {
+                self->access_log_.websocket();
+            }
             self->relay_bytes_ = response.take_output();
             self->access_log_.response_head(self->relay_bytes_);
             self->relay_origin_bytes(attempt);
@@ -1048,8 +1060,6 @@ private:
             return;
         }
         if (tunnel_) {
-            access_log_.record(response.status_code().value_or(101),
-                proxied_response_bytes_, client_address_);
             start_tunnel(attempt);
         } else if (response.complete()) {
             if (cache_fill_) {
@@ -1061,8 +1071,8 @@ private:
             if (cache_prewarm_) {
                 send({}, status);
             } else {
-                access_log_.record(status, proxied_response_bytes_, client_address_);
-                close();
+                access_log_.record(status, proxied_response_bytes_, client_address_, "completed");
+                close("completed");
             }
         } else {
             read_origin_body(attempt);
@@ -1077,17 +1087,18 @@ private:
         }
         arm(read_timeout_, attempt, timeout_action::close);
         const auto self = this->shared_from_this();
+        access_log_.first_byte();
         asio::async_write(stream_, asio::buffer(relay_bytes_),
             [self, attempt](const std::error_code& error, std::size_t size) {
+                self->context_.metrics_.traffic_out(size);
+                self->proxied_response_bytes_ += size;
                 if (!self->origin_attempt_current(attempt)) {
                     return;
                 }
-                self->context_.metrics_.traffic_out(size);
-                self->proxied_response_bytes_ += size;
                 if (error) {
-                    self->access_log_.record(499, self->proxied_response_bytes_, self->client_address_);
+                    self->access_log_.record(499, self->proxied_response_bytes_, self->client_address_, "client_error");
                     self->log_client_io("client relay write failed", error);
-                    self->close();
+                    self->close("client_error");
                     return;
                 }
                 self->continue_origin_response(attempt);
@@ -1110,13 +1121,13 @@ private:
                     return;
                 }
                 self->log_io("origin response body read failed", error);
-                self->access_log_.record(502, self->proxied_response_bytes_, self->client_address_);
-                self->close();
+                self->access_log_.record(502, self->proxied_response_bytes_, self->client_address_, "origin_error");
+                self->close("origin_error");
                 return;
             }
             if (response.consume_body(bytes) != origin_response_body_status::accepted) {
                 self->log("origin response body parse failed");
-                self->close();
+                self->close("protocol_error");
                 return;
             }
             self->relay_bytes_ = response.take_output();
@@ -1128,6 +1139,7 @@ private:
         tunnel_state_ = std::make_unique<tunnel_state>();
         if (upgrade_requested_ && !request_reader_.unconsumed_bytes().empty()) {
             tunnel_state_->client_upgrade_remainder_.assign(request_reader_.unconsumed_bytes());
+            access_log_.request_bytes(tunnel_state_->client_upgrade_remainder_.size());
         }
         exchange_->enter_tunnel();
         cancel_timer();
@@ -1143,7 +1155,7 @@ private:
                     return;
                 }
                 if (error) {
-                    self->close();
+                    self->close("origin_error");
                     return;
                 }
                 self->tunnel_state_->client_upgrade_remainder_.clear();
@@ -1156,11 +1168,12 @@ private:
         const auto self = this->shared_from_this();
         stream_.async_read_some(asio::buffer(tunnel_state_->client_tunnel_buffer_),
             [self, attempt](const std::error_code& error, std::size_t size) {
+                self->access_log_.request_bytes(size);
                 if (!self->origin_attempt_current(attempt)) {
                     return;
                 }
                 if (error) {
-                    self->close();
+                    self->close(origin_closed(error) ? "client_closed" : "client_error");
                     return;
                 }
                 self->exchange_->write(
@@ -1170,7 +1183,7 @@ private:
                             return;
                         }
                         if (write_error) {
-                            self->close();
+                            self->close("origin_error");
                             return;
                         }
                         self->read_tunnel_client(attempt);
@@ -1185,17 +1198,18 @@ private:
                 return;
             }
             if (error) {
-                self->close();
+                self->close(origin_closed(error) ? "origin_closed" : "origin_error");
                 return;
             }
             asio::async_write(self->stream_, asio::buffer(bytes),
                 [self, attempt](const std::error_code& write_error, std::size_t size) {
+                    self->context_.metrics_.traffic_out(size);
+                    self->proxied_response_bytes_ += size;
                     if (!self->origin_attempt_current(attempt)) {
                         return;
                     }
-                    self->context_.metrics_.traffic_out(size);
                     if (write_error) {
-                        self->close();
+                        self->close("client_error");
                         return;
                     }
                     self->read_tunnel_origin(attempt);
@@ -1352,6 +1366,7 @@ private:
     bool closed_{};
     bool continue_sent_{};
     bool response_pending_{};
+    std::string_view end_reason_{"shutdown"};
 };
 
 }  // namespace flexedge::node

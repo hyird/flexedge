@@ -52,7 +52,8 @@ void verify_existing_tenants(const ruvia::db_config& base) {
     }) == 0,
         "prepare existing tenants");
     const auto applied = migrator.migrate(service::config::schema_migrations);
-    require(applied.applied().size() == 2, "default-policy and cache-reason migrations apply to existing installations");
+    require(applied.applied().size() == service::config::schema_migrations.size() - migrations.size(),
+        "remaining migrations apply to existing installations");
     require(database.run([&](ruvia::db_client& client) -> ruvia::task<void> {
         co_await client.connect();
         auto db = client.handle();
@@ -136,6 +137,8 @@ void verify_fresh_install(const ruvia::db_config& base) {
             "fresh installation policy has default rules");
         require(service::cache_config::parse(rows.front()[2].value().value()).max_object_bytes_ == 64 * 1024 * 1024,
             "fresh installation defaults to 64MiB cache objects");
+        require(service::cache_config::parse(rows.front()[2].value().value()).memory_percent_ == 50,
+            "fresh installation defaults to 50 percent L1 memory");
         require(rows.front()[3].as<bool>().value(), "fresh installation policy is built-in");
         co_await verify_protected_default(db);
         (void)co_await db.execute("UPDATE sys_cache_policy SET description='保留用户修改',status='disabled'");
@@ -156,6 +159,7 @@ void verify_cache_reason_rollback(const ruvia::db_config& base) {
     const test_support::postgres_test_database database(base);
     const ruvia::db_migrator migrator(database.config(), {.table_ = "schema_migrations"});
     auto previous = service::config::schema_migrations;
+    std::erase_if(previous, [](const auto& migration) { return migration.id() > "0005_access_log_cache_reason"; });
     const auto migration = previous.back();
     previous.pop_back();
     (void)migrator.migrate(previous);
@@ -172,7 +176,8 @@ void verify_cache_reason_rollback(const ruvia::db_config& base) {
     }) == 0,
         "cache-reason migration rollback");
     const auto applied = migrator.migrate(service::config::schema_migrations);
-    require(applied.applied().size() == 1, "cache-reason migration applies after rollback");
+    require(applied.applied().size() == service::config::schema_migrations.size() - previous.size(),
+        "remaining migrations apply after rollback");
     const auto repeated = migrator.migrate(service::config::schema_migrations);
     require(repeated.applied().empty(), "cache-reason migration repeats without changes");
 }

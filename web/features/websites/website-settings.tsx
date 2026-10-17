@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { getRouteApi, useNavigate } from '@tanstack/react-router'
+import { useNavigate } from '@tanstack/react-router'
 import { Chip, Skeleton, Tabs, useMediaQuery } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { useArrivalState } from '@/lib/history-state'
@@ -25,7 +25,7 @@ import {
 import { collectOriginGroups } from './origin-groups'
 import { initialRouteEditorView } from './route-tabs'
 import type { Website } from './types'
-import type { WebsiteArrival } from './website-context'
+import { useWebsite, type WebsiteArrival } from './website-context'
 import { DomainsSection } from './website-domain-section'
 import { validateWebsiteForm, type WebsiteFormValues } from './website-form'
 import {
@@ -55,8 +55,6 @@ import {
 } from './website-settings-sections'
 import { WebsiteCacheSection } from './website_cache_section'
 
-const settingsRoute = getRouteApi('/_authenticated/websites/$websiteId')
-
 const sectionComponents: Record<
   Exclude<WebsiteSectionId, 'routes'>,
   (props: WebsiteSectionProps) => ReactNode
@@ -75,7 +73,7 @@ const sectionComponents: Record<
 /** `/websites/$websiteId` settings tab. The group is component state; the
  * arrival may request one (`state.website.section`). */
 export function WebsiteSettingsPage({ initial }: { initial?: WebsiteArrival }) {
-  const { websiteId } = settingsRoute.useParams()
+  const { id: websiteId } = useWebsite()
   const [section, setSection] = useState(() =>
     websiteSectionFrom(initial?.section)
   )
@@ -88,7 +86,9 @@ export function WebsiteSettingsPage({ initial }: { initial?: WebsiteArrival }) {
         onRetry={() => void query.refetch()}
       />
     ) : (
-      <EditorSkeleton />
+      <SectionNav section={section} onChange={setSection} errorCounts={{}}>
+        <EditorSkeleton />
+      </SectionNav>
     )
   return (
     <WebsiteEditor
@@ -123,20 +123,10 @@ function EditorSkeleton() {
     <div
       aria-busy
       aria-label='正在加载网站配置'
-      className='grid gap-4 lg:grid-cols-[6rem_minmax(0,1fr)]'
+      className='flex flex-col gap-4'
     >
-      <div className='flex gap-2 lg:flex-col'>
-        {websiteSections.map((section) => (
-          <Skeleton
-            key={section.id}
-            className='h-8 w-20 rounded-lg lg:w-full'
-          />
-        ))}
-      </div>
-      <div className='flex flex-col gap-4'>
-        <Skeleton className='h-56 rounded-2xl' />
-        <Skeleton className='h-32 rounded-2xl' />
-      </div>
+      <Skeleton className='h-56 rounded-2xl' />
+      <Skeleton className='h-32 rounded-2xl' />
     </div>
   )
 }
@@ -273,8 +263,8 @@ function WebsiteEditor({
           resourceId: created.id,
         })
         void navigate({
-          to: '/websites/$websiteId',
-          params: { websiteId: created.id },
+          to: '/websites',
+          state: { website: { id: created.id } },
           ignoreBlocker: true,
         })
         return

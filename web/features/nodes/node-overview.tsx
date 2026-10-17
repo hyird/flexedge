@@ -221,6 +221,14 @@ export function NodeOverview() {
                 ),
               },
               {
+                label: 'L1内存缓存',
+                value: formatBytes(metrics.cache_memory_bytes),
+              },
+              {
+                label: 'L2磁盘缓存',
+                value: formatBytes(metrics.cache_disk_bytes),
+              },
+              {
                 label: '健康',
                 value:
                   metrics.health &&

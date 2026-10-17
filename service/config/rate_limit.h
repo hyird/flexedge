@@ -24,11 +24,11 @@ struct rate_limit_config final {
     rate_bucket_policy outbound_global_{8, std::chrono::seconds(1)};
     rate_bucket_policy outbound_account_{2, std::chrono::seconds(1)};
     std::chrono::milliseconds outbound_max_wait_{5000};
-    rate_bucket_policy api_global_{2000, std::chrono::seconds(1)};
-    rate_bucket_policy api_address_{120, std::chrono::seconds(1)};
-    rate_bucket_policy api_tenant_{500, std::chrono::seconds(1)};
-    rate_bucket_policy api_admin_{60, std::chrono::seconds(1)};
-    rate_bucket_policy auth_address_{20, std::chrono::minutes(1)};
+    rate_bucket_policy api_global_{2048, std::chrono::seconds(1)};
+    rate_bucket_policy api_address_{128, std::chrono::seconds(1)};
+    rate_bucket_policy api_tenant_{512, std::chrono::seconds(1)};
+    rate_bucket_policy api_admin_{64, std::chrono::seconds(1)};
+    rate_bucket_policy auth_address_{16, std::chrono::minutes(1)};
 };
 
 inline void validate_rate_bucket(const rate_bucket_policy& policy) {

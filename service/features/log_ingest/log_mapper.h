@@ -65,9 +65,17 @@ inline log_rows to_log_rows(const v2::QueuedLogDelivery& envelope, std::int64_t 
             row.set<"host">(access.host());
             row.set<"target">(access.target());
             row.set<"status_code">(static_cast<std::int32_t>(access.status_code()));
-            row.set<"request_bytes">(static_cast<std::int64_t>(access.request_bytes()));
-            row.set<"response_bytes">(static_cast<std::int64_t>(access.response_bytes()));
-            row.set<"duration_ms">(static_cast<std::int32_t>(access.duration_ms()));
+            row.set<"request_bytes">(static_cast<std::int64_t>(access.has_total_request_bytes() ? access.total_request_bytes() : access.request_bytes()));
+            row.set<"response_bytes">(static_cast<std::int64_t>(access.has_total_response_bytes() ? access.total_response_bytes() : access.response_bytes()));
+            row.set<"duration_ms">(static_cast<std::int64_t>(access.has_total_duration_ms() ? access.total_duration_ms() : access.duration_ms()));
+            row.set<"request_type">(access.request_type());
+            row.set<"end_reason">(access.end_reason());
+            if (access.started_unix_ms()) {
+                row.set<"started_at">(occurred_timestamp(access.started_unix_ms(), received_unix_ms));
+            }
+            if (access.has_first_byte_ms()) {
+                row.set<"first_byte_ms">(static_cast<std::int64_t>(access.first_byte_ms()));
+            }
             row.set<"user_agent">(access.user_agent());
             row.set<"referer">(access.referer());
             row.set<"request_headers">(access.request_headers());

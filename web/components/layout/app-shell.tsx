@@ -1,8 +1,8 @@
 import { type ReactNode, useState } from 'react'
 import { Outlet, useLocation } from '@tanstack/react-router'
-import { Globe } from '@gravity-ui/icons'
 import { AppLayout, Navbar, Sheet, Sidebar } from '@heroui-pro/react'
 import { Tooltip } from '@heroui/react'
+import { BrandMark } from '@/components/brand_mark'
 import { AppBreadcrumbs } from './app-breadcrumbs'
 import {
   BreadcrumbLabelContext,
@@ -95,9 +95,7 @@ function SidebarNavigation({
     <>
       <Sidebar.Header>
         <div className='flex items-center gap-2.5 px-1 py-1.5'>
-          <span className='flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent text-accent-foreground'>
-            <Globe className='size-4' />
-          </span>
+          <BrandMark />
           <span className='flex min-w-0 flex-col' data-sidebar='label'>
             <span className='text-sm leading-5 font-semibold'>FlexEdge</span>
             <span className='text-xs leading-4 text-muted'>边缘控制台</span>

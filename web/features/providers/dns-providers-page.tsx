@@ -25,7 +25,7 @@ import {
 } from './provider-display'
 import type { DnsProvider } from './types'
 
-const route = getRouteApi('/_authenticated/providers/dns')
+const route = getRouteApi('/_authenticated/providers')
 
 /** `/providers/dns`. Search, pagination and the add/edit sheets live in the
  * URL; the list is paged by the server. */

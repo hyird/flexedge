@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -94,6 +95,10 @@ public:
         std::string cache_status_{};
         std::string cache_reason_{};
         bool cache_revalidated_{};
+        std::string request_type_{};
+        std::uint64_t started_unix_ms_{};
+        std::optional<std::uint64_t> first_byte_ms_{};
+        std::string end_reason_{};
     };
 
     static constexpr std::size_t max_request_headers_bytes{log_contract::max_request_headers_bytes};
@@ -291,6 +296,9 @@ private:
     }
 
     static v2::LogEvent access_event(access_record record) {
+        const auto total_duration = (std::min)(record.duration_ms_, log_contract::max_connection_duration_ms);
+        const auto total_request = (std::min)(record.request_bytes_, log_contract::max_connection_bytes);
+        const auto total_response = (std::min)(record.response_bytes_, log_contract::max_connection_bytes);
         record = clamp(std::move(record));
         v2::LogEvent event;
         auto* value = event.mutable_access_log();
@@ -318,6 +326,17 @@ private:
         value->set_cache_status(record.cache_status_);
         value->set_cache_reason(record.cache_reason_);
         value->set_cache_revalidated(record.cache_revalidated_);
+        if (!record.request_type_.empty()) {
+            value->set_request_type(record.request_type_);
+            value->set_started_unix_ms(record.started_unix_ms_);
+            if (record.first_byte_ms_) {
+                value->set_first_byte_ms((std::min)(*record.first_byte_ms_, total_duration));
+            }
+            value->set_end_reason(record.end_reason_);
+            value->set_total_duration_ms(total_duration);
+            value->set_total_request_bytes(total_request);
+            value->set_total_response_bytes(total_response);
+        }
         return event;
     }
 

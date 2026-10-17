@@ -24,6 +24,18 @@ inline void fill_website_access_log(website_access_log_dto& item, const row_type
     item.set<"request_body_truncated">(row[17].template as<bool>().value_or(false));
     item.set<"cache_status">(row[22].value().value_or(""));
     item.set<"cache_reason">(row[23].value().value_or(""));
+    if (const auto value = row[24].value()) {
+        item.set<"request_type">(*value);
+    }
+    if (const auto value = row[25].value()) {
+        item.set<"started_at">(*value);
+    }
+    if (const auto value = row[26].template as<std::int64_t>()) {
+        item.set<"first_byte_ms">(*value);
+    }
+    if (const auto value = row[27].value()) {
+        item.set<"end_reason">(*value);
+    }
     if (const auto value = row[4].value()) {
         item.set<"client_ip">(*value);
         if (const auto location = service::geoip::get_xdb_database().lookup(*value)) {

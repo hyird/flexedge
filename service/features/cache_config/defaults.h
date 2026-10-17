@@ -13,7 +13,7 @@ inline constexpr std::string_view default_policy_description{
 // Initial values only: persisted policies own their configuration after creation.
 inline flexedge::cache::policy default_policy() {
     flexedge::cache::policy result;
-    result.memory_percent_ = 10;
+    result.memory_percent_ = 50;
     result.disk_percent_ = 50;
     result.memory_reserved_bytes_ = 512 * 1024 * 1024;
     result.disk_reserved_bytes_ = std::int64_t{5} * 1024 * 1024 * 1024;

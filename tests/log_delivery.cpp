@@ -117,7 +117,7 @@ ruvia::task<void> create_fixture(delivery_context& context) {
     auto db = context.db();
     (void)co_await db.execute("CREATE TABLE sys_node (id uuid, tenant_id uuid, cluster_id uuid, agent_id text, registration_status text, deleted_at timestamptz)");
     (void)co_await db.execute("CREATE TABLE sys_website (id uuid, tenant_id uuid, cluster_id uuid, deleted_at timestamptz)");
-    (void)co_await db.execute("CREATE TABLE sys_website_access_log (tenant_id uuid, occurred_at timestamptz, id uuid, node_id uuid, website_id uuid, client_ip varchar(64), protocol text, method text, host text, target text, status_code int, request_bytes bigint, response_bytes bigint, duration_ms bigint, user_agent text, referer text, request_headers text, request_body text, request_body_truncated bool, tls_fingerprint text, response_headers text, query_string text, cookies text, cache_status varchar(16) NOT NULL DEFAULT '', cache_reason varchar(64) NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tenant_id,occurred_at,id))");
+    (void)co_await db.execute("CREATE TABLE sys_website_access_log (tenant_id uuid, occurred_at timestamptz, id uuid, node_id uuid, website_id uuid, client_ip varchar(64), protocol text, method text, host text, target text, status_code int, request_bytes bigint, response_bytes bigint, duration_ms bigint, user_agent text, referer text, request_headers text, request_body text, request_body_truncated bool, tls_fingerprint text, response_headers text, query_string text, cookies text, cache_status varchar(16) NOT NULL DEFAULT '', cache_reason varchar(64) NOT NULL DEFAULT '', request_type varchar(16) NOT NULL DEFAULT '', started_at timestamptz, first_byte_ms bigint, end_reason varchar(32) NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tenant_id,occurred_at,id))");
     (void)co_await db.execute("CREATE TABLE sys_node_log (tenant_id uuid, occurred_at timestamptz, id uuid, node_id uuid, level text, category text, message text, created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tenant_id,occurred_at,id))");
     (void)co_await db.execute("CREATE TABLE sys_notification_outbox (id varchar(64) PRIMARY KEY, kind varchar(24) NOT NULL, payload text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), available_at timestamptz NOT NULL DEFAULT now(), attempts integer NOT NULL DEFAULT 0)");
     (void)co_await db.execute("INSERT INTO sys_node VALUES($1,$2,'a2d6e77d-4a0c-4796-93d5-755d3c6d3837',$3,'registered',NULL)", node_id, tenant_id, agent_id);
@@ -184,6 +184,10 @@ ruvia::task<void> verify_batch_ownership(delivery_context& context) {
     access->set_cache_status("hit_disk");
     access->set_cache_reason("origin_not_modified");
     access->set_cache_revalidated(true);
+    access->set_request_type("websocket");
+    access->set_started_unix_ms(access->occurred_unix_ms() - 1000);
+    access->set_first_byte_ms(0);
+    access->set_end_reason("origin_closed");
     const auto first_access = batch.events(0);
     const auto first_node = batch.events(1);
     *batch.add_events() = first_access;
@@ -198,6 +202,8 @@ ruvia::task<void> verify_batch_ownership(delivery_context& context) {
     const auto entry = co_await append(context, payload);
     require(co_await persist(context, entry) == 1, "one mixed batch persists every distinct row, ignoring duplicates within the batch");
     co_await check_counts(context, 3, 2, 3);
+    const auto connection = co_await db.query("SELECT request_type,started_at IS NOT NULL,first_byte_ms,end_reason FROM sys_website_access_log WHERE id=$1", first_access.access_log().id());
+    require(connection.front()[0].value() == "websocket" && connection.front()[1].as<bool>() == true && connection.front()[2].as<std::int64_t>() == 0 && connection.front()[3].value() == "origin_closed", "connection metadata survives persistence and a measured zero is not missing");
     const auto stored = co_await db.query("SELECT request_bytes,response_bytes,duration_ms,user_agent,referer,request_headers,request_body,request_body_truncated,tls_fingerprint,response_headers,query_string,cookies,round(extract(epoch FROM occurred_at)*1000)::bigint,created_at IS NOT NULL FROM sys_website_access_log WHERE id=$1", first_access.access_log().id());
     const auto& expected = first_access.access_log();
     const auto cache_status = co_await db.query("SELECT cache_status,cache_reason FROM sys_website_access_log WHERE id=$1", first_access.access_log().id());

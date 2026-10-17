@@ -49,7 +49,7 @@ public:
     }
 };
 
-using access_log_row = std::array<access_log_field, 24>;
+using access_log_row = std::array<access_log_field, 28>;
 
 access_log_row make_row(std::optional<std::string> client_ip) {
     access_log_row row{};
@@ -124,6 +124,17 @@ void verify_with_xdb() {
 }
 
 void verify_missing_xdb() {
+    auto connection = make_row("192.0.2.1");
+    connection[24].text_ = "websocket";
+    connection[25].text_ = "2026-10-14T07:59:00.000000+00";
+    connection[26].text_ = "0";
+    connection[27].text_ = "origin_closed";
+    service::website::website_access_log_dto item;
+    service::website::fill_website_access_log(item, connection);
+    const auto details = std::string(ruvia::to_json(item));
+    require(contains(details, "\"first_byte_ms\":0"), "a measured zero first-byte time is retained");
+    require(contains(details, "\"request_type\":\"websocket\""), "connection type is retained");
+    require(contains(details, "\"end_reason\":\"origin_closed\""), "end reason is retained");
     require(!service::geoip::get_xdb_database().available(), "absent XDB paths loaded a database");
     const auto json = map_to_json("1.2.3.4");
     require(contains(json, "\"cache_status\":\"hit_disk\""), "cache tier must be present independently of response headers");

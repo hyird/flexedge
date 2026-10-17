@@ -45,6 +45,12 @@ void set_reported_runtime(runtime_model& runtime, const heartbeat_report& report
     if (report.disk_usage_) {
         runtime.template set<"disk_usage">(*report.disk_usage_);
     }
+    if (report.cache_memory_bytes_) {
+        runtime.template set<"cache_memory_bytes">(*report.cache_memory_bytes_);
+    }
+    if (report.cache_disk_bytes_) {
+        runtime.template set<"cache_disk_bytes">(*report.cache_disk_bytes_);
+    }
     runtime.template set<"traffic_out_bps">(report.traffic_out_bps_);
     runtime.template set<"connection_count">(report.connection_count_);
     if (report.connected_ip_count_) {

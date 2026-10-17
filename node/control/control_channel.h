@@ -203,6 +203,8 @@ private:
         if (report.load_) {
             value->set_connection_count(report.load_->connection_count_);
             value->set_connected_ip_count(report.load_->connected_ip_count_);
+            value->set_cache_memory_bytes(report.cache_memory_bytes_);
+            value->set_cache_disk_bytes(report.cache_disk_bytes_);
         }
         value->set_load_1m(metrics.load1m_);
         value->set_health(

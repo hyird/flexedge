@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getRouteApi } from '@tanstack/react-router'
 import {
   ArrowLeft,
   FileText,
@@ -42,8 +41,6 @@ import { WebsiteLifecycleActions } from './website-lifecycle-actions'
 import { WebsiteOverview } from './website-overview'
 import { WebsiteSettingsPage } from './website-settings'
 
-const route = getRouteApi('/_authenticated/websites/$websiteId')
-
 const tabItems = [
   { id: 'overview', label: '概览', icon: <LayoutHeaderCells /> },
   { id: 'logs', label: '访问日志', icon: <FileText /> },
@@ -60,8 +57,7 @@ const tabItems = [
  * their own stream, so the header reads the detail once (or reuses the last
  * live frame) and `afterWebsiteWrite` invalidates it after writes. Only the
  * selected tab is mounted, so leaving a tab closes its stream. */
-export function WebsiteDetailLayout() {
-  const { websiteId } = route.useParams()
+export function WebsiteDetailLayout({ websiteId }: { websiteId: string }) {
   const [view, setView, arrivalKey] = useArrivalState<{
     tab: WebsiteDetailTab
     initial?: WebsiteArrival
@@ -80,6 +76,10 @@ export function WebsiteDetailLayout() {
       ? websiteOverviewQuery(websiteId)
       : websiteDetailQuery(websiteId)),
     enabled: liveTab,
+    // Tab streams share the same website contract. Keep its header mounted
+    // while the next stream opens, without borrowing another website's data.
+    placeholderData: (previous) =>
+      previous?.id === websiteId ? previous : undefined,
   })
   const dashboard = useQuery({
     ...websiteDashboardQuery(websiteId),
@@ -96,7 +96,9 @@ export function WebsiteDetailLayout() {
   // After a confirmed delete the stream reports "not found" before navigation
   // settles; keep showing the last snapshot instead of flashing that state.
   const [deleted, setDeleted] = useState(false)
-  const website = query.data
+  // A cold stream may not have delivered its first frame when the user returns
+  // from logs. The one-off snapshot still owns the same website's header.
+  const website = query.data ?? (liveTab ? snapshot.data : live.data)
   useBreadcrumbLabel(website ? websiteName(website) : undefined)
 
   if (!deleted && query.isError && isWebsiteNotFound(query.error))
@@ -111,42 +113,29 @@ export function WebsiteDetailLayout() {
         />
       </Page>
     )
-  if (!website)
-    return (
-      <Page>
-        {query.isError ? (
-          <QueryNotice
-            query={query}
-            onRetry={() => void query.refetch()}
-            title='网站加载失败'
-          />
-        ) : (
-          <DetailSkeleton />
-        )}
-      </Page>
-    )
-
-  const name = websiteName(website)
   const tabKey = `${arrivalKey}:${tab}`
-  const content =
-    tab === 'overview' ? (
-      <WebsiteOverview key={tabKey} dashboard={dashboard} />
-    ) : tab === 'logs' ? (
-      <AccessLogs key={tabKey} />
+  const content = !website ? (
+    query.isError ? (
+      <QueryNotice
+        query={query}
+        onRetry={() => void query.refetch()}
+        title='网站加载失败'
+      />
     ) : (
-      <WebsiteSettingsPage key={tabKey} initial={view.initial} />
+      <DetailSkeleton />
     )
-  return (
-    <WebsiteContext
-      value={{
-        website,
-        openTab,
-        markDeleted: () => setDeleted(true),
-      }}
-    >
-      <Page fit={tab === 'logs'}>
+  ) : tab === 'overview' ? (
+    <WebsiteOverview key={tabKey} dashboard={dashboard} />
+  ) : tab === 'logs' ? (
+    <AccessLogs key={tabKey} />
+  ) : (
+    <WebsiteSettingsPage key={tabKey} initial={view.initial} />
+  )
+  const page = (
+    <Page fit={tab === 'logs'}>
+      {website ? (
         <DetailHeader
-          title={name}
+          title={websiteName(website)}
           status={
             <StatusChip
               {...describeStatus(enablementStatuses, website.status)}
@@ -180,39 +169,42 @@ export function WebsiteDetailLayout() {
             </>
           }
         />
-        {!deleted && (
-          <QueryNotice
-            query={query}
-            onRetry={() => void query.refetch()}
-            title={liveTab ? '实时状态已中断' : '网站信息刷新失败'}
-          />
-        )}
-        <PageTabs
-          fit={tab === 'logs'}
-          label='网站详情'
-          items={tabItems}
-          selected={tab}
-          guard={tabGuard}
-          onSelectionChange={(next) =>
-            setView({ tab: next, initial: undefined })
-          }
-        >
-          {content}
-        </PageTabs>
-      </Page>
+      ) : (
+        <DetailHeaderSkeleton />
+      )}
+      {website && !deleted && (
+        <QueryNotice
+          query={query}
+          onRetry={() => void query.refetch()}
+          title={liveTab ? '实时状态已中断' : '网站信息刷新失败'}
+        />
+      )}
+      <PageTabs
+        fit={tab === 'logs'}
+        label='网站详情'
+        items={tabItems}
+        selected={tab}
+        guard={tabGuard}
+        onSelectionChange={(next) => setView({ tab: next, initial: undefined })}
+      >
+        {content}
+      </PageTabs>
+    </Page>
+  )
+  return website ? (
+    <WebsiteContext
+      value={{ website, openTab, markDeleted: () => setDeleted(true) }}
+    >
+      {page}
     </WebsiteContext>
+  ) : (
+    page
   )
 }
 
 function DetailSkeleton() {
   return (
     <div className='flex flex-col gap-6'>
-      <DetailHeaderSkeleton />
-      <div className='flex gap-4'>
-        {Array.from({ length: 4 }, (_, index) => (
-          <Skeleton key={index} className='h-8 w-20 rounded-md' />
-        ))}
-      </div>
       <div className='grid gap-4 sm:grid-cols-3'>
         {Array.from({ length: 3 }, (_, index) => (
           <Skeleton key={index} className='h-28 rounded-2xl' />

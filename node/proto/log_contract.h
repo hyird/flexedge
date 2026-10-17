@@ -27,5 +27,7 @@ inline constexpr std::size_t max_node_message_bytes{2000};
 inline constexpr std::uint64_t max_request_bytes{2ull * 1024ull * 1024ull};
 inline constexpr std::uint64_t max_response_bytes{1024ull * 1024ull * 1024ull * 1024ull};
 inline constexpr std::uint64_t max_duration_ms{24ull * 60ull * 60ull * 1000ull};
+inline constexpr std::uint64_t max_connection_duration_ms{365ull * 24ull * 60ull * 60ull * 1000ull};
+inline constexpr std::uint64_t max_connection_bytes{1024ull * 1024ull * 1024ull * 1024ull};
 
 }  // namespace flexedge::node::log_contract

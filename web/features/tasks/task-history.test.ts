@@ -191,7 +191,7 @@ test('unknown values and a malformed detail only affect their own attempt', () =
   )
   // Every attempt renders in one list, titled with its operation.
   for (const number of [4, 3, 2, 1])
-    expect(html).toContain(`第 ${number} 次 · 同步`)
+    expect(html).not.toContain(`第 ${number} 次`)
   expect(html).toContain('aria-label="执行记录"')
   // Unknown outcome / phase / domain status show their raw values.
   expect(html).toContain('cancelled')
@@ -368,7 +368,8 @@ test('a folded failure run shows only its newest timeline until opened', () => {
   const html = renderToStaticMarkup(
     createElement(QueryClientProvider, { client }, panel)
   )
-  expect(html).toContain('第 1–3 次')
+  expect(html).not.toContain('第 1–3 次')
+  expect(html).toContain('>同步</h3>')
   expect(html).toContain('展开 3 次尝试')
   expect(html).toContain('查找区域 3')
   expect(html).not.toContain('查找区域 2')

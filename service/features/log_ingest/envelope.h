@@ -44,6 +44,12 @@ inline bool valid_access(const flexedge::node::v2::AccessLog& value) {
            value.request_bytes() <= flexedge::node::log_contract::max_request_bytes &&
            value.response_bytes() <= flexedge::node::log_contract::max_response_bytes &&
            value.duration_ms() <= flexedge::node::log_contract::max_duration_ms &&
+           (!value.has_total_duration_ms() || value.total_duration_ms() <= flexedge::node::log_contract::max_connection_duration_ms) &&
+           (!value.has_total_request_bytes() || value.total_request_bytes() <= flexedge::node::log_contract::max_connection_bytes) &&
+           (!value.has_total_response_bytes() || value.total_response_bytes() <= flexedge::node::log_contract::max_connection_bytes) &&
+           (!value.has_first_byte_ms() || value.first_byte_ms() <= (value.has_total_duration_ms() ? value.total_duration_ms() : value.duration_ms())) &&
+           (value.request_type().empty() || value.request_type() == "http" || value.request_type() == "sse" || value.request_type() == "websocket") &&
+           (value.end_reason().empty() || value.end_reason() == "completed" || value.end_reason() == "client_closed" || value.end_reason() == "origin_closed" || value.end_reason() == "client_error" || value.end_reason() == "origin_error" || value.end_reason() == "protocol_error" || value.end_reason() == "timeout" || value.end_reason() == "shutdown") &&
            bounded(value.user_agent(), flexedge::node::log_contract::max_user_agent_bytes) &&
            bounded(value.referer(), flexedge::node::log_contract::max_referer_bytes) &&
            bounded(value.request_headers(),

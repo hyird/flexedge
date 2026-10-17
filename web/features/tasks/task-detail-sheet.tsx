@@ -91,7 +91,11 @@ function TaskHeader({ task }: { task: Task }) {
     <div className='flex min-w-0 flex-col gap-1 text-sm'>
       <p className='m-0 flex min-w-0 items-center gap-1.5 overflow-x-auto whitespace-nowrap text-muted'>
         {target ? (
-          <Link href={target} className='min-w-0 truncate text-sm'>
+          <Link
+            href={target.href}
+            routerOptions={target.state && { state: target.state }}
+            className='min-w-0 truncate text-sm'
+          >
             {task.name}
           </Link>
         ) : (

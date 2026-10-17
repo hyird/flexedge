@@ -17,6 +17,8 @@ inline heartbeat_report to_heartbeat_report(const flexedge::node::v2::Heartbeat&
         .memory_total_bytes_ = value.has_memory_total_bytes() ? std::optional<std::int64_t>(value.memory_total_bytes()) : std::nullopt,
         .disk_total_bytes_ = value.has_disk_total_bytes() ? std::optional<std::int64_t>(value.disk_total_bytes()) : std::nullopt,
         .disk_usage_ = value.has_disk_usage() ? std::optional<double>(value.disk_usage()) : std::nullopt,
+        .cache_memory_bytes_ = value.has_cache_memory_bytes() ? std::optional<std::int64_t>(value.cache_memory_bytes()) : std::nullopt,
+        .cache_disk_bytes_ = value.has_cache_disk_bytes() ? std::optional<std::int64_t>(value.cache_disk_bytes()) : std::nullopt,
         .traffic_out_bps_ = value.traffic_out_bps(),
         .connection_count_ = value.connection_count(),
         .connected_ip_count_ = value.has_connected_ip_count()

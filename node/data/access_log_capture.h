@@ -4,12 +4,14 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 
 #include "common/route_policy.h"
 #include "node/data/http1_request_reader.h"
+#include "node/data/http_content_type.h"
 #include "node/proto/edge_control.pb.h"
 #include "node/runtime/log_producer.h"
 
@@ -28,6 +30,27 @@ public:
         method_.assign(parsed.request().method());
         target_.assign(parsed.request().target());
         host_.assign(host);
+    }
+
+    void first_byte() noexcept {
+        if (!first_byte_ms_) {
+            first_byte_ms_ = elapsed_ms();
+        }
+    }
+    void websocket() noexcept {
+        request_type_ = "websocket";
+    }
+    void response_status(std::uint32_t value) noexcept {
+        response_status_ = value;
+    }
+    [[nodiscard]] std::uint32_t final_status() const noexcept {
+        return response_status_ ? response_status_ : 499;
+    }
+    [[nodiscard]] bool streaming() const noexcept {
+        return request_type_ != "http";
+    }
+    void request_bytes(std::uint64_t bytes) noexcept {
+        request_body_bytes_ += bytes;
     }
 
     void website(const http1_request_reader& parsed, const v2::Website& website) {
@@ -56,20 +79,37 @@ public:
 
     // `wire` starts with the HTTP/1.1 response head sent to the client.
     void response_head(std::string_view wire) {
+        auto fields = response_fields(wire);
+        auto remaining = fields;
+        while (!remaining.empty()) {
+            const auto end = remaining.find("\r\n");
+            const auto line = remaining.substr(0, end);
+            const auto colon = line.find(':');
+            if (colon != std::string_view::npos &&
+                flexedge::route_policy::ascii_equal(line.substr(0, colon), "Content-Type") &&
+                is_event_stream_content_type(line.substr(colon + 1))) {
+                request_type_ = "sse";
+            }
+            if (end == std::string_view::npos) {
+                break;
+            }
+            remaining.remove_prefix(end + 2);
+        }
         if (!response_headers_enabled_ || !response_headers_.empty()) {
             return;
         }
-        response_headers_ = header_block(response_fields(wire), log_producer::max_response_headers_bytes);
+        response_headers_ = header_block(fields, log_producer::max_response_headers_bytes);
     }
 
     void record(std::uint32_t status_code, std::uint64_t response_bytes,
-        std::string_view client_ip) noexcept {
+        std::string_view client_ip, std::string_view end_reason = "completed") noexcept {
+        if (streaming() && response_status_) {
+            status_code = response_status_;
+        }
         if (recorded_ || !enabled_ || website_id_.empty() || !status_code_enabled(status_code)) {
             return;
         }
         recorded_ = true;
-        const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - started_at_);
         try {
             logs_.access({
                 .website_id_ = website_id_,
@@ -81,8 +121,7 @@ public:
                 .status_code_ = status_code,
                 .request_bytes_ = request_body_bytes_,
                 .response_bytes_ = response_bytes,
-                .duration_ms_ = duration.count() < 0 ? std::uint64_t{}
-                                                     : static_cast<std::uint64_t>(duration.count()),
+                .duration_ms_ = elapsed_ms(),
                 .user_agent_ = user_agent_,
                 .referer_ = referer_,
                 .request_headers_ = request_headers_,
@@ -95,6 +134,10 @@ public:
                 .cache_status_ = cache_status_,
                 .cache_reason_ = cache_reason_,
                 .cache_revalidated_ = cache_revalidated_,
+                .request_type_ = std::string(request_type_),
+                .started_unix_ms_ = started_unix_ms_,
+                .first_byte_ms_ = first_byte_ms_,
+                .end_reason_ = std::string(end_reason),
             });
         } catch (...) {
             // A record that cannot be queued is dropped like one rejected by a full buffer.
@@ -102,6 +145,12 @@ public:
     }
 
 private:
+    [[nodiscard]] std::uint64_t elapsed_ms() const noexcept {
+        const auto value = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started_at_)
+                               .count();
+        return value < 0 ? 0 : static_cast<std::uint64_t>(value);
+    }
     static void append_bounded(std::string& result, std::string_view value, std::size_t maximum) {
         if (result.size() < maximum) {
             result.append(value.substr(0, maximum - result.size()));
@@ -220,6 +269,10 @@ private:
 
     log_producer& logs_;
     std::chrono::steady_clock::time_point started_at_{std::chrono::steady_clock::now()};
+    std::uint64_t started_unix_ms_{static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count())};
+    std::optional<std::uint64_t> first_byte_ms_{};
+    std::string_view request_type_{"http"};
+    std::uint32_t response_status_{};
     std::string website_id_;
     std::string method_;
     std::string target_;

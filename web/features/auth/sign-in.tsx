@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { Button } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
+import { BrandMark } from '@/components/brand_mark'
 import { Field, Notice } from '@/components/forms'
 import { login } from './data'
 import styles from './sign-in.module.css'
@@ -41,7 +42,15 @@ export function SignInPage() {
     <main className='relative isolate flex min-h-dvh items-center justify-center bg-background px-5 py-12 sm:px-8'>
       <div aria-hidden='true' className={styles.background} />
       <div className='relative flex w-full max-w-sm flex-col gap-8'>
-        <h1 className='page-title'>登录</h1>
+        <div className='flex flex-col gap-6'>
+          <div className='flex items-center gap-3'>
+            <BrandMark className='size-11' />
+            <span className='text-xl font-semibold tracking-tight'>
+              FlexEdge
+            </span>
+          </div>
+          <h1 className='page-title'>登录</h1>
+        </div>
         <form onSubmit={submit} className='flex flex-col gap-4' noValidate>
           <Notice>{error}</Notice>
           <Field

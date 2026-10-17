@@ -23,6 +23,7 @@ struct node_runtime_data final {
     std::optional<std::int64_t> memory_total_bytes_;
     std::optional<std::int64_t> disk_total_bytes_;
     std::optional<double> disk_usage_{};
+    std::optional<std::int64_t> cache_memory_bytes_{}, cache_disk_bytes_{};
     std::optional<std::int64_t> traffic_out_bps_;
     std::optional<std::int64_t> connection_count_;
     std::optional<std::int64_t> connected_ip_count_;

@@ -257,7 +257,7 @@ function AttemptBody({
   return (
     <>
       <AttemptHeader
-        title={`第 ${attempt.attempt} 次 · ${operationLabel(attempt.operation)}`}
+        title={operationLabel(attempt.operation)}
         outcome={attempt.outcome}
         aside={<AttemptMeta attempt={attempt} />}
       />
@@ -294,11 +294,10 @@ function AttemptRun({
 }) {
   const [expanded, setExpanded] = useState(false)
   const newest = attempts[0]
-  const oldest = attempts[attempts.length - 1]
   return (
     <li className={attemptRow}>
       <AttemptHeader
-        title={`第 ${oldest.attempt}–${newest.attempt} 次 · ${operationLabel(newest.operation)}`}
+        title={operationLabel(newest.operation)}
         outcome='failed'
         aside={
           <AttemptMeta attempt={newest} extra={`共 ${attempts.length} 次`} />
@@ -325,7 +324,7 @@ function AttemptRun({
                 read only once they can be seen. */}
             {expanded && (
               <ol
-                aria-label={`第 ${oldest.attempt}–${newest.attempt} 次尝试`}
+                aria-label='执行记录'
                 className='m-0 mt-1 flex list-none flex-col gap-3 p-0 pl-3'
               >
                 {attempts.map((attempt, index) => (
@@ -335,7 +334,7 @@ function AttemptRun({
                   >
                     <div className='flex min-w-0 items-center justify-between gap-3 text-xs'>
                       <span className='font-medium'>
-                        第 {attempt.attempt} 次
+                        {operationLabel(attempt.operation)}
                       </span>
                       <span className='text-muted tabular-nums'>
                         <AttemptMeta attempt={attempt} />

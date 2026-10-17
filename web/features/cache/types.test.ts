@@ -90,7 +90,7 @@ describe('cache policy boundaries', () => {
   it('uses percentage budgets and independent editable default rules', () => {
     const first = defaultCacheConfig(),
       second = defaultCacheConfig()
-    expect(first.memory_percent).toBe(10)
+    expect(first.memory_percent).toBe(50)
     expect(first.disk_percent).toBe(50)
     expect(first.disk_reserved_bytes).toBe(5 * 1024 ** 3)
     expect(first.rules.map((rule) => rule.action)).toEqual(['cache'])

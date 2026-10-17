@@ -25,7 +25,7 @@ import {
 } from './provider-display'
 import type { CertificateProvider } from './types'
 
-const route = getRouteApi('/_authenticated/providers/certificate')
+const route = getRouteApi('/_authenticated/providers')
 
 /** `/providers/certificate`. Search, pagination and add/edit sheets live in
  * the URL; GET and live snapshots use the same server-side page. */

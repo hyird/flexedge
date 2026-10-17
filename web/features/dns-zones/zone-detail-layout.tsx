@@ -1,6 +1,6 @@
 import { useNavigate } from '@tanstack/react-router'
 import { ArrowLeft, TrashBin } from '@gravity-ui/icons'
-import { Button } from '@heroui/react'
+import { Button, Skeleton } from '@heroui/react'
 import { useArrivalState } from '@/lib/history-state'
 import { describeStatus } from '@/lib/status'
 import { useTabSwitchGuard } from '@/lib/unsaved-changes'
@@ -47,28 +47,16 @@ export function ZoneDetailLayout() {
   const query = useZoneDetail()
   const zone = query.data
   useBreadcrumbLabel(zone?.domain)
-  if (!zone) {
-    if (query.isError && isZoneNotFound(query.error))
-      return (
-        <Page>
-          <EmptyState
-            title='域名不存在'
-            description='该域名可能已被移除，或链接有误。'
-            action={<LinkButton href='/dns-zones'>返回域名</LinkButton>}
-          />
-        </Page>
-      )
+  if (!zone && query.isError && isZoneNotFound(query.error))
     return (
       <Page>
-        <QueryNotice
-          query={query}
-          onRetry={() => void query.refetch()}
-          title='域名加载失败'
+        <EmptyState
+          title='域名不存在'
+          description='该域名可能已被移除，或链接有误。'
+          action={<LinkButton href='/dns-zones'>返回域名</LinkButton>}
         />
-        {query.isPending && <DetailHeaderSkeleton />}
       </Page>
     )
-  }
   return (
     <Page fit={tab === 'records'}>
       <QueryNotice
@@ -76,39 +64,43 @@ export function ZoneDetailLayout() {
         onRetry={() => void query.refetch()}
         title='实时连接中断，显示的是最后一次收到的数据'
       />
-      <DetailHeader
-        title={zone.domain}
-        status={
-          <StatusChip
-            {...describeStatus(zoneSyncStatuses, zone.sync_status)}
-            reserve={zoneSyncStatusReserve}
-          />
-        }
-        meta={[
-          <span key='provider'>
-            {zone.dns_provider_name} · {providerLabel(zone.dns_provider)}
-          </span>,
-          <span key='synced'>
-            最近同步 <RelativeTime value={zone.last_synced_at} />
-          </span>,
-        ]}
-        actions={
-          <>
-            <LinkButton href='/dns-zones'>
-              <ArrowLeft />
-              返回
-            </LinkButton>
-            <Button
-              size='sm'
-              variant='danger-soft'
-              onPress={() => commands.remove(zone)}
-            >
-              <TrashBin />
-              移除域名
-            </Button>
-          </>
-        }
-      />
+      {zone ? (
+        <DetailHeader
+          title={zone.domain}
+          status={
+            <StatusChip
+              {...describeStatus(zoneSyncStatuses, zone.sync_status)}
+              reserve={zoneSyncStatusReserve}
+            />
+          }
+          meta={[
+            <span key='provider'>
+              {zone.dns_provider_name} · {providerLabel(zone.dns_provider)}
+            </span>,
+            <span key='synced'>
+              最近同步 <RelativeTime value={zone.last_synced_at} />
+            </span>,
+          ]}
+          actions={
+            <>
+              <LinkButton href='/dns-zones'>
+                <ArrowLeft />
+                返回
+              </LinkButton>
+              <Button
+                size='sm'
+                variant='danger-soft'
+                onPress={() => commands.remove(zone)}
+              >
+                <TrashBin />
+                移除域名
+              </Button>
+            </>
+          }
+        />
+      ) : (
+        <DetailHeaderSkeleton />
+      )}
       <PageTabs
         fit={tab === 'records'}
         guard={tabGuard}
@@ -119,7 +111,14 @@ export function ZoneDetailLayout() {
       >
         {/* A new arrival remounts the tab, so its search, filters and open
          * record form start over. */}
-        {tab === 'records' ? (
+        {!zone ? (
+          query.isPending && (
+            <div aria-label='正在加载域名内容' className='flex flex-col gap-4'>
+              <Skeleton className='h-28 rounded-2xl' />
+              <Skeleton className='h-64 rounded-2xl' />
+            </div>
+          )
+        ) : tab === 'records' ? (
           <ZoneRecords key={arrivalKey} />
         ) : tab === 'lines' ? (
           <ZoneLines key={arrivalKey} />

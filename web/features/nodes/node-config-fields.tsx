@@ -13,7 +13,7 @@ import { QueryNotice } from '@/components/page'
 import { Section } from '@/components/section'
 import { clusterOptionsQuery } from '@/features/clusters/data'
 import { dnsZoneLinesQuery } from '@/features/dns-zones/data'
-import { dnsLinePath } from '@/features/dns-zones/dns-lines'
+import { DnsLinePicker } from '@/features/dns-zones/dns-line-picker'
 import type { NodeFormValues } from './node-form'
 
 const maxEndpoints = 8
@@ -73,7 +73,6 @@ export function NodeConfigFields({
 }) {
   const clusters = useQuery(clusterOptionsQuery)
   const clusterId = useWatch({ control: form.control, name: 'cluster_id' })
-  const lineCodes = useWatch({ control: form.control, name: 'endpoints' })
   const selectedCluster = clusters.data?.find(
     (cluster) => cluster.id === clusterId
   )
@@ -158,20 +157,6 @@ export function NodeConfigFields({
       />
       {endpointError && <Notice>{endpointError}</Notice>}
       {endpoints.fields.map((endpoint, index) => {
-        const currentCode = lineCodes[index]?.line_code ?? endpoint.line_code
-        const available = (lines.data ?? [])
-          .filter(
-            (line) => line.status !== 'disabled' || line.code === currentCode
-          )
-          .map((line) => ({
-            id: line.code,
-            label: dnsLinePath(lines.data ?? [], line.code),
-          }))
-        if (!available.some((line) => line.id === currentCode))
-          available.push({
-            id: currentCode,
-            label: currentCode === 'default' ? '默认线路' : currentCode,
-          })
         return (
           <div
             key={endpoint.formKey}
@@ -196,11 +181,11 @@ export function NodeConfigFields({
               control={form.control}
               name={`endpoints.${index}.line_code`}
               render={({ field, fieldState }) => (
-                <Choice
+                <DnsLinePicker
                   label='DNS线路'
                   value={field.value}
                   onChange={field.onChange}
-                  items={available}
+                  lines={lines.data ?? []}
                   error={fieldState.error?.message}
                   disabled={disabled || (lines.isFetching && !lines.data)}
                 />

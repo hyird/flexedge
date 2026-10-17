@@ -258,7 +258,7 @@ export function defaultCacheConfig(): CacheConfig {
     storage: 'tiered',
     memory_bytes: 64 * 1024 ** 2,
     disk_bytes: 1024 ** 3,
-    memory_percent: 10,
+    memory_percent: 50,
     disk_percent: 50,
     memory_reserved_bytes: 512 * 1024 ** 2,
     disk_reserved_bytes: 5 * 1024 ** 3,

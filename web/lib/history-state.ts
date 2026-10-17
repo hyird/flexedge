@@ -9,8 +9,10 @@ import { useLocation, type HistoryState } from '@tanstack/react-router'
 declare module '@tanstack/history' {
   interface HistoryState {
     cache?: { tab?: 'prewarm' | 'refresh' | 'clean' | 'policies' }
-    /** `/websites/new`. */
+    providers?: { tab?: 'dns' | 'certificate' }
+    /** Website selection stays in the history entry, including across reloads. */
     website?: {
+      id?: string
       /** Settings group (`websiteSectionIds`). */
       section?: string
     }

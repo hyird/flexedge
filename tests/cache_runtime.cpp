@@ -226,10 +226,17 @@ void verify() {
     auto request = [&](std::string_view headers = {}, std::string_view method = "GET", std::string_view target = "/asset") {
         return flexedge::testing::request(port, "www.example.com", headers, target, method);
     };
+    const auto cache_usage = [&] {
+        return control.loop(0).start(plane.report({})).get();
+    };
+    const auto empty_cache = cache_usage();
+    FLEXEDGE_REQUIRE(empty_cache.load_ && empty_cache.cache_memory_bytes_ == 0 && empty_cache.cache_disk_bytes_ == 0);
     FLEXEDGE_REQUIRE(request().find("X-Cache: MISS") != std::string::npos);
     for (int index = 0; index < 20; ++index) {
         FLEXEDGE_REQUIRE(request().find("X-Cache: HIT") != std::string::npos);
     }
+    const auto filled_cache = cache_usage();
+    FLEXEDGE_REQUIRE(filled_cache.load_ && filled_cache.cache_memory_bytes_ > 4 && filled_cache.cache_disk_bytes_ > 4);
     FLEXEDGE_REQUIRE(source.hits() == 1);
     FLEXEDGE_REQUIRE(flexedge::testing::request(port, "assets.example.com", {}, "/asset").find("X-Cache: HIT") != std::string::npos);
     FLEXEDGE_REQUIRE(source.hits() == 1);
@@ -257,6 +264,8 @@ void verify() {
     command.set_expires_unix_ms(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() + 600000);
     auto result = control.loop(0).start(plane.execute_cache(command)).get();
     FLEXEDGE_REQUIRE(result.ok() && result.affected_objects() == 1);
+    const auto cleared_cache = cache_usage();
+    FLEXEDGE_REQUIRE(cleared_cache.load_ && cleared_cache.cache_memory_bytes_ == 0 && cleared_cache.cache_disk_bytes_ == 0);
     FLEXEDGE_REQUIRE(request().find("X-Cache: MISS") != std::string::npos && source.hits() == 3);
     command.set_attempt_id("prewarm");
     command.set_operation("prewarm");

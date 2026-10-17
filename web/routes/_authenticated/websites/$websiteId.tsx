@@ -1,7 +1,11 @@
-import { createFileRoute } from '@tanstack/react-router'
-import { WebsiteDetailLayout } from '@/features/websites/website-detail'
+import { createFileRoute, redirect } from '@tanstack/react-router'
 
 export const Route = createFileRoute('/_authenticated/websites/$websiteId')({
-  staticData: { breadcrumb: '网站详情' },
-  component: WebsiteDetailLayout,
+  beforeLoad: ({ params }) => {
+    throw redirect({
+      to: '/websites',
+      state: { website: { id: params.websiteId } },
+      replace: true,
+    })
+  },
 })

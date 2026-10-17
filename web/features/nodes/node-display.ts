@@ -40,6 +40,8 @@ type LiveMetrics = Pick<
   | 'cpu_usage'
   | 'memory_usage'
   | 'disk_usage'
+  | 'cache_memory_bytes'
+  | 'cache_disk_bytes'
   | 'traffic_out_bps'
   | 'connection_count'
   | 'connected_ip_count'
@@ -57,6 +59,8 @@ export function liveMetrics(runtime: Node['runtime']): LiveMetrics {
     cpu_usage: runtime.cpu_usage,
     memory_usage: runtime.memory_usage,
     disk_usage: runtime.disk_usage,
+    cache_memory_bytes: runtime.cache_memory_bytes,
+    cache_disk_bytes: runtime.cache_disk_bytes,
     traffic_out_bps: runtime.traffic_out_bps,
     connection_count: runtime.connection_count,
     connected_ip_count: runtime.connected_ip_count,

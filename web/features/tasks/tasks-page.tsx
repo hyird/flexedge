@@ -227,7 +227,8 @@ function TaskCell({ task }: { task: Task }) {
       </span>
       {target ? (
         <HeroLink
-          href={target}
+          href={target.href}
+          routerOptions={target.state && { state: target.state }}
           className='min-w-0 truncate text-sm no-underline hover:underline'
         >
           {task.name}

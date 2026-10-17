@@ -6,6 +6,7 @@ import {
   dnsLineName,
   dnsLinePath,
   flattenDnsLineTree,
+  filterDnsLineTree,
 } from './dns-lines'
 
 const lines: DnsLine[] = [
@@ -25,6 +26,18 @@ const lines: DnsLine[] = [
 ]
 
 describe('DNS line tree', () => {
+  it('searches names and codes while retaining ancestors and matching subtrees', () => {
+    const tree = buildDnsLineTree(lines)
+    expect(filterDnsLineTree(tree, '  ')).toBe(tree)
+    expect(filterDnsLineTree(tree, '北京')[0]?.children[0]?.line?.code).toBe(
+      'cn_mobile_beijing'
+    )
+    expect(filterDnsLineTree(tree, 'CN_MOBILE_BEIJING')[0]?.label).toBe(
+      '中国移动'
+    )
+    expect(filterDnsLineTree(tree, '中国移动')).toEqual([tree[1]])
+    expect(filterDnsLineTree(tree, '不存在')).toEqual([])
+  })
   it('groups provider line names into their display hierarchy', () => {
     const tree = buildDnsLineTree(lines)
     expect(tree.map((node) => node.label)).toEqual(['默认', '中国移动'])

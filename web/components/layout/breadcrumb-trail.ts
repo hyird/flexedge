@@ -34,7 +34,15 @@ export function buildBreadcrumbTrail(
   for (const match of matches) {
     const label = labels.get(match.id) ?? match.breadcrumb
     const href = normalizePath(match.pathname)
-    if (!label || crumbs.some((crumb) => crumb.href === href)) continue
+    if (
+      !label ||
+      crumbs.some(
+        (crumb) =>
+          crumb.href === href &&
+          (!labels.has(match.id) || crumb.label === label)
+      )
+    )
+      continue
     crumbs.push({ key: match.id, label, href })
   }
   return crumbs.map((crumb, index) =>

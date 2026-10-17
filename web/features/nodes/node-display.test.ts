@@ -11,6 +11,8 @@ describe('liveMetrics', () => {
     applied_node_spec_revision: 1,
     cpu_usage: 0.4,
     disk_usage: 0,
+    cache_memory_bytes: 0,
+    cache_disk_bytes: 1024 ** 3,
     connected_ip_count: 0,
     health: 'degraded',
   })
@@ -19,6 +21,8 @@ describe('liveMetrics', () => {
     expect(liveMetrics(runtime('online'))).toMatchObject({
       cpu_usage: 0.4,
       disk_usage: 0,
+      cache_memory_bytes: 0,
+      cache_disk_bytes: 1024 ** 3,
       connected_ip_count: 0,
       health: 'degraded',
     })

@@ -35,6 +35,12 @@ namespace service::node_runtime {
     if (const auto& value = input.get<"disk_usage">()) {
         result.disk_usage_ = value->value_;
     }
+    if (const auto& value = input.get<"cache_memory_bytes">()) {
+        result.cache_memory_bytes_ = value->value_;
+    }
+    if (const auto& value = input.get<"cache_disk_bytes">()) {
+        result.cache_disk_bytes_ = value->value_;
+    }
     if (const auto& value = input.get<"traffic_out_bps">()) {
         result.traffic_out_bps_ = value->value_;
     }

@@ -28,6 +28,7 @@ class config_activation;
 struct data_plane_report final {
     std::optional<data_plane_load> load_{};
     std::shared_ptr<const origin_health_snapshot> origin_health_{};
+    std::uint64_t cache_memory_bytes_{}, cache_disk_bytes_{};
 };
 
 // A retired worker or unconfirmed rollback makes this node unavailable. This failure
@@ -338,7 +339,19 @@ public:
         addresses.erase(std::ranges::unique(addresses).begin(), addresses.end());
         load.connected_ip_count_ = static_cast<std::int64_t>(addresses.size());
         last_health_ = origin_health_snapshot::merge(health);
-        co_return data_plane_report{.load_ = load, .origin_health_ = last_health_};
+        data_plane_report report{.load_ = load, .origin_health_ = last_health_};
+        // Count the shared immutable root once, rather than once per worker.
+        const auto cache = cache_->snapshot();
+        for (const auto& [key, variants] : cache->entries_) {
+            (void)key;
+            for (const auto& item : variants) {
+                report.cache_memory_bytes_ += item->bytes_ - (item->body_ ? 0 : item->body_bytes_);
+                if (item->file_) {
+                    report.cache_disk_bytes_ += item->bytes_;
+                }
+            }
+        }
+        co_return report;
     }
 
     [[nodiscard]] ruvia::task<bool> wait_drained(std::chrono::steady_clock::duration timeout) {

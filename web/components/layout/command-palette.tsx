@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useQueries } from '@tanstack/react-query'
-import { useRouter } from '@tanstack/react-router'
+import { useRouter, type HistoryState } from '@tanstack/react-router'
 import {
   Globe,
   Layers,
@@ -19,8 +19,8 @@ import { navigation } from './navigation'
 export type ResourceSearchSource = {
   label: string
   icon: typeof Globe
-  /** Detail route prefix of the found resources. */
-  path: string
+  /** The route assembly owns resource navigation; the layout only follows it. */
+  target: (id: string) => { href: string; state?: HistoryState }
   /** The owning domain's palette search (`xxxSearchQuery`). */
   search: (keyword: string) => ResourceSearchQuery
 }
@@ -117,9 +117,9 @@ function CommandPaletteDialog({
       ...source.search(keyword),
       select: (hits: ResourceSearchHit[]) =>
         hits.map((hit) => ({
-          key: `${source.path}/${hit.id}`,
+          key: `${source.label}:${hit.id}`,
           label: hit.label,
-          href: `${source.path}/${hit.id}`,
+          target: source.target(hit.id),
         })),
     })),
   })
@@ -128,16 +128,19 @@ function CommandPaletteDialog({
     (searches[index].data ?? []).map((hit) => ({ ...hit, source }))
   )
   const failed = searches.some((search) => search.isError)
-  const targets = new Map<string, string>([
-    ...navigation.map((item): [string, string] => [
+  const targets = new Map<string, { href: string; state?: HistoryState }>([
+    ...navigation.map((item): [string, { href: string }] => [
       `page:${item.href}`,
-      item.href,
+      { href: item.href },
     ]),
-    ...quickActions.map((item): [string, string] => [
+    ...quickActions.map((item): [string, { href: string }] => [
       `action:${item.href}`,
-      item.href,
+      { href: item.href },
     ]),
-    ...hits.map((hit): [string, string] => [hit.key, hit.href]),
+    ...hits.map((hit): [string, { href: string; state?: HistoryState }] => [
+      hit.key,
+      hit.target,
+    ]),
   ])
   return (
     <Command.Dialog
@@ -171,10 +174,10 @@ function CommandPaletteDialog({
       <Command.List
         aria-label='搜索结果'
         onAction={(key) => {
-          const href = targets.get(String(key))
-          if (!href) return
+          const target = targets.get(String(key))
+          if (!target) return
           onClose()
-          void router.navigate({ href })
+          void router.navigate(target)
         }}
         renderEmptyState={() => (
           <p className='py-10 text-center text-sm text-muted'>

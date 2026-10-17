@@ -39,6 +39,21 @@ import { websiteAccessLogHistoryQuery, websiteAccessLogsQuery } from './data'
 import { useWebsite } from './website-context'
 
 const filterKeys = ['method', 'status_class'] as const
+const requestTypes: Record<string, string> = {
+  http: 'HTTP',
+  sse: 'SSE',
+  websocket: 'WebSocket',
+}
+const endReasons: Record<string, string> = {
+  completed: '正常结束',
+  client_closed: '客户端关闭',
+  origin_closed: '源站关闭',
+  client_error: '客户端断开',
+  origin_error: '回源异常',
+  protocol_error: '协议错误',
+  timeout: '超时',
+  shutdown: '节点关闭',
+}
 /** State of the live tail shown next to the mode switch. */
 const liveStates = {
   paused: { label: '已暂停', tone: 'default' },
@@ -267,6 +282,11 @@ export function AccessLogs() {
                   {log.method} {url}
                 </Tooltip.Content>
               </Tooltip>
+              {log.request_type && log.request_type !== 'http' && (
+                <span className='shrink-0 text-xs text-muted'>
+                  {requestTypes[log.request_type] ?? log.request_type}
+                </span>
+              )}
               {cacheState(log) && (
                 <Tooltip delay={300}>
                   <span className='inline-flex shrink-0' tabIndex={0}>
@@ -596,7 +616,18 @@ function AccessLogDetail({ log }: { log: AccessLog }) {
       <DescriptionList
         columns={3}
         items={[
-          { label: '时间', value: formatDate(log.occurred_at) },
+          {
+            label: log.request_type ? '结束时间' : '时间',
+            value: formatDate(log.occurred_at),
+          },
+          {
+            label: '开始时间',
+            value: log.started_at ? formatDate(log.started_at) : '—',
+          },
+          {
+            label: '请求类型',
+            value: requestTypes[log.request_type ?? ''] ?? '—',
+          },
           {
             label: '状态码',
             value: <StatusChip {...accessLogStatus(log.status_code)} />,
@@ -645,7 +676,18 @@ function AccessLogDetail({ log }: { log: AccessLog }) {
                 .filter(Boolean)
                 .join(' ') || '—',
           },
-          { label: '耗时', value: `${log.duration_ms} ms` },
+          { label: '总时长', value: `${log.duration_ms} ms` },
+          {
+            label: '首字节耗时',
+            value:
+              log.first_byte_ms === undefined ? '—' : `${log.first_byte_ms} ms`,
+          },
+          {
+            label: '结束原因',
+            value: log.end_reason
+              ? (endReasons[log.end_reason] ?? log.end_reason)
+              : '—',
+          },
           { label: '请求流量', value: formatBytes(log.request_bytes) },
           { label: '响应流量', value: formatBytes(log.response_bytes) },
           {

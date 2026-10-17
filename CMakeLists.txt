@@ -430,6 +430,10 @@ if(BUILD_TESTING)
         SOURCES tests/http2_runtime.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto)
     set_tests_properties(flexedge_http2_runtime PROPERTIES TIMEOUT 60)
+    flexedge_add_test(connection_access_log
+        SOURCES tests/connection_access_log.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto)
+    set_tests_properties(flexedge_connection_access_log PROPERTIES TIMEOUT 30)
     flexedge_add_test(cache_migration
         SOURCES tests/cache_migration.cpp
         LIBRARIES flexedge_route_policy ruvia::web OpenSSL::Crypto)

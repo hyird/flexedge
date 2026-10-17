@@ -1,26 +1,47 @@
-import { useMemo } from 'react'
+import { useId, useMemo, useState } from 'react'
+import { ChevronDown } from '@gravity-ui/icons'
+import { FileTree } from '@heroui-pro/react'
+import { Button, Input, Label, Popover, TextField } from '@heroui/react'
 import {
-  ComboBox,
-  FieldError,
-  Input,
-  Label,
-  ListBox,
-  ListLayout,
-  Virtualizer,
-} from '@heroui/react'
-import { dnsLineIndex } from './dns-lines'
+  dnsLineIndex,
+  filterDnsLineTree,
+  type DnsLineTreeNode,
+} from './dns-lines'
 import type { DnsLine } from './types'
 
-type LineItem = { id: string; label: string; isDisabled: boolean }
+function treeItems(nodes: DnsLineTreeNode[]) {
+  return nodes.map((node) => (
+    <FileTree.Item
+      key={node.key}
+      id={node.line?.code ?? `group:${node.key}`}
+      textValue={node.path.join('/')}
+      title={node.label}
+    >
+      {treeItems(node.children)}
+    </FileTree.Item>
+  ))
+}
 
-const rowHeight = 32
+function branchKeys(nodes: DnsLineTreeNode[]): string[] {
+  return nodes.flatMap((node) =>
+    node.children.length
+      ? [node.line?.code ?? `group:${node.key}`, ...branchKeys(node.children)]
+      : []
+  )
+}
 
-/** Searchable DNS line picker over the zone's one-shot line snapshot. The
- * items come from the snapshot's shared index (built once per snapshot) and
- * the open list is virtualized, so a provider list of hundreds of lines
- * (Aliyun) opens and filters without rendering every option. Disabled lines
- * stay visible but cannot be chosen (the backend rejects them); a current
- * code missing from the snapshot is kept as its own item. */
+function disabledKeys(nodes: DnsLineTreeNode[], value: string): string[] {
+  return nodes.flatMap((node) => [
+    ...(!node.line ||
+    (node.line.status !== 'enabled' && node.line.code !== value)
+      ? [node.line?.code ?? `group:${node.key}`]
+      : []),
+    ...disabledKeys(node.children, value),
+  ])
+}
+
+/** The shared picker for record and node forms. Groups only expand; provider
+ * lines can be selected at any depth. Search keeps the matching hierarchy. */
 export function DnsLinePicker({
   lines,
   value,
@@ -36,55 +57,129 @@ export function DnsLinePicker({
   disabled?: boolean
   label?: string
 }) {
+  const id = useId()
+  const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const index = dnsLineIndex(lines)
-  const items = useMemo<LineItem[]>(() => {
-    const known = index.options.map(({ line }) => ({
-      id: line.code,
-      label: index.labels.get(line.code) ?? line.code,
-      isDisabled: line.status !== 'enabled' && line.code !== value,
-    }))
-    return !value || index.labels.has(value)
-      ? known
-      : [{ id: value, label: value, isDisabled: false }, ...known]
+  const nodes = useMemo(() => {
+    if (!value || index.labels.has(value)) return index.tree
+    return [
+      {
+        key: `unknown:${value}`,
+        label: value === 'default' ? '默认' : value,
+        path: [value],
+        line: {
+          code: value,
+          name: value,
+          display_name: value,
+          status: 'enabled',
+        },
+        children: [],
+      },
+      ...index.tree,
+    ]
   }, [index, value])
+  const filtered = useMemo(
+    () => filterDnsLineTree(nodes, search),
+    [nodes, search]
+  )
+  const selectedLabel =
+    index.labels.get(value) ?? (value === 'default' ? '默认' : value)
   return (
-    <ComboBox<LineItem>
-      defaultItems={items}
-      selectedKey={value || null}
-      onSelectionChange={(key) => {
-        if (typeof key === 'string') onChange(key)
-      }}
-      disabledKeys={items.filter((item) => item.isDisabled).map(({ id }) => id)}
-      isDisabled={disabled}
-      isInvalid={!!error}
-      isRequired
-      menuTrigger='focus'
-      variant='secondary'
-      className='w-full'
-    >
-      <Label>{label}</Label>
-      <ComboBox.InputGroup>
-        <Input placeholder='搜索线路' />
-        <ComboBox.Trigger />
-      </ComboBox.InputGroup>
-      <ComboBox.Popover className='w-(--trigger-width) overflow-hidden'>
-        <Virtualizer layout={ListLayout} layoutOptions={{ rowHeight }}>
-          <ListBox<LineItem>
-            className='max-h-80 overflow-y-auto'
-            renderEmptyState={() => (
+    <div className='flex min-w-0 flex-col gap-1'>
+      <Label id={`${id}-label`}>{label}</Label>
+      <Popover
+        isOpen={open}
+        onOpenChange={(next) => {
+          setOpen(next)
+          if (next) {
+            setSearch('')
+            const path =
+              index.options.find(({ line }) => line.code === value)?.path ?? []
+            setExpanded(
+              new Set(
+                branchKeys(nodes).filter((key) => {
+                  const nodePath = index.options.find(
+                    ({ line }) => line.code === key
+                  )?.path
+                  return nodePath
+                    ? nodePath.length < path.length &&
+                        nodePath.every((part, i) => part === path[i])
+                    : key.startsWith('group:') &&
+                        path.join('/').startsWith(key.slice(6) + '/')
+                })
+              )
+            )
+          }
+        }}
+      >
+        <Button
+          variant='secondary'
+          isDisabled={disabled}
+          aria-labelledby={`${id}-label ${id}-value`}
+          aria-invalid={!!error || undefined}
+          aria-describedby={error ? `${id}-error` : undefined}
+          className='h-10 w-full min-w-0 justify-between rounded-xl px-3 font-normal'
+        >
+          <span id={`${id}-value`} className='truncate'>
+            {selectedLabel || '选择线路'}
+          </span>
+          <ChevronDown className='size-4 shrink-0 text-muted' />
+        </Button>
+        <Popover.Content
+          placement='bottom start'
+          className='w-(--trigger-width) max-w-[calc(100vw-2rem)] min-w-64'
+        >
+          <Popover.Dialog
+            aria-label={label}
+            className='flex flex-col gap-2 p-1'
+          >
+            <TextField
+              aria-label='搜索线路'
+              value={search}
+              onChange={setSearch}
+              variant='secondary'
+            >
+              <Input placeholder='搜索线路' />
+            </TextField>
+            {filtered.length ? (
+              <FileTree
+                key={search ? 'search' : 'browse'}
+                aria-label={label}
+                selectionMode='single'
+                selectedKeys={value ? [value] : []}
+                disallowEmptySelection
+                disabledBehavior='selection'
+                disabledKeys={disabledKeys(nodes, value)}
+                expandedKeys={search ? new Set(branchKeys(filtered)) : expanded}
+                onExpandedChange={(keys) =>
+                  setExpanded(new Set(Array.from(keys, String)))
+                }
+                onSelectionChange={(keys) => {
+                  if (keys === 'all') return
+                  const key = keys.values().next().value
+                  if (typeof key !== 'string' || key.startsWith('group:'))
+                    return
+                  onChange(key)
+                  setOpen(false)
+                }}
+                showGuideLines
+                className='max-h-80 overflow-y-auto'
+              >
+                {treeItems(filtered)}
+              </FileTree>
+            ) : (
               <p className='px-3 py-2 text-sm text-muted'>没有匹配的线路</p>
             )}
-          >
-            {(item) => (
-              <ListBox.Item id={item.id} textValue={item.label} className='h-8'>
-                <span className='truncate'>{item.label}</span>
-                <ListBox.ItemIndicator />
-              </ListBox.Item>
-            )}
-          </ListBox>
-        </Virtualizer>
-      </ComboBox.Popover>
-      <FieldError>{error}</FieldError>
-    </ComboBox>
+          </Popover.Dialog>
+        </Popover.Content>
+      </Popover>
+      {error && (
+        <p id={`${id}-error`} className='text-xs text-danger'>
+          {error}
+        </p>
+      )}
+    </div>
   )
 }

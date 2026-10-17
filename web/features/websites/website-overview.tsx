@@ -1,9 +1,9 @@
 import { useMutation, type UseQueryResult } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { Lock, Magnifier } from '@gravity-ui/icons'
-import { ListView, type DataGridColumn } from '@heroui-pro/react'
+import { Magnifier } from '@gravity-ui/icons'
+import type { DataGridColumn } from '@heroui-pro/react'
 import { KPI } from '@heroui-pro/react/kpi'
-import { Alert, Button } from '@heroui/react'
+import { Button } from '@heroui/react'
 import { formatBytes, formatDate, ratioOf } from '@/lib/format'
 import {
   describeStatus,
@@ -13,7 +13,6 @@ import {
 import { cn } from '@/lib/utils'
 import { DataTable, TruncatedText } from '@/components/data-table'
 import { Mono } from '@/components/mono'
-import { EmptyState } from '@/components/page'
 import { RelativeTime } from '@/components/relative-time'
 import { DescriptionList, Section } from '@/components/section'
 import { StatusChip } from '@/components/status-chip'
@@ -325,96 +324,161 @@ export function WebsiteOverview({
         />
       </Section>
 
-      <div className='grid gap-6 lg:grid-cols-2'>
-        <Section title='绑定证书'>
-          {!config.https_enabled ? (
-            <EmptyState
-              size='sm'
-              icon={<Lock />}
-              title='未启用HTTPS'
-              description='节点只接受HTTP请求。'
-            />
-          ) : website.certificates.length ? (
-            <ListView
-              aria-label='绑定证书'
-              variant='secondary'
-              items={website.certificates}
-            >
-              {(certificate) => (
-                <ListView.Item
-                  id={certificate.id}
-                  href={`/certificates/${certificate.id}`}
-                  textValue={certificate.domains.join('、')}
-                  className='rounded-lg'
-                >
-                  <ListView.ItemContent>
-                    <ListView.Title
-                      title={certificate.domains.join('、')}
-                      className='font-mono text-[13px] font-normal'
+      <Section title='配置摘要'>
+        <DescriptionList
+          columns={3}
+          items={[
+            {
+              label: '绑定证书',
+              value: website.certificates.length ? (
+                <span className='flex flex-col gap-2'>
+                  {website.certificates.map((certificate) => (
+                    <span
+                      key={certificate.id}
+                      className='flex items-start gap-3'
                     >
-                      {certificate.domains.join('、')}
-                    </ListView.Title>
-                  </ListView.ItemContent>
-                  <ListView.ItemAction>
-                    <StatusChip
-                      {...certificateUsability[
-                        certificate.usable ? 'usable' : 'unusable'
-                      ]}
-                      reserve={certificateReserve}
-                    />
-                  </ListView.ItemAction>
-                </ListView.Item>
-              )}
-            </ListView>
-          ) : (
-            <Alert status='warning'>
-              <Alert.Indicator />
-              <Alert.Content>
-                <Alert.Title>已启用HTTPS，但尚未绑定可用证书</Alert.Title>
-              </Alert.Content>
-            </Alert>
-          )}
-        </Section>
-        <Section title='配置摘要'>
-          <DescriptionList
-            items={[
-              {
-                label: '默认源站',
-                value: origin ? (
-                  <span className='flex flex-col gap-0.5'>
-                    {originGroupName(origin.group)}
-                    <Mono className='text-muted'>{originAddress(origin)}</Mono>
+                      <Link
+                        to='/certificates/$certificateId'
+                        params={{ certificateId: certificate.id }}
+                        aria-label={certificate.domains.join('、')}
+                        className='link min-w-0 flex-col items-start font-mono break-all'
+                      >
+                        {certificate.domains.map((domain) => (
+                          <span key={domain} className='block'>
+                            {domain}
+                          </span>
+                        ))}
+                      </Link>
+                      <StatusChip
+                        {...certificateUsability[
+                          certificate.usable ? 'usable' : 'unusable'
+                        ]}
+                        reserve={certificateReserve}
+                      />
+                    </span>
+                  ))}
+                </span>
+              ) : (
+                <span
+                  className={config.https_enabled ? 'text-warning' : undefined}
+                >
+                  未绑定
+                </span>
+              ),
+            },
+            {
+              label: '接入协议',
+              value: config.https_enabled
+                ? `HTTP/HTTPS，TLS${config.minimum_tls_version}+`
+                : 'HTTP',
+            },
+            {
+              label: 'HTTPS设置',
+              value: config.https_enabled
+                ? `强制HTTPS${config.force_https ? '开启' : '关闭'}，HSTS${config.hsts_enabled ? '开启' : '关闭'}`
+                : '未启用',
+            },
+            {
+              label: '默认源站',
+              value: origin ? (
+                <span className='flex flex-col gap-0.5'>
+                  {originGroupName(origin.group)}
+                  <Mono className='text-muted'>{originAddress(origin)}</Mono>
+                </span>
+              ) : (
+                '未配置'
+              ),
+            },
+            {
+              label: '回源Host',
+              value: config.origin_host_header ? (
+                <Mono>{config.origin_host_header}</Mono>
+              ) : (
+                '跟随请求'
+              ),
+            },
+            {
+              label: '回源协议',
+              value: { auto: '自动协商', http1: 'HTTP/1.1', http2: 'HTTP/2' }[
+                config.origin_http_version
+              ],
+            },
+            {
+              label: '连接超时',
+              value: `${config.origin_connect_timeout_seconds}秒`,
+            },
+            {
+              label: '读取超时',
+              value: `${config.origin_read_timeout_seconds}秒`,
+            },
+            {
+              label: '传递客户端IP',
+              value: config.pass_client_ip ? '已启用' : '未启用',
+            },
+            {
+              label: '主动健康检查',
+              value: config.health_check_enabled ? (
+                <span className='flex flex-col gap-0.5'>
+                  <Mono>{config.health_check_path}</Mono>
+                  <span className='text-muted'>
+                    每{config.health_check_interval_seconds}秒，超时
+                    {config.health_check_timeout_seconds}秒，预期
+                    {config.health_check_expected_status}
                   </span>
+                </span>
+              ) : (
+                '未启用'
+              ),
+            },
+            {
+              label: '缓存策略',
+              value:
+                config.cache_enabled && config.cache_policy_id ? (
+                  <Link
+                    to='/cache/$policyId'
+                    params={{ policyId: config.cache_policy_id }}
+                    className='link'
+                  >
+                    已启用，查看策略
+                  </Link>
                 ) : (
-                  '未配置'
+                  '未启用'
                 ),
-              },
-              {
-                label: '回源Host',
-                value: config.origin_host_header ? (
-                  <Mono>{config.origin_host_header}</Mono>
-                ) : (
-                  '跟随请求'
-                ),
-              },
-              {
-                label: '响应压缩',
-                value: config.response_compression_enabled
-                  ? `${config.response_compression_algorithms.join(' / ') || '已启用'} · ≥ ${formatBytes(config.response_compression_min_bytes)}`
-                  : '未启用',
-              },
-              {
-                label: '访问日志',
-                value: config.access_log_enabled ? '已启用' : '未启用',
-              },
-              {
-                label: '最近更新',
-                value: <RelativeTime value={website.updated_at} />,
-              },
-            ]}
-          />
-        </Section>
-      </div>
+            },
+            {
+              label: '路由规则',
+              value: `${config.route_rules.filter((rule) => rule.status === 'enabled').length}条启用，共${config.route_rules.length}条`,
+            },
+            {
+              label: '响应压缩',
+              value: config.response_compression_enabled ? (
+                <span className='flex flex-col gap-0.5'>
+                  <Mono>
+                    {config.response_compression_algorithms.join('/') ||
+                      '已启用'}
+                  </Mono>
+                  <span className='text-muted'>
+                    {formatBytes(config.response_compression_min_bytes)}–
+                    {config.response_compression_max_bytes
+                      ? formatBytes(config.response_compression_max_bytes)
+                      : '不限'}
+                  </span>
+                </span>
+              ) : (
+                '未启用'
+              ),
+            },
+            {
+              label: '访问日志',
+              value: config.access_log_enabled ? '已启用' : '未启用',
+            },
+            {
+              label: '最近更新',
+              value: <RelativeTime value={website.updated_at} />,
+            },
+          ]}
+        />
+      </Section>
       <WebsiteAnalytics dashboard={dashboard} />
     </div>
   )

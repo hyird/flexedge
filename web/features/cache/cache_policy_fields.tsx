@@ -171,7 +171,7 @@ function CacheCapacityFields({
         value={config[percent] ? 'percent' : 'fixed'}
         onChange={(value) =>
           change({
-            [percent]: value === 'percent' ? (kind === 'memory' ? 10 : 50) : 0,
+            [percent]: value === 'percent' ? 50 : 0,
           })
         }
         items={[

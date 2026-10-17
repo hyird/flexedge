@@ -88,6 +88,9 @@ message Heartbeat {
     optional uint64 disk_total_bytes = 19;
     // Used / total capacity on the same filesystem. Absent when unavailable.
     optional double disk_usage = 20;
+    // Current node-wide cache occupancy, including cache metadata. Absent on older nodes.
+    optional uint64 cache_memory_bytes = 21;
+    optional uint64 cache_disk_bytes = 22;
 }
 
 message OriginHealth {
@@ -233,6 +236,15 @@ message AccessLog {
     string cache_status = 22; // hit_memory, hit_disk, miss, bypass; empty on older nodes
     string cache_reason = 23; // Cache decision reason code; empty on older nodes
     bool cache_revalidated = 24; // Origin validated an existing cached representation
+    string request_type = 25; // http, sse, websocket; empty on older nodes
+    uint64 started_unix_ms = 26;
+    optional uint64 first_byte_ms = 27;
+    string end_reason = 28;
+    // Full connection counters. Legacy fields retain their previous bounds so
+    // rolling node upgrades remain accepted by older control planes.
+    optional uint64 total_duration_ms = 29;
+    optional uint64 total_request_bytes = 30;
+    optional uint64 total_response_bytes = 31;
 }
 
 message NodeLog {

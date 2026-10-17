@@ -1,4 +1,7 @@
-import { defaultStringifySearch } from '@tanstack/react-router'
+import {
+  defaultStringifySearch,
+  type HistoryState,
+} from '@tanstack/react-router'
 import { parseDate } from '@/lib/format'
 import { statusReserve, type StatusDictionary } from '@/lib/status'
 import {
@@ -69,17 +72,14 @@ export const activeTaskStatuses: readonly string[] = [
   'retrying',
 ]
 
-/** Recent-task order of the header task center and the overview: active
- * tasks first, then the most recently updated. */
-export function recentTaskOrder<T extends Pick<Task, 'status' | 'updated_at'>>(
+/** Recent-task order matches the paginated task list: newest execution first. */
+export function recentTaskOrder<T extends Pick<Task, 'updated_at'>>(
   list: readonly T[]
 ): T[] {
   return [...list].sort(
     (left, right) =>
-      Number(activeTaskStatuses.includes(right.status)) -
-        Number(activeTaskStatuses.includes(left.status)) ||
       (parseDate(right.updated_at)?.getTime() ?? 0) -
-        (parseDate(left.updated_at)?.getTime() ?? 0)
+      (parseDate(left.updated_at)?.getTime() ?? 0)
   )
 }
 
@@ -144,22 +144,25 @@ export function taskHref(task: TaskRef) {
  * account. */
 export function taskTarget(
   task: Pick<Task, 'resource_type' | 'resource_id' | 'resource_kind' | 'name'>
-): string | undefined {
+): { href: string; state?: HistoryState } | undefined {
   const encoded = encodeURIComponent(task.resource_id)
   switch (task.resource_type) {
     case 'cache':
-      return '/cache'
+      return { href: '/cache' }
     case 'website':
-      return `/websites/${encoded}`
+      return { href: '/websites', state: { website: { id: task.resource_id } } }
     case 'node':
-      return `/nodes/${encoded}`
+      return { href: `/nodes/${encoded}` }
     case 'dns_zone':
-      return `/dns-zones/${encoded}`
+      return { href: `/dns-zones/${encoded}` }
     case 'certificate':
-      return `/certificates/${encoded}`
+      return { href: `/certificates/${encoded}` }
     case 'provider': {
       const list = task.resource_kind === 'certificate' ? 'certificate' : 'dns'
-      return `/providers/${list}${defaultStringifySearch({ q: task.name })}`
+      return {
+        href: `/providers${defaultStringifySearch({ q: task.name })}`,
+        state: { providers: { tab: list } },
+      }
     }
     default:
       return undefined

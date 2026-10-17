@@ -685,8 +685,7 @@ ON CONFLICT(tenant_id,name) WHERE deleted_at IS NULL DO UPDATE SET is_builtin=tr
 END;
 $flexedge_default_cache$;
 )sql"}});
-    migrations.push_back(ruvia::db_migration{{
-        .id_ = "0005_access_log_cache_reason",
+    migrations.push_back(ruvia::db_migration{{.id_ = "0005_access_log_cache_reason",
         .sql_ = R"sql(DO $flexedge_cache_reason$
 BEGIN
 ALTER TABLE public.sys_website_access_log
@@ -698,6 +697,14 @@ ADD CONSTRAINT sys_website_access_log_cache_status_check
 CHECK(cache_status IN ('','hit_memory','hit_disk','revalidated','miss','bypass'));
 END;
 $flexedge_cache_reason$;
+)sql"}});
+    migrations.push_back(ruvia::db_migration{{.id_ = "0006_access_log_connection", .sql_ = R"sql(
+ALTER TABLE public.sys_website_access_log
+ ALTER COLUMN duration_ms TYPE bigint,
+ ADD COLUMN request_type varchar(16) DEFAULT '' NOT NULL CHECK(request_type IN ('','http','sse','websocket')),
+ ADD COLUMN started_at timestamptz,
+ ADD COLUMN first_byte_ms bigint CHECK(first_byte_ms >= 0 AND first_byte_ms <= duration_ms),
+ ADD COLUMN end_reason varchar(32) DEFAULT '' NOT NULL CHECK(end_reason IN ('','completed','client_closed','origin_closed','client_error','origin_error','protocol_error','timeout','shutdown'));
 )sql"}});
     return migrations;
 }();

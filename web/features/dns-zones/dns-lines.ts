@@ -78,6 +78,24 @@ export function flattenDnsLineTree(
   ])
 }
 
+export function filterDnsLineTree(
+  nodes: DnsLineTreeNode[],
+  search: string
+): DnsLineTreeNode[] {
+  const query = search.trim().toLocaleLowerCase()
+  if (!query) return nodes
+  return nodes.flatMap((node) => {
+    if (
+      [node.path.join('/'), node.line?.code ?? ''].some((text) =>
+        text.toLocaleLowerCase().includes(query)
+      )
+    )
+      return [node]
+    const children = filterDnsLineTree(node.children, query)
+    return children.length ? [{ ...node, children }] : []
+  })
+}
+
 export type DnsLineIndex = {
   tree: DnsLineTreeNode[]
   /** Selectable lines in hierarchy order. */

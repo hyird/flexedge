@@ -1,5 +1,5 @@
 import { type ReactNode } from 'react'
-import { Globe } from '@gravity-ui/icons'
+import { BrandMark } from '@/components/brand_mark'
 
 /** Standalone full-page frame for root-level error and not-found pages, which
  * render outside the authenticated shell. */
@@ -19,9 +19,7 @@ export function ErrorLayout({
   return (
     <main className='flex min-h-dvh flex-col bg-background px-5 py-6 sm:px-8'>
       <div className='flex items-center gap-2.5'>
-        <span className='flex size-8 items-center justify-center rounded-lg bg-accent text-accent-foreground'>
-          <Globe className='size-4' />
-        </span>
+        <BrandMark />
         <span className='text-sm font-semibold'>FlexEdge</span>
       </div>
       <section className='flex flex-1 items-center justify-center py-12'>

@@ -277,7 +277,11 @@ const topWebsiteColumns: DataGridColumn<TopWebsiteRow>[] = [
     header: '网站',
     isRowHeader: true,
     cell: (site) => (
-      <Link href={`/websites/${site.website_id}`} className='font-medium'>
+      <Link
+        href='/websites'
+        routerOptions={{ state: { website: { id: site.website_id } } }}
+        className='font-medium'
+      >
         {site.name}
       </Link>
     ),

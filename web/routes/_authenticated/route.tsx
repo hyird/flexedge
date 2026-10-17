@@ -14,24 +14,34 @@ import { websiteSearchQuery } from '@/features/websites/data'
 
 /** The command palette's resource searches, each owned by its domain. */
 const resourceSearch: ResourceSearchSource[] = [
-  { label: '网站', icon: Globe, path: '/websites', search: websiteSearchQuery },
-  { label: '节点', icon: Server, path: '/nodes', search: nodeSearchQuery },
+  {
+    label: '网站',
+    icon: Globe,
+    target: (id) => ({ href: '/websites', state: { website: { id } } }),
+    search: websiteSearchQuery,
+  },
+  {
+    label: '节点',
+    icon: Server,
+    target: (id) => ({ href: `/nodes/${id}` }),
+    search: nodeSearchQuery,
+  },
   {
     label: '集群',
     icon: Layers,
-    path: '/clusters',
+    target: (id) => ({ href: `/clusters/${id}` }),
     search: clusterSearchQuery,
   },
   {
     label: '证书',
     icon: ShieldCheck,
-    path: '/certificates',
+    target: (id) => ({ href: `/certificates/${id}` }),
     search: certificateSearchQuery,
   },
   {
     label: '域名',
     icon: Signal,
-    path: '/dns-zones',
+    target: (id) => ({ href: `/dns-zones/${id}` }),
     search: dnsZoneSearchQuery,
   },
 ]
@@ -44,7 +54,9 @@ export const Route = createFileRoute('/_authenticated')({
       if (isUnauthorized(error))
         throw redirect({
           to: '/sign-in',
-          search: { redirect: location.href },
+          search: {
+            redirect: location.href === '/' ? undefined : location.href,
+          },
           replace: true,
         })
       throw error

@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
 import { ArrowDown, ArrowUp, Plus, TrashBin } from '@gravity-ui/icons'
 import type { DataGridColumn } from '@heroui-pro/react'
-import { Button, Switch } from '@heroui/react'
+import { Button, Skeleton, Switch } from '@heroui/react'
 import { apiErrorMessage } from '@/lib/api'
 import { fieldErrors } from '@/lib/form-errors'
 import { useRevisionDraft } from '@/lib/revision-draft'
@@ -39,23 +39,51 @@ import {
 } from './types'
 
 const route = getRouteApi('/_authenticated/cache/$policyId')
+type PolicyTab = 'config' | 'rules' | 'websites'
 export function CachePolicyDetail() {
   const { policyId } = route.useParams()
+  const [tab, setTab] = useState<PolicyTab>('config')
   const query = useQuery(cachePolicyQuery(policyId))
   if (!query.data)
     return (
-      <Page title='缓存策略'>
+      <Page
+        title='缓存策略'
+        description={<span aria-hidden className='block h-6' />}
+        actions={
+          <LinkButton href='/cache' state={{ cache: { tab: 'policies' } }}>
+            返回缓存中心
+          </LinkButton>
+        }
+      >
         <QueryNotice
           query={query}
           title='缓存策略加载失败'
           onRetry={() => query.refetch()}
         />
-        {query.isPending && <p className='text-muted'>正在加载缓存策略…</p>}
+        <PageTabs
+          label='缓存策略详情'
+          items={[
+            { id: 'config', label: '基本配置' },
+            { id: 'rules', label: '缓存规则' },
+            { id: 'websites', label: '引用网站' },
+          ]}
+          selected={tab}
+          onSelectionChange={setTab}
+        >
+          {query.isPending && (
+            <div aria-label='正在加载缓存策略' className='flex flex-col gap-4'>
+              <Skeleton className='h-40 rounded-2xl' />
+              <Skeleton className='h-64 rounded-2xl' />
+            </div>
+          )}
+        </PageTabs>
       </Page>
     )
   return (
     <PolicyEditor
       policy={query.data}
+      tab={tab}
+      onTabChange={setTab}
       reload={async () => (await query.refetch()).data}
     />
   )
@@ -70,14 +98,17 @@ function inputOf(policy: CachePolicy): CachePolicyInput {
 }
 function PolicyEditor({
   policy,
+  tab,
+  onTabChange,
   reload,
 }: {
   policy: CachePolicy
+  tab: PolicyTab
+  onTabChange: (tab: PolicyTab) => void
   reload: () => Promise<CachePolicy | undefined>
 }) {
   const client = useQueryClient(),
     navigate = useNavigate()
-  const [tab, setTab] = useState<'config' | 'rules' | 'websites'>('config')
   const [edits, setEdits] = useState<CachePolicyInput>()
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [editing, setEditing] = useState<CacheRule>()
@@ -311,7 +342,7 @@ function PolicyEditor({
         onSelectionChange={(next) => {
           if (draft.isSaving) return
           draft.discard()
-          setTab(next)
+          onTabChange(next)
         }}
       >
         {tab === 'rules' ? (
