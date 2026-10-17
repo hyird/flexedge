@@ -7,7 +7,7 @@ import tempfile
 
 sys.dont_write_bytecode = True
 
-from website_access_log_mapper_test import fixture
+from support.xdb_fixture import fixture
 
 
 IPV4_RANGES = (

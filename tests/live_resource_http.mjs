@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-// Run explicitly against an isolated backend; this is outside unit-test discovery.
+// End-to-end SSE check, run explicitly against an isolated backend.
 
 const base = process.env.SSE_CACHE_QA_URL ?? "";
 const password = process.env.SSE_CACHE_QA_PASSWORD;

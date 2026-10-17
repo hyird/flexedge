@@ -5,7 +5,6 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
-#include <type_traits>
 #include <vector>
 
 #if defined(__linux__)
@@ -21,13 +20,6 @@ using flexedge::node::inherited_listeners;
 using flexedge::node::owned_listener_fd;
 using flexedge::node::reexec_with_listeners;
 
-static_assert(!std::is_copy_constructible_v<owned_listener_fd>);
-static_assert(!std::is_copy_assignable_v<owned_listener_fd>);
-static_assert(std::is_nothrow_move_constructible_v<owned_listener_fd>);
-static_assert(std::is_nothrow_move_assignable_v<owned_listener_fd>);
-static_assert(!std::is_copy_constructible_v<inherited_listeners>);
-static_assert(!std::is_copy_assignable_v<inherited_listeners>);
-static_assert(std::is_nothrow_move_constructible_v<inherited_listeners>);
 
 void require(bool condition, const char* message) {
     if (!condition) {

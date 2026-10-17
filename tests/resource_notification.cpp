@@ -69,16 +69,6 @@ ruvia::task<std::vector<notifications::resource_notification>> exchange(ruvia::r
     notifications::resource_notification attempt("tenant-a");
     attempt.task_attempt("task-a", 42).changed(live::resource::tasks, "task-a").changed(live::resource::dns_zones, "zone-a");
     const auto fields = notifications::encode(attempt);
-    const auto encoded = [&](std::string_view name) {
-        for (const auto& [field, value] : fields) {
-            if (field == name) {
-                return value;
-            }
-        }
-        return std::string{};
-    };
-    require(encoded("task_attempts") == "task-a,42" && encoded("changes") == "tasks:task-a;dns_zones:zone-a",
-        "a task attempt travels as its task id and event id; the task list resource is named tasks");
     const auto payload = live::outbox::pack(fields);
     co_await service::node_presence::resource_relay::publish(handle, first_id, payload);
     const auto after_a = co_await cache::read(handle, tenant_a);

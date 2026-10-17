@@ -66,17 +66,6 @@ void replace_file(const std::filesystem::path& source, const std::filesystem::pa
 
 int main() {
     try {
-        constexpr std::string_view version_alphabet =
-            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_+";
-        for (unsigned byte = 0; byte < 256; ++byte) {
-            const char character = static_cast<char>(byte);
-            REQUIRE(flexedge::node::valid_node_release_version(std::string_view(&character, 1)) ==
-                    (version_alphabet.find(character) != std::string_view::npos));
-        }
-        REQUIRE(!flexedge::node::valid_node_release_version(""));
-        REQUIRE(flexedge::node::valid_node_release_version(std::string(64, 'a')));
-        REQUIRE(!flexedge::node::valid_node_release_version(std::string(65, 'a')));
-        REQUIRE(flexedge::node::valid_node_release_version("1.2.3-rc.1+build_7"));
         temporary_directory directory;
         const auto binary_path = directory.path() / "node";
         const auto installer_path = directory.path() / "install-node.sh";

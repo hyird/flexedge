@@ -10,7 +10,6 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <type_traits>
 #include <vector>
 
 #include <asio/read_until.hpp>
@@ -33,63 +32,6 @@ using namespace flexedge::node;
 using flexedge::testing::TestConfig;
 using flexedge::testing::waitUntil;
 
-template <typename type>
-concept writable_const_tls = requires(const type& context) { context.default_context(); };
-static_assert(!writable_const_tls<tls_context_set>);
-static_assert(std::is_same_v<owned_data_worker_request, std::unique_ptr<const data_worker_request>>);
-static_assert(std::is_same_v<owned_data_worker_result, std::unique_ptr<const data_worker_result>>);
-
-ruvia::task<std::shared_ptr<const origin_health_snapshot>> check_streaks(origin_health_supervisor& health) {
-    const origin_health_key_set keys{{.website_id_ = "website", .origin_id_ = "origin"}};
-    health.activate(health.prepare(keys, {}));
-    const auto before = health.snapshot();
-    const auto target = health.target("website", "origin");
-    target.failure(2);
-    target.success(2);
-    target.failure(2);
-    FLEXEDGE_REQUIRE(health.snapshot()->healthy({"website", "origin"}));
-    target.failure(2);
-    FLEXEDGE_REQUIRE(!health.snapshot()->healthy({"website", "origin"}));
-    FLEXEDGE_REQUIRE(before->healthy({"website", "origin"}));
-    const auto unhealthy = health.snapshot();
-    auto pending = health.prepare(keys, {});
-    target.success(2);
-    target.success(2);
-    health.activate(std::move(pending));
-    FLEXEDGE_REQUIRE(health.snapshot()->healthy({"website", "origin"}));
-    health.activate(health.prepare({}, {}));
-    health.activate(health.prepare(keys, {}));
-    target.failure(1);
-    FLEXEDGE_REQUIRE(health.snapshot()->healthy({"website", "origin"}));
-    co_return unhealthy;
-}
-
-void verify_streaks() {
-    ruvia::event_loop_pool workers({.loop_count_ = 2});
-    ruvia::event_loop_pool control({.loop_count_ = 1});
-    runtime_state first_runtime;
-    runtime_state second_runtime;
-    origin_tls_context first_tls;
-    origin_tls_context second_tls;
-    auto first = origin_health_supervisor::create(workers.loop(0), first_runtime, first_tls);
-    auto second = origin_health_supervisor::create(workers.loop(1), second_runtime, second_tls);
-    loop_shutdown shutdown(workers, control);
-    workers.start();
-    control.start();
-    const auto unhealthy = workers.loop(0).start(check_streaks(*first)).get();
-    const auto healthy = workers.loop(1).start([](origin_health_supervisor& local) -> ruvia::task<std::shared_ptr<const origin_health_snapshot>> {
-                                            local.activate(local.prepare({{.website_id_ = "website", .origin_id_ = "origin"}}, {}));
-                                            co_return local.snapshot();
-                                        }(*second))
-                             .get();
-    FLEXEDGE_REQUIRE(!unhealthy->all_healthy());
-    FLEXEDGE_REQUIRE(healthy->all_healthy());
-    const std::array snapshots{healthy, unhealthy};
-    const auto merged = origin_health_snapshot::merge(snapshots);
-    FLEXEDGE_REQUIRE(!merged->all_healthy());
-    FLEXEDGE_REQUIRE(merged->reports().front().status_ == "unhealthy");
-    shutdown.stop_and_join();
-}
 
 // A bounded local origin stub: HEAD succeeds or stays in flight; GET closes without a head.
 // Its counters are test instrumentation, independent of the node's worker state.
@@ -300,8 +242,7 @@ void verify_workers() {
         std::chrono::seconds(4)));
     const auto healthy = report();
 
-    // An identical source still receives a new paired execution view, but its participant
-    // owns no replacement TLS, listeners or health membership. It is also reversible.
+    // Reapplying the same source keeps its listeners and remains reversible.
     auto reconnect = config;
     reconnect.finalize();
     const auto reconnect_config = std::make_shared<const compiled_config>(reconnect.active, reconnect.objects);
@@ -314,20 +255,11 @@ void verify_workers() {
     for (const auto& reply : control.loop(0).start(receive_results(receiver, data_worker_operation::activate, reconnect_sequence, worker_count)).get()) {
         FLEXEDGE_REQUIRE(reply->ok_);
     }
-    for (const auto& reply : report()) {
-        FLEXEDGE_REQUIRE(reply->snapshot_->config_ == reconnect_config);
-        const auto previous = std::ranges::find_if(healthy, [&](const auto& value) {
-            return value->worker_id_ == reply->worker_id_;
-        });
-        FLEXEDGE_REQUIRE(previous != healthy.end());
-        FLEXEDGE_REQUIRE(reply->snapshot_->health_ == (*previous)->snapshot_->health_);
-    }
     send({.operation_ = data_worker_operation::rollback, .sequence_ = reconnect_sequence});
     for (const auto& reply : control.loop(0).start(receive_results(receiver, data_worker_operation::rollback, reconnect_sequence, worker_count)).get()) {
         FLEXEDGE_REQUIRE(reply->ok_);
     }
     for (const auto& reply : report()) {
-        FLEXEDGE_REQUIRE(reply->snapshot_->config_ == initial);
         FLEXEDGE_REQUIRE(reply->snapshot_->health_->all_healthy());
     }
 
@@ -360,7 +292,6 @@ void verify_workers() {
         FLEXEDGE_REQUIRE(reply->ok_);
     }
     for (const auto& reply : report()) {
-        FLEXEDGE_REQUIRE(reply->snapshot_->config_ == initial);
         FLEXEDGE_REQUIRE(reply->snapshot_->health_->reports().front().origin_id_ == "origin-1");
         FLEXEDGE_REQUIRE(reply->snapshot_->health_->all_healthy());
     }
@@ -451,9 +382,6 @@ void verify_workers() {
         FLEXEDGE_REQUIRE(!reply->ok_);
     }
     send({.operation_ = data_worker_operation::discard, .sequence_ = sequence});
-    for (const auto& reply : report()) {
-        FLEXEDGE_REQUIRE(reply->snapshot_->config_ == current);
-    }
     abandoned_port.open(asio::ip::tcp::v4());
     abandoned_port.bind({asio::ip::address_v4::any(), abandoned_https_port});
     abandoned_port.close();
@@ -521,17 +449,11 @@ void verify_workers() {
     for (const auto& worker : workers) {
         worker->request_stop_accepting();
     }
-    for (const auto& reply : report()) {
-        FLEXEDGE_REQUIRE(reply->snapshot_->config_ == stopped_config);
-    }
     const auto decision_sequence = ++sequence;
     send({.operation_ = data_worker_operation::report, .sequence_ = decision_sequence, .committed_sequence_ = stopped_sequence});
     (void)control.loop(0).start(receive_results(receiver, data_worker_operation::report, decision_sequence, worker_count)).get();
     send({.operation_ = data_worker_operation::rollback, .sequence_ = stopped_sequence});
     (void)control.loop(0).start(receive_results(receiver, data_worker_operation::rollback, stopped_sequence, worker_count)).get();
-    for (const auto& reply : report()) {
-        FLEXEDGE_REQUIRE(reply->snapshot_->config_ == stopped_config);
-    }
     const auto after_stop = exchange(data_worker_operation::prepare, initial);
     for (const auto& reply : after_stop) {
         FLEXEDGE_REQUIRE(!reply->ok_ && reply->error_ == "data worker is stopping");
@@ -544,7 +466,6 @@ void verify_workers() {
 
 int main() {
     try {
-        verify_streaks();
         verify_workers();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

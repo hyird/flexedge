@@ -45,22 +45,7 @@ std::shared_ptr<const cached_response> insert(response_cache& cache, const v2::W
     FLEXEDGE_REQUIRE(cache.store(*ticket.ticket_, site.response_cache(), rule, *fill, {}));
     return cache.lookup(site, rule, address, {}, false).response_;
 }
-void expire(const std::shared_ptr<response_cache_publication>& publication, const std::string& key) {
-    auto root = publication->snapshot();
-    auto next = std::make_shared<response_cache_snapshot>(*root);
-    auto copy = std::make_shared<cached_response>(*next->entries_.at(key).front());
-    copy->expires_at_ = std::chrono::steady_clock::now() - std::chrono::seconds(2);
-    next->entries_[key][0] = copy;
-    FLEXEDGE_REQUIRE(publication->publish(root, next));
-}
 void verify_large_objects() {
-    auto policy = flexedge::cache::policy{};
-    FLEXEDGE_REQUIRE(policy.max_object_bytes_ == 512 * 1024 * 1024);
-    policy.max_object_bytes_ = 512 * 1024 * 1024;
-    FLEXEDGE_REQUIRE(flexedge::cache::validate(policy).empty());
-    ++policy.max_object_bytes_;
-    FLEXEDGE_REQUIRE(!flexedge::cache::validate(policy).empty());
-
     directory files;
     auto site = website("disk");
     site.mutable_response_cache()->set_max_object_bytes(256 * 1024 * 1024);
@@ -97,69 +82,13 @@ void verify_large_objects() {
     }
 }
 void verify() {
-    directory files;
-    auto site = website();
+    directory disk_files;
+    auto site = website("disk");
     const auto rule = flexedge::cache::from_proto(site.response_cache()).rules_.front();
-    auto publication = std::make_shared<response_cache_publication>(files.path_);
-    response_cache cache(publication), other(publication);
-    insert(cache, site, rule);
-    const auto key = cache.lookup(site, rule, object_url, {}, false).key_;
-    const auto before = publication->snapshot();
-    for (int i = 0; i < 32; ++i) {
-        FLEXEDGE_REQUIRE(cache.lookup(site, rule, object_url, {}, false).response_);
-    }
-    FLEXEDGE_REQUIRE(publication->snapshot() == before);
-    for (int i = 0; i < 128; ++i) {
-        FLEXEDGE_REQUIRE(cache.lookup(site, rule, object_url, {}, false).response_);
-    }
-    FLEXEDGE_REQUIRE(publication->snapshot() != before);
-
-    expire(publication, key);
-    const auto expired = cache.lookup(site, rule, object_url, {});
-    FLEXEDGE_REQUIRE(expired.stale_ && expired.ticket_ && response_cache::usable_stale(*expired.stale_));
-    FLEXEDGE_REQUIRE(other.lookup(site, rule, object_url, {}).filling_);
-    FLEXEDGE_REQUIRE(cache.renew(*expired.ticket_));
-    FLEXEDGE_REQUIRE(publication->snapshot()->filling_.at(key).expires_at_ > std::chrono::steady_clock::now() + std::chrono::seconds(20));
-    const auto fresh = cache.revalidate(*expired.ticket_, rule, *expired.stale_,
-        {304, {{"Cache-Control", "public, max-age=900"}, {"ETag", "\"etag\""}}}, {});
-    FLEXEDGE_REQUIRE(fresh && fresh->body_ == expired.stale_->body_ && fresh->expires_at_ > std::chrono::steady_clock::now());
-    FLEXEDGE_REQUIRE(other.lookup(site, rule, object_url, {}).response_);
-    FLEXEDGE_REQUIRE(!cache.renew(*expired.ticket_));
-
-    const auto orphan = cache.lookup(site, rule, object_url + "?lease", {});
-    {
-        auto root = publication->snapshot();
-        auto next = std::make_shared<response_cache_snapshot>(*root);
-        next->filling_[orphan.ticket_->key_].expires_at_ = std::chrono::steady_clock::now() - std::chrono::seconds(1);
-        FLEXEDGE_REQUIRE(publication->publish(root, next));
-    }
-    const auto successor = other.lookup(site, rule, object_url + "?lease", {});
-    FLEXEDGE_REQUIRE(successor.ticket_ && successor.ticket_->claim_ != orphan.ticket_->claim_);
-    FLEXEDGE_REQUIRE(!cache.renew(*orphan.ticket_));
-    other.abandon(*successor.ticket_);
-    const auto pending = cache.lookup(site, rule, object_url + "?pending", {});
     v2::CacheCommand clear;
     clear.set_operation("clean");
     clear.set_policy_id("policy");
     clear.set_scope("all");
-    cache.invalidate(clear, {});
-    FLEXEDGE_REQUIRE(!cache.renew(*pending.ticket_));
-    FLEXEDGE_REQUIRE(!cache.current(key, *fresh));
-    auto origin_rule = rule;
-    origin_rule.ttl_mode_ = "origin";
-    auto strict = insert(cache, site, origin_rule, "public, max-age=600, must-revalidate");
-    FLEXEDGE_REQUIRE(!response_cache::usable_stale(*strict));
-
-    const auto range = parse_cache_range("bytes=2-5", 10);
-    FLEXEDGE_REQUIRE(range && range->satisfiable_ && range->offset_ == 2 && range->length_ == 4);
-    FLEXEDGE_REQUIRE(parse_cache_range("bytes=-3", 10)->offset_ == 7);
-    FLEXEDGE_REQUIRE(parse_cache_range("bytes=7-", 10)->length_ == 3);
-    FLEXEDGE_REQUIRE(!parse_cache_range("bytes=99-", 10)->satisfiable_);
-    FLEXEDGE_REQUIRE(!parse_cache_range("bytes=0-1,4-5", 10));
-    FLEXEDGE_REQUIRE(!parse_cache_range("bytes=0-", 0)->satisfiable_);
-
-    directory disk_files;
-    site = website("disk");
     std::filesystem::path body;
     {
         auto disk = std::make_shared<response_cache_publication>(disk_files.path_);

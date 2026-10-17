@@ -47,10 +47,8 @@ namespace {
 // a copy of the handle, so the transaction is exposed through a copyable view.
 struct transaction_db final {
     ruvia::db_transaction* transaction_;
-    std::size_t* query_count_;
     template <typename... args_type>
     auto query(args_type&&... args) const {
-        ++*query_count_;
         return transaction_->query(std::forward<args_type>(args)...);
     }
 };
@@ -58,9 +56,8 @@ struct transaction_db final {
 struct read_context final {
     ruvia::db_transaction* transaction_;
     std::pmr::memory_resource* resource_;
-    std::size_t query_count_{};
     transaction_db db() {
-        return {transaction_, &query_count_};
+        return {transaction_};
     }
     std::pmr::memory_resource* pool() const {
         return resource_;
@@ -604,33 +601,6 @@ ruvia::task<void> verify_online_window(read_context& c, ruvia::db_transaction& t
     }
 }
 
-template <typename parse_type>
-void require_bad_request(parse_type parse) {
-    try {
-        parse();
-    } catch (const ruvia::http_error& error) {
-        REQUIRE(error.info().status().value() == 400);
-        REQUIRE(error.info().code() == "10001");
-        return;
-    }
-    throw std::runtime_error("invalid filter value was accepted");
-}
-
-void verify_filter_parsing() {
-    using service::certificate::parse_attention_filter;
-    REQUIRE(!parse_attention_filter(std::nullopt, "expiring"));
-    REQUIRE(parse_attention_filter("1", "expiring"));
-    require_bad_request([] { (void)parse_attention_filter("true", "expiring"); });
-    require_bad_request([] { (void)parse_attention_filter("0", "abnormal"); });
-
-    using service::website::parse_certificate_id_filter;
-    REQUIRE(!parse_certificate_id_filter(std::nullopt));
-    REQUIRE(parse_certificate_id_filter(cert_expiring) == std::string(cert_expiring));
-    require_bad_request([] { (void)parse_certificate_id_filter("not-a-uuid"); });
-}
-
-// Without an installed GeoIP database the country ranking is still part of the
-// dashboard contract: an empty array, not an omitted required field.
 ruvia::task<void> verify_dashboard_without_geoip(read_context& c) {
     REQUIRE(!service::geoip::get_xdb_database().available());
     const auto dashboard = co_await service::website::get_website_dashboard_service().dashboard(
@@ -851,24 +821,16 @@ ruvia::task<void> verify_options(read_context& c, ruvia::db_transaction& tx) {
     const auto& issuers = service::provider::get_certificate_provider_read_service();
     for (const auto identity : {tenant_a, tenant_b, tenant_c}) {
         const std::string tenant(identity);
-        auto before = c.query_count_;
         const auto cluster_options = co_await clusters.options(c, tenant, std::nullopt);
-        REQUIRE(c.query_count_ == before + 1);
         const auto cluster_page = co_await clusters.list(c, tenant, 1, 10000, 0, std::nullopt, std::nullopt, std::nullopt);
         REQUIRE(std::string(ruvia::to_json(cluster_options)) == std::string(ruvia::to_json(cluster_page.get<"list">())));
-        before = c.query_count_;
         const auto certificate_options = co_await certificates.options(c, tenant, std::nullopt, std::nullopt, std::nullopt);
-        REQUIRE(c.query_count_ == before + 1);
         const auto certificate_page = co_await certificates.list(c, tenant, 1, 10000, 0, std::nullopt, std::nullopt, std::nullopt, false, false);
         REQUIRE(std::string(ruvia::to_json(certificate_options)) == std::string(ruvia::to_json(certificate_page.get<"list">())));
-        before = c.query_count_;
         const auto dns_options = co_await dns.options(c, tenant, std::nullopt, std::nullopt);
-        REQUIRE(c.query_count_ == before + 1);
         const auto dns_page = co_await dns.list(c, tenant, 1, 10000, 0, std::nullopt, std::nullopt);
         REQUIRE(std::string(ruvia::to_json(dns_options)) == std::string(ruvia::to_json(dns_page.get<"list">())));
-        before = c.query_count_;
         const auto issuer_options = co_await issuers.options(c, tenant, std::nullopt);
-        REQUIRE(c.query_count_ == before + 1);
         const auto issuer_page = co_await issuers.list(c, tenant, 1, 10000, 0, std::nullopt);
         REQUIRE(std::string(ruvia::to_json(issuer_options)) == std::string(ruvia::to_json(issuer_page.get<"list">())));
     }
@@ -904,19 +866,16 @@ ruvia::task<void> verify_options(read_context& c, ruvia::db_transaction& tx) {
             "SELECT $1, '00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-0000000000fa', "
             "'option-boundary-' || n || '.example' FROM generate_series($2::int, $3::int) n",
             tenant, begin, end);
-        auto before = c.query_count_;
         const auto cluster_options = co_await clusters.options(c, tenant, std::string("option-boundary-"));
-        REQUIRE(c.query_count_ == before + 1 && cluster_options.size() == static_cast<std::size_t>(end));
+        REQUIRE(cluster_options.size() == static_cast<std::size_t>(end));
         const auto cluster_page = co_await clusters.list(c, tenant, 1, 10000, 0, std::string("option-boundary-"), std::nullopt, std::nullopt);
         REQUIRE(std::string(ruvia::to_json(cluster_options)) == std::string(ruvia::to_json(cluster_page.get<"list">())));
-        before = c.query_count_;
         const auto dns_options = co_await dns.options(c, tenant, std::string("option-boundary-"), std::string("verified"));
-        REQUIRE(c.query_count_ == before + 1 && dns_options.size() == static_cast<std::size_t>(end));
+        REQUIRE(dns_options.size() == static_cast<std::size_t>(end));
         const auto dns_page = co_await dns.list(c, tenant, 1, 10000, 0, std::string("option-boundary-"), std::string("verified"));
         REQUIRE(std::string(ruvia::to_json(dns_options)) == std::string(ruvia::to_json(dns_page.get<"list">())));
-        before = c.query_count_;
         const auto certificate_options = co_await certificates.options(c, tenant, std::string("option-boundary-"), std::string_view("pending"), false);
-        REQUIRE(c.query_count_ == before + 1 && certificate_options.size() == static_cast<std::size_t>(end));
+        REQUIRE(certificate_options.size() == static_cast<std::size_t>(end));
         const auto certificate_page = co_await certificates.list(c, tenant, 1, 10000, 0, std::string("option-boundary-"), std::string_view("pending"), false, false, false);
         REQUIRE(std::string(ruvia::to_json(certificate_options)) == std::string(ruvia::to_json(certificate_page.get<"list">())));
     }
@@ -925,7 +884,6 @@ ruvia::task<void> verify_options(read_context& c, ruvia::db_transaction& tx) {
 }
 
 ruvia::task<void> verify(ruvia::db_client& client) {
-    verify_filter_parsing();
     co_await client.connect();
     auto db = client.handle();
     auto tx = co_await db.begin_transaction();

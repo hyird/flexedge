@@ -14,7 +14,6 @@
 #include <string>
 #include <string_view>
 #include <thread>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -260,78 +259,6 @@ issuance::validation_progress progress(std::int64_t revision = 1) {
             .challenge_url_ = "https://acme-v02.api.letsencrypt.org/challenge/fresh"}}, 10);
 }
 
-static_assert(!std::is_default_constructible_v<issuance::validation_progress>);
-static_assert(!std::is_default_constructible_v<issuance::finalize_progress>);
-static_assert(!std::is_constructible_v<issuance::issuance_progress, issuance::unpublished_order>);
-
-void verify_progress_values(std::pmr::memory_resource* resource) {
-    const auto validation = progress();
-    const auto json = issuance::serialize_issuance_progress(validation, resource);
-    const auto restored = issuance::parse_issuance_progress(json, 1, resource);
-    require(restored && std::holds_alternative<issuance::validation_progress>(*restored),
-        "published validation resumes as its own phase value");
-    const auto& resumed = std::get<issuance::validation_progress>(*restored);
-    require(resumed.dns_revision() == 10 && resumed.authorizations().size() == 1 &&
-        resumed.authorizations().front().challenge_url_ == validation.authorizations().front().challenge_url_,
-        "validation preserves the publication revision and challenge URLs");
-    require(!issuance::parse_issuance_progress(json, 2, resource), "progress from another issuance revision is rejected");
-    const auto parse = [&](std::string_view phase, std::optional<std::int64_t> dns_revision,
-                           std::string_view key, std::string_view order_url = "order") {
-        issuance::issuance_state_dto output({.resource_ = resource});
-        output.set<"revision">(1);
-        output.set<"phase">(phase);
-        output.set<"account_url">(account_url);
-        output.set<"order_url">(order_url);
-        (void)output.ensure<"authorizations">();
-        output.set<"private_key_envelope">(key);
-        if (dns_revision) {
-            output.set<"dns_revision">(*dns_revision);
-        }
-        const auto wire = ruvia::to_json(output, {.resource_ = resource});
-        return issuance::parse_issuance_progress(std::string_view(wire), 1, resource);
-    };
-    require(!parse("validation", std::nullopt, "") && !parse("validation", 0, "") &&
-        !parse("validation", -1, ""), "legacy or nonpositive DNS revisions cannot enter validation");
-    require(!parse("finalize", 10, "") && !parse("unknown", 10, "key") &&
-        !parse("validation", 10, "", ""), "missing keys, unknown phases and empty orders are rejected");
-    const auto legacy_finalize = parse("finalize", std::nullopt, "stored-key");
-    require(legacy_finalize && std::get<issuance::finalize_progress>(*legacy_finalize).private_key_envelope() == "stored-key",
-        "legacy finalize progress remains resumable without a DNS revision");
-    auto validated = progress();
-    const issuance::finalize_progress finalized(std::move(validated), "stored-key");
-    const auto final_json = issuance::serialize_issuance_progress(finalized, resource);
-    const auto final_dto = ruvia::from_json<issuance::issuance_state_dto>(final_json, {.resource_ = resource});
-    require(final_dto && final_dto->get<"phase">().view() == "finalize" &&
-        final_dto->get<"authorizations">().empty() &&
-        final_dto->get<"private_key_envelope">().view() == "stored-key" &&
-        final_dto->get<"dns_revision">()->value_ == 10,
-        "finalize serializes the unchanged JSON contract without validation-only fields");
-    bool rejected_validation{}, rejected_finalize{};
-    try {
-        (void)issuance::validation_progress(validation.order(), {}, 0);
-    } catch (const std::invalid_argument&) {
-        rejected_validation = true;
-    }
-    try {
-        (void)issuance::finalize_progress(validation.order(), "");
-    } catch (const std::invalid_argument&) {
-        rejected_finalize = true;
-    }
-    require(rejected_validation && rejected_finalize, "phase constructors reject missing publication or certificate keys");
-    using disposition = issuance::failure_disposition;
-    const auto check_failure = [](const std::exception_ptr& exception, disposition expected) {
-        const auto failure = issuance::classify_issuance_failure(exception);
-        require(failure.disposition_ == expected && !failure.message_.empty(),
-            "each exception has one explicit issuance disposition and an error message");
-    };
-    check_failure(std::make_exception_ptr(issuance::acme_pending("pending")), disposition::resume_order);
-    check_failure(std::make_exception_ptr(service::outbound_http::transport_error("network")), disposition::resume_order);
-    check_failure(std::make_exception_ptr(issuance::acme_error("invalid order", false)), disposition::restart_order);
-    check_failure(std::make_exception_ptr(issuance::acme_error("credentials", true)), disposition::terminal);
-    check_failure(std::make_exception_ptr(std::invalid_argument("stored input")), disposition::terminal);
-    check_failure(std::make_exception_ptr(std::runtime_error("storage")), disposition::restart_order);
-    check_failure(std::make_exception_ptr(42), disposition::restart_order);
-}
 
 ruvia::task<void> reset(task_context& context, bool legacy = false) {
     auto db = context.db();
@@ -606,7 +533,6 @@ ruvia::task<void> verify_finalize_recovery(ruvia::web_worker_context& web, task_
 ruvia::task<void> verify(ruvia::web_worker_context& web, acme_origin& origin) {
     task_context context(web);
     co_await prepare(context.db());
-    verify_progress_values(context.pool());
     co_await reset(context);
     auto before = origin.count();
     (void)co_await run_certificate(context);

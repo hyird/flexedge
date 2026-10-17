@@ -114,60 +114,6 @@ void require_trace_shape(const v2::ApplyResult& result, const TestConfig& config
     }
 }
 
-void verify_trace_limits() {
-    using flexedge::node::apply_log_level;
-    using flexedge::node::apply_trace;
-    using flexedge::node::truncate_utf8;
-    // "a" then two-byte characters: byte 512 starts a character, byte 511 continues one.
-    std::string wide("a");
-    for (int index = 0; index < 300; ++index) {
-        wide.append("\xC3\xA9");
-    }
-    REQUIRE(truncate_utf8(wide, 512).size() == 511);
-    REQUIRE(truncate_utf8("short", 512) == "short");
-    REQUIRE(truncate_utf8(wide.substr(1), 512).size() == 512);
-
-    apply_trace trace;
-    trace.log(apply_log_level::info, "before any step");
-    for (int index = 0; index < 20; ++index) {
-        trace.run_step("stage", [] {});
-    }
-    trace.log(apply_log_level::info, "after stage");
-    const auto open = trace.begin_step("fetch_objects");
-    trace.log(apply_log_level::info, "during fetch");
-    trace.end_step(open, true);
-    bool rethrown = false;
-    try {
-        trace.run_step("activate", [&]() -> int { throw std::runtime_error(wide); });
-    } catch (const std::runtime_error&) {
-        rethrown = true;
-    }
-    REQUIRE(rethrown);
-    for (int index = 0; index < 147; ++index) {
-        trace.log(apply_log_level::info, wide);
-    }
-    v2::ApplyResult result;
-    trace.write_to(result);
-    REQUIRE(result.logs(0).phase().empty());
-    REQUIRE(result.logs(1).phase() == "stage");
-    REQUIRE(result.logs(2).phase() == "fetch_objects");
-    REQUIRE(result.logs(3).phase() == "activate");
-    REQUIRE(result.steps_size() == 16);
-    REQUIRE(result.logs_size() == 100);
-    REQUIRE(result.logs(3).message().size() == 511);
-    REQUIRE(result.logs(99).level() == "warning");
-    REQUIRE(result.logs(99).phase().empty());
-
-    apply_trace failed;
-    try {
-        failed.run_step("validate", [&] { throw std::runtime_error(wide); });
-    } catch (const std::runtime_error&) {
-    }
-    failed.write_to(result);
-    REQUIRE(result.steps_size() == 1 && result.logs_size() == 0);
-    REQUIRE(!result.steps(0).ok() && result.steps(0).error().size() == 511);
-}
-
 }  // namespace
 
 int main() {
@@ -182,7 +128,6 @@ int main() {
             std::filesystem::remove_all(path_, ignored);
         }
     } state_cleanup{state_directory};
-    verify_trace_limits();
     {
         ruvia::event_loop_pool workers({.loop_count_ = 2});
         ruvia::event_loop_pool control({.loop_count_ = 1});

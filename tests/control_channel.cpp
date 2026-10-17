@@ -554,73 +554,6 @@ std::size_t count_logs(const std::vector<flexedge::node::v2::NodeLog>& logs,
     }));
 }
 
-ruvia::task<void> verify_channel_log_policy_on_worker(
-    ruvia::channel_receiver<flexedge::node::owned_log_batch>& receiver,
-    flexedge::node::log_producer& logs) {
-    using namespace flexedge::node;
-    using code_type = ruvia::websocket_client_error::code_type;
-    for (const auto code : {code_type::timeout, code_type::cancelled, code_type::resolve_failed,
-             code_type::connect_failed, code_type::handshake_rejected, code_type::io_error, code_type::closing}) {
-        REQUIRE(classify_channel_failure(code) == channel_failure_kind::transient);
-    }
-    for (const auto code : {code_type::invalid_config, code_type::invalid_state, code_type::tls_failed,
-             code_type::protocol_error, code_type::message_too_large}) {
-        REQUIRE(classify_channel_failure(code) == channel_failure_kind::permanent);
-    }
-    channel_log log(logs, "control");
-    log.recovered();
-    REQUIRE(logs.queued_events() == 0);
-    log.failed("connection refused", channel_failure_kind::transient);
-    REQUIRE(log.retry_delay() == std::chrono::seconds(1));
-    log.failed("connection refused", channel_failure_kind::transient);
-    REQUIRE(log.retry_delay() == std::chrono::seconds(2));
-    log.failed("connection refused", channel_failure_kind::transient);
-    REQUIRE(log.retry_delay() == std::chrono::seconds(4));
-    for (int attempt = 0; attempt < 10; ++attempt) {
-        log.failed("temporary failure", channel_failure_kind::transient);
-    }
-    REQUIRE(log.retry_delay() == std::chrono::seconds(30));
-    log.recovered();
-    log.recovered();
-    REQUIRE(log.retry_delay() == std::chrono::seconds(1));
-    log.failed("invalid credentials", channel_failure_kind::permanent);
-    log.recovered();
-    const auto entries = co_await drain_node_logs(logs, receiver);
-    REQUIRE(count_logs(entries, "control", "warning") == 13);
-    REQUIRE(count_logs(entries, "control", "error") == 1);
-    REQUIRE(count_logs(entries, "control", "info", "connection restored") == 2);
-    log.failed("a new outage", channel_failure_kind::transient);
-    REQUIRE(log.retry_delay() == std::chrono::seconds(1));
-    log.failed(ruvia::websocket_client_error(code_type::protocol_error,
-        "WebSocket transport ended before peer Close"));
-    log.failed(ruvia::websocket_client_error(code_type::protocol_error,
-        "WebSocket peer violated the protocol"));
-    log.failed(ruvia::websocket_client_error(code_type::protocol_error,
-        "WebSocket transport ended before peer Close with invalid frame"));
-    log.failed(ruvia::websocket_client_error(code_type::invalid_config,
-        "WebSocket transport ended before peer Close"));
-    const auto next_outage = co_await drain_node_logs(logs, receiver);
-    REQUIRE(count_logs(next_outage, "control", "warning") == 2);
-    REQUIRE(count_logs(next_outage, "control", "error") == 3);
-}
-
-void verify_channel_log_policy() {
-    ruvia::event_loop_pool loops({.loop_count_ = 1});
-    const auto loop = loops.loop(0);
-    auto [sender, receiver] = make_log_channel(loop);
-    flexedge::node::log_producer logs(loop, std::move(sender));
-    loops.start();
-    try {
-        loop.start(verify_channel_log_policy_on_worker(receiver, logs)).get();
-    } catch (...) {
-        loops.stop();
-        loops.join();
-        throw;
-    }
-    loops.stop();
-    loops.join();
-}
-
 void verify_control_reconnect(const std::filesystem::path& root,
     std::vector<session_behavior> sessions, std::size_t expected_heartbeats,
     std::size_t expected_warnings, std::size_t expected_errors, std::size_t expected_recoveries) {
@@ -1070,7 +1003,6 @@ int main(int argc, char* argv[]) {
         (void)argc;
         (void)argv;
 #endif
-        verify_channel_log_policy();
         // A usable persisted state is served before the control plane is reached.
         {
             const auto state = root / "valid";

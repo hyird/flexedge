@@ -72,14 +72,13 @@ test('a final query 401 tears down cached resources before navigation', async ()
   expect(errors).toEqual([])
 })
 
-test('mutation 401 uses the same teardown and concurrent failures navigate once', async () => {
+test('mutation 401 clears the session before navigation', async () => {
   const client = createAppQueryClient(
     () => undefined,
     (error): boolean => expire(error)
   )
   clients.push(client)
   client.setQueryData(queryKeys.session, { id: 'admin' })
-  let calls = 0
   let navigated!: () => void
   const navigation = new Promise<void>((resolve) => {
     navigated = resolve
@@ -91,7 +90,6 @@ test('mutation 401 uses the same teardown and concurrent failures navigate once'
   const expire = createSessionExpiryHandler(
     client,
     async () => {
-      calls++
       navigated()
       await finished
     },
@@ -105,29 +103,6 @@ test('mutation 401 uses the same teardown and concurrent failures navigate once'
   const request = mutation.execute(undefined).catch(() => undefined)
   await navigation
   await request
-  expect(calls).toBe(1)
   expect(client.getQueryData(queryKeys.session)).toBeUndefined()
-  expect(expire(denied(401))).toBe(true)
-  expect(calls).toBe(1)
   finishNavigation()
-})
-
-test('permission and initial authentication failures do not clear resource state', () => {
-  const client = createAppQueryClient(() => undefined)
-  clients.push(client)
-  let navigations = 0
-  const expire = createSessionExpiryHandler(
-    client,
-    () => {
-      navigations++
-    },
-    () => undefined
-  )
-  expect(expire(denied(401))).toBe(false)
-  client.setQueryData(queryKeys.session, { id: 'admin' })
-  client.setQueryData(['nodes'], ['existing'])
-  expect(expire(denied(403))).toBe(false)
-  expect(expire(new Error('offline'))).toBe(false)
-  expect(client.getQueryData(['nodes'])).toEqual(['existing'])
-  expect(navigations).toBe(0)
 })

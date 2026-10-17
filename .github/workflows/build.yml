@@ -46,7 +46,7 @@ jobs:
       - name: Frontend lint
         run: bun run lint
 
-      - name: Frontend tests
+      - name: Frontend integration tests
         run: bun run test
 
       - name: Install toolchain

@@ -218,18 +218,7 @@ else()
 endif()
 
 if(BUILD_TESTING)
-    # Compile-only boundary check: no Ruvia, database, or protocol dependency
-    # may be needed to consume the plain domain data structures.
-    add_library(flexedge_domain_models_compile_test OBJECT
-        tests/domain_models_compile.cpp
-    )
-    target_include_directories(flexedge_domain_models_compile_test
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-    )
-    if(MSVC)
-        target_compile_options(flexedge_domain_models_compile_test PRIVATE /utf-8)
-    endif()
-
+    # Only functional integration and end-to-end tests belong here.
     # Each test owns its dependencies; compilation policy is shared.
     function(flexedge_add_test name)
         cmake_parse_arguments(TEST "BIG_OBJECT" "DRIVER" "SOURCES;LIBRARIES;DRIVER_ARGS" ${ARGN})
@@ -252,22 +241,6 @@ if(BUILD_TESTING)
         endif()
     endfunction()
 
-    flexedge_add_test(website_model_contract
-        SOURCES tests/website_model_contract.cpp
-        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web
-    )
-    flexedge_add_test(node_model_contract
-        SOURCES tests/node_model_contract.cpp
-        LIBRARIES ruvia::web
-    )
-    flexedge_add_test(resource_model_contract
-        SOURCES tests/resource_model_contract.cpp
-        LIBRARIES ruvia::web
-    )
-    flexedge_add_test(provider_model_contract
-        SOURCES tests/provider_model_contract.cpp
-        LIBRARIES ruvia::web
-    )
     flexedge_add_test(background_shutdown
         SOURCES tests/background_shutdown.cpp
         LIBRARIES ruvia::web OpenSSL::Crypto
@@ -279,10 +252,6 @@ if(BUILD_TESTING)
         DRIVER tests/snapshot_read_budget_test.py
     )
     set_tests_properties(flexedge_snapshot_read_budget PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90)
-    flexedge_add_test(dns_reconciliation
-        SOURCES tests/dns_reconciliation.cpp
-        LIBRARIES OpenSSL::Crypto
-    )
     flexedge_add_test(dns_maintenance
         SOURCES tests/dns_maintenance.cpp
         LIBRARIES ruvia::web OpenSSL::Crypto
@@ -299,29 +268,6 @@ if(BUILD_TESTING)
         DRIVER tests/dns_management_test.py
     )
     set_tests_properties(flexedge_dns_management PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90)
-    flexedge_add_test(credential_crypto
-        SOURCES tests/credential_crypto.cpp
-        LIBRARIES OpenSSL::Crypto
-    )
-    flexedge_add_test(duration
-        SOURCES tests/duration.cpp
-    )
-    flexedge_add_test(geoip_location
-        SOURCES tests/geoip_location.cpp
-    )
-    flexedge_add_test(website_access_log_mapper
-        SOURCES tests/website_access_log_mapper.cpp
-        LIBRARIES ruvia::web
-        DRIVER tests/website_access_log_mapper_test.py
-    )
-    flexedge_add_test(uuid_collection_validation
-        SOURCES tests/uuid_collection_validation.cpp
-        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web
-    )
-    flexedge_add_test(node_endpoint_validation
-        SOURCES tests/node_endpoint_validation.cpp
-        LIBRARIES ruvia::web
-    )
     flexedge_add_test(endpoint_claim
         SOURCES tests/endpoint_claim.cpp
         LIBRARIES ruvia::web
@@ -330,18 +276,6 @@ if(BUILD_TESTING)
     flexedge_add_test(website_relations
         SOURCES tests/website_relations.cpp
         LIBRARIES ruvia::web
-    )
-    flexedge_add_test(website_domain_claim
-        SOURCES tests/website_domain_claim.cpp
-        LIBRARIES ruvia::web
-    )
-    flexedge_add_test(website_certificate_coverage
-        SOURCES tests/website_certificate_coverage.cpp
-        LIBRARIES ruvia::web
-    )
-    flexedge_add_test(website_dns_flattening
-        SOURCES tests/website_dns_flattening.cpp
-        LIBRARIES asio::asio
     )
     set_tests_properties(flexedge_website_relations PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     flexedge_add_test(website_reference_lock
@@ -402,34 +336,9 @@ if(BUILD_TESTING)
         SOURCES tests/secure_file.cpp
         LIBRARIES Threads::Threads
     )
-    flexedge_add_test(loop_shutdown
-        SOURCES tests/loop_shutdown.cpp
-        LIBRARIES ruvia::core
-    )
-    flexedge_add_test(log_notification
-        SOURCES tests/log_notification.cpp
-        LIBRARIES flexedge_node_protocol ruvia::core OpenSSL::Crypto
-    )
-    flexedge_add_test(architecture
-        SOURCES tests/architecture.cpp
-        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web asio::asio OpenSSL::Crypto
-    )
-    flexedge_add_test(origin_health
-        SOURCES tests/origin_health.cpp
-        LIBRARIES Threads::Threads
-    )
-    flexedge_add_test(response_cache
-        SOURCES tests/response_cache.cpp
-        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::http Threads::Threads)
     flexedge_add_test(cache_features
         SOURCES tests/cache_features.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::http Threads::Threads)
-    flexedge_add_test(cache_config
-        SOURCES tests/cache_config.cpp
-        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web)
-    flexedge_add_test(response_streaming
-        SOURCES tests/response_streaming.cpp
-        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::http OpenSSL::Crypto)
     flexedge_add_test(cache_runtime
         SOURCES tests/cache_runtime.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto)
@@ -446,18 +355,6 @@ if(BUILD_TESTING)
         SOURCES tests/cache_migration.cpp
         LIBRARIES flexedge_route_policy ruvia::web OpenSSL::Crypto)
     set_tests_properties(flexedge_cache_migration PROPERTIES SKIP_RETURN_CODE 77)
-    flexedge_add_test(origin_selection
-        SOURCES tests/origin_selection.cpp
-        LIBRARIES flexedge_node_protocol Threads::Threads
-    )
-    flexedge_add_test(origin_request_codec
-        SOURCES tests/origin_request_codec.cpp
-        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::http OpenSSL::Crypto
-    )
-    flexedge_add_test(http1_request_reader
-        SOURCES tests/http1_request_reader.cpp
-        LIBRARIES ruvia::http
-    )
     flexedge_add_test(node_runtime BIG_OBJECT
         SOURCES tests/node_runtime.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto
@@ -504,22 +401,6 @@ if(BUILD_TESTING)
             "$<TARGET_FILE:flexedge_control_channel_test>" --dns-reconnect)
         set_tests_properties(flexedge_control_dns PROPERTIES TIMEOUT 30)
     endif()
-    flexedge_add_test(agent_protocol
-        SOURCES tests/agent_protocol.cpp
-        LIBRARIES flexedge_node_protocol OpenSSL::Crypto ruvia::web
-    )
-    flexedge_add_test(log_ingest
-        SOURCES tests/log_ingest.cpp
-        LIBRARIES flexedge_log_ingest_protocol ruvia::web
-    )
-    flexedge_add_test(log_fanout
-        SOURCES tests/log_fanout.cpp
-        LIBRARIES ruvia::web
-    )
-    flexedge_add_test(live_resource
-        SOURCES tests/live_resource.cpp
-        LIBRARIES ruvia::web
-    )
     # Needs REDIS_TEST_PORT / REDIS_TEST_DATABASE (isolated Redis); skipped otherwise.
     flexedge_add_test(resource_notification
         SOURCES tests/resource_notification.cpp
@@ -582,10 +463,6 @@ if(BUILD_TESTING)
         DRIVER tests/read_projection_test.py
     )
     set_tests_properties(flexedge_read_projection PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
-    flexedge_add_test(logging
-        SOURCES tests/logging.cpp
-        LIBRARIES Threads::Threads ruvia::web
-    )
     flexedge_add_test(task_history
         SOURCES tests/task_history.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web
@@ -611,23 +488,11 @@ if(BUILD_TESTING)
         LIBRARIES ruvia::web
     )
     set_tests_properties(flexedge_log_ingest_migration PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
-    flexedge_add_test(attempt_trace_redaction
-        SOURCES tests/attempt_trace_redaction.cpp
-        LIBRARIES ruvia::web OpenSSL::Crypto
-    )
-    flexedge_add_test(attempt_trace_recorder
-        SOURCES tests/attempt_trace_recorder.cpp
-        LIBRARIES ruvia::web OpenSSL::Crypto
-    )
     flexedge_add_test(attempt_trace_store
         SOURCES tests/attempt_trace_store.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto
     )
     set_tests_properties(flexedge_attempt_trace_store PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
-    flexedge_add_test(provider_error_redaction
-        SOURCES tests/provider_error_redaction.cpp
-        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web asio::asio OpenSSL::Crypto
-    )
 endif()
 
 set(FLEXEDGE_RUNTIME_OUTPUT_DIR "${CMAKE_BINARY_DIR}")

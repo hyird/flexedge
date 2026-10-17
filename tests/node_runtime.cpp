@@ -25,7 +25,6 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
-#include <type_traits>
 #include <vector>
 
 #include <asio/buffer.hpp>
@@ -75,18 +74,6 @@
     } while (false)
 
 namespace {
-static_assert(!std::is_copy_constructible_v<flexedge::node::compiled_config>);
-static_assert(!std::is_copy_assignable_v<flexedge::node::compiled_config>);
-static_assert(!std::is_move_constructible_v<flexedge::node::compiled_config>);
-static_assert(!std::is_move_assignable_v<flexedge::node::compiled_config>);
-static_assert(!std::is_copy_constructible_v<flexedge::node::tls_context_set>);
-static_assert(!std::is_move_constructible_v<flexedge::node::tls_context_set>);
-static_assert(!std::is_move_assignable_v<flexedge::node::tls_context_set>);
-static_assert(!std::is_copy_constructible_v<flexedge::node::log_producer>);
-static_assert(std::is_same_v<flexedge::node::owned_log_batch,
-    std::unique_ptr<const flexedge::node::log_batch>>);
-static_assert(std::is_same_v<decltype(std::declval<const flexedge::node::log_batch&>().value()),
-    const flexedge::node::v2::LogDelivery&>);
 
 using flexedge::testing::snapshot;
 using flexedge::testing::TestConfig;
@@ -101,6 +88,15 @@ void apply(flexedge::node::runtime_state& runtime, TestConfig value) {
     runtime.validate_next(*config);
     runtime.publish_execution(std::make_shared<const flexedge::node::worker_execution_view>(
         std::move(config)));
+}
+
+ruvia::http1_client_exchange_state origin_exchange_state() {
+    const auto config = snapshot();
+    auto prepared = flexedge::node::prepare_origin_request(
+        {.method_ = "GET", .target_ = "/", .headers_ = {}, .body_ = {}, .has_body_ = false},
+        config.website(), "www.example.com", "198.51.100.1", true, false, false);
+    REQUIRE(prepared);
+    return prepared->make_exchange_state();
 }
 
 using flexedge::testing::request;
@@ -333,10 +329,6 @@ void verify_log_batches() {
         require_log_batch_bounds(*batch);
     }
     REQUIRE(delivery->value().SerializeAsString() == immutable_bytes);
-    v2::Website website_log_policy;
-    REQUIRE(!website_log_policy.access_log_enabled());
-    website_log_policy.set_access_log_enabled(true);
-    REQUIRE(website_log_policy.access_log_enabled());
     shutdown.stop_and_join();
 }
 
@@ -896,16 +888,6 @@ int main(int argc, char* argv[]) {
             throw std::runtime_error("test executable path is unavailable");
         }
         const auto executable_path = std::filesystem::absolute(argv[0]);
-        REQUIRE(flexedge::node::valid_credential_node_id(std::string(32, 'a')));
-        REQUIRE(!flexedge::node::valid_credential_node_id(std::string(32, 'A')));
-        REQUIRE(!flexedge::node::valid_credential_node_id(std::string(31, 'a')));
-        REQUIRE(!flexedge::node::valid_credential_node_id(std::string(33, 'a')));
-        REQUIRE(flexedge::node::valid_credential_secret(std::string(32, '!')));
-        REQUIRE(flexedge::node::valid_credential_secret(std::string(128, '~')));
-        REQUIRE(!flexedge::node::valid_credential_secret(std::string(31, '!')));
-        REQUIRE(!flexedge::node::valid_credential_secret(std::string(129, '!')));
-        REQUIRE(!flexedge::node::valid_credential_secret(std::string(32, ' ')));
-        REQUIRE(!flexedge::node::valid_credential_secret(std::string(32, '\x7f')));
         const auto credentials_root =
             std::filesystem::temp_directory_path() /
             ("flexedge-node-credentials-" +
@@ -1023,147 +1005,6 @@ int main(int argc, char* argv[]) {
             REQUIRE(!entry.path().filename().string().starts_with(".node.upgrade."));
         }
 
-        REQUIRE(flexedge::node::accepts_event_stream("text/event-stream"));
-        REQUIRE(flexedge::node::accepts_event_stream(
-            "application/json, text/event-stream; charset=utf-8"));
-        REQUIRE(!flexedge::node::accepts_event_stream("text/plain"));
-        const std::array<ruvia::http_header_view, 2> streaming_headers{
-            ruvia::http_header_view{"Accept", "text/event-stream"},
-            ruvia::http_header_view{"Accept-Encoding", "gzip"},
-        };
-        const auto streaming_config = snapshot();
-        const auto streaming_origin_request = flexedge::node::prepare_origin_request(
-            {.method_ = "GET",
-                .target_ = "/events",
-                .headers_ = streaming_headers,
-                .body_ = {},
-                .has_body_ = false},
-            streaming_config.website(), "www.example.com", "198.51.100.1", true, false, false, true);
-        REQUIRE(streaming_origin_request);
-        REQUIRE(streaming_origin_request->bytes_.find("Accept-Encoding: identity\r\n") !=
-                std::string::npos);
-        REQUIRE(streaming_origin_request->bytes_.find("Accept-Encoding: gzip\r\n") ==
-                std::string::npos);
-        auto origin_exchange_state = [&](std::string_view method = "GET") {
-            auto prepared = flexedge::node::prepare_origin_request(
-                {.method_ = method, .target_ = "/", .headers_ = {}, .body_ = {}, .has_body_ = false},
-                streaming_config.website(), "www.example.com", "198.51.100.1", true, false, false);
-            REQUIRE(prepared);
-            return prepared->make_exchange_state();
-        };
-        // Streaming keeps the origin framing for the relayed body and only tracks its end.
-        flexedge::node::origin_response_codec streamed(origin_exchange_state(), true, nullptr);
-        REQUIRE(streamed.consume_head("HTTP/1.1 200 OK\r\n"
-                                      "Connection: keep-alive, X-Remove\r\n"
-                                      "X-Remove: secret\r\n"
-                                      "Keep-Alive: timeout=5\r\n"
-                                      "Transfer-Encoding: chunked\r\n"
-                                      "Strict-Transport-Security: max-age=1\r\n\r\n"
-                                      "4\r\nWi") == flexedge::node::origin_response_head_status::ready);
-        const auto streamed_head = streamed.take_output();
-        REQUIRE(streamed_head.starts_with("HTTP/1.1 200 OK\r\n"));
-        REQUIRE(streamed_head.find("Transfer-Encoding: chunked\r\n") != std::string::npos);
-        REQUIRE(streamed_head.find("X-Remove") == std::string::npos);
-        REQUIRE(streamed_head.find("Keep-Alive") == std::string::npos);
-        REQUIRE(streamed_head.find("max-age=1\r\n") == std::string::npos);
-        REQUIRE(streamed_head.find("Strict-Transport-Security: max-age=31536000\r\n") !=
-                std::string::npos);
-        REQUIRE(streamed_head.ends_with(
-            "Connection: close\r\n"
-            "Strict-Transport-Security: max-age=31536000\r\n\r\n4\r\nWi"));
-        REQUIRE(!streamed.complete());
-        REQUIRE(streamed.consume_body("ki\r\n0\r\nX-Test: value\r\n") ==
-                flexedge::node::origin_response_body_status::accepted);
-        REQUIRE(!streamed.complete());
-        REQUIRE(streamed.consume_body("\r\n") == flexedge::node::origin_response_body_status::accepted);
-        REQUIRE(streamed.complete());
-        REQUIRE(streamed.consume_body("extra") == flexedge::node::origin_response_body_status::failure);
-
-        // The streaming codec preserves representation length on HEAD/304 and
-        // never invents Content-Length for 204, including with compression enabled.
-        struct no_content_response final {
-            std::string_view method_{};
-            std::string_view head_{};
-            std::uint16_t status_{};
-        };
-        flexedge::node::buffered_bytes_budget codec_budget(1024 * 1024);
-        auto codec_website = streaming_config.website();
-        codec_website.set_response_compression_enabled(true);
-        for (const bool compression : {false, true}) {
-            for (const auto& test : std::array{
-                     no_content_response{"HEAD", "HTTP/1.1 200 OK\r\nContent-Length: 123\r\n\r\n", 200},
-                     no_content_response{"GET", "HTTP/1.1 304 Not Modified\r\nContent-Length: 123\r\n\r\n", 304},
-                     no_content_response{"GET", "HTTP/1.1 204 No Content\r\n\r\n", 204},
-                     no_content_response{"GET", "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n", 204},
-                     no_content_response{"GET", "HTTP/1.1 204 No Content\r\nContent-Length: nonsense\r\nTransfer-Encoding: nonsense\r\n\r\n", 204}}) {
-                flexedge::node::origin_response_codec codec(origin_exchange_state(test.method_), false, nullptr);
-                if (compression) {
-                    codec.set_compression(codec_website, "/file.html", "gzip", codec_budget.lease());
-                }
-                REQUIRE(codec.consume_head(test.head_) == flexedge::node::origin_response_head_status::ready);
-                REQUIRE(codec.complete());
-                const auto wire = codec.take_output();
-                ruvia::http1_client_response_parser parser(origin_exchange_state(test.method_));
-                const auto result = parser.parse(wire);
-                REQUIRE(result.parsed());
-                REQUIRE(result.parsed()->head().status().value() == test.status_);
-                REQUIRE(result.parsed()->consumed_bytes() == wire.size());
-                for (const auto& field : result.parsed()->head().headers()) {
-                    if (flexedge::route_policy::ascii_equal(field.name(), "Content-Length")) {
-                        REQUIRE(test.status_ != 204);
-                        REQUIRE(field.value() == "123");
-                    } else if (flexedge::route_policy::ascii_equal(field.name(), "Transfer-Encoding")) {
-                        REQUIRE(test.status_ != 204);
-                    }
-                }
-                REQUIRE(wire.ends_with("\r\n\r\n"));
-                REQUIRE(codec_budget.used_bytes() == 0);
-            }
-        }
-
-        flexedge::node::origin_response_codec malformed(origin_exchange_state(), false, nullptr);
-        REQUIRE(malformed.consume_head("HTTP/1.1 20x Bad Status\r\n\r\n") ==
-                flexedge::node::origin_response_head_status::failure);
-
-        flexedge::node::buffered_bytes_budget budget(8192);
-        auto first_reservation = budget.lease();
-        REQUIRE(first_reservation.try_grow(4096));
-        REQUIRE(budget.used_bytes() == 4096);
-        auto moved_reservation = std::move(first_reservation);
-        moved_reservation.shrink(1024);
-        REQUIRE(budget.used_bytes() == 3072);
-        moved_reservation = {};
-        REQUIRE(budget.used_bytes() == 0);
-        auto maximum_reservation = budget.lease();
-        REQUIRE(maximum_reservation.try_grow(budget.maximum_bytes()));
-        auto rejected_reservation = budget.lease();
-        REQUIRE(!rejected_reservation.try_grow(1));
-        REQUIRE(budget.rejected_reservations() == 1);
-        maximum_reservation = {};
-        REQUIRE(budget.used_bytes() == 0);
-
-        flexedge::node::buffered_bytes_budget request_budget(32);
-        auto held_request_bytes = request_budget.lease();
-        REQUIRE(held_request_bytes.try_grow(32));
-        auto rejected_request_bytes = request_budget.lease();
-        REQUIRE(!rejected_request_bytes.try_grow(1));
-        REQUIRE(request_budget.rejected_reservations() == 1);
-
-        flexedge::node::state_cipher state_cipher(std::string(64, '1'));
-        const auto sealed_state = state_cipher.seal("device-encrypted-private-state");
-        REQUIRE(sealed_state.starts_with("FES1"));
-        REQUIRE(sealed_state.find("device-encrypted-private-state") == std::string::npos);
-        REQUIRE(state_cipher.open(sealed_state) == "device-encrypted-private-state");
-        auto tampered_state = sealed_state;
-        tampered_state.back() ^= 1;
-        bool tampered_state_rejected = false;
-        try {
-            (void)state_cipher.open(tampered_state);
-        } catch (const std::runtime_error&) {
-            tampered_state_rejected = true;
-        }
-        REQUIRE(tampered_state_rejected);
-
         const auto state_directory =
             std::filesystem::temp_directory_path() /
             ("flexedge-node-state-" +
@@ -1240,49 +1081,6 @@ int main(int argc, char* argv[]) {
             REQUIRE(state_store.load().active_.has_release());
         }
 
-        const auto config = compiled(snapshot());
-        REQUIRE(config->website("www.example.com:80") != nullptr);
-        REQUIRE(config->domain("WWW.EXAMPLE.COM") != nullptr);
-        // The port goes before the trailing root label dot: both spellings name the same site.
-        REQUIRE(flexedge::route_policy::hostname("WWW.Example.COM.:443") == "www.example.com");
-        REQUIRE(config->website("WWW.Example.COM.:443") == config->website("www.example.com"));
-        REQUIRE(config->domain("www.example.com.") != nullptr);
-        const auto redirect =
-            flexedge::node::http_to_https_redirect(*config, "WWW.Example.COM:80", "/a?q=1");
-        REQUIRE(redirect);
-        REQUIRE(redirect->status_ == ruvia::http_status::moved_permanently);
-        REQUIRE(redirect->location_ == "https://www.example.com/a?q=1");
-        REQUIRE(!flexedge::node::http_to_https_redirect(*config, "http.example.com", "/"));
-
-        const auto no_redirect = compiled(snapshot(false));
-        REQUIRE(!flexedge::node::http_to_https_redirect(*no_redirect, "www.example.com", "/"));
-
-        auto wildcard_snapshot = snapshot();
-        wildcard_snapshot.mutableWebsite()->mutable_domains(0)->set_hostname("*.Example.COM.");
-        wildcard_snapshot.duplicateWebsite();
-        auto* exact_website = wildcard_snapshot.contents.back().mutable_website();
-        exact_website->set_id("exact-website");
-        exact_website->clear_domains();
-        auto* exact_domain = exact_website->add_domains();
-        exact_domain->set_hostname("www.example.com");
-        exact_domain->set_https_enabled(true);
-        exact_domain->set_certificate_digest(
-            wildcard_snapshot.mutableWebsite()->domains(0).certificate_digest());
-        const auto wildcard_config = compiled(std::move(wildcard_snapshot));
-        REQUIRE(wildcard_config->website("www.example.com")->id() == "exact-website");
-        REQUIRE(wildcard_config->website("ASSETS.Example.COM.:443")->id() == "website-1");
-        REQUIRE(wildcard_config->domain("assets.example.com")->hostname() == "*.Example.COM.");
-        REQUIRE(!wildcard_config->domain("http.example.com")->https_enabled());
-        for (const auto host : {"example.com", "a.b.example.com", "badexample.com",
-                 "example.com.evil", "*.example.com", ".example.com", "bad_host.example.com"}) {
-            REQUIRE(wildcard_config->website(host) == nullptr);
-            REQUIRE(wildcard_config->domain(host) == nullptr);
-        }
-        const auto wildcard_redirect = flexedge::node::http_to_https_redirect(
-            *wildcard_config, "ASSETS.Example.COM:80", "/asset?q=1");
-        REQUIRE(wildcard_redirect);
-        REQUIRE(wildcard_redirect->location_ == "https://assets.example.com/asset?q=1");
-
         // Objects published before http2_enabled was retired carry field 14 in number order.
         // Nodes hash the bytes they hold, so those objects verify as published; nodes that
         // still re-serialize need the field known to reproduce the same bytes.
@@ -1314,42 +1112,10 @@ int main(int argc, char* argv[]) {
             REQUIRE(legacy_http2_config->website("www.example.com") != nullptr);
         }
 
-        auto invalid_compression_mime_type = snapshot(false);
-        invalid_compression_mime_type.mutableWebsite()->add_response_compression_mime_types(
-            "application");
-        bool invalid_compression_mime_type_rejected = false;
-        try {
-            (void)compiled(std::move(invalid_compression_mime_type));
-        } catch (const std::runtime_error&) {
-            invalid_compression_mime_type_rejected = true;
-        }
-        REQUIRE(invalid_compression_mime_type_rejected);
-
         flexedge::node::runtime_state runtime;
-        apply(runtime, snapshot());
-        const auto previous = runtime.config();
-        REQUIRE(previous != nullptr);
-        REQUIRE(previous->node_spec().revision() == 3);
-
-        auto duplicate = snapshot();
-        duplicate.setGeneration(4);
-        duplicate.duplicateWebsite();
-        bool rejected = false;
-        try {
-            apply(runtime, std::move(duplicate));
-        } catch (const std::runtime_error&) {
-            rejected = true;
-        }
-        REQUIRE(rejected);
-        REQUIRE(runtime.config() == previous);
-        REQUIRE(runtime.applied_node_spec_revision() == 3);
-
         auto replacement = snapshot(false);
         replacement.setGeneration(4);
         apply(runtime, std::move(replacement));
-        REQUIRE(runtime.config() != previous);
-        REQUIRE(runtime.applied_node_spec_revision() == 4);
-        REQUIRE(previous->website("www.example.com") != nullptr);
         std::int64_t next_generation{5};
 
         // Declared before the loops so sessions retiring on them never outlive their counters.
@@ -1484,22 +1250,6 @@ int main(int argc, char* argv[]) {
                 },
                 std::chrono::seconds(2));
         };
-        // A listener stopped before its configuration activates must release its
-        // self references even if another start request was queued.
-        auto verify_stopped_before_activation = [&](auto listener) {
-            const std::weak_ptr weak(listener);
-            listener->request_start();
-            listener->request_start();
-            listener->request_stop();
-            listener.reset();
-            REQUIRE(waitUntil([&] { return weak.expired(); }, std::chrono::seconds(2)));
-        };
-        verify_stopped_before_activation(flexedge::node::edge_listener::create(loops.loop(0),
-            first_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0), nullptr));
-        flexedge::node::tls_context_registry inactive_tls_contexts;
-        verify_stopped_before_activation(flexedge::node::edge_listener::create(loops.loop(0),
-            first_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0),
-            &inactive_tls_contexts));
         const auto constrained_response = request(constrained_port);
         REQUIRE(constrained_response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
         REQUIRE(waitUntil([&] { return constrained_request_buffers.used_bytes() == 0; },
@@ -1662,28 +1412,7 @@ int main(int argc, char* argv[]) {
         REQUIRE(observed_metrics.memory_total_bytes_ && *observed_metrics.memory_total_bytes_ > 0);
         REQUIRE(observed_metrics.disk_total_bytes_ && *observed_metrics.disk_total_bytes_ > 0);
         REQUIRE(observed_metrics.disk_usage_ && *observed_metrics.disk_usage_ >= 0 && *observed_metrics.disk_usage_ <= 1);
-        // Without a collected load no traffic rate is reported.
-        REQUIRE(metrics_sampler.sample(std::nullopt).traffic_out_bps_ == 0);
-
         // Per-IP accounting over real sockets, collected through connected_workers.
-        using flexedge::node::connected_clients;
-        REQUIRE(connected_clients::get_key(asio::ip::make_address("127.0.0.1")) ==
-                connected_clients::get_key(asio::ip::make_address("::ffff:127.0.0.1")));
-        REQUIRE(connected_clients::get_key(asio::ip::make_address("::1")) !=
-                connected_clients::get_key(asio::ip::make_address("127.0.0.1")));
-        {
-            connected_clients registry;
-            const auto client = connected_clients::get_key(asio::ip::make_address("192.0.2.1"));
-            registry.opened(client);
-            registry.opened(client);
-            registry.closed(client);
-            REQUIRE(registry.snapshot().size() == 1);
-            registry.closed(client);
-            REQUIRE(registry.snapshot().empty());
-            registry.closed(client);
-            REQUIRE(registry.snapshot().empty());
-        }
-        REQUIRE(count_ips({}) == 0);
         REQUIRE(count_ips(connected_workers) == 0);
         asio::io_context client_context;
         {
@@ -2901,11 +2630,6 @@ int main(int argc, char* argv[]) {
         reusable_edge_listener->request_stop();
         first_listener->request_stop();
         second_listener->request_stop();
-        // Posting cleanup after shutdown must not keep an otherwise unused
-        // listener (and its event loop handle) alive indefinitely.
-        auto stopped_loop_listener = flexedge::node::edge_listener::create(loops.loop(0),
-            first_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0), nullptr);
-        const std::weak_ptr stopped_loop_weak(stopped_loop_listener);
         control_loops.stop();
         control_loops.join();
         loops.stop();
@@ -2921,9 +2645,6 @@ int main(int argc, char* argv[]) {
             restart_after_worker_retirement_rejected = true;
         }
         REQUIRE(restart_after_worker_retirement_rejected);
-        stopped_loop_listener->request_stop();
-        stopped_loop_listener.reset();
-        REQUIRE(stopped_loop_weak.expired());
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

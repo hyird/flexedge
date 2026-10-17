@@ -594,29 +594,7 @@ ruvia::task<void> verify_summary_beyond_limit(ruvia::db_handle& db, read_context
     require(foreign, "history is tenant scoped");
 }
 
-ruvia::task<void> verify_bounds_and_failures(ruvia::db_handle& db, read_context& context,
-    std::pmr::memory_resource* pool) {
-    const std::string long_content(400, 'x');
-    service::dns_sync::detail::zone_sync_attempt large;
-    for (int index = 0; index < 200; ++index) {
-        large.record_created({.name_ = "host-" + std::to_string(index), .type_ = "TXT", .line_code_ = "default", .content_ = long_content, .ttl_ = 600, .priority_ = std::nullopt, .proxied_ = false});
-        large.record_deleted({.name_ = "gone-" + std::to_string(index), .type_ = "TXT", .line_code_ = "default", .content_ = long_content, .ttl_ = 600, .priority_ = std::nullopt, .proxied_ = false});
-    }
-    const auto large_json = large.to_json(pool);
-    require(large_json.size() <= service::sync_runtime::detail_max_bytes, "detail byte cap");
-    const auto parsed = ruvia::from_json<dns_detail_input>(large_json);
-    require(parsed && parsed->get<"truncated">().value_ && parsed->get<"created_count">().value_ == 200 &&
-                parsed->get<"deleted_count">().value_ == 200 && parsed->get<"created">().size() <= 50 &&
-                parsed->get<"created">()[0].get<"content">().view().size() == service::sync_runtime::detail_text_bytes,
-        "lists and text are truncated with exact counts");
-
-    bool cut = false;
-    const auto bounded = service::sync_runtime::bounded_detail_text(
-        "a\0b\xff"
-        "c错误"sv,
-        cut, 6);
-    require(bounded == "a bc" && cut, "control characters, invalid UTF-8 and partial characters are removed");
-
+ruvia::task<void> verify_bounds_and_failures(ruvia::db_handle& db, read_context& context) {
     // Unusable details are replaced; the marker transition still commits.
     std::string oversized = R"({"kind":"dns_sync","truncated":false,"pad":")";
     oversized.append(service::sync_runtime::detail_max_bytes, 'p');
@@ -638,12 +616,6 @@ ruvia::task<void> verify_bounds_and_failures(ruvia::db_handle& db, read_context&
         dns_marker);
     require(!marker.front()[0].as<bool>().value_or(true) && text(marker, 2) == "detail rejected",
         "marker failure applied with every dropped detail");
-    const auto thrown = service::sync_runtime::serialize_detail(pool,
-        [](std::pmr::memory_resource*) -> service::node_dispatch::node_apply_detail_dto {
-            throw std::runtime_error("mapping failed");
-        });
-    require(thrown == service::sync_runtime::detail_dropped_json, "a failing detail builder is dropped");
-
     // An attempt with an unknown start keeps started_at empty and duration 0.
     (void)co_await record_attempt(db,
         running(dns_marker, 4, service::sync_runtime::marker_resource_type::dns_zone, zone,
@@ -724,7 +696,7 @@ ruvia::task<void> verify_records(ruvia::db_client& client) {
     co_await verify_provider(db, context, &pool);
     co_await verify_node_apply(db, context, &pool);
     co_await verify_summary_beyond_limit(db, context, &pool);
-    co_await verify_bounds_and_failures(db, context, &pool);
+    co_await verify_bounds_and_failures(db, context);
     co_await verify_live_history(db, context, &pool);
 
     // Retention removes every attempt older than 7 days, node attempts

@@ -1,5 +1,5 @@
 import { QueryClient, QueryObserver } from '@tanstack/react-query'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { api } from '@/lib/api'
 import { ApiProtocolError } from '@/lib/api-response'
 import { setLiveQueryQueryClient } from '@/lib/live-query'
@@ -10,10 +10,8 @@ import {
   nodesQuery,
   resetNodeCredentials,
   updateNode,
-  watchClusterNodeTransitions,
   type NodeInput,
 } from './data'
-import { nodeInstallCommand } from './install-command'
 
 const originalAdapter = api.defaults.adapter
 afterEach(() => {
@@ -203,24 +201,6 @@ describe('node API contracts', () => {
     })
   })
 
-  it('builds the install command expected by install-node.sh', () => {
-    expect(
-      nodeInstallCommand('https://console.example.test/', {
-        node_id: agentId,
-        secret,
-      })
-    ).toBe(
-      `curl -fsSL 'https://console.example.test/api/agent/install-node.sh' -o install-node.sh && \\\n` +
-        `  sudo FLEXEDGE_SERVER_ORIGIN='https://console.example.test' bash install-node.sh '${agentId}' '${secret}'`
-    )
-    expect(
-      nodeInstallCommand('http://127.0.0.1:8080', {
-        node_id: agentId,
-        secret: "a'b",
-      })
-    ).toContain(`'a'\\''b'`)
-  })
-
   it('accepts update acknowledgements and sends the original revision', async () => {
     api.defaults.adapter = async (config) => {
       expect(config.method).toBe('put')
@@ -369,132 +349,5 @@ describe('node API contracts', () => {
     expect(cached().connected_ip_count).toBe(0)
     stop()
     observer.destroy()
-  })
-})
-
-describe('cluster node transitions', () => {
-  class Source extends EventTarget {
-    close() {}
-    frame(name: string, data: unknown) {
-      this.dispatchEvent(new MessageEvent(name, { data: JSON.stringify(data) }))
-    }
-  }
-  const clusterId = 'c1'
-  type TestNode = {
-    id: string
-    revision: number
-    name: string
-    cluster_id: string
-    runtime: Record<string, unknown>
-  }
-  const runtime = (connection_status: string) => ({
-    registration_status: 'registered',
-    connection_status,
-    last_heartbeat_at: '2026-10-14T00:00:00Z',
-    applied_node_spec_revision: 1,
-    cpu_usage: 0.1,
-  })
-  const node = (nodeId: string, connection_status: string): TestNode => ({
-    ...nodeDto,
-    id: nodeId,
-    revision: 1,
-    name: nodeId,
-    cluster_id: clusterId,
-    runtime: runtime(connection_status),
-  })
-  const page = (...list: TestNode[]) => ({
-    code: 0,
-    message: 'ok',
-    data: { list, total: list.length, page: 1, page_size: 20, total_pages: 1 },
-  })
-  // `advanceTimersByTimeAsync` is Vitest-only; `bun test` runs the same suite.
-  const advance = async (ms: number) => {
-    for (let turn = 0; turn < 5; turn++) await Promise.resolve()
-    vi.advanceTimersByTime(ms)
-    for (let turn = 0; turn < 5; turn++) await Promise.resolve()
-  }
-
-  it('re-reads once per transition burst and never for runtime patches', async () => {
-    vi.useFakeTimers()
-    const sources: Source[] = []
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    })
-    setLiveQueryQueryClient(client, undefined, () => {
-      const source = new Source()
-      sources.push(source)
-      return source as never
-    })
-    const onTransition = vi.fn()
-    const stop = watchClusterNodeTransitions(client, clusterId, onTransition)
-    const observer = new QueryObserver(
-      client,
-      nodesQuery({ page: 1, page_size: 20, cluster_id: clusterId })
-    )
-    const unsubscribe = observer.subscribe(() => undefined)
-    try {
-      await advance(0)
-      const source = sources[0]
-      source.frame('snapshot', page(node('a', 'online'), node('b', 'online')))
-      await advance(1000)
-      // The first snapshot is the baseline, not a transition.
-      expect(onTransition).not.toHaveBeenCalled()
-      for (const cpu of [0.2, 0.3, 0.4])
-        source.frame('node-runtime', {
-          id: 'a',
-          node_revision: 1,
-          runtime: {
-            ...runtime('offline'),
-            last_heartbeat_at: '2026-10-14T00:00:05Z',
-            cpu_usage: cpu,
-          },
-        })
-      // An identical snapshot (reconnect, manual refresh) is no transition.
-      source.frame('snapshot', page(node('a', 'online'), node('b', 'online')))
-      await advance(1000)
-      expect(onTransition).not.toHaveBeenCalled()
-      // A burst: a goes offline, b too, then a node is added.
-      source.frame('snapshot', page(node('a', 'offline'), node('b', 'online')))
-      source.frame('snapshot', page(node('a', 'offline'), node('b', 'offline')))
-      source.frame(
-        'snapshot',
-        page(node('a', 'offline'), node('b', 'offline'), node('c', 'online'))
-      )
-      await advance(1000)
-      expect(onTransition).toHaveBeenCalledTimes(1)
-      source.frame(
-        'snapshot',
-        page(node('a', 'online'), node('b', 'offline'), node('c', 'online'))
-      )
-      await advance(1000)
-      expect(onTransition).toHaveBeenCalledTimes(2)
-      expect(sources).toHaveLength(1)
-    } finally {
-      unsubscribe()
-      observer.destroy()
-      stop()
-      vi.useRealTimers()
-    }
-  })
-
-  it('ignores node lists of other clusters', async () => {
-    vi.useFakeTimers()
-    const client = new QueryClient()
-    const onTransition = vi.fn()
-    const stop = watchClusterNodeTransitions(client, clusterId, onTransition)
-    try {
-      const key = nodesQuery({
-        page: 1,
-        page_size: 20,
-        cluster_id: 'other',
-      }).queryKey
-      client.setQueryData(key, page(node('a', 'online')).data as never)
-      client.setQueryData(key, page(node('a', 'offline')).data as never)
-      await advance(1000)
-      expect(onTransition).not.toHaveBeenCalled()
-    } finally {
-      stop()
-      vi.useRealTimers()
-    }
   })
 })

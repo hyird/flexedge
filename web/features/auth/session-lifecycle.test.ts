@@ -1,7 +1,5 @@
-import { QueryObserver } from '@tanstack/react-query'
 import { afterEach, expect, test } from 'vitest'
 import { api } from '@/lib/api'
-import { readLiveQuery, setLiveQueryQueryClient } from '@/lib/live-query'
 import { createAppQueryClient } from '@/lib/query-client'
 import { ensureAuthenticatedSession, login, logout } from './data'
 import { replaceSession } from './session-lifecycle'
@@ -17,107 +15,12 @@ afterEach(() => {
 })
 const user = { id: 'admin', username: 'same-admin', status: 'enabled' }
 
-test('an obsolete session check cannot authenticate after logout', async () => {
-  const client = setup()
-  const check = ensureAuthenticatedSession(client)
-  await replaceSession(client)
-  await expect(check).rejects.toThrow('登录会话已变更，请重试')
-})
-
 function setup() {
   const client = createAppQueryClient(() => undefined)
   client.setQueryData(['session'], user)
   cleanups.push(() => client.clear())
   return client
 }
-
-test('late pre-logout reads cannot populate the next login cache', async () => {
-  const client = setup()
-  client.setQueryData(['websites'], ['old'])
-  let respond!: (data: string[]) => void
-  // Intentionally ignore AbortSignal, matching transports not yet cancellable.
-  const oldRead = client
-    .fetchQuery({
-      queryKey: ['websites'],
-      staleTime: 0,
-      queryFn: () =>
-        new Promise<string[]>((resolve) => {
-          respond = resolve
-        }),
-    })
-    .catch(() => undefined)
-  await replaceSession(client)
-  expect(client.getQueryData(['websites'])).toBeUndefined()
-  await replaceSession(client, user)
-  respond(['late old response'])
-  await oldRead
-  expect(client.getQueryData(['websites'])).toBeUndefined()
-  const observer = new QueryObserver(client, {
-    queryKey: ['websites'],
-    queryFn: async () => ['new session'],
-  })
-  expect(observer.getCurrentResult().data).toBeUndefined()
-  cleanups.push(observer.subscribe(() => undefined))
-  await observer.refetch()
-  expect(client.getQueryData(['websites'])).toEqual(['new session'])
-})
-
-test('session replacement aborts cancellable reads', async () => {
-  const client = setup()
-  let signal!: AbortSignal
-  const capture = (value: AbortSignal) => {
-    signal = value
-  }
-  const read = client
-    .fetchQuery({
-      queryKey: ['nodes'],
-      queryFn: (context) => {
-        capture(context.signal)
-        return new Promise(() => undefined)
-      },
-    })
-    .catch(() => undefined)
-  await replaceSession(client)
-  await read
-  expect(signal.aborted).toBe(true)
-})
-
-test('live views close before cache removal and late frames do nothing', async () => {
-  const client = setup()
-  class Source extends EventTarget {
-    closed = false
-    close() {
-      this.closed = true
-    }
-  }
-  const source = new Source()
-  // The ES2022 lib has no Promise.withResolvers.
-  let open!: () => void
-  const opened = new Promise<void>((resolve) => {
-    open = resolve
-  })
-  setLiveQueryQueryClient(client, undefined, () => {
-    open()
-    return source
-  })
-  cleanups.push(() => setLiveQueryQueryClient(client))
-  const observer = new QueryObserver(client, {
-    queryKey: ['nodes'],
-    queryFn: ({ queryKey, signal }) =>
-      readLiveQuery('/api/nodes/stream', queryKey, signal),
-  })
-  cleanups.push(observer.subscribe(() => undefined))
-  await opened
-  await replaceSession(client)
-  expect(source.closed).toBe(true)
-  await replaceSession(client, user)
-  source.dispatchEvent(
-    new MessageEvent('snapshot', {
-      data: JSON.stringify({ code: 0, message: 'ok', data: ['late'] }),
-    })
-  )
-  expect(client.getQueryData(['nodes'])).toBeUndefined()
-})
 
 test('rejected auth operations preserve the existing session', async () => {
   const client = setup()

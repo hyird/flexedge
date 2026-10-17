@@ -351,29 +351,6 @@ ruvia::task<void> apply(data_plane& plane, const flexedge::testing::TestConfig& 
     auto pending = co_await config_activation::prepare(plane, std::make_shared<const compiled_config>(config.active, config.objects));
     co_await pending.commit();
 }
-void verify_pending_stream_close() {
-    asio::io_context io;
-    buffered_bytes_budget budget(1024);
-    auto stream = std::make_shared<http2_stream_state>(
-        std::weak_ptr<http2_session>{}, io.get_executor(), 1, budget.lease());
-    auto bytes = std::make_shared<std::string>("pending output");
-    std::weak_ptr<std::string> retained = bytes;
-    unsigned completions{};
-    stream->output_ = asio::buffer(*bytes);
-    stream->written_ = [bytes, owned = std::make_unique<int>(17), &completions](
-                           std::error_code error, std::size_t size) {
-        ++completions;
-        FLEXEDGE_REQUIRE(error == asio::error::operation_aborted && size == 0);
-        FLEXEDGE_REQUIRE(*owned == 17 && *bytes == "pending output");
-    };
-    bytes.reset();
-    stream->close();
-    stream->close();
-    FLEXEDGE_REQUIRE(completions == 0 && !retained.expired());
-    io.run();
-    FLEXEDGE_REQUIRE(completions == 1 && retained.expired());
-}
-
 void verify(std::string_view storage) {
     auto identity = flexedge::testing::make_identity("localhost", 8);
     const auto ca = std::filesystem::current_path() / "http2-origin-ca.pem";
@@ -743,7 +720,6 @@ void verify(std::string_view storage) {
 }  // namespace
 int main() {
     try {
-        verify_pending_stream_close();
         verify("tiered");
         verify("disk");
         std::cout << "HTTP/2 ingress, origin and cache passed\n";

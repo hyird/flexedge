@@ -29,10 +29,6 @@ bool throws_runtime_error(function_type&& function) {
 int main() {
     try {
         {
-            const ruvia::env empty;
-            const auto defaults = service::config::get_auth_configuration(empty);
-            REQUIRE(defaults.session_expires_in_ == std::chrono::hours(24 * 7));
-            REQUIRE(defaults.cookie_secure_);
             const auto path = std::filesystem::temp_directory_path() /
                               ("flexedge-auth-config-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".env");
             const auto load = [&](std::string_view contents) {

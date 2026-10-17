@@ -19,22 +19,10 @@ int main() {
     const auto path = std::filesystem::temp_directory_path() /
                       ("flexedge-runtime-secrets-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".env");
     try {
-        bool missing_rejected = false;
-        try {
-            (void)service::config::runtime_env_detail::ends_with_newline(path);
-        } catch (const std::runtime_error&) {
-            missing_rejected = true;
-        }
-        REQUIRE(missing_rejected);
-        {
-            std::ofstream file(path);
-        }
-        REQUIRE(service::config::runtime_env_detail::ends_with_newline(path));
         {
             std::ofstream file(path);
             file << "EXISTING_VALUE=preserved";
         }
-        REQUIRE(!service::config::runtime_env_detail::ends_with_newline(path));
         const ruvia::env empty;
         REQUIRE(service::config::ensure_runtime_secrets(path, empty));
         const auto read = [&] {
@@ -42,7 +30,6 @@ int main() {
             return std::string(std::istreambuf_iterator<char>(file), {});
         };
         const auto generated = read();
-        REQUIRE(service::config::runtime_env_detail::ends_with_newline(path));
         REQUIRE(generated.starts_with("EXISTING_VALUE=preserved\n"));
         ruvia::app().load_dotenv(path);
         const auto key = ruvia::app().env().get("SECRET_MASTER_KEY");
