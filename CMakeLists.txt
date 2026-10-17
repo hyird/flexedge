@@ -53,7 +53,7 @@ FetchContent_Declare(
     ruvia
     SYSTEM
     GIT_REPOSITORY https://github.com/hyird/Ruvia.git
-    GIT_TAG 7572cdb77a3bb870115f2b6449471fb4b2ac9c48 # main, 2026-10-16
+    GIT_TAG df03f1c7b6cc9214832145d77650c49b83fe5cb0 # file input reset fix, 2026-10-17
 )
 FetchContent_MakeAvailable(ruvia)
 # CMAKE_COMPILE_WARNING_AS_ERROR applies to FlexEdge code only; Ruvia is third-party.

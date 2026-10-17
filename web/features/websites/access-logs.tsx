@@ -1,9 +1,16 @@
-import { useMemo, useState } from 'react'
+import {
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { ArrowRotateLeft, Pause, Play } from '@gravity-ui/icons'
 import { Segment, type DataGridColumn } from '@heroui-pro/react'
-import { Button, Tooltip } from '@heroui/react'
+import { Button, Table, Tooltip } from '@heroui/react'
 import { formatBytes, formatDate } from '@/lib/format'
 import { useListState } from '@/lib/list-search'
 import { statusReserve, type StatusDictionary } from '@/lib/status'
@@ -41,6 +48,122 @@ const liveStates = {
   'paused' | 'connected' | 'interrupted' | 'connecting'
 >
 const liveStateReserve = statusReserve(liveStates)
+
+const columnText = {
+  time: (log: AccessLog) => formatDate(log.occurred_at),
+  node: (log: AccessLog) => log.node_name,
+  status: (log: AccessLog) => String(log.status_code),
+  client: (log: AccessLog) => log.client_ip || '—',
+  location: (log: AccessLog) => formatClientLocation(log.client_ip_location),
+  duration: (log: AccessLog) => `${log.duration_ms} ms`,
+  bytes: (log: AccessLog) => formatBytes(log.response_bytes),
+}
+type ContentColumn = keyof typeof columnText
+
+/** Virtualized cells need numeric widths. Measure their real typography and
+ * decorations, then account for every retained row, including offscreen rows. */
+function useColumnWidths(
+  rows: AccessLog[] | undefined,
+  container: RefObject<HTMLDivElement | null>
+) {
+  const textCache = useRef(
+    new WeakMap<AccessLog, Partial<Record<ContentColumn, string>>>()
+  )
+  const measurementCache = useRef(
+    new Map<
+      ContentColumn,
+      { font: string; spacing: string; widths: Map<string, number> }
+    >()
+  )
+  const [widths, setWidths] = useState<Record<ContentColumn, number>>({
+    time: 190,
+    node: 120,
+    status: 80,
+    client: 130,
+    location: 150,
+    duration: 90,
+    bytes: 100,
+  })
+  useEffect(() => {
+    const root = container.current
+    const context = document.createElement('canvas').getContext('2d')
+    if (!root || !context || !rows?.length) return
+    let active = true
+    const measure = () => {
+      if (!active) return
+      const next = {} as Record<ContentColumn, number>
+      for (const id of Object.keys(columnText) as ContentColumn[]) {
+        const cell = root.querySelector<HTMLElement>(`[data-log-cell="${id}"]`)
+        const header = root.querySelector<HTMLElement>(
+          `[data-log-header="${id}"]`
+        )
+        if (!cell || !header) return
+        const text = document
+          .createTreeWalker(cell, NodeFilter.SHOW_TEXT)
+          .nextNode()?.parentElement
+        if (!text) return
+        const font = getComputedStyle(text)
+        context.font = `${font.fontWeight} ${font.fontSize} ${font.fontFamily}`
+        context.letterSpacing =
+          font.letterSpacing === 'normal' ? '0px' : font.letterSpacing
+        const cached = measurementCache.current.get(id)
+        const previous =
+          cached?.font === context.font &&
+          cached.spacing === context.letterSpacing
+            ? cached.widths
+            : undefined
+        const measured = new Map<string, number>()
+        let widest = 0
+        for (const row of rows) {
+          let entry = textCache.current.get(row)
+          if (!entry) {
+            entry = {}
+            textCache.current.set(row, entry)
+          }
+          const value = (entry[id] ??= columnText[id](row))
+          const width =
+            measured.get(value) ??
+            previous?.get(value) ??
+            context.measureText(value).width
+          measured.set(value, width)
+          widest = Math.max(widest, width)
+        }
+        // Keep only strings still present in this page or bounded live buffer.
+        measurementCache.current.set(id, {
+          font: context.font,
+          spacing: context.letterSpacing,
+          widths: measured,
+        })
+        const padding = getComputedStyle(cell.closest('.table__cell')!)
+        next[id] = Math.ceil(
+          Math.max(
+            header.getBoundingClientRect().width,
+            cell.getBoundingClientRect().width +
+              widest -
+              context.measureText(cell.textContent ?? '').width
+          ) +
+            parseFloat(padding.paddingInlineStart) +
+            parseFloat(padding.paddingInlineEnd)
+        )
+      }
+      setWidths((previous) =>
+        (Object.keys(next) as ContentColumn[]).every(
+          (id) => next[id] === previous[id]
+        )
+          ? previous
+          : next
+      )
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(root)
+    void document.fonts.ready.then(measure)
+    return () => {
+      active = false
+      observer.disconnect()
+    }
+  }, [rows, container])
+  return widths
+}
 
 /** Website detail “访问日志” tab. Mode, filters, page and the open request
  * are component state, so leaving the tab resets them and the URL never
@@ -82,6 +205,8 @@ export function AccessLogs() {
     [live.logs, list.keyword, search.method, search.status_class]
   )
   const rows = history ? historyQuery.data?.list : liveRows
+  const tableContainer = useRef<HTMLDivElement>(null)
+  const columnWidths = useColumnWidths(rows, tableContainer)
   const filtered =
     !!list.keyword || filterKeys.some((key) => search[key] !== undefined)
   const selected = openLogId
@@ -95,7 +220,6 @@ export function AccessLogs() {
       {
         id: 'time',
         header: '时间',
-        width: 190,
         cell: (log) => (
           <span className='text-[13px] tabular-nums'>
             {formatDate(log.occurred_at)}
@@ -105,7 +229,6 @@ export function AccessLogs() {
       {
         id: 'node',
         header: '节点',
-        minWidth: 120,
         cell: (log) => (
           <Link
             to='/nodes/$nodeId'
@@ -121,7 +244,9 @@ export function AccessLogs() {
         id: 'request',
         header: '请求',
         isRowHeader: true,
+        width: '1fr',
         minWidth: 300,
+        maxWidth: 960,
         cell: (log) => {
           const url = log.host + log.target
           return (
@@ -146,13 +271,11 @@ export function AccessLogs() {
       {
         id: 'status',
         header: '状态',
-        width: 80,
         cell: (log) => <StatusChip {...accessLogStatus(log.status_code)} />,
       },
       {
         id: 'client',
         header: 'IP',
-        minWidth: 130,
         cell: (log) => (
           <ClientIpTooltip
             asn={log.client_ip_asn}
@@ -165,7 +288,6 @@ export function AccessLogs() {
       {
         id: 'location',
         header: 'IP 归属',
-        minWidth: 150,
         cell: (log) => {
           const location = formatClientLocation(log.client_ip_location)
           return (
@@ -178,7 +300,6 @@ export function AccessLogs() {
       {
         id: 'duration',
         header: '耗时',
-        width: 90,
         cell: (log) => (
           <span className='tabular-nums'>{log.duration_ms} ms</span>
         ),
@@ -186,7 +307,6 @@ export function AccessLogs() {
       {
         id: 'bytes',
         header: '响应',
-        width: 100,
         cell: (log) => (
           <span className='tabular-nums'>
             {formatBytes(log.response_bytes)}
@@ -195,6 +315,31 @@ export function AccessLogs() {
       },
     ],
     []
+  )
+  const sizedColumns = useMemo(
+    () =>
+      columns.map((column) =>
+        column.id === 'request'
+          ? column
+          : {
+              ...column,
+              width: columnWidths[column.id as ContentColumn],
+              header: (
+                <span
+                  className='inline-block w-max'
+                  data-log-header={column.id}
+                >
+                  {column.header as string}
+                </span>
+              ),
+              cell: (log: AccessLog) => (
+                <span className='inline-flex w-max' data-log-cell={column.id}>
+                  {column.cell?.(log, column)}
+                </span>
+              ),
+            }
+      ),
+    [columns, columnWidths]
   )
 
   const liveState = paused
@@ -232,7 +377,42 @@ export function AccessLogs() {
         </Segment>
       }
     >
-      <div className='flex min-h-0 flex-1 flex-col gap-4'>
+      <div ref={tableContainer} className='flex min-h-0 flex-1 flex-col gap-4'>
+        {!!rows?.length && (
+          <div
+            aria-hidden
+            inert
+            className='pointer-events-none invisible absolute size-0 overflow-hidden'
+          >
+            <Table variant='secondary' className='data-grid w-max'>
+              <Table.Content aria-label='访问日志列宽测量' className='w-max'>
+                <Table.Header>
+                  {sizedColumns
+                    .filter((column) => column.id !== 'request')
+                    .map((column) => (
+                      <Table.Column
+                        key={column.id}
+                        isRowHeader={column.id === 'time'}
+                      >
+                        {column.header as ReactNode}
+                      </Table.Column>
+                    ))}
+                </Table.Header>
+                <Table.Body>
+                  <Table.Row>
+                    {sizedColumns
+                      .filter((column) => column.id !== 'request')
+                      .map((column) => (
+                        <Table.Cell key={column.id}>
+                          {column.cell?.(rows[0], column)}
+                        </Table.Cell>
+                      ))}
+                  </Table.Row>
+                </Table.Body>
+              </Table.Content>
+            </Table>
+          </div>
+        )}
         {!website.config.access_log_enabled && (
           <p className='text-[13px] text-warning'>
             此网站未启用访问日志，节点不会上报新的请求记录。
@@ -316,10 +496,10 @@ export function AccessLogs() {
         />
         <DataTable
           fit
-          virtualized={!history}
+          virtualized
           label={history ? '历史访问日志' : '实时访问日志'}
           variant='secondary'
-          columns={columns}
+          columns={sizedColumns}
           data={rows}
           isLoading={history ? historyQuery.isPending : live.loading}
           error={
@@ -334,7 +514,7 @@ export function AccessLogs() {
           onRetry={() =>
             history ? void historyQuery.refetch() : live.reconnect()
           }
-          minWidth={1020}
+          minWidth={0}
           empty={
             filtered
               ? {
