@@ -425,6 +425,10 @@ if(BUILD_TESTING)
         SOURCES tests/origin_request_codec.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::http OpenSSL::Crypto
     )
+    flexedge_add_test(http1_request_reader
+        SOURCES tests/http1_request_reader.cpp
+        LIBRARIES ruvia::http
+    )
     flexedge_add_test(node_runtime BIG_OBJECT
         SOURCES tests/node_runtime.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto

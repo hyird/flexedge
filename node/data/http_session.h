@@ -125,7 +125,6 @@ public:
           secure_(secure),
           cache_prewarm_(cache_prewarm),
           count_connection_(count_connection) {
-        request_bytes_.reserve(8192);
         if (!cache_prewarm_) {
             capture_client_address(count_connection_);
             if (count_connection_) {
@@ -1074,7 +1073,7 @@ private:
     asio::steady_timer timer_;
     access_log_capture access_log_;
     http1_request_reader request_reader_{max_request_bytes};
-    std::array<char, 8192> read_buffer_{};
+    std::array<char, 8192> read_buffer_;
     std::string request_bytes_;
     std::string response_bytes_;
     buffered_bytes_lease request_reservation_;

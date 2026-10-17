@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "node/data/http1_request_reader.h"
 #include "node/data/origin_health.h"
 #include "node/data/origin_request_codec.h"
 #include "node/data/origin_selection.h"
@@ -151,6 +152,50 @@ void benchmark_request(std::string_view name, std::size_t body_size,
     });
 }
 
+void benchmark_read(std::string_view name, std::string_view wire,
+    std::size_t fragment_size, std::size_t iterations) {
+    measure(name, iterations, [&](std::size_t) {
+        flexedge::node::http1_request_reader reader(2 * 1024 * 1024);
+        std::string buffer;
+        buffer.reserve(8192);
+        auto status = flexedge::node::http1_request_read_status::need_more;
+        for (std::size_t offset = 0; offset < wire.size();) {
+            const auto size = std::min(fragment_size, wire.size() - offset);
+            buffer.append(wire.substr(offset, size));
+            offset += size;
+            status = reader.consume(buffer);
+            if (status != flexedge::node::http1_request_read_status::need_more) {
+                break;
+            }
+        }
+        const auto body = reader.body();
+        if (status != flexedge::node::http1_request_read_status::complete || !body) {
+            throw std::runtime_error("request reader benchmark failed");
+        }
+        return reader.request().target().size() + reader.request().headers().size() +
+               body->size() + reader.message_bytes() + reader.unconsumed_bytes().size();
+    });
+}
+
+void benchmark_reads(std::size_t iterations) {
+    const auto fields = " " + std::string(target) + " HTTP/1.1\r\nHost: " +
+                        std::string(hostname) + "\r\nX-Channel: stable\r\n";
+    const auto get = "GET" + fields + "\r\n";
+    const auto post4k = "POST" + fields + "Content-Length: 4096\r\n\r\n" + std::string(4096, 'b');
+    const auto post64k = "POST" + fields + "Content-Length: 65536\r\n\r\n" + std::string(65536, 'b');
+    const auto large = "GET" + fields + "X-Large: " + std::string(20000, 'v') + "\r\n\r\n";
+    const auto chunked = "POST" + fields +
+                         "Transfer-Encoding: chunked\r\n\r\n4\r\nDATA\r\n5\r\nMORE!\r\n0\r\nX-End: yes\r\n\r\n";
+    const auto pipeline = get + get;
+    benchmark_read("read_get", get, get.size(), iterations);
+    benchmark_read("read_fragmented_get", get, 17, iterations);
+    benchmark_read("read_post_4k", post4k, post4k.size(), iterations);
+    benchmark_read("read_post_64k_fragmented", post64k, 8192, iterations);
+    benchmark_read("read_head_20k", large, large.size(), iterations);
+    benchmark_read("read_chunked_fragmented", chunked, 17, iterations);
+    benchmark_read("read_pipeline_tail", pipeline, pipeline.size(), iterations);
+}
+
 void benchmark_origins(std::string_view name, std::size_t origins, bool mixed,
     bool exhaust, std::size_t iterations) {
     const auto website = make_website(origins, 0);
@@ -191,6 +236,7 @@ int main(int argc, char** argv) {
         benchmark_request("request_head_15k", 0, 15000, false, true, iterations);
         benchmark_request("request_head_20k", 0, 20000, false, true, iterations);
         benchmark_request("request_upgrade", 0, 32, true, true, iterations);
+        benchmark_reads(iterations);
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
