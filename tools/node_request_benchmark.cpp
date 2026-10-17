@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "node/data/origin_health.h"
+#include "node/data/origin_request_codec.h"
 #include "node/data/origin_selection.h"
 #include "node/data/route_rules.h"
 #include "tools/node_request_allocations.h"
@@ -106,6 +107,50 @@ void benchmark_route(std::string_view name, std::size_t rules, std::size_t itera
     });
 }
 
+void benchmark_request(std::string_view name, std::size_t body_size,
+    std::size_t field_size, bool upgrade, bool routed, std::size_t iterations) {
+    auto website = make_website(16, 16);
+    website.set_pass_client_ip(true);
+    const flexedge::node::route_program program(website);
+    const auto route = flexedge::node::evaluate_route_rules(
+        program, website, "GET", target, hostname, headers);
+    if (!route) {
+        throw std::runtime_error("request benchmark route evaluation failed");
+    }
+    const std::string body(body_size, 'b');
+    const std::string field(field_size, 'v');
+    const std::array<ruvia::http_header_view, 10> incoming_headers{{
+        {"Host", hostname},
+        {"User-Agent", "node-request-performance-benchmark"},
+        {"Accept-Encoding", "gzip, br"},
+        {"X-Edge-Request-Context", "incoming-request-context-to-be-overridden"},
+        {"X-Large", field},
+        {"X-Forwarded-For", "198.51.100.2"},
+        {"Content-Type", "application/octet-stream"},
+        {"X-Channel", "stable"},
+        {"Connection", upgrade ? "Upgrade" : "keep-alive"},
+        {"Upgrade", upgrade ? "websocket" : ""},
+    }};
+    const flexedge::node::origin_request_view incoming{
+        .method_ = body.empty() ? "GET" : "POST",
+        .target_ = target,
+        .headers_ = incoming_headers,
+        .body_ = body,
+        .has_body_ = !body.empty(),
+    };
+    measure(name, iterations, [&](std::size_t) {
+        const auto prepared = flexedge::node::prepare_origin_request(
+            incoming, website, hostname, "198.51.100.10", true, upgrade, false,
+            true, routed ? &*route : nullptr);
+        if (!prepared) {
+            throw std::runtime_error("request benchmark preparation failed");
+        }
+        const auto state = prepared->make_exchange_state();
+        (void)state;
+        return prepared->bytes_.size() + prepared->target_.size();
+    });
+}
+
 void benchmark_origins(std::string_view name, std::size_t origins, bool mixed,
     bool exhaust, std::size_t iterations) {
     const auto website = make_website(origins, 0);
@@ -140,6 +185,12 @@ int main(int argc, char** argv) {
         benchmark_origins("origins_64_first", 64, false, false, iterations);
         benchmark_origins("origins_64_mixed_first", 64, true, false, iterations);
         benchmark_origins("origins_64_mixed_exhaust", 64, true, true, iterations);
+        benchmark_request("request_get", 0, 32, false, false, iterations);
+        benchmark_request("request_routed", 0, 32, false, true, iterations);
+        benchmark_request("request_post_4k", 4096, 32, false, true, iterations);
+        benchmark_request("request_head_15k", 0, 15000, false, true, iterations);
+        benchmark_request("request_head_20k", 0, 20000, false, true, iterations);
+        benchmark_request("request_upgrade", 0, 32, true, true, iterations);
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
