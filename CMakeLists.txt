@@ -82,6 +82,16 @@ add_library(flexedge_route_policy INTERFACE)
 target_include_directories(flexedge_route_policy INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(flexedge_route_policy INTERFACE re2::re2 flexedge_security)
 
+add_library(flexedge_security_reference STATIC service/domains/security/security_reference.cpp)
+target_include_directories(flexedge_security_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(flexedge_security_reference
+    PUBLIC flexedge_node_protocol flexedge_route_policy ruvia::web)
+if(MSVC)
+    target_compile_options(flexedge_security_reference PRIVATE /W4 /bigobj /permissive- /Zc:preprocessor /utf-8 /wd4819)
+else()
+    target_compile_options(flexedge_security_reference PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_library(flexedge_node_version INTERFACE)
 target_compile_definitions(flexedge_node_version INTERFACE
     FLEXEDGE_NODE_VERSION="${PROJECT_VERSION}"
@@ -129,7 +139,6 @@ endif()
 add_executable(flexedge_service
     service/server.cpp
     service/domains/security/security_controller.cpp
-    service/domains/security/security_reference.cpp
 )
 
 target_include_directories(flexedge_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -139,6 +148,7 @@ target_link_libraries(flexedge_service
         flexedge_node_protocol
         flexedge_log_ingest_protocol
         flexedge_route_policy
+        flexedge_security_reference
         ruvia::web
         asio::asio
         OpenSSL::Crypto
@@ -299,8 +309,8 @@ if(BUILD_TESTING)
     )
     set_tests_properties(flexedge_website_aggregate PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     flexedge_add_test(deployment_source
-        SOURCES tests/deployment_source.cpp service/domains/security/security_reference.cpp
-        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web
+        SOURCES tests/deployment_source.cpp
+        LIBRARIES flexedge_security_reference
     )
     set_tests_properties(flexedge_deployment_source PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     flexedge_add_test(delivery_object
@@ -460,7 +470,7 @@ if(BUILD_TESTING)
     )
     flexedge_add_test(node_reports
         SOURCES tests/node_reports.cpp
-        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto
+        LIBRARIES flexedge_security_reference OpenSSL::Crypto
     )
     set_tests_properties(flexedge_node_reports PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 RUN_SERIAL TRUE)
     set_tests_properties(flexedge_redis_rate_limit flexedge_redis_snapshot_cache flexedge_log_ingest_queue
@@ -485,12 +495,12 @@ if(BUILD_TESTING)
     set_tests_properties(flexedge_task_center PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
     flexedge_add_test(sync_runtime BIG_OBJECT
         SOURCES tests/sync_runtime.cpp
-        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto
+        LIBRARIES flexedge_security_reference OpenSSL::Crypto
     )
     set_tests_properties(flexedge_sync_runtime PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
     flexedge_add_test(certificate_dependency BIG_OBJECT
-        SOURCES tests/certificate_dependency.cpp service/domains/security/security_reference.cpp
-        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto
+        SOURCES tests/certificate_dependency.cpp
+        LIBRARIES flexedge_security_reference OpenSSL::Crypto
     )
     set_tests_properties(flexedge_certificate_dependency PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
     flexedge_add_test(log_ingest_migration
