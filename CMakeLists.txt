@@ -653,6 +653,14 @@ if(BUILD_TESTING)
                 "$<TARGET_FILE:flexedge_node>"
         )
         set_tests_properties(flexedge_node_shutdown PROPERTIES TIMEOUT 60)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            add_test(NAME flexedge_node_upgrade
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/node_upgrade_smoke.py"
+                    "$<TARGET_FILE:flexedge_node>"
+            )
+            set_tests_properties(flexedge_node_upgrade PROPERTIES TIMEOUT 60)
+        endif()
         add_test(NAME flexedge_node_installer_validation
             COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/node_installer_validation_test.py"

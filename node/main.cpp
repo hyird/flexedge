@@ -118,6 +118,13 @@ int main(int argc, char* argv[]) {
             }
             request_stop("shutdown requested");
         });
+        // An internal upgrade requests stop without delivering a process signal.
+        // Retire the outstanding Asio wait on its owner loop before joining it.
+        auto signals_stop = loop.on_stop([&signals]() -> ruvia::task<void> {
+            std::error_code ignored;
+            signals.cancel(ignored);
+            co_return;
+        });
         flexedge::node::self_updater self_updater({
             .binary_path_ = binary_path,
             .current_version_ = std::string(flexedge::node::node_version),
