@@ -714,8 +714,8 @@ private:
         if (const auto conditions = ruvia::get_http_etag_preconditions(parsed.request(), etag); conditions.if_none_match_.present_) {
             unchanged = conditions.if_none_match_.matches();
         } else if (const auto modified_since = parsed.request().header("If-Modified-Since")) {
-            const auto modified = cache_http_time(cache_single_header(cached_response_->headers_, "Last-Modified"));
-            const auto requested = cache_http_time(*modified_since);
+            const auto modified = ruvia::parse_http_date(cache_single_header(cached_response_->headers_, "Last-Modified"));
+            const auto requested = ruvia::parse_http_date(*modified_since);
             unchanged = modified && requested && *modified <= *requested;
         }
         cached_status_ = unchanged ? 304 : cached_response_->status_;

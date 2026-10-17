@@ -158,6 +158,16 @@ private:
                     asio::async_write(*peer, asio::buffer(*data), [peer, data](std::error_code, std::size_t) { std::error_code ignored; peer->close(ignored); });
                     return;
                 }
+                if (request_text.starts_with("GET /old-date ")) {
+                    auto data = std::make_shared<std::string>();
+                    data->reserve(body_.size() + 256);
+                    data->append("HTTP/1.1 200 OK\r\nCache-Control: public, max-age=600\r\nDate: Sun Nov  6 08:49:37 1994\r\nContent-Length: ")
+                        .append(std::to_string(body_.size()))
+                        .append("\r\nConnection: close\r\n\r\n")
+                        .append(body_);
+                    asio::async_write(*peer, asio::buffer(*data), [peer, data](std::error_code, std::size_t) { std::error_code ignored; peer->close(ignored); });
+                    return;
+                }
                 const auto etag = request_text.starts_with("GET /etag-comma ") ? "\"test\\,part\"" : "\"test\"";
                 auto bytes = std::make_shared<std::string>(
                     std::string("HTTP/1.1 200 OK\r\nCache-Control: public, max-age=600\r\nETag: ") + etag +
@@ -517,6 +527,18 @@ void verify() {
     FLEXEDGE_REQUIRE(weak_range.starts_with("HTTP/1.1 200"));
     FLEXEDGE_REQUIRE(weak_range.substr(weak_range.find("\r\n\r\n") + 4) == large_body);
     FLEXEDGE_REQUIRE(large_source.hits() == 4);
+    const auto legacy_modified = request("If-Modified-Since: Wednesday, 21-Oct-15 07:28:00 GMT\r\n", "GET", "/date-range");
+    FLEXEDGE_REQUIRE(legacy_modified.starts_with("HTTP/1.1 304"));
+    FLEXEDGE_REQUIRE(legacy_modified.substr(legacy_modified.find("\r\n\r\n") + 4).empty());
+    const auto invalid_modified = request("If-Modified-Since: Wed, 21 Oct 2015 07:28:00 GMT junk\r\n", "GET", "/date-range");
+    FLEXEDGE_REQUIRE(invalid_modified.starts_with("HTTP/1.1 200"));
+    FLEXEDGE_REQUIRE(invalid_modified.substr(invalid_modified.find("\r\n\r\n") + 4) == large_body);
+    const auto old_date_fetches = large_source.hits();
+    for (unsigned repeat = 0; repeat < 2; ++repeat) {
+        const auto old_date = request({}, "GET", "/old-date");
+        FLEXEDGE_REQUIRE(old_date.substr(old_date.find("\r\n\r\n") + 4) == large_body);
+    }
+    FLEXEDGE_REQUIRE(large_source.hits() == old_date_fetches + 2);
     shutdown.stop_and_join();
 }
 }  // namespace

@@ -1,4 +1,6 @@
 #pragma once
+#include <ruvia/http/http_cache.h>
+
 #include <array>
 #include <atomic>
 #include <charconv>
@@ -181,20 +183,6 @@ inline std::optional<std::int64_t> cache_directive_seconds(std::string_view inpu
         result = seconds;
     }
     return result;
-}
-inline std::optional<std::time_t> cache_http_time(std::string_view text) {
-    std::tm value{};
-    std::istringstream stream{std::string(text)};
-    stream.imbue(std::locale::classic());
-    stream >> std::get_time(&value, "%a, %d %b %Y %H:%M:%S GMT");
-    if (stream.fail()) {
-        return {};
-    }
-#ifdef _WIN32
-    return _mkgmtime(&value);
-#else
-    return timegm(&value);
-#endif
 }
 inline std::string cache_http_date(std::time_t timestamp) {
     std::tm value{};
@@ -1277,7 +1265,7 @@ private:
             return false;
         }
         const auto wall = std::time(nullptr);
-        const auto date = cache_http_time(cache_header(response.headers_, "Date")).value_or(wall);
+        const auto date = ruvia::parse_http_date(cache_header(response.headers_, "Date")).value_or(wall);
         const auto age = (std::max)(std::int64_t{0}, static_cast<std::int64_t>(wall - date));
         std::int64_t upstream_age{};
         const auto age_text = cache_header(response.headers_, "Age");
@@ -1295,7 +1283,7 @@ private:
                 ttl = cache_directive_seconds(control, "max-age");
             }
             if (!ttl) {
-                if (const auto expires = cache_http_time(cache_header(response.headers_, "Expires"))) {
+                if (const auto expires = ruvia::parse_http_date(cache_header(response.headers_, "Expires"))) {
                     ttl = static_cast<std::int64_t>(*expires - date);
                 }
             }
