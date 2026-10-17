@@ -208,6 +208,7 @@ void verify() {
     config.node_spec.mutable_endpoints(0)->set_http_port(port);
     config.node_spec.mutable_endpoints(0)->set_https_port(secure_port);
     auto* site = config.mutableWebsite();
+    site->mutable_domains(0)->set_hostname("*.example.com");
     site->set_health_check_enabled(false);
     site->set_response_compression_enabled(false);
     site->mutable_origins(0)->set_host("127.0.0.1");
@@ -229,6 +230,8 @@ void verify() {
     for (int index = 0; index < 20; ++index) {
         FLEXEDGE_REQUIRE(request().find("X-Cache: HIT") != std::string::npos);
     }
+    FLEXEDGE_REQUIRE(source.hits() == 1);
+    FLEXEDGE_REQUIRE(flexedge::testing::request(port, "assets.example.com", {}, "/asset").find("X-Cache: HIT") != std::string::npos);
     FLEXEDGE_REQUIRE(source.hits() == 1);
     const auto head = request({}, "HEAD");
     FLEXEDGE_REQUIRE(head.find("X-Cache: HIT") != std::string::npos && !head.ends_with("body"));
@@ -264,6 +267,16 @@ void verify() {
     const auto before = source.hits();
     FLEXEDGE_REQUIRE(request("Accept-Encoding: identity\r\n", "GET", "/prewarm").find("X-Cache: HIT") != std::string::npos);
     FLEXEDGE_REQUIRE(source.hits() == before);
+    FLEXEDGE_REQUIRE(flexedge::testing::request(port, "assets.example.com", "Accept-Encoding: identity\r\n", "/prewarm").find("X-Cache: HIT") != std::string::npos);
+    FLEXEDGE_REQUIRE(source.hits() == before);
+    command.set_attempt_id("refresh-alias");
+    command.set_operation("refresh");
+    command.clear_urls();
+    command.add_urls("http://assets.example.com/prewarm");
+    result = control.loop(0).start(plane.execute_cache(command)).get();
+    FLEXEDGE_REQUIRE(result.ok() && result.affected_objects() == 1);
+    FLEXEDGE_REQUIRE(request("Accept-Encoding: identity\r\n", "GET", "/prewarm").find("X-Cache: MISS") != std::string::npos);
+    FLEXEDGE_REQUIRE(source.hits() == before + 1);
     {
         const auto expected = std::string(262144, 'a') + std::string(262144, 'b');
         FLEXEDGE_REQUIRE(request({}, "GET", "/large").ends_with(expected));

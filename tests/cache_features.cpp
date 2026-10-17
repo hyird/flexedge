@@ -142,7 +142,7 @@ void verify() {
     clear.set_operation("clean");
     clear.set_policy_id("policy");
     clear.set_scope("all");
-    cache.invalidate(clear);
+    cache.invalidate(clear, {});
     FLEXEDGE_REQUIRE(!cache.renew(*pending.ticket_));
     FLEXEDGE_REQUIRE(!cache.current(key, *fresh));
     auto strict = insert(cache, site, rule, "public, max-age=600, must-revalidate");
@@ -176,7 +176,7 @@ void verify() {
         std::ifstream old_metadata(metadata_path, std::ios::binary);
         const std::string previous_record((std::istreambuf_iterator<char>(old_metadata)), {});
         old_metadata.close();
-        reader.invalidate(clear);
+        reader.invalidate(clear, {});
         // Simulate an old writer's metadata arriving after a completed purge.
         std::ofstream delayed(metadata_path, std::ios::binary | std::ios::trunc);
         delayed.write(previous_record.data(), static_cast<std::streamsize>(previous_record.size()));
@@ -200,14 +200,14 @@ void verify() {
         selective.set_scope("urls");
         selective.add_website_ids("site");
         selective.add_urls(object_url);
-        writer.invalidate(selective);
+        writer.invalidate(selective, std::array{cache_invalidation_url{"site", *flexedge::cache::parse_url(selective.urls(0))}});
     }
     {
         auto recovered = std::make_shared<response_cache_publication>(disk_files.path_);
         response_cache reader(recovered);
         FLEXEDGE_REQUIRE(!reader.lookup(site, rule, object_url, {}, false).response_);
         FLEXEDGE_REQUIRE(reader.lookup(site, rule, object_url + "/other", {}, false).response_);
-        reader.invalidate(clear);
+        reader.invalidate(clear, {});
     }
     // A truncated sidecar cannot make its body visible after a restart.
     {

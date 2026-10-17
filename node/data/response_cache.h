@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <span>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -28,6 +29,22 @@
 
 namespace flexedge::node {
 using cache_headers = std::vector<std::pair<std::string, std::string>>;
+
+struct cache_invalidation_url final {
+    std::string website_id_{};
+    flexedge::cache::url url_{};
+};
+
+// The website owns the cached representation. Its domain aliases do not create
+// separate objects; protocol, target and Vary still distinguish representations.
+inline std::pair<std::string_view, std::string_view> cache_resource_address(std::string_view url) {
+    const auto separator = url.find("://");
+    const auto target = separator == std::string_view::npos ? separator : url.find('/', separator + 3);
+    if (target == std::string_view::npos) {
+        throw std::invalid_argument("cache URL must be normalized");
+    }
+    return {url.substr(0, separator), url.substr(target)};
+}
 
 inline std::string cache_file_name() {
     std::random_device random;
@@ -764,7 +781,8 @@ public:
         const auto encoding = cache_header(headers, "Range").empty() ? ruvia::http_content_coding_token(preferred_response_coding(website, cache_header(headers, "Accept-Encoding"))) : std::string_view("identity");
         const auto website_revision = std::to_string(website.revision());
         const auto policy_revision = std::to_string(website.response_cache().revision());
-        const std::array<std::string_view, 7> parts{website.id(), website_revision, website.response_cache().id(), policy_revision, rule.id_, url, encoding};
+        const auto [scheme, target] = cache_resource_address(url);
+        const std::array<std::string_view, 8> parts{website.id(), website_revision, website.response_cache().id(), policy_revision, rule.id_, scheme, target, encoding};
         std::string key;
         std::size_t capacity{};
         for (const auto part : parts) {
@@ -1070,7 +1088,8 @@ public:
             }
         }
     }
-    std::pair<std::uint64_t, std::uint64_t> invalidate(const v2::CacheCommand& command) {
+    std::pair<std::uint64_t, std::uint64_t> invalidate(const v2::CacheCommand& command,
+        std::span<const cache_invalidation_url> urls) {
         auto root = publication_->snapshot();
         for (;;) {
             auto next = std::make_shared<response_cache_snapshot>(*root);
@@ -1098,12 +1117,16 @@ public:
                     }
                     if (matched && (command.scope() == "urls" || command.scope() == "prefix")) {
                         matched = false;
-                        for (const auto& url : command.urls()) {
-                            auto candidate = url;
-                            if (item->ignore_query_) {
-                                candidate.resize(candidate.find('?') == std::string::npos ? candidate.size() : candidate.find('?'));
+                        const auto [scheme, target] = cache_resource_address(item->url_);
+                        for (const auto& url : urls) {
+                            if (url.website_id_ != item->website_id_ || url.url_.scheme_ != scheme) {
+                                continue;
                             }
-                            if (command.scope() == "prefix" ? item->url_.starts_with(candidate) : item->url_ == candidate) {
+                            std::string_view candidate = url.url_.target_;
+                            if (item->ignore_query_) {
+                                candidate = candidate.substr(0, candidate.find('?'));
+                            }
+                            if (command.scope() == "prefix" ? target.starts_with(candidate) : target == candidate) {
                                 matched = true;
                                 break;
                             }

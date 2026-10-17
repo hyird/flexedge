@@ -345,7 +345,20 @@ private:
                         value.set_error("部分 URL 未能写入缓存");
                     }
                 } else if (command->operation() == "refresh" || command->operation() == "clean") {
-                    const auto [objects, bytes] = cache_.invalidate(*command);
+                    std::vector<cache_invalidation_url> urls;
+                    if (command->scope() == "urls" || command->scope() == "prefix") {
+                        const auto config = runtime_.config();
+                        for (const auto& address : command->urls()) {
+                            auto url = flexedge::cache::parse_url(address);
+                            const auto* site = url && config ? config->website(url->hostname_) : nullptr;
+                            if (!site || std::ranges::find(command->website_ids(), site->id()) == command->website_ids().end() ||
+                                !site->has_response_cache() || site->response_cache().id() != command->policy_id()) {
+                                throw std::runtime_error("网站缓存策略已改变或 URL 不属于该网站");
+                            }
+                            urls.push_back({site->id(), std::move(*url)});
+                        }
+                    }
+                    const auto [objects, bytes] = cache_.invalidate(*command, urls);
                     value.set_affected_objects(objects);
                     value.set_affected_bytes(bytes);
                 } else {

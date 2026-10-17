@@ -70,14 +70,20 @@ void verify() {
     FLEXEDGE_REQUIRE(store(first, *fill.ticket_, site.response_cache(), rule, value, {}));
     const auto retained = second.lookup(site, rule, "http://example.com/a", {}).response_;
     FLEXEDGE_REQUIRE(retained && *retained->body_ == "body");
+    FLEXEDGE_REQUIRE(second.lookup(site, rule, "http://alias.example.com/a", {}, false).response_ == retained);
+    FLEXEDGE_REQUIRE(!second.lookup(site, rule, "https://alias.example.com/a", {}, false).response_);
+    FLEXEDGE_REQUIRE(!second.lookup(site, rule, "http://alias.example.com/a?q=1", {}, false).response_);
+    auto other_site = site;
+    other_site.set_id("other-site");
+    FLEXEDGE_REQUIRE(!second.lookup(other_site, rule, "http://alias.example.com/a", {}, false).response_);
     auto in_flight = first.lookup(site, rule, "http://example.com/b", {});
     v2::CacheCommand refresh;
     refresh.set_operation("refresh");
     refresh.set_scope("urls");
     refresh.set_policy_id("policy");
     refresh.add_website_ids("site");
-    refresh.add_urls("http://example.com/a");
-    FLEXEDGE_REQUIRE(second.invalidate(refresh).first == 1);
+    refresh.add_urls("http://alias.example.com/a");
+    FLEXEDGE_REQUIRE(second.invalidate(refresh, std::array{cache_invalidation_url{"site", *flexedge::cache::parse_url(refresh.urls(0))}}).first == 1);
     FLEXEDGE_REQUIRE(!store(first, *in_flight.ticket_, site.response_cache(), rule, value, {}));
     FLEXEDGE_REQUIRE(*retained->body_ == "body");
     auto miss = first.lookup(site, rule, "http://example.com/a", {}, false);
@@ -156,10 +162,28 @@ void verify() {
     clean.set_operation("clean");
     clean.set_scope("all");
     clean.set_policy_id("policy");
-    first.invalidate(clean);
+    first.invalidate(clean, {});
     FLEXEDGE_REQUIRE(std::filesystem::exists(file));
     disk_object.reset();
     FLEXEDGE_REQUIRE(!std::filesystem::exists(file));
+    {
+        // Host-sensitive responses remain separate when the origin declares Vary.
+        auto host_value = response("example.com");
+        host_value.headers_.emplace_back("Vary", "Host");
+        const auto pending = first.lookup(site, rule, "http://example.com/host", {{"Host", "example.com"}});
+        FLEXEDGE_REQUIRE(store(first, *pending.ticket_, site.response_cache(), rule, host_value, {{"Host", "example.com"}}));
+        FLEXEDGE_REQUIRE(!second.lookup(site, rule, "http://alias.example.com/host", {{"Host", "alias.example.com"}}, false).response_);
+        FLEXEDGE_REQUIRE(second.lookup(site, rule, "http://example.com/host", {{"Host", "example.com"}}, false).response_);
+        // A URL resolves to exactly one website, even when a command includes both.
+        const auto other = first.lookup(other_site, rule, "http://other.example/host", {});
+        FLEXEDGE_REQUIRE(store(first, *other.ticket_, other_site.response_cache(), rule, value, {}));
+        refresh.add_website_ids(other_site.id());
+        refresh.set_scope("prefix");
+        const std::array urls{cache_invalidation_url{site.id(), *flexedge::cache::parse_url("http://alias.example.com/ho")}};
+        FLEXEDGE_REQUIRE(first.invalidate(refresh, urls).first == 1);
+        FLEXEDGE_REQUIRE(second.lookup(other_site, rule, "http://other.example/host", {}, false).response_);
+        first.invalidate(clean, {});
+    }
     {
         auto tiered = site;
         tiered.mutable_response_cache()->set_storage("tiered");
@@ -207,7 +231,7 @@ void verify() {
         FLEXEDGE_REQUIRE(second_is_disk_only);
         store_tiered(3);
         FLEXEDGE_REQUIRE(!second.lookup(tiered, rule, "http://example.com/tiered/2", {}, false).response_);
-        first.invalidate(clean);
+        first.invalidate(clean, {});
         FLEXEDGE_REQUIRE(!second.lookup(tiered, rule, "http://example.com/tiered/0", {}, false).response_);
     }
     {
@@ -262,13 +286,13 @@ void verify() {
         auto pending_promotion = second.begin_promotion(*hit, tiered.response_cache(), {});
         FLEXEDGE_REQUIRE(pending_promotion && pending_promotion->append(bytes));
         const auto pending_key = second.lookup(streamed, rule, "http://example.com/stream", {}, false).key_;
-        first.invalidate(clean);
+        first.invalidate(clean, {});
         second.promote(pending_key, hit, tiered.response_cache(), *pending_promotion);
         FLEXEDGE_REQUIRE(!second.lookup(streamed, rule, "http://example.com/stream", {}, false).response_);
         auto tiny_memory = first.begin_fill(site.response_cache(), rule, {200, response().headers_}, budget.lease());
         FLEXEDGE_REQUIRE(tiny_memory && !tiny_memory->append(chunk));
         FLEXEDGE_REQUIRE(budget.used_bytes() == 0);
-        first.invalidate(clean);
+        first.invalidate(clean, {});
     }
     {
         auto encoded = site;
@@ -291,7 +315,7 @@ void verify() {
                                     {{"Accept-Encoding", "gzip"}, {"Accept-Language", "zh"}}, false)
                 .response_);
         FLEXEDGE_REQUIRE(!second.lookup(encoded, rule, "http://example.com/encoded", {}, false).response_);
-        first.invalidate(clean);
+        first.invalidate(clean, {});
         FLEXEDGE_REQUIRE(!first.begin_fill(site.response_cache(), rule,
             {200, {{"Content-Type", "Text/Event-Stream; charset=utf-8"}}}, {}));
         FLEXEDGE_REQUIRE(!first.eligible("GET", {{"Accept", "application/json, Text/Event-Stream"}}));
