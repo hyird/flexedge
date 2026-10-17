@@ -41,10 +41,10 @@ import {
 
 const route = getRouteApi('/_authenticated/cache/')
 const tabs = [
+  { id: 'policies', label: '策略配置' },
   { id: 'prewarm', label: '预热' },
   { id: 'refresh', label: '刷新' },
   { id: 'clean', label: '清理缓存' },
-  { id: 'policies', label: '策略配置' },
 ] as const
 type CacheTab = (typeof tabs)[number]['id']
 export function CachePage() {
