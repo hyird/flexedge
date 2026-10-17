@@ -148,9 +148,10 @@ private:
                     asio::async_write(*peer, asio::buffer(*bytes), [peer, bytes](std::error_code, std::size_t) { std::error_code ignored; peer->close(ignored); });
                     return;
                 }
+                const auto etag = request_text.starts_with("GET /etag-comma ") ? "\"test\\,part\"" : "\"test\"";
                 auto bytes = std::make_shared<std::string>(
-                    "HTTP/1.1 200 OK\r\nCache-Control: public, max-age=600\r\nETag: \"test\"\r\nContent-Type: text/plain\r\nContent-Length: " +
-                    std::to_string(body_.size()) + "\r\nConnection: close\r\n\r\n" + body_);
+                    std::string("HTTP/1.1 200 OK\r\nCache-Control: public, max-age=600\r\nETag: ") + etag +
+                    "\r\nContent-Type: text/plain\r\nContent-Length: " + std::to_string(body_.size()) + "\r\nConnection: close\r\n\r\n" + body_);
                 asio::async_write(*peer, asio::buffer(*bytes), [peer, bytes](std::error_code, std::size_t) {std::error_code ignored;peer->close(ignored); });
             });
             accept();
@@ -476,6 +477,15 @@ void verify() {
     FLEXEDGE_REQUIRE(disk_unchanged.starts_with("HTTP/1.1 304"));
     FLEXEDGE_REQUIRE(disk_unchanged.substr(disk_unchanged.find("\r\n\r\n") + 4).empty());
     FLEXEDGE_REQUIRE(large_source.hits() == 1);
+    const auto comma_miss = request({}, "GET", "/etag-comma");
+    FLEXEDGE_REQUIRE(comma_miss.substr(comma_miss.find("\r\n\r\n") + 4) == large_body);
+    const auto comma_match = request("If-None-Match: \"other\", W/\"test\\,part\"\r\n", "GET", "/etag-comma");
+    FLEXEDGE_REQUIRE(comma_match.starts_with("HTTP/1.1 304"));
+    FLEXEDGE_REQUIRE(comma_match.substr(comma_match.find("\r\n\r\n") + 4).empty());
+    const auto invalid_match = request("If-None-Match: \"test\", invalid\r\n", "GET", "/disk-large");
+    FLEXEDGE_REQUIRE(invalid_match.starts_with("HTTP/1.1 200"));
+    FLEXEDGE_REQUIRE(invalid_match.substr(invalid_match.find("\r\n\r\n") + 4) == large_body);
+    FLEXEDGE_REQUIRE(large_source.hits() == 2);
     shutdown.stop_and_join();
 }
 }  // namespace

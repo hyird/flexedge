@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ruvia/http/http_conditional_request.h>
 #include <ruvia/http/http_status.h>
 
 #include <algorithm>
@@ -687,29 +688,6 @@ private:
         stop_cache_fill();
     }
 
-    static bool matches_cache_etag(std::string_view incoming, std::string_view etag) {
-        if (incoming == "*") {
-            return true;
-        }
-        if (etag.starts_with("W/")) {
-            etag.remove_prefix(2);
-        }
-        while (!incoming.empty()) {
-            const auto comma = incoming.find(',');
-            auto candidate = flexedge::route_policy::trim_ows(incoming.substr(0, comma));
-            if (candidate.starts_with("W/")) {
-                candidate.remove_prefix(2);
-            }
-            if (!etag.empty() && candidate == etag) {
-                return true;
-            }
-            if (comma == std::string_view::npos) {
-                break;
-            }
-            incoming.remove_prefix(comma + 1);
-        }
-        return false;
-    }
     void send_cached(std::shared_ptr<const cached_response> response, const http1_request_reader& parsed, bool stale = false, bool revalidated = false) {
         if (cache_prewarm_) {
             cache_stored_ = true;
@@ -731,8 +709,8 @@ private:
         }
         const auto etag = cache_header(cached_response_->headers_, "ETag");
         bool unchanged{};
-        if (const auto condition = parsed.request().header("If-None-Match")) {
-            unchanged = matches_cache_etag(*condition, etag);
+        if (const auto conditions = ruvia::get_http_etag_preconditions(parsed.request(), etag); conditions.if_none_match_.present_) {
+            unchanged = conditions.if_none_match_.matches();
         } else if (const auto modified_since = parsed.request().header("If-Modified-Since")) {
             const auto modified = cache_http_time(cache_header(cached_response_->headers_, "Last-Modified"));
             const auto requested = cache_http_time(*modified_since);
