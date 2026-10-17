@@ -105,7 +105,6 @@ inline zone_snapshot capture_zone_snapshot(std::string_view zone_id, std::string
     }
     std::ranges::sort(result.records_.records_, {}, &zone_record_data::id_);
     std::ranges::sort(result.runtime_.record_states_, {}, &zone_record_runtime_data::id_);
-    std::ranges::sort(result.runtime_.lines_, {}, &zone_line_runtime_data::code_);
     return result;
 }
 

@@ -115,7 +115,7 @@ export function DnsLinePicker({
         }}
       >
         <Button
-          variant='secondary'
+          variant='tertiary'
           isDisabled={disabled}
           aria-labelledby={`${id}-label ${id}-value`}
           aria-invalid={!!error || undefined}
@@ -148,6 +148,7 @@ export function DnsLinePicker({
                 key={search ? 'search' : 'browse'}
                 aria-label={label}
                 selectionMode='single'
+                selectionBehavior='replace'
                 selectedKeys={value ? [value] : []}
                 disallowEmptySelection
                 disabledBehavior='selection'
