@@ -74,7 +74,7 @@ public:
         std::string saved_id = id;
         try {
             auto tx = co_await c.db().begin_transaction();
-            co_await lock_bindings(tx, tenant);
+            co_await service::website::lock_policy_bindings(tx, tenant);
             if (id.empty()) {
                 const auto rows = co_await tx.query("INSERT INTO sys_cache_policy(tenant_id,name,description,status,config) VALUES($1,$2,$3,$4,$5::jsonb) RETURNING id", tenant, name, description, status, config);
                 saved_id = std::string(rows.front()[0].value().value());
@@ -126,7 +126,7 @@ public:
 
     ruvia::task<void> remove(ruvia::context& c, const std::string& tenant, const std::string& id, std::int64_t expected) const {
         auto tx = co_await c.db().begin_transaction();
-        co_await lock_bindings(tx, tenant);
+        co_await service::website::lock_policy_bindings(tx, tenant);
         const auto previous = co_await find_policy(tx, tenant, id);
         if (!previous) {
             service::common::throw_app_error(19002, "缓存策略不存在", 404);

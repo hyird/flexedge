@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "node/data/route_program.h"
+#include "node/data/security_program.h"
 
 namespace flexedge::node {
 
@@ -18,7 +19,8 @@ public:
     explicit worker_execution_view(std::shared_ptr<const compiled_config> source)
         : source_(source ? std::move(source)
                          : throw std::invalid_argument("worker execution source cannot be empty")),
-          program_(*source_) {}
+          program_(*source_),
+          security_(*source_) {}
 
     [[nodiscard]] const compiled_config& config() const noexcept {
         return *source_;
@@ -26,6 +28,9 @@ public:
 
     [[nodiscard]] const route_program& routes() const noexcept {
         return program_;
+    }
+    [[nodiscard]] const security_program& security() const noexcept {
+        return security_;
     }
 
     [[nodiscard]] const std::shared_ptr<const compiled_config>& source() const noexcept {
@@ -35,6 +40,7 @@ public:
 private:
     std::shared_ptr<const compiled_config> source_;
     route_program program_;
+    security_program security_;
 };
 
 class runtime_state final {

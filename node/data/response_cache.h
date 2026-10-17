@@ -27,11 +27,11 @@
 #include "node/data/cache_capacity.h"
 #include "node/data/cache_deception.h"
 #include "node/data/cache_disk_record.h"
-#include "node/data/cache_expression.h"
 #include "node/data/cache_key.h"
 #include "node/data/cache_range.h"
 #include "node/data/cache_response_head.h"
 #include "node/data/cache_vary.h"
+#include "node/data/request_expression.h"
 #include "node/data/response_compression.h"
 #include "node/proto/edge_control.pb.h"
 
@@ -1547,7 +1547,7 @@ private:
     struct compiled_policy final {
         flexedge::cache::policy policy_{};
         std::vector<std::vector<std::shared_ptr<const RE2>>> patterns_{};
-        std::vector<std::optional<cache_expression_program>> expressions_{};
+        std::vector<std::optional<request_expression_program>> expressions_{};
     };
     struct capacity final {
         std::uint64_t memory_{}, disk_{};

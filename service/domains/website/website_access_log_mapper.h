@@ -36,6 +36,9 @@ inline void fill_website_access_log(website_access_log_dto& item, const row_type
     if (const auto value = row[27].value()) {
         item.set<"end_reason">(*value);
     }
+    if (const auto value = row[28].template as<std::int64_t>()) {
+        item.set<"waf_anomaly_score">(*value);
+    }
     if (const auto value = row[4].value()) {
         item.set<"client_ip">(*value);
         if (const auto location = service::geoip::get_xdb_database().lookup(*value)) {

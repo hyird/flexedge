@@ -16,6 +16,7 @@
 #include "node/proto/schema_version.h"
 #include "node/proto/website_validation.h"
 #include "node/runtime/country_database.h"
+#include "node/runtime/security_config.h"
 
 namespace flexedge::node {
 
@@ -33,6 +34,7 @@ public:
         index_objects(objects);
         validate_endpoints();
         validate_websites();
+        security_ = std::make_unique<const security_config>(websites_);
     }
 
     // Index pointers refer to objects owned by this immutable snapshot.
@@ -43,6 +45,10 @@ public:
 
     [[nodiscard]] const v2::NodeSpecContent& node_spec() const noexcept {
         return node_spec_;
+    }
+
+    [[nodiscard]] const security_config& security() const noexcept {
+        return *security_;
     }
 
     [[nodiscard]] const std::string& node_spec_digest() const noexcept {
@@ -203,6 +209,7 @@ private:
     std::vector<const v2::Website*> websites_;
     std::unordered_map<std::string, const v2::Certificate*> certificates_;
     std::unordered_map<std::string, compiled_route> routes_;
+    std::unique_ptr<const security_config> security_;
 };
 
 }  // namespace flexedge::node

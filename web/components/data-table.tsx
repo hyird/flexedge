@@ -64,6 +64,7 @@ export function DataTable<T extends object>({
   variant = 'primary',
   fit = false,
   virtualized = false,
+  autoHeight = false,
 }: {
   /** Accessible table name, also used in loading announcements. */
   label: string
@@ -90,6 +91,8 @@ export function DataTable<T extends object>({
   fit?: boolean
   /** Render only visible rows, using the shared fixed row and header heights. */
   virtualized?: boolean
+  /** Grow with all rows instead of creating an internal vertical viewport. */
+  autoHeight?: boolean
 }) {
   return (
     <div
@@ -190,6 +193,7 @@ export function DataTable<T extends object>({
           className={cn(
             'min-w-0',
             fit && 'data-grid--fit',
+            autoHeight && 'data-grid--auto-height',
             tableClassName,
             variant === 'primary' &&
               'overflow-hidden rounded-2xl bg-surface shadow-surface'

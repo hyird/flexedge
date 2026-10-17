@@ -10,6 +10,12 @@
 
 namespace service::website {
 
+// Cache/security policy publication and website binding mutate the same website
+// aggregates. Serialize them before taking any website or cluster row locks.
+inline ruvia::task<void> lock_policy_bindings(ruvia::db_transaction& db, const std::string& tenant) {
+    co_await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "website-policy-bindings:" + tenant);
+}
+
 // Whether a website claims a name under the zone. The caller holds the zone
 // FOR UPDATE, so no website can start claiming under it meanwhile.
 inline ruvia::task<bool> websites_claim_dns_zone(ruvia::db_transaction& transaction, std::string_view tenant_id,
@@ -85,6 +91,23 @@ inline ruvia::task<std::vector<cache_policy_publication>> revise_cache_policy_we
     ruvia::db_transaction& tx, const std::string& tenant, const std::string& id) {
     const auto rows = co_await tx.query("UPDATE sys_website SET revision=revision+1,updated_at=NOW() WHERE tenant_id=$1 AND cache_policy_id=$2 AND deleted_at IS NULL RETURNING id,cluster_id,revision", tenant, id);
     std::vector<cache_policy_publication> result;
+    for (const auto& row : rows) {
+        result.push_back({std::string(row[0].value().value()), std::string(row[1].value().value()), row[2].as<std::int64_t>().value()});
+    }
+    co_return result;
+}
+inline ruvia::task<std::int64_t> security_policy_reference_count(auto& db, const std::string& tenant, const std::string& id) {
+    const auto rows = co_await db.query("SELECT COUNT(*) FROM sys_website WHERE tenant_id=$1 AND security_policy_id=$2 AND deleted_at IS NULL", tenant, id);
+    co_return rows.front()[0].template as<std::int64_t>().value();
+}
+struct security_policy_publication final {
+    std::string id_{}, cluster_id_{};
+    std::int64_t revision_{};
+};
+inline ruvia::task<std::vector<security_policy_publication>> revise_security_policy_websites(
+    ruvia::db_transaction& tx, const std::string& tenant, const std::string& id) {
+    const auto rows = co_await tx.query("UPDATE sys_website SET revision=revision+1,updated_at=NOW() WHERE tenant_id=$1 AND security_policy_id=$2 AND deleted_at IS NULL RETURNING id,cluster_id,revision", tenant, id);
+    std::vector<security_policy_publication> result;
     for (const auto& row : rows) {
         result.push_back({std::string(row[0].value().value()), std::string(row[1].value().value()), row[2].as<std::int64_t>().value()});
     }

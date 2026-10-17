@@ -336,6 +336,9 @@ const routeRuleSchema = z
 export const websiteFormSchema = z
   .object({
     cache_enabled: z.boolean().default(false),
+    security_policy_id: z
+      .union([z.literal(''), z.string().uuid('请选择安全规则集')])
+      .default(''),
     cache_policy_id: z
       .union([z.literal(''), z.string().uuid('请选择缓存策略')])
       .default(''),
@@ -634,6 +637,7 @@ export function routeRuleToForm(
 export function defaultWebsiteConfig(): WebsiteConfig {
   return {
     cache_enabled: false,
+    security_policy_id: '',
     cache_policy_id: '',
     name: '',
     domains: [],

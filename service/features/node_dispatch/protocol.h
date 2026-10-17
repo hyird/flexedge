@@ -152,6 +152,9 @@ build_website_object(const deployment_website_source& source, const cluster_depl
     flexedge::node::v2::DeliveryObjectContent object_content;
     auto* website = object_content.mutable_website();
     website->set_id(source.id_);
+    if (source.security_) {
+        *website->mutable_security() = *source.security_;
+    }
     if (source.response_cache_) {
         flexedge::cache::to_proto(*source.response_cache_, *website->mutable_response_cache());
     }
@@ -263,11 +266,24 @@ inline cluster_release_artifact build_cluster_release(std::string_view release_i
     manifest.set_generation(generation);
     manifest.set_access_domain(deployment.access_domain_);
     manifest.set_enabled(deployment.enabled_);
-    manifest.set_schema_version(flexedge::node::cluster_release_schema_version);
+    const auto has_security = std::ranges::any_of(deployment.websites_, [](const auto& site) { return site.security_.has_value(); });
+    manifest.set_schema_version(has_security ? flexedge::node::cluster_release_schema_version : 6);
 
     std::unordered_map<std::string, std::string> certificate_digests;
     bool needs_countries = false;
     for (const auto& source : deployment.websites_) {
+        if (source.enabled_ && source.security_) {
+            const auto uses_country = [](const auto& rules) {
+                return std::ranges::any_of(rules, [](const auto& rule) {
+                    if (!rule.enabled()) {
+                        return false;
+                    }
+                    const auto program = flexedge::rules::request_expression_parser(rule.expression(), flexedge::rules::expression_context::security).parse();
+                    return std::ranges::any_of(program, [](const auto& instruction) { return instruction.field_ == "ip.src.country"; });
+                });
+            };
+            needs_countries = needs_countries || uses_country(source.security_->custom_rules()) || uses_country(source.security_->cc_rules());
+        }
         if (source.enabled_ && source.response_cache_ && source.response_cache_->enabled_) {
             needs_countries = needs_countries || std::ranges::any_of(source.response_cache_->rules_, [](const auto& rule) {
                 return rule.enabled_ && flexedge::cache::configured(rule, "key") && rule.settings_->key_.country_;

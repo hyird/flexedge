@@ -4,6 +4,7 @@
 #include <ruvia/core/event_loop.h>
 #include <ruvia/core/task.h>
 #include <ruvia/core/task_scope.h>
+#include <ruvia/core/timer.h>
 
 #include <algorithm>
 #include <chrono>
@@ -36,7 +37,8 @@ enum class data_worker_operation { prepare,
     drain,
     stop_accepting,
     retired,
-    cache_command };
+    cache_command,
+    cc_dispositions };
 
 // Cross-loop messages contain owned immutable business values, never runtime objects,
 // listener handles, completion callbacks or channels back into another worker.
@@ -46,6 +48,7 @@ struct data_worker_request final {
     std::uint64_t committed_sequence_{};
     std::shared_ptr<const compiled_config> config_{};
     std::shared_ptr<const v2::CacheCommand> cache_command_{};
+    std::shared_ptr<const cc_dispositions> cc_dispositions_{};
     std::chrono::steady_clock::duration timeout_{};
     std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
 };
@@ -88,7 +91,8 @@ public:
         ruvia::channel_sender<owned_log_batch> logs, std::size_t worker_count,
         std::shared_ptr<response_cache_publication> cache,
         ruvia::channel_sender<owned_data_worker_result> cache_results,
-        inherited_listeners inherited = {})
+        inherited_listeners inherited = {},
+        std::optional<ruvia::channel_sender<std::unique_ptr<const cc_batch>>> cc_reports = {})
         : loop_(std::move(loop)),
           worker_(loop_.handle()),
           identity_(identity),
@@ -97,6 +101,8 @@ public:
           cache_results_(std::move(cache_results)),
           cache_(std::move(cache)),
           operations_(worker_),
+          cc_(identity, (std::max)(std::size_t{256}, std::size_t{65536} / worker_count)),
+          cc_reports_(std::move(cc_reports)),
           origin_connections_(loop_.executor(), origin_tls_),
           logs_(loop_, std::move(logs)),
           health_(origin_health_supervisor::create(loop_, runtime_, origin_tls_)),
@@ -150,6 +156,9 @@ public:
                           return;
                       }
                       operations_.spawn(run());
+                      if (cc_reports_) {
+                          operations_.spawn(report_cc());
+                      }
                       operations_.spawn(origin_connections_.watch_dns(loop_, operations_.get_stop_token()));
                       health_->request_start();
                   })
@@ -230,6 +239,9 @@ private:
                         finalize(reload_->sequence_);
                     }
                     switch (request->operation_) {
+                        case data_worker_operation::cc_dispositions:
+                            cc_.publish(request->cc_dispositions_);
+                            continue;
                         case data_worker_operation::cache_command:
                             operations_.spawn(execute_cache(request->sequence_, request->cache_command_));
                             continue;
@@ -279,7 +291,20 @@ private:
     }
 
     [[nodiscard]] http_session_context session_context() noexcept {
-        return {.runtime_ = runtime_, .health_ = *health_, .metrics_ = metrics_, .clients_ = clients_, .logs_ = logs_, .origin_connections_ = origin_connections_, .request_buffers_ = request_buffers_, .response_buffers_ = response_buffers_, .cache_ = &cache_, .refresh_ = &cache_refresh_};
+        return {.runtime_ = runtime_, .health_ = *health_, .metrics_ = metrics_, .clients_ = clients_, .logs_ = logs_, .origin_connections_ = origin_connections_, .request_buffers_ = request_buffers_, .response_buffers_ = response_buffers_, .cache_ = &cache_, .refresh_ = &cache_refresh_, .cc_ = &cc_};
+    }
+
+    ruvia::task<void> report_cc() {
+        const auto stop = operations_.get_stop_token();
+        while (!stop.stop_requested()) {
+            auto batch = cc_.report(cc_now_ms());
+            if (batch->counts_.empty() || cc_reports_->send(std::move(batch)).accepted()) {
+                cc_.acknowledge();
+            }
+            if (co_await ruvia::sleep_for(worker_, std::chrono::milliseconds(250), stop) == ruvia::timer_sleep_result::stop_requested) {
+                co_return;
+            }
+        }
     }
 
     ruvia::task<std::pair<bool, std::string>> prewarm_url(const v2::CacheCommand& command,
@@ -561,6 +586,8 @@ private:
     ruvia::channel_sender<owned_data_worker_result> cache_results_;
     response_cache cache_;
     ruvia::task_scope operations_;
+    cc_worker cc_;
+    std::optional<ruvia::channel_sender<std::unique_ptr<const cc_batch>>> cc_reports_;
     cache_refresh_runtime cache_refresh_{loop_, operations_};
     runtime_state runtime_;
     worker_metrics metrics_;

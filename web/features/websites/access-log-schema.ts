@@ -25,6 +25,7 @@ const accessLogSchema = z.object({
   request_type: z.string().optional(),
   started_at: z.string().optional(),
   first_byte_ms: z.number().int().nonnegative().optional(),
+  waf_anomaly_score: z.number().int().nonnegative().max(4294967295).optional(),
   end_reason: z.string().optional(),
   user_agent: z.string().optional(),
   referer: z.string().optional(),

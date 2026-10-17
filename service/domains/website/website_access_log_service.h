@@ -44,7 +44,7 @@ public:
                     "log.duration_ms", "log.user_agent", "log.referer", "log.request_headers",
                     "log.request_body", "log.request_body_truncated", "log.tls_fingerprint",
                     "log.response_headers", "log.query_string", "log.cookies",
-                    "log.cache_status", "log.cache_reason", "log.request_type", "TO_CHAR(log.started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')", "log.first_byte_ms", "log.end_reason", "log.ingested_unix_micros"}))
+                    "log.cache_status", "log.cache_reason", "log.request_type", "TO_CHAR(log.started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')", "log.first_byte_ms", "log.end_reason", "log.waf_anomaly_score", "log.ingested_unix_micros"}))
             .from("sys_website", "website")
             .join(ruvia::db_join_type::left, entries, query.sql("TRUE"), "log", {.lateral_ = true})
             .where(query.sql({"website.tenant_id = ", ""}, {query.value(tenant_id)}))
@@ -68,7 +68,7 @@ public:
         }
         if (!items.empty()) {
             result.template set<"cursor">(service::log_ingest::encode_tail_cursor(
-                rows.front()[28].template as<std::int64_t>().value_or(0),
+                rows.front()[29].template as<std::int64_t>().value_or(0),
                 rows.front()[0].value().value_or("")));
         }
         co_return result;
@@ -123,7 +123,7 @@ public:
                         "access.duration_ms", "access.user_agent", "access.referer",
                         "access.request_headers", "access.request_body", "access.request_body_truncated",
                         "access.tls_fingerprint", "access.response_headers", "access.query_string",
-                        "access.cookies", "access.cache_status", "access.cache_reason", "access.request_type", "TO_CHAR(access.started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')", "access.first_byte_ms", "access.end_reason"}))
+                        "access.cookies", "access.cache_status", "access.cache_reason", "access.request_type", "TO_CHAR(access.started_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')", "access.first_byte_ms", "access.end_reason", "access.waf_anomaly_score"}))
                 .order_by(query.sql("access.created_at"), ruvia::db_order_direction::desc)
                 .add_order_by(query.sql("access.id"), ruvia::db_order_direction::desc);
         };

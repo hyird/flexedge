@@ -99,6 +99,7 @@ public:
         std::uint64_t started_unix_ms_{};
         std::optional<std::uint64_t> first_byte_ms_{};
         std::string end_reason_{};
+        std::optional<std::uint32_t> waf_anomaly_score_{};
     };
 
     static constexpr std::size_t max_request_headers_bytes{log_contract::max_request_headers_bytes};
@@ -325,6 +326,9 @@ private:
         value->set_cookies(record.cookies_);
         value->set_cache_status(record.cache_status_);
         value->set_cache_reason(record.cache_reason_);
+        if (record.waf_anomaly_score_) {
+            value->set_waf_anomaly_score(*record.waf_anomaly_score_);
+        }
         value->set_cache_revalidated(record.cache_revalidated_);
         if (!record.request_type_.empty()) {
             value->set_request_type(record.request_type_);

@@ -19,11 +19,6 @@ inline ruvia::task<void> create_default_policy(ruvia::db_transaction& db, const 
         service::cache_config::default_policy_description, config);
 }
 
-// Policy mutation and website binding use the same transaction lock before
-// aggregate locks, so a concurrent delete or republish cannot miss a binding.
-inline ruvia::task<void> lock_bindings(ruvia::db_transaction& db, const std::string& tenant) {
-    co_await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "cache-bindings:" + tenant);
-}
 inline ruvia::task<std::optional<policy_entity>> find_policy(auto& db, const std::string& tenant, const std::string& id) {
     ruvia::db_query e;
     auto query = db.template get_repository<policy_entity>().create_query_builder("policy");

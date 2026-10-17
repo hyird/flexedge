@@ -69,6 +69,7 @@ const columnText = {
   time: (log: AccessLog) => formatDate(log.occurred_at),
   node: (log: AccessLog) => log.node_name,
   status: (log: AccessLog) => String(log.status_code),
+  waf_score: (log: AccessLog) => log.waf_anomaly_score?.toString() ?? '—',
   client: (log: AccessLog) => log.client_ip || '—',
   location: (log: AccessLog) => formatClientLocation(log.client_ip_location),
   duration: (log: AccessLog) => `${log.duration_ms} ms`,
@@ -95,6 +96,7 @@ function useColumnWidths(
     time: 190,
     node: 120,
     status: 80,
+    waf_score: 110,
     client: 130,
     location: 150,
     duration: 90,
@@ -303,6 +305,13 @@ export function AccessLogs() {
         id: 'status',
         header: '状态',
         cell: (log) => <StatusChip {...accessLogStatus(log.status_code)} />,
+      },
+      {
+        id: 'waf_score',
+        header: '异常评分',
+        cell: (log) => (
+          <span className='tabular-nums'>{log.waf_anomaly_score ?? '—'}</span>
+        ),
       },
       {
         id: 'client',
@@ -633,6 +642,7 @@ function AccessLogDetail({ log }: { log: AccessLog }) {
             value: <StatusChip {...accessLogStatus(log.status_code)} />,
           },
           { label: '协议', value: log.protocol },
+          { label: '异常评分', value: log.waf_anomaly_score ?? '—' },
           {
             label: '缓存',
             value: cacheState(log) ? (

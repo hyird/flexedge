@@ -182,6 +182,7 @@ RUVIA_MODEL(
     RUVIA_OPTIONAL_FIELD(request_type, ruvia::string, RUVIA_OMIT_EMPTY),
     RUVIA_OPTIONAL_FIELD(started_at, ruvia::string, RUVIA_OMIT_EMPTY),
     RUVIA_OPTIONAL_FIELD(first_byte_ms, ruvia::int64),
+    RUVIA_OPTIONAL_FIELD(waf_anomaly_score, ruvia::int64),
     RUVIA_OPTIONAL_FIELD(end_reason, ruvia::string, RUVIA_OMIT_EMPTY),
     RUVIA_OPTIONAL_FIELD_NAME("user_agent", user_agent, ruvia::string, RUVIA_OMIT_EMPTY),
     RUVIA_OPTIONAL_FIELD(referer, ruvia::string, RUVIA_OMIT_EMPTY),

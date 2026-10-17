@@ -18,7 +18,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VCPKG_ROOT})
     unset(_vcpkg_root)
 endif()
 
-project(flexedge_service VERSION 0.4.1 LANGUAGES CXX)
+project(flexedge_service VERSION 0.4.1 LANGUAGES C CXX)
 
 include(CTest)
 include(FetchContent)
@@ -63,6 +63,7 @@ find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
 find_package(Protobuf CONFIG REQUIRED)
 find_package(re2 CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
+include(cmake/modsecurity.cmake)
 
 set(FLEXEDGE_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${FLEXEDGE_GENERATED_DIR}")
@@ -79,7 +80,7 @@ target_link_libraries(flexedge_node_protocol PUBLIC protobuf::libprotobuf)
 
 add_library(flexedge_route_policy INTERFACE)
 target_include_directories(flexedge_route_policy INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(flexedge_route_policy INTERFACE re2::re2)
+target_link_libraries(flexedge_route_policy INTERFACE re2::re2 flexedge_security)
 
 add_library(flexedge_node_version INTERFACE)
 target_compile_definitions(flexedge_node_version INTERFACE
@@ -124,9 +125,11 @@ if(FLEXEDGE_BUILD_WEB)
     )
 endif()
 
-# Domain controllers are currently header-only. Feature .cpp files must be listed explicitly here.
+# Runtime implementation units are listed explicitly; headers are never globbed as sources.
 add_executable(flexedge_service
     service/server.cpp
+    service/domains/security/security_controller.cpp
+    service/domains/security/security_reference.cpp
 )
 
 target_include_directories(flexedge_service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -240,6 +243,13 @@ if(BUILD_TESTING)
             add_test(NAME flexedge_${name} COMMAND ${target})
         endif()
     endfunction()
+
+    flexedge_add_test(security_runtime SOURCES tests/security_runtime.cpp LIBRARIES
+        flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto)
+    set_tests_properties(flexedge_security_runtime PROPERTIES TIMEOUT 90)
+    flexedge_add_test(security_migration SOURCES tests/security_migration.cpp LIBRARIES
+        flexedge_node_protocol flexedge_route_policy ruvia::web)
+    set_tests_properties(flexedge_security_migration PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90)
 
     flexedge_add_test(background_shutdown
         SOURCES tests/background_shutdown.cpp
@@ -479,7 +489,7 @@ if(BUILD_TESTING)
     )
     set_tests_properties(flexedge_sync_runtime PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
     flexedge_add_test(certificate_dependency BIG_OBJECT
-        SOURCES tests/certificate_dependency.cpp
+        SOURCES tests/certificate_dependency.cpp service/domains/security/security_reference.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web OpenSSL::Crypto
     )
     set_tests_properties(flexedge_certificate_dependency PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)

@@ -96,6 +96,7 @@ export type WebsiteRouteRule = z.infer<typeof websiteRouteRuleSchema>
 /** `website_config_output`; `name` is omitted when never set. */
 const websiteConfigSchema = z.object({
   cache_enabled: z.boolean().default(false),
+  security_policy_id: z.string().default(''),
   cache_policy_id: z.string().default(''),
   name: z.string().optional(),
   domains: z.array(websiteDomainSchema),

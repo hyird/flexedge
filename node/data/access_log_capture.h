@@ -68,6 +68,9 @@ public:
     [[nodiscard]] bool client_abort_enabled() const noexcept {
         return client_abort_enabled_;
     }
+    void waf_anomaly_score(std::optional<std::uint32_t> value) noexcept {
+        waf_anomaly_score_ = value;
+    }
     void cache_status(std::string_view value, std::string_view reason = {}, bool revalidated = false) {
         cache_status_ = value;
         cache_reason_ = reason;
@@ -138,6 +141,7 @@ public:
                 .started_unix_ms_ = started_unix_ms_,
                 .first_byte_ms_ = first_byte_ms_,
                 .end_reason_ = std::string(end_reason),
+                .waf_anomaly_score_ = waf_anomaly_score_,
             });
         } catch (...) {
             // A record that cannot be queued is dropped like one rejected by a full buffer.
@@ -271,6 +275,7 @@ private:
     std::chrono::steady_clock::time_point started_at_{std::chrono::steady_clock::now()};
     std::uint64_t started_unix_ms_{static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count())};
     std::optional<std::uint64_t> first_byte_ms_{};
+    std::optional<std::uint32_t> waf_anomaly_score_{};
     std::string_view request_type_{"http"};
     std::uint32_t response_status_{};
     std::string website_id_;

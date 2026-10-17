@@ -12,6 +12,7 @@ export function websiteToFormValues(
   const config = structuredClone(website?.config ?? defaultWebsiteConfig())
   return {
     cache_enabled: config.cache_enabled,
+    security_policy_id: config.security_policy_id,
     cache_policy_id: config.cache_enabled ? config.cache_policy_id : '',
     cluster_id: website?.cluster_id ?? '',
     status: website?.status ?? 'enabled',

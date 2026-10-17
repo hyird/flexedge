@@ -44,6 +44,7 @@ export const websiteSections = [
     label: '缓存',
     description: '启用缓存并选择缓存策略。',
   },
+  { id: 'security', label: '安全', description: '选择网站应用的安全规则集。' },
   {
     id: 'compression',
     label: '压缩',
@@ -76,6 +77,7 @@ export function websiteSectionFrom(id: string | undefined): WebsiteSectionId {
  * mapping exhaustive when the form schema gains a field. */
 const fieldSections: Record<keyof WebsiteFormValues, WebsiteSectionId> = {
   cache_enabled: 'cache',
+  security_policy_id: 'security',
   cache_policy_id: 'cache',
   name: 'basic',
   cluster_id: 'basic',

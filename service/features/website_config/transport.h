@@ -44,6 +44,7 @@ RUVIA_MODEL(website_route_rule_input, RUVIA_OPTIONAL_FIELD(id, ruvia::string),
         ruvia::array<website_route_header_input>));
 RUVIA_MODEL(
     website_config_input,
+    RUVIA_OPTIONAL_FIELD(security_policy_id, ruvia::string),
     RUVIA_OPTIONAL_FIELD(cache_enabled, ruvia::bool_value),
     RUVIA_OPTIONAL_FIELD(cache_policy_id, ruvia::string), RUVIA_OPTIONAL_FIELD(name, ruvia::string),
     RUVIA_OPTIONAL_FIELD(domains, ruvia::array<website_domain_input>),
@@ -138,6 +139,7 @@ RUVIA_MODEL(website_route_rule_output, RUVIA_REQUIRED_FIELD(id, ruvia::string),
         ruvia::array<website_route_header_output>));
 RUVIA_MODEL(
     website_config_output,
+    RUVIA_REQUIRED_FIELD(security_policy_id, ruvia::string),
     RUVIA_REQUIRED_FIELD(cache_enabled, ruvia::bool_value),
     RUVIA_REQUIRED_FIELD(cache_policy_id, ruvia::string), RUVIA_OPTIONAL_FIELD(name, ruvia::string),
     RUVIA_REQUIRED_FIELD(domains, ruvia::array<website_domain_output>),

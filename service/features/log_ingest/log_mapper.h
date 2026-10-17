@@ -87,6 +87,9 @@ inline log_rows to_log_rows(const v2::QueuedLogDelivery& envelope, std::int64_t 
             row.set<"cookies">(access.cookies());
             row.set<"cache_status">(access.cache_revalidated() ? "revalidated" : access.cache_status());
             row.set<"cache_reason">(access.cache_reason());
+            if (access.has_waf_anomaly_score()) {
+                row.set<"waf_anomaly_score">(static_cast<std::int64_t>(access.waf_anomaly_score()));
+            }
             rows.websites_.push_back(access.website_id());
         } else {
             const auto& item = event.node_log();

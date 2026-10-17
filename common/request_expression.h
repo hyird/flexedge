@@ -8,7 +8,10 @@
 
 #include "common/route_match.h"
 
-namespace flexedge::cache {
+namespace flexedge::rules {
+
+enum class expression_context { cache,
+    security };
 
 enum class expression_op { compare,
     logical_not,
@@ -23,17 +26,20 @@ struct expression_instruction final {
     std::string comparison_{};
     std::vector<std::string> values_{};
     bool lower_{false};
+    std::string list_{};
 };
 
 // A bounded parser shared by management validation and Worker compilation.
 // Its result contains only values; regular expressions belong to the Worker.
-class cache_expression_parser final {
+class request_expression_parser final {
 public:
-    explicit cache_expression_parser(std::string_view text)
-        : text_(text) {}
+    explicit request_expression_parser(std::string_view text, expression_context context = expression_context::cache)
+        : text_(text),
+          context_(context) {}
     std::vector<expression_instruction> parse() {
-        if (text_.empty() || text_.size() > 4096) {
-            fail("表达式长度必须在1至4096之间");
+        const auto maximum = context_ == expression_context::security ? 8000u : 4096u;
+        if (text_.empty() || text_.size() > maximum) {
+            fail("表达式为空或超过长度上限");
         }
         logical_or(0);
         whitespace();
@@ -159,7 +165,9 @@ private:
             if (!route_policy::http_token(instruction.header_, 128) || std::ranges::any_of(instruction.header_, [](unsigned char c) { return c >= 'A' && c <= 'Z'; })) {
                 fail("请求头名称必须使用小写");
             }
-        } else if (std::ranges::find(fields, instruction.field_) == fields.end()) {
+        } else if (std::ranges::find(fields, instruction.field_) == fields.end() &&
+                   !(context_ == expression_context::security &&
+                       (instruction.field_ == "ip.src" || instruction.field_ == "ip.src.country" || instruction.field_ == "ip.src.asnum"))) {
             fail("不支持此匹配字段");
         }
         if (instruction.lower_) {
@@ -226,15 +234,20 @@ private:
             fail("不支持此运算符");
         }
         if (instruction.comparison_ == "in") {
+            if (context_ == expression_context::security && symbol('$')) {
+                instruction.list_ = identifier();
+                emit(std::move(instruction));
+                return;
+            }
             require('{');
             while (!symbol('}')) {
                 if (instruction.values_.size() >= 100) {
                     fail("列表最多100项");
                 }
-                instruction.values_.push_back(literal());
+                instruction.values_.push_back(scalar(instruction));
             }
         } else {
-            instruction.values_.push_back(literal());
+            instruction.values_.push_back(scalar(instruction));
         }
         if (instruction.comparison_ == "matches" && !route_policy::compile_pattern(instruction.values_.front())) {
             fail("正则表达式不受支持");
@@ -289,17 +302,40 @@ private:
     }
 
     std::string_view text_;
+    expression_context context_{};
     std::size_t position_{};
     std::vector<expression_instruction> program_{};
+
+    std::string scalar(const expression_instruction& instruction) {
+        whitespace();
+        if (context_ != expression_context::security ||
+            (instruction.field_ != "ip.src" && instruction.field_ != "ip.src.asnum") ||
+            position_ == text_.size() || text_[position_] == '"') {
+            return literal();
+        }
+        const auto first = position_;
+        while (position_ < text_.size()) {
+            const auto ch = text_[position_];
+            if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') ||
+                    (ch >= 'A' && ch <= 'F') || ch == ':' || ch == '.' || ch == '/')) {
+                break;
+            }
+            ++position_;
+        }
+        if (first == position_) {
+            fail("需要 IP、CIDR 或 ASN");
+        }
+        return std::string(text_.substr(first, position_ - first));
+    }
 };
 
-inline std::string validate_cache_expression(std::string_view text) {
+inline std::string validate_expression(std::string_view text, expression_context context = expression_context::cache) {
     try {
-        (void)cache_expression_parser(text).parse();
+        (void)request_expression_parser(text, context).parse();
         return {};
     } catch (const std::invalid_argument& error) {
         return error.what();
     }
 }
 
-}  // namespace flexedge::cache
+}  // namespace flexedge::rules

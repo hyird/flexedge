@@ -62,7 +62,7 @@ public:
             service::common::throw_app_error(19007, "每次提交1至100个URL；整站和清理操作无需填写URL", 422);
         }
         auto tx = co_await c.db().begin_transaction();
-        co_await lock_bindings(tx, tenant);
+        co_await service::website::lock_policy_bindings(tx, tenant);
         flexedge::node::v2::CacheCommand command;
         command.set_operation(operation);
         command.set_scope(scope);

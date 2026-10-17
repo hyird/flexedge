@@ -51,7 +51,7 @@ std::string preserved_logs;
 ruvia::task<std::string> log_fingerprint(ruvia::db_handle db) {
     const auto rows = co_await db.query(
         "SELECT string_agg(value, ',' ORDER BY value) FROM ("
-        "SELECT 'access:' || (to_jsonb(log)-ARRAY['request_type','started_at','first_byte_ms','end_reason'])::text AS value FROM sys_website_access_log log "
+        "SELECT 'access:' || (to_jsonb(log)-ARRAY['request_type','started_at','first_byte_ms','end_reason','waf_anomaly_score'])::text AS value FROM sys_website_access_log log "
         "UNION ALL SELECT 'node:' || row_to_json(log)::text FROM sys_node_log log) logs");
     co_return std::string(rows[0][0].value().value_or(""));
 }
@@ -134,6 +134,8 @@ ruvia::task<void> verify_preserved(ruvia::db_client& client) {
     co_await client.connect();
     auto db = client.handle();
     require(co_await log_fingerprint(db) == preserved_logs, "rerunning the baseline preserves log fields and timestamps");
+    const auto unscored = co_await db.query("SELECT count(*) FROM sys_website_access_log WHERE waf_anomaly_score IS NOT NULL");
+    require(unscored.front()[0].as<std::int64_t>() == 0, "historical requests remain unscored instead of inventing zero scores");
     const auto chunks = co_await db.query(
         "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_schema='public' "
         "AND hypertable_name IN ('sys_node_log','sys_website_access_log')");
@@ -189,9 +191,9 @@ int main() {
         const test_support::postgres_test_database upgrade(*config);
         const auto previous = std::span<const ruvia::db_migration>(migrations).first(migrations.size() - 1);
         migrate(upgrade, previous, previous.size());
-        require(upgrade.run(insert_logs) == 0, "old logs exist before adding connection metadata");
+        require(upgrade.run(insert_logs) == 0, "old logs exist before adding the WAF score");
         migrate(upgrade, migrations, 1);
-        require(upgrade.run(verify_preserved) == 0, "connection migration preserves historical logs across chunks");
+        require(upgrade.run(verify_preserved) == 0, "score migration preserves historical logs across chunks");
         migrate(upgrade, migrations, 0);
         require(conflict.run(create_conflict) == 0, "prepare an isolated conflicting object");
         require_rejected(conflict, migrations);

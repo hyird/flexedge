@@ -122,6 +122,13 @@ ruvia::task<void> insert_envelope(context_type& context,
     if (node_inserted) {
         co_await enqueue_log(transaction, "node", tenant, node);
     }
+    if (!inserted_websites.empty() || (node_inserted && std::ranges::any_of(rows.node_, [](const auto& row) {
+            return row.template get<"category">() == "security";
+        }))) {
+        service::live_resource::notifications::resource_notification notice(tenant);
+        notice.changed(service::live_resource::resource::security_history);
+        (void)co_await service::live_resource::enqueue_notification(transaction, notice);
+    }
     co_await transaction.commit();
     service::live_resource::wake_own_outbox(context);
 }

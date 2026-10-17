@@ -240,7 +240,7 @@ public:
         // it, and runtime reports bypass publish(), so neither task changes
         // nor ordinary heartbeats reload it.
         if (resource_value != resource::overview && resource_value != resource::access_history &&
-            resource_value != resource::overview_traffic && resource_value != resource::tasks) {
+            resource_value != resource::overview_traffic && resource_value != resource::security_history && resource_value != resource::tasks) {
             deliver(*state_, tenant, resource::overview, {}, {}, false);
         }
         // Read projections join these resources. Dependent projections receive
@@ -286,6 +286,7 @@ public:
             case resource::overview:
             case resource::access_history:
             case resource::overview_traffic:
+            case resource::security_history:
                 break;
         }
     }

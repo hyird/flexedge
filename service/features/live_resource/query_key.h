@@ -17,7 +17,8 @@ enum class resource {
     tasks,
     overview,
     access_history,
-    overview_traffic
+    overview_traffic,
+    security_history
 };
 
 namespace detail {

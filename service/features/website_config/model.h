@@ -61,6 +61,7 @@ struct website_route_rule_data final {
 struct website_config_data final {
     bool cache_enabled_{false};
     std::string cache_policy_id_{};
+    std::string security_policy_id_{};
     std::optional<std::string> name_;
     std::vector<website_domain_data> domains_;
     std::vector<website_origin_data> origins_;

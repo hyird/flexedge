@@ -14,6 +14,7 @@
 #include "common/route_match.h"
 #include "common/route_policy.h"
 #include "node/proto/edge_control.pb.h"
+#include "node/proto/security_validation.h"
 
 namespace flexedge::node {
 
@@ -399,6 +400,9 @@ inline void validate_website_domains(const v2::Website& website) {
 // publishes and by the node before it serves. Disabled websites are delivered but never
 // served, so they are not checked.
 inline void validate_website(const v2::Website& website) {
+    if (website.has_security()) {
+        validate_security(website.security());
+    }
     if (website.has_response_cache()) {
         const auto error = flexedge::cache::validate(flexedge::cache::from_proto(website.response_cache()));
         if (!error.empty() || website.response_cache().id().empty() || website.response_cache().revision() < 1) {

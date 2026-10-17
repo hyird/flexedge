@@ -253,6 +253,7 @@ collect_enabled_origin_groups(const ruvia::array<website_origin_input>& origins)
     website_config_data result;
     result.cache_enabled_ = input.get<"cache_enabled">() && input.get<"cache_enabled">()->value_;
     result.cache_policy_id_ = input.get<"cache_policy_id">() ? std::string(input.get<"cache_policy_id">()->view()) : "";
+    result.security_policy_id_ = input.get<"security_policy_id">() ? std::string(input.get<"security_policy_id">()->view()) : "";
     if (const auto& name = input.get<"name">()) {
         result.name_ = std::string(name->view());
     }
@@ -355,6 +356,7 @@ parse_stored(std::string_view json, ruvia::model_parse_options options = {}) {
     website_config_output output(options);
     output.set<"cache_enabled">(input.cache_enabled_);
     output.set<"cache_policy_id">(input.cache_policy_id_);
+    output.set<"security_policy_id">(input.security_policy_id_);
     if (input.name_) {
         output.set<"name">(*input.name_);
     }

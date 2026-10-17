@@ -54,12 +54,14 @@ import {
   LogsSection,
 } from './website-settings-sections'
 import { WebsiteCacheSection } from './website_cache_section'
+import { WebsiteSecuritySection } from './website_security_section'
 
 const sectionComponents: Record<
   Exclude<WebsiteSectionId, 'routes'>,
   (props: WebsiteSectionProps) => ReactNode
 > = {
   cache: WebsiteCacheSection,
+  security: WebsiteSecuritySection,
   basic: BasicSection,
   domains: DomainsSection,
   https: HttpsSection,

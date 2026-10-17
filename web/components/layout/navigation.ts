@@ -56,6 +56,13 @@ export const navigation: NavigationItem[] = [
     keywords: 'cache caching purge prewarm',
   },
   {
+    href: '/security',
+    label: '安全',
+    icon: ShieldCheck,
+    group: '业务',
+    keywords: 'security waf cc owasp rules lists 安全 防护 清单',
+  },
+  {
     href: '/certificates',
     label: '证书',
     icon: ShieldCheck,

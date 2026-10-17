@@ -184,16 +184,21 @@ public:
         std::filesystem::path cache_directory = "cache",
         std::vector<inherited_listeners> inherited = {})
         : owner_(std::move(owner)),
+          owner_worker_(owner_.handle()),
           runtime_(runtime),
           retired_workers_(loops.loop_count()),
           results_(ruvia::make_channel<owned_data_worker_result>(owner_.handle(), {.capacity_ = loops.loop_count() * 4})),
           cache_results_(ruvia::make_channel<owned_data_worker_result>(owner_.handle(), {.capacity_ = loops.loop_count() * 64})),
+          cc_reports_(ruvia::make_channel<std::unique_ptr<const cc_batch>>(owner_.handle(), {.capacity_ = loops.loop_count() * 2})),
+          cc_operations_(owner_worker_),
+          cc_(loops.loop_count()),
           cache_(std::make_shared<response_cache_publication>(std::move(cache_directory))),
           empty_health_(std::make_shared<const origin_health_snapshot>()),
           last_health_(empty_health_),
           stop_registration_(owner_.on_stop([this]() -> ruvia::task<void> {
               request_stop_accepting();
-              co_return;
+              cc_operations_.request_stop();
+              co_await cc_operations_.join();
           })) {
         if (!inherited.empty() && inherited.size() != loops.loop_count()) {
             throw std::invalid_argument("inherited node listener worker count mismatch");
@@ -205,7 +210,7 @@ public:
             data_loops_.push_back(loops.loop(index));
             auto [sender, receiver] = ruvia::make_channel<owned_data_worker_request>(loops.loop(index).handle(), {.capacity_ = 32});
             workers_.push_back(std::make_unique<data_worker>(loops.loop(index), index, std::move(receiver), results_.first, logs, loops.loop_count(), cache_, cache_results_.first,
-                inherited.empty() ? inherited_listeners{} : std::move(inherited[index])));
+                inherited.empty() ? inherited_listeners{} : std::move(inherited[index]), cc_reports_.first));
             requests_.push_back(std::move(sender));
         }
     }
@@ -239,10 +244,52 @@ public:
         for (const auto& worker : workers_) {
             worker->start();
         }
+        if (!owner_.post([this] {
+                       if (owner_.accepting()) {
+                           cc_operations_.spawn(run_cc());
+                       }
+                   })
+                .accepted()) {
+            throw std::runtime_error("CC control loop is stopping");
+        }
     }
 
 private:
     friend class config_activation;
+
+    ruvia::task<void> run_cc() {
+        const auto stop = cc_operations_.get_stop_token();
+        auto deadline = std::chrono::steady_clock::now();
+        std::shared_ptr<const cc_dispositions> previous;
+        while (!stop.stop_requested()) {
+            const auto received = co_await cc_reports_.second.receive_for(
+                (std::max)(std::chrono::steady_clock::duration::zero(), deadline - std::chrono::steady_clock::now()), stop);
+            if (!received.has_value() && received.status() != ruvia::worker_wait_status::timed_out) {
+                co_return;
+            }
+            const auto now = cc_now_ms();
+            if (received.has_value()) {
+                cc_.merge(*received.value(), now);
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                const auto snapshot = cc_.snapshot(now);
+                bool accepted = true;
+                if (!previous || previous->saturated_until_ != snapshot->saturated_until_ || previous->blocked_until_ != snapshot->blocked_until_) {
+                    for (const auto& sender : requests_) {
+                        // A full channel retains the last expiring snapshot; the next tick retries.
+                        accepted = sender.send(std::make_unique<const data_worker_request>(data_worker_request{
+                                                   .operation_ = data_worker_operation::cc_dispositions, .cc_dispositions_ = snapshot}))
+                                       .accepted() &&
+                                   accepted;
+                    }
+                    if (accepted) {
+                        previous = snapshot;
+                    }
+                }
+                deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+            }
+        }
+    }
 
     [[nodiscard]] ruvia::task<data_plane_reload> begin_reload(std::shared_ptr<const compiled_config> config,
         std::chrono::steady_clock::duration timeout) {
@@ -509,6 +556,7 @@ private:
     }
 
     ruvia::event_loop owner_;
+    ruvia::worker_handle owner_worker_;
     runtime_state& runtime_;
     std::vector<bool> retired_workers_;
     data_plane_operations operations_;
@@ -521,6 +569,9 @@ private:
     std::uint64_t committed_sequence_{};
     std::pair<ruvia::channel_sender<owned_data_worker_result>, ruvia::channel_receiver<owned_data_worker_result>> results_;
     std::pair<ruvia::channel_sender<owned_data_worker_result>, ruvia::channel_receiver<owned_data_worker_result>> cache_results_;
+    std::pair<ruvia::channel_sender<std::unique_ptr<const cc_batch>>, ruvia::channel_receiver<std::unique_ptr<const cc_batch>>> cc_reports_;
+    ruvia::task_scope cc_operations_;
+    cc_aggregator cc_;
     std::shared_ptr<response_cache_publication> cache_;
     std::shared_ptr<const origin_health_snapshot> empty_health_;
     std::shared_ptr<const origin_health_snapshot> last_health_;

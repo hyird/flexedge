@@ -109,6 +109,12 @@
     flex-direction: column;
     min-height: 0;
   }
+  .data-grid--auto-height .table__scroll-container {
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior: auto;
+  }
   .data-grid--fit .table__scroll-container {
     flex: 1;
     min-height: 0;

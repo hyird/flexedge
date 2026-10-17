@@ -22,6 +22,7 @@
 #include "service/features/log_ingest/notifications.h"
 #include "service/features/log_ingest/worker.h"
 #include "service/features/logging/logger.h"
+#include "service/features/node_presence/notification_relay.h"
 #include "support/postgres_test.h"
 #include "support/redis_test.h"
 
@@ -110,7 +111,7 @@ ingest::v2::QueuedLogDelivery envelope(const flexedge::node::v2::LogDelivery& va
 ruvia::task<void> clean_redis(ruvia::redis_handle redis) {
     (void)co_await redis.command("DEL", queue::stream_key, queue::retained_bytes_key,
         queue::retry_schedule_key, queue::retry_attempts_key, queue::failed_stream_key,
-        queue::failed_bytes_key, queue::statistics_key, ingest::notifications::stream_key);
+        queue::failed_bytes_key, queue::statistics_key, ingest::notifications::stream_key, live::notifications::stream_key);
 }
 
 ruvia::task<void> create_fixture(delivery_context& context) {
@@ -119,6 +120,7 @@ ruvia::task<void> create_fixture(delivery_context& context) {
     (void)co_await db.execute("CREATE TABLE sys_website (id uuid, tenant_id uuid, cluster_id uuid, deleted_at timestamptz)");
     (void)co_await db.execute("CREATE TABLE sys_website_access_log (tenant_id uuid, occurred_at timestamptz, id uuid, node_id uuid, website_id uuid, client_ip varchar(64), protocol text, method text, host text, target text, status_code int, request_bytes bigint, response_bytes bigint, duration_ms bigint, user_agent text, referer text, request_headers text, request_body text, request_body_truncated bool, tls_fingerprint text, response_headers text, query_string text, cookies text, cache_status varchar(16) NOT NULL DEFAULT '', cache_reason varchar(64) NOT NULL DEFAULT '', request_type varchar(16) NOT NULL DEFAULT '', started_at timestamptz, first_byte_ms bigint, end_reason varchar(32) NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tenant_id,occurred_at,id))");
     (void)co_await db.execute("CREATE TABLE sys_node_log (tenant_id uuid, occurred_at timestamptz, id uuid, node_id uuid, level text, category text, message text, created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tenant_id,occurred_at,id))");
+    (void)co_await db.execute("ALTER TABLE sys_website_access_log ADD COLUMN waf_anomaly_score bigint");
     (void)co_await db.execute("CREATE TABLE sys_notification_outbox (id varchar(64) PRIMARY KEY, kind varchar(24) NOT NULL, payload text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), available_at timestamptz NOT NULL DEFAULT now(), attempts integer NOT NULL DEFAULT 0)");
     (void)co_await db.execute("INSERT INTO sys_node VALUES($1,$2,'a2d6e77d-4a0c-4796-93d5-755d3c6d3837',$3,'registered',NULL)", node_id, tenant_id, agent_id);
     (void)co_await db.execute("INSERT INTO sys_website VALUES($1,$2,'a2d6e77d-4a0c-4796-93d5-755d3c6d3837',NULL)", website_id, tenant_id);
@@ -126,6 +128,10 @@ ruvia::task<void> create_fixture(delivery_context& context) {
 
 ruvia::task<void> check_counts(delivery_context& context, int access, int node, int outbox) {
     const auto rows = co_await context.db().query("SELECT (SELECT count(*) FROM sys_website_access_log),(SELECT count(*) FROM sys_node_log),(SELECT count(*) FROM sys_notification_outbox)");
+    if (rows[0][0].as<int>() != access || rows[0][1].as<int>() != node || rows[0][2].as<int>() != outbox) {
+        std::cerr << "Actual access/node/outbox counts: " << rows[0][0].as<int>().value_or(-1) << '/' << rows[0][1].as<int>().value_or(-1) << '/' << rows[0][2].as<int>().value_or(-1)
+                  << "; expected " << access << '/' << node << '/' << outbox << '\n';
+    }
     require(rows[0][0].as<int>() == access && rows[0][1].as<int>() == node && rows[0][2].as<int>() == outbox,
         "log rows and notification outbox share the transaction and retain idempotent counts");
 }
@@ -151,7 +157,7 @@ ruvia::task<queue::entry> retry(delivery_context& context, const queue::entry& e
 
 ruvia::task<void> deliver_notifications(delivery_context& context) {
     const auto events = co_await context.db().query("SELECT id FROM sys_notification_outbox");
-    require(co_await live::outbox::deliver_batch<ingest::log_relay>(context), "committed outbox events are claimed and delivered");
+    require(co_await live::outbox::deliver_batch<service::node_presence::resource_relay, ingest::log_relay>(context), "committed outbox events are claimed and delivered");
     for (const auto& event : events) {
         const auto key = "flexedge:notification-published:v1:" + std::string(event[0].value().value_or(""));
         (void)co_await context.redis().command("DEL", key);
@@ -188,20 +194,34 @@ ruvia::task<void> verify_batch_ownership(delivery_context& context) {
     access->set_started_unix_ms(access->occurred_unix_ms() - 1000);
     access->set_first_byte_ms(0);
     access->set_end_reason("origin_closed");
+    access->set_waf_anomaly_score(7);
     const auto first_access = batch.events(0);
     const auto first_node = batch.events(1);
     *batch.add_events() = first_access;
     batch.mutable_events(2)->mutable_access_log()->set_id("e5643be6-049e-4f05-b0df-ea9275144d1a");
     batch.mutable_events(2)->mutable_access_log()->set_website_id(second_website);
+    batch.mutable_events(2)->mutable_access_log()->set_waf_anomaly_score(0);
     *batch.add_events() = first_access;
     batch.mutable_events(3)->mutable_access_log()->set_id("adf76493-b06e-4035-aef7-57b75f8d86dc");
+    batch.mutable_events(3)->mutable_access_log()->clear_waf_anomaly_score();
     *batch.add_events() = first_node;
     batch.mutable_events(4)->mutable_node_log()->set_id("37753e1e-3b25-42df-9292-4cb0ad68dcc9");
     *batch.add_events() = first_access;
     const auto payload = ingest::serialize_envelope(tenant_id, agent_id, batch);
     const auto entry = co_await append(context, payload);
     require(co_await persist(context, entry) == 1, "one mixed batch persists every distinct row, ignoring duplicates within the batch");
-    co_await check_counts(context, 3, 2, 3);
+    co_await check_counts(context, 3, 2, 4);
+    const auto scores = co_await db.query("SELECT id,waf_anomaly_score FROM sys_website_access_log ORDER BY id");
+    for (const auto& score : scores) {
+        const auto id = score[0].value().value();
+        if (id == first_access.access_log().id()) {
+            require(score[1].as<std::int64_t>() == 7, "actual WAF score survives log delivery");
+        } else if (id == "e5643be6-049e-4f05-b0df-ea9275144d1a") {
+            require(score[1].as<std::int64_t>() == 0, "a measured zero WAF score remains present");
+        } else {
+            require(!score[1].value(), "unevaluated WAF score remains NULL");
+        }
+    }
     const auto connection = co_await db.query("SELECT request_type,started_at IS NOT NULL,first_byte_ms,end_reason FROM sys_website_access_log WHERE id=$1", first_access.access_log().id());
     require(connection.front()[0].value() == "websocket" && connection.front()[1].as<bool>() == true && connection.front()[2].as<std::int64_t>() == 0 && connection.front()[3].value() == "origin_closed", "connection metadata survives persistence and a measured zero is not missing");
     const auto stored = co_await db.query("SELECT request_bytes,response_bytes,duration_ms,user_agent,referer,request_headers,request_body,request_body_truncated,tls_fingerprint,response_headers,query_string,cookies,round(extract(epoch FROM occurred_at)*1000)::bigint,created_at IS NOT NULL FROM sys_website_access_log WHERE id=$1", first_access.access_log().id());
@@ -227,7 +247,7 @@ ruvia::task<void> verify_batch_ownership(delivery_context& context) {
     partial.mutable_events(3)->mutable_access_log()->set_id("732c41ea-b088-47e3-9000-25cc82933a6e");
     const auto partial_entry = co_await append(context, ingest::serialize_envelope(tenant_id, agent_id, partial));
     require(co_await persist(context, partial_entry) == 1, "a partially duplicate mixed batch writes only its new row");
-    co_await check_counts(context, 4, 2, 1);
+    co_await check_counts(context, 4, 2, 2);
     co_await deliver_notifications(context);
 
     for (const auto website : {foreign_cluster_website, foreign_tenant_website, deleted_website}) {
@@ -264,7 +284,7 @@ ruvia::task<void> verify_corrected_timestamp_identity(delivery_context& context)
     batch.mutable_events(3)->mutable_node_log()->set_occurred_unix_ms(received - 2000);
     const auto queued = envelope(batch);
     co_await ingest::insert_envelope(context, queued, received);
-    co_await check_counts(context, 1, 1, 2);
+    co_await check_counts(context, 1, 1, 3);
     const auto times = co_await db.query("SELECT round(extract(epoch FROM occurred_at)*1000)::bigint FROM sys_website_access_log UNION ALL SELECT round(extract(epoch FROM occurred_at)*1000)::bigint FROM sys_node_log");
     require(times.size() == 2 && times[0][0].as<std::int64_t>() == received && times[1][0].as<std::int64_t>() == received,
         "within-batch identity ignores timestamp and UUID case; kinds remain independent and first corrected times win");
@@ -285,7 +305,7 @@ ruvia::task<void> verify_corrected_timestamp_identity(delivery_context& context)
     *partial.add_events() = first_node;
     partial.mutable_events(5)->mutable_node_log()->set_id("bca092b8-5288-42f4-a8ea-5b84e3f9688a");
     co_await ingest::insert_envelope(context, envelope(partial), received + 1000);
-    co_await check_counts(context, 2, 2, 2);
+    co_await check_counts(context, 2, 2, 3);
     co_await deliver_notifications(context);
 
     auto rejected = delivery("4a3edb05-c194-4699-9a06-983ed078b63c", "71c488df-93ad-42df-9779-4375c8daaecb");
@@ -298,7 +318,7 @@ ruvia::task<void> verify_corrected_timestamp_identity(delivery_context& context)
     require(archived.size() == 1, "the rolled-back corrected batch remains replayable");
     (void)co_await db.execute("DROP TRIGGER reject_corrected_log ON sys_node_log");
     co_await ingest::insert_envelope(context, envelope(rejected), received + 2000);
-    co_await check_counts(context, 3, 3, 2);
+    co_await check_counts(context, 3, 3, 3);
     co_await deliver_notifications(context);
     require((co_await queue::replay_failed(context.redis(), archived[0].id_)).has_value(), "dead-letter replay obtains a new Redis receipt");
     const auto replayed = co_await queue::read(context.redis(), consumer);
@@ -399,7 +419,7 @@ void verify_concurrent_ingest(const ruvia::event_loop& first, delivery_context& 
     if (failure) {
         std::rethrow_exception(failure);
     }
-    first.start(check_counts(context, 1, 1, 2)).get();
+    first.start(check_counts(context, 1, 1, 3)).get();
     first.start(deliver_notifications(context)).get();
     first.start(check_counts(context, 1, 1, 0)).get();
 }
@@ -425,15 +445,15 @@ ruvia::task<void> verify(delivery_context& context) {
     }
     (void)co_await db.execute("DROP TRIGGER reject_outbox ON sys_notification_outbox");
     require(co_await persist(context, entry) == 1, "the retained delivery succeeds when PostgreSQL recovers");
-    co_await check_counts(context, 1, 1, 2);
+    co_await check_counts(context, 1, 1, 3);
     require(std::find(context.own_claims_.begin(), context.own_claims_.end(), "outbox") != context.own_claims_.end(),
         "the ingesting worker wakes only its own outbox loop for the notifications it committed");
     const auto duplicate = co_await append(context, payload);
     require(co_await persist(context, duplicate) == 1, "repeated node payloads complete idempotently");
-    co_await check_counts(context, 1, 1, 2);
+    co_await check_counts(context, 1, 1, 3);
 
     (void)co_await context.redis().command("SET", ingest::notifications::stream_key, "wrong-type-fixture");
-    require(co_await live::outbox::deliver_batch<ingest::log_relay>(context), "failed Redis publication leaves durable outbox work");
+    require(co_await live::outbox::deliver_batch<service::node_presence::resource_relay, ingest::log_relay>(context), "failed Redis publication leaves durable outbox work");
     co_await check_counts(context, 1, 1, 2);
     const auto deferred = co_await db.query("SELECT min(attempts),bool_and(available_at > now()) FROM sys_notification_outbox");
     require(deferred[0][0].as<int>() == 1 && deferred[0][1].as<bool>() == true, "outbox failure persists bounded retry scheduling");
@@ -465,7 +485,7 @@ ruvia::task<void> verify(delivery_context& context) {
     require((co_await queue::replay_failed(context.redis(), failed[0].id_)).has_value(), "archived data can be explicitly replayed");
     auto replayed = co_await queue::read(context.redis(), consumer);
     require(replayed.size() == 1 && co_await persist(context, replayed[0]) == 1, "repaired data uses the normal persistence and acknowledgement path");
-    co_await check_counts(context, 2, 2, 2);
+    co_await check_counts(context, 2, 2, 3);
     co_await deliver_notifications(context);
     co_await check_counts(context, 2, 2, 0);
     co_await verify_batch_ownership(context);

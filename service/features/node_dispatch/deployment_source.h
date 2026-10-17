@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "common/cache_policy.h"
+#include "node/proto/edge_control.pb.h"
 
 namespace service::node_dispatch {
 
@@ -22,6 +23,7 @@ struct deployment_website_source final {
     bool enabled_;
     std::string config_json_;
     std::optional<flexedge::cache::policy> response_cache_{};
+    std::optional<flexedge::node::v2::SecurityPolicy> security_{};
 };
 
 struct cluster_deployment_source final {

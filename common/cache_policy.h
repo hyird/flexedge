@@ -7,8 +7,8 @@
 #include <unordered_set>
 #include <vector>
 
-#include "common/cache_expression.h"
 #include "common/cache_settings_proto.h"
+#include "common/request_expression.h"
 #include "common/route_match.h"
 
 namespace flexedge::cache {
@@ -213,7 +213,7 @@ inline void apply_rule(rule& target, const rule& source) {
                 if (item.patterns_.size() != 1) {
                     return "每条缓存规则只接受一个组合表达式";
                 }
-                if (const auto error = validate_cache_expression(pattern); !error.empty()) {
+                if (const auto error = flexedge::rules::validate_expression(pattern); !error.empty()) {
                     return error;
                 }
                 continue;

@@ -62,6 +62,8 @@ inline constexpr std::string_view all_tenants{"*"};
             return "access_history";
         case resource::overview_traffic:
             return "overview_traffic";
+        case resource::security_history:
+            return "security_history";
     }
     throw std::invalid_argument("unsupported live resource");
 }
@@ -69,7 +71,7 @@ inline constexpr std::string_view all_tenants{"*"};
 [[nodiscard]] inline std::optional<resource> parse_resource(std::string_view value) {
     for (const auto candidate : {resource::nodes, resource::clusters, resource::websites, resource::dns_zones,
              resource::providers, resource::certificates, resource::tasks, resource::overview,
-             resource::access_history, resource::overview_traffic}) {
+             resource::access_history, resource::overview_traffic, resource::security_history}) {
         if (resource_name(candidate) == value) {
             return candidate;
         }

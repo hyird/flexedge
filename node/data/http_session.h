@@ -1,5 +1,7 @@
 #pragma once
 
+#include <google/protobuf/struct.pb.h>
+#include <google/protobuf/util/json_util.h>
 #include <ruvia/core/channel.h>
 #include <ruvia/core/task_scope.h>
 #include <ruvia/http/http_cache.h>
@@ -69,6 +71,7 @@ struct http_session_context final {
     buffered_bytes_budget& response_buffers_;
     response_cache* cache_{};
     cache_refresh_runtime* refresh_{};
+    cc_worker* cc_{};
 };
 
 // One accepted client connection as its listener sees it, from accept until the session
@@ -329,7 +332,11 @@ private:
             return;
         }
         std::error_code address_error;
-        client_address_ = endpoint.address().to_string(address_error);
+        auto address = endpoint.address();
+        if (address.is_v6() && address.to_v6().is_v4_mapped()) {
+            address = asio::ip::make_address_v4(asio::ip::v4_mapped, address.to_v6());
+        }
+        client_address_ = address.to_string(address_error);
         if (address_error) {
             client_address_ = "unknown";
         }
@@ -469,6 +476,9 @@ private:
             }
         }
         hsts_enabled_ = secure_ && website_->hsts_enabled();
+        if (!cache_prewarm_ && website_->has_security() && !inspect_security(parsed, host)) {
+            return;
+        }
         if (!resolve_route_policy(parsed, *website_, host)) {
             return;
         }
@@ -485,6 +495,110 @@ private:
             return;
         }
         proxy(parsed, host);
+    }
+
+    bool inspect_security(const http1_request_reader& parsed, std::string_view host) {
+        if (!context_.cc_) {
+            reply(ruvia::http_status::service_unavailable);
+            return false;
+        }
+        std::vector<std::pair<std::string, std::string>> headers;
+        std::vector<std::pair<std::string_view, std::string_view>> borrowed_headers;
+        for (const auto& header : parsed.request().headers()) {
+            headers.emplace_back(header.name(), header.value());
+            borrowed_headers.emplace_back(header.name(), header.value());
+        }
+        const rule_match_request request{parsed.request().target(), parsed.request().method(), host,
+            secure_, headers, client_address_, country_for_address(active_execution_->config().release().countries(), client_address_)};
+        auto decision = active_execution_->security().evaluate(*website_, request, *context_.cc_, cc_now_ms());
+        if (!decision.status_ && !decision.skip_managed_) {
+            if (const auto* managed = active_execution_->config().security().managed(website_->id())) {
+                const auto body = parsed.body();
+                if (!body) {
+                    decision.status_ = 413;
+                } else {
+                    const auto result = managed->inspect(client_address_, parsed.request().method(), parsed.request().target(), secure_, borrowed_headers, *body);
+                    access_log_.waf_anomaly_score(result.anomaly_score_);
+                    decision.status_ = result.status_;
+                    if (!result.matched_rules_.empty()) {
+                        decision.rule_ = std::to_string(result.matched_rules_.front());
+                    }
+                    if (!result.status_) {
+                        for (const auto id : result.matched_rules_) {
+                            decision.logged_rules_.push_back(std::to_string(id));
+                        }
+                    }
+                }
+            }
+        }
+        for (const auto& rule : decision.logged_rules_) {
+            log_security(rule, "log", request);
+        }
+        if (!decision.status_) {
+            return true;
+        }
+        log_security(decision.rule_, "block", request);
+        std::string bytes = "HTTP/1.1 " + std::to_string(decision.status_) + " " +
+                            std::string(ruvia::http_reason_phrase(ruvia::http_status_code::from_value(decision.status_))) + "\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Length: " + std::to_string(decision.body_.size()) + "\r\n";
+        if (!decision.body_.empty()) {
+            bytes += "Content-Type: " + std::string(decision.content_type_.empty() ? "text/plain" : decision.content_type_) + "; charset=utf-8\r\n";
+        }
+        bytes += "\r\n";
+        if (parsed.request().method() != "HEAD") {
+            bytes.append(decision.body_);
+        }
+        send(std::move(bytes), decision.status_);
+        return false;
+    }
+
+    void log_security(std::string_view rule_id, std::string_view action, const rule_match_request& request) {
+        google::protobuf::Struct payload;
+        auto& fields = *payload.mutable_fields();
+        auto set = [&](std::string key, std::string_view value) { fields[std::move(key)].set_string_value(std::string(value)); };
+        const auto& policy = website_->security();
+        std::string_view name = rule_id, stage = "managed";
+        for (const auto& rule : policy.custom_rules()) {
+            if (rule.id() == rule_id) {
+                stage = "custom";
+                name = rule.name().empty() ? rule_id : std::string_view(rule.name());
+                if (rule.action() == "skip") {
+                    action = "skip";
+                }
+            }
+        }
+        for (const auto& rule : policy.cc_rules()) {
+            if (rule.id() == rule_id) {
+                stage = "rate";
+                name = rule.name().empty() ? rule_id : std::string_view(rule.name());
+            }
+        }
+        set("id", "");
+        set("time", "");
+        set("website", website_->id());
+        set("website_id", website_->id());
+        set("policyId", policy.id());
+        set("ruleId", rule_id);
+        set("ruleName", name);
+        set("action", action);
+        set("stage", stage);
+        set("ip", request.client_ip_);
+        set("country", request.country_);
+        set("method", request.method_);
+        set("detail", "");
+        auto path = request.target_.substr(0, request.target_.find('?'));
+        set("path", path.size() <= 256 ? path : std::string_view{});
+        std::string json;
+        if (google::protobuf::util::MessageToJsonString(payload, &json).ok()) {
+            if (json.size() > 2000) {
+                set("path", "");
+                set("ruleName", rule_id);
+                json.clear();
+                (void)google::protobuf::util::MessageToJsonString(payload, &json);
+            }
+            if (json.size() <= 2000) {
+                context_.logs_.node("info", "security", std::move(json));
+            }
+        }
     }
 
     void redirect(const evaluated_route_policy& route) {

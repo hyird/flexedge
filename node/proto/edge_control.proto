@@ -245,6 +245,7 @@ message AccessLog {
     optional uint64 total_duration_ms = 29;
     optional uint64 total_request_bytes = 30;
     optional uint64 total_response_bytes = 31;
+    optional uint32 waf_anomaly_score = 32; // Actual CRS request score; absent when not evaluated
 }
 
 message NodeLog {
@@ -398,6 +399,62 @@ message Website {
     reserved "cache_enabled", "cache_policy";
     CachePolicy response_cache = 43;
     string origin_http_version = 44; // auto, http1, http2; empty means auto
+    SecurityPolicy security = 45;
+}
+
+// Security policies have no enabled/disabled state; websites opt in by binding one.
+message SecurityPolicy {
+    string id = 1;
+    string name = 2;
+    int64 revision = 3;
+    repeated SecurityRule custom_rules = 4;
+    repeated CcRule cc_rules = 5;
+    ManagedSecurity managed = 6;
+    repeated SecurityList lists = 7;
+}
+message SecurityList {
+    string name = 1;
+    string type = 2; // ip (IP/CIDR), asn, country, user_agent
+    repeated string entries = 3;
+    repeated SecurityListEntry members = 4;
+}
+message SecurityListEntry {
+    string value = 1;
+    uint64 expires_unix_ms = 2; // Zero means permanent.
+}
+message SecurityRule {
+    string id = 1;
+    bool enabled = 2;
+    string expression = 3;
+    string action = 4; // block, log, skip (remaining security checks)
+    uint32 response_status = 5;
+    string response_content_type = 6;
+    string response_body = 7;
+    string name = 8;
+    bool expression_mode = 9;
+    repeated string skip_stages = 10;
+}
+message CcRule {
+    string id = 1;
+    bool enabled = 2;
+    string expression = 3;
+    uint32 requests = 4;
+    uint32 window_seconds = 5;
+    uint32 mitigation_seconds = 6;
+    string action = 7; // block, log
+    string name = 8;
+    bool expression_mode = 9;
+    uint32 response_status = 10;
+    string response_content_type = 11;
+    string response_body = 12;
+}
+message ManagedSecurity {
+    bool enabled = 1;
+    uint32 paranoia_level = 2;
+    uint32 inbound_threshold = 3;
+    uint32 body_limit_bytes = 4;
+    bool detection_only = 5;
+    repeated uint32 excluded_rules = 6;
 }
 
 // Added fields are ignored by older nodes. The control plane only dispatches cache
