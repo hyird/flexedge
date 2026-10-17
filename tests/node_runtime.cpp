@@ -50,6 +50,7 @@
 #include "node/data/worker_metrics.h"
 #include "node/proto/release_metadata.h"
 #include "node/proto/schema_version.h"
+#include "node/runtime/config_activation.h"
 #include "node/runtime/connected_clients.h"
 #include "node/runtime/http_redirect.h"
 #include "node/runtime/log_producer.h"
@@ -96,8 +97,8 @@ std::shared_ptr<const flexedge::node::compiled_config> compiled(TestConfig value
 void apply(flexedge::node::runtime_state& runtime, TestConfig value) {
     auto config = compiled(std::move(value));
     runtime.validate_next(*config);
-    auto patterns = flexedge::node::compile_route_patterns(*config);
-    runtime.publish(std::move(config), std::move(patterns));
+    runtime.publish_execution(std::make_shared<const flexedge::node::worker_execution_view>(
+        std::move(config)));
 }
 
 using flexedge::testing::request;
@@ -603,23 +604,23 @@ enum class reload_action { abandon,
 
 ruvia::task<void> hold_listener_reload(flexedge::node::data_plane& plane, const TestConfig& config,
     std::atomic<bool>& ready, ruvia::channel_receiver<bool>& release) {
-    auto prepared = co_await plane.prepare(compiled(config));
+    auto prepared = co_await flexedge::node::config_activation::prepare(plane, compiled(config));
     ready = true;
     REQUIRE((co_await release.receive_for(std::chrono::seconds(3))).has_value());
 }
 
 ruvia::task<void> exercise_listener_reload(flexedge::node::data_plane& plane,
     const TestConfig& config, std::size_t added, std::size_t retired, reload_action action) {
-    std::optional<flexedge::node::prepared_data_plane_reload> reload;
+    std::optional<flexedge::node::config_activation> reload;
     {
-        auto prepared = co_await plane.prepare(compiled(config));
+        auto prepared = co_await flexedge::node::config_activation::prepare(plane, compiled(config));
         REQUIRE(prepared.added_listeners() == added);
         REQUIRE(prepared.retired_listeners() == retired);
         reload.emplace(std::move(prepared));
     }
     // The moved-from object's destruction must leave the new owner able to commit.
     if (action == reload_action::activate) {
-        co_await plane.activate(*reload);
+        co_await reload->commit();
     } else if (action == reload_action::fail) {
         throw std::runtime_error("synthetic failure after preparing listeners");
     }
@@ -822,8 +823,8 @@ void record_health_failure(ruvia::event_loop loop, flexedge::node::origin_health
 
 ruvia::task<void> publish_runtime(flexedge::node::runtime_state& local,
     std::shared_ptr<const flexedge::node::compiled_config> config) {
-    auto patterns = flexedge::node::compile_route_patterns(*config);
-    local.publish(std::move(config), std::move(patterns));
+    local.publish_execution(std::make_shared<const flexedge::node::worker_execution_view>(
+        std::move(config)));
     co_return;
 }
 
@@ -1382,8 +1383,10 @@ int main(int argc, char* argv[]) {
         ruvia::event_loop_pool control_loops({.loop_count_ = 1});
         flexedge::node::runtime_state first_runtime;
         flexedge::node::runtime_state second_runtime;
-        first_runtime.publish(runtime.config(), flexedge::node::compile_route_patterns(*runtime.config()));
-        second_runtime.publish(runtime.config(), flexedge::node::compile_route_patterns(*runtime.config()));
+        first_runtime.publish_execution(std::make_shared<const flexedge::node::worker_execution_view>(
+            runtime.config()));
+        second_runtime.publish_execution(std::make_shared<const flexedge::node::worker_execution_view>(
+            runtime.config()));
         flexedge::node::origin_tls_context first_origin_tls;
         flexedge::node::origin_tls_context second_origin_tls;
         auto listener_health =
@@ -2048,8 +2051,9 @@ int main(int argc, char* argv[]) {
         source_route->clear_query_string();
         proxy_route->set_action("rewrite");
         proxy_route->clear_origin_ids();
+        const flexedge::node::route_program proxy_program(proxy_snapshot.website());
         const auto route_policy = flexedge::node::evaluate_route_rules(
-            proxy_snapshot.website(), "GET", "/a/users?q=1", "www.example.com");
+            proxy_program, proxy_snapshot.website(), "GET", "/a/users?q=1", "www.example.com");
         REQUIRE(route_policy);
         const auto candidates =
             flexedge::node::origin_candidates(proxy_snapshot.website(), 0, &*route_policy);

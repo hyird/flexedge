@@ -7,31 +7,35 @@
 #include <string>
 #include <utility>
 
-#include "node/runtime/compiled_config.h"
+#include "node/data/route_program.h"
 
 namespace flexedge::node {
 
-// RE2 maintains matching caches even behind its const API. Compile those objects on each
-// data worker; immutable configuration shared between loops contains only their source.
-inline std::shared_ptr<const route_patterns> compile_route_patterns(const compiled_config& config) {
-    auto patterns = std::make_shared<route_patterns>();
-    for (const auto* website : config.websites()) {
-        if (!website->enabled()) {
-            continue;
-        }
-        for (const auto& rule : website->route_rules()) {
-            if (rule.match_type() != "regex") {
-                continue;
-            }
-            auto pattern = flexedge::route_policy::compile_pattern(rule.path());
-            if (!pattern) {
-                throw invalid_website("invalid route regex or capture template");
-            }
-            patterns->emplace(&rule, std::move(pattern));
-        }
+// Construct and retain this view on one data worker. Its program may own RE2 caches;
+// only the source configuration crosses loops.
+class worker_execution_view final {
+public:
+    explicit worker_execution_view(std::shared_ptr<const compiled_config> source)
+        : source_(source ? std::move(source)
+                         : throw std::invalid_argument("worker execution source cannot be empty")),
+          program_(*source_) {}
+
+    [[nodiscard]] const compiled_config& config() const noexcept {
+        return *source_;
     }
-    return patterns;
-}
+
+    [[nodiscard]] const route_program& routes() const noexcept {
+        return program_;
+    }
+
+    [[nodiscard]] const std::shared_ptr<const compiled_config>& source() const noexcept {
+        return source_;
+    }
+
+private:
+    std::shared_ptr<const compiled_config> source_;
+    route_program program_;
+};
 
 class runtime_state final {
 public:
@@ -57,14 +61,19 @@ public:
         }
     }
 
-    void publish(std::shared_ptr<const compiled_config> config, std::shared_ptr<const route_patterns> patterns) noexcept {
-        patterns_ = std::move(patterns);
+    // Control-loop publication never creates or retains worker execution resources.
+    void publish_source(std::shared_ptr<const compiled_config> config) noexcept {
         config_.store(std::move(config), std::memory_order_release);
     }
 
-    // Owner loop only. A session pins its worker's patterns alongside its configuration.
-    [[nodiscard]] std::shared_ptr<const route_patterns> patterns() const noexcept {
-        return patterns_;
+    // Owner loop only. Publication and request acquisition always use the whole pair.
+    void publish_execution(std::shared_ptr<const worker_execution_view> execution) noexcept {
+        execution_ = std::move(execution);
+        publish_source(execution_ ? execution_->source() : nullptr);
+    }
+
+    [[nodiscard]] std::shared_ptr<const worker_execution_view> execution() const noexcept {
+        return execution_;
     }
 
     [[nodiscard]] std::shared_ptr<const compiled_config> config() const noexcept {
@@ -88,7 +97,7 @@ public:
 
 private:
     std::atomic<std::shared_ptr<const compiled_config>> config_;
-    std::shared_ptr<const route_patterns> patterns_;
+    std::shared_ptr<const worker_execution_view> execution_;
 };
 
 }  // namespace flexedge::node

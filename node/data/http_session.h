@@ -291,8 +291,8 @@ private:
         for (const auto& header : parsed.request().headers()) {
             match_headers.emplace_back(header.name(), header.value());
         }
-        effective_route_ = evaluate_route_rules(website, parsed.request().method(),
-            parsed.request().target(), host, match_headers, active_patterns_.get());
+        effective_route_ = evaluate_route_rules(active_execution_->routes(), website,
+            parsed.request().method(), parsed.request().target(), host, match_headers);
         if (!effective_route_) {
             reply(ruvia::http_status::bad_request);
             return false;
@@ -313,9 +313,8 @@ private:
     }
 
     void handle_request(const http1_request_reader& parsed) {
-        active_config_ = context_.runtime_.config();
-        active_patterns_ = context_.runtime_.patterns();
-        if (!active_config_) {
+        active_execution_ = context_.runtime_.execution();
+        if (!active_execution_) {
             reply(ruvia::http_status::service_unavailable);
             return;
         }
@@ -324,13 +323,13 @@ private:
             return;
         }
         const auto& [host, hostname] = *resolved_host;
-        website_ = active_config_->website(hostname);
+        website_ = active_execution_->config().website(hostname);
         if (website_ != nullptr) {
             access_log_.website(parsed, *website_);
         }
         if (!secure_) {
             if (const auto redirect_target =
-                    http_to_https_redirect(*active_config_, hostname, parsed.request().target())) {
+                    http_to_https_redirect(active_execution_->config(), hostname, parsed.request().target())) {
                 reply(redirect_target->status_, "Location: " + redirect_target->location_ + "\r\n");
                 return;
             }
@@ -341,7 +340,7 @@ private:
         }
         if (secure_) {
             const auto server_name = connection_->tls_server_name();
-            const auto* domain = active_config_->domain(hostname);
+            const auto* domain = active_execution_->config().domain(hostname);
             if (server_name.empty() || hostname != flexedge::route_policy::hostname(server_name) ||
                 domain == nullptr || !domain->https_enabled() || !website_->https_enabled()) {
                 reply(ruvia::http_status::misdirected_request);
@@ -793,8 +792,7 @@ private:
     buffered_bytes_lease response_reservation_;
     std::string client_address_;
     std::optional<connected_clients::address_key> client_key_;
-    std::shared_ptr<const compiled_config> active_config_;
-    std::shared_ptr<const route_patterns> active_patterns_;
+    std::shared_ptr<const worker_execution_view> active_execution_;
     const v2::Website* website_{};
     std::optional<evaluated_route_policy> effective_route_;
     const evaluated_route_policy* route_{};

@@ -1,8 +1,11 @@
 #pragma once
 
+#include <chrono>
+#include <cstddef>
 #include <exception>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -12,6 +15,113 @@
 #include "node/runtime/state_store.h"
 
 namespace flexedge::node {
+
+// The control loop owns the only activation decision. Worker votes never compensate
+// themselves, and the operation lease remains held through durable recovery.
+class config_activation final {
+    enum class phase { prepared,
+        deciding,
+        settled };
+
+public:
+    config_activation(config_activation&& other) noexcept
+        : plane_(other.plane_),
+          reload_(std::move(other.reload_)),
+          phase_(std::exchange(other.phase_, phase::settled)) {}
+    config_activation& operator=(config_activation&&) = delete;
+    config_activation(const config_activation&) = delete;
+    config_activation& operator=(const config_activation&) = delete;
+
+    [[nodiscard]] static ruvia::task<config_activation> prepare(data_plane& plane,
+        std::shared_ptr<const compiled_config> source,
+        std::chrono::steady_clock::duration timeout = std::chrono::seconds(10)) {
+        config_activation activation(plane, co_await plane.begin_reload(std::move(source), timeout));
+        std::exception_ptr failure;
+        try {
+            co_await plane.prepare_workers(activation.reload_);
+        } catch (...) {
+            failure = std::current_exception();
+        }
+        if (failure) {
+            co_await activation.compensate(failure, std::nullopt);
+        }
+        co_return activation;
+    }
+
+    [[nodiscard]] std::size_t added_listeners() const noexcept {
+        return reload_.added_listeners();
+    }
+
+    [[nodiscard]] std::size_t retired_listeners() const noexcept {
+        return reload_.retired_listeners();
+    }
+
+    ruvia::task<void> commit() {
+        co_await decide(nullptr);
+    }
+
+    ruvia::task<void> commit_staged(state_store& store) {
+        co_await decide(&store);
+    }
+
+private:
+    struct durable_rollback final {
+        state_store& store_;
+        std::optional<std::string> previous_;
+    };
+
+    config_activation(data_plane& plane, data_plane_reload reload)
+        : plane_(plane),
+          reload_(std::move(reload)) {}
+
+    ruvia::task<void> decide(state_store* staged) {
+        if (phase_ != phase::prepared) {
+            throw std::logic_error(phase_ == phase::deciding
+                                       ? "configuration activation decision is already in progress"
+                                       : "configuration activation is already settled");
+        }
+        phase_ = phase::deciding;
+        std::optional<durable_rollback> durable;
+        std::exception_ptr failure;
+        try {
+            if (staged) {
+                durable.emplace(durable_rollback{*staged, staged->activate_staged()});
+            }
+            co_await plane_.activate_workers(reload_);
+        } catch (...) {
+            failure = std::current_exception();
+        }
+        if (failure) {
+            co_await compensate(failure, std::move(durable));
+        }
+        plane_.commit_reload(reload_);
+        phase_ = phase::settled;
+    }
+
+    ruvia::task<void> compensate(std::exception_ptr failure,
+        std::optional<durable_rollback> durable) {
+        try {
+            co_await plane_.rollback_workers(reload_);
+        } catch (...) {
+            failure = std::current_exception();
+        }
+        try {
+            if (durable) {
+                durable->store_.rollback_active(durable->previous_);
+            }
+        } catch (...) {
+            plane_.request_stop_accepting();
+            phase_ = phase::settled;
+            throw data_plane_unavailable("persisted configuration rollback failed");
+        }
+        phase_ = phase::settled;
+        std::rethrow_exception(failure);
+    }
+
+    data_plane& plane_;
+    data_plane_reload reload_;
+    phase phase_{phase::prepared};
+};
 
 // A persisted state that no longer compiles is an unusable local cache; listener and
 // activation failures keep their original errors.
@@ -24,40 +134,8 @@ inline ruvia::task<void> activate_persisted_config(data_plane& data_plane, const
         throw stored_state_unusable(std::string("stored active state does not compile: ") +
                                     error.what());
     }
-    auto reload = co_await data_plane.prepare(compiled);
-    co_await data_plane.activate(reload);
-}
-
-// Disk and worker activation form one transaction. Worker rollback finishes before the
-// previous encrypted state is restored, and no failed attempt is reported as applied.
-inline ruvia::task<void> activate_staged_config(state_store& store, data_plane& data_plane,
-    prepared_data_plane_reload reload) {
-    std::optional<std::string> previous;
-    bool persisted{};
-    std::exception_ptr failure;
-    try {
-        previous = store.activate_staged();
-        persisted = true;
-        co_await data_plane.activate(reload);
-    } catch (...) {
-        failure = std::current_exception();
-    }
-    if (failure) {
-        try {
-            co_await data_plane.rollback(reload);
-        } catch (...) {
-            failure = std::current_exception();
-        }
-        try {
-            if (persisted) {
-                store.rollback_active(previous);
-            }
-        } catch (...) {
-            data_plane.request_stop_accepting();
-            throw data_plane_unavailable("persisted configuration rollback failed");
-        }
-        std::rethrow_exception(failure);
-    }
+    auto activation = co_await config_activation::prepare(data_plane, std::move(compiled));
+    co_await activation.commit();
 }
 
 // Stages, validates, prepares and activates `desired`, recording each step in `trace`. `phase`
@@ -77,12 +155,13 @@ inline ruvia::task<void> activate_desired_config(state_store& store, data_plane&
         "compiled the configuration: " + std::to_string(compiled->websites().size()) +
             " websites, " + std::to_string(compiled->endpoints().size()) + " endpoints" +
             (compiled->enabled() ? "" : ", node disabled"));
-    auto reload = co_await trace.run_async_step("prepare_listeners", [&] { return data_plane.prepare(compiled); });
+    auto activation = co_await trace.run_async_step("prepare_listeners",
+        [&] { return config_activation::prepare(data_plane, compiled); });
     trace.log(apply_log_level::info,
-        "prepared listeners: " + std::to_string(reload.added_listeners()) + " new, " +
-            std::to_string(reload.retired_listeners()) + " retired");
+        "prepared listeners: " + std::to_string(activation.added_listeners()) + " new, " +
+            std::to_string(activation.retired_listeners()) + " retired");
     phase = v2::APPLY_PHASE_ACTIVATE;
-    co_await trace.run_async_step("activate", [&] { return activate_staged_config(store, data_plane, std::move(reload)); });
+    co_await trace.run_async_step("activate", [&] { return activation.commit_staged(store); });
     trace.log(apply_log_level::info, "activated the configuration");
 }
 

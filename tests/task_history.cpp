@@ -253,15 +253,18 @@ ruvia::task<void> lease(ruvia::db_handle& db, std::string_view marker) {
 }
 
 // Records one attempt through the production marker transition and commits it.
-ruvia::task<service::sync_runtime::running_result_transition> record_attempt(ruvia::db_handle& db,
+ruvia::task<service::sync_runtime::task_result> record_attempt(ruvia::db_handle& db,
     const service::sync_runtime::running_marker_lease& running, bool completed, std::string_view detail,
     std::string_view error = "qa failure") {
     co_await lease(db, running.marker_.marker_id_);
     auto transaction = co_await db.begin_transaction();
-    const auto transition = co_await service::sync_runtime::record_running_result(transaction, running,
+    service::sync_runtime::running_result_writer writer(transaction, running);
+    const auto transition = co_await writer.record(
         completed ? service::sync_runtime::attempt_result::completed() : service::sync_runtime::attempt_result::retry(error),
         detail);
-    co_await transaction.commit();
+    test_support::recorded_notifications worker_context{.handle_ = db};
+    service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::dns_sync, worker, running.started_);
+    co_await writer.commit(worker_context, trace);
     co_return transition;
 }
 
@@ -291,7 +294,7 @@ ruvia::task<void> verify_dns_sync(ruvia::db_handle& db, read_context& context, s
     const auto first = co_await record_attempt(db,
         running(dns_marker, 4, service::sync_runtime::marker_resource_type::dns_zone, zone, started), false,
         failed.to_json(pool), "Cloudflare 返回异常");
-    require(first.marker_transitioned_ && first.event_recorded_, "dns failure recorded");
+    require(first.kind() == service::sync_runtime::result_kind::recorded, "dns failure recorded");
 
     service::dns_sync::detail::zone_sync_attempt completed;
     completed.record_deleted({.name_ = "old", .type_ = "A", .line_code_ = "default", .content_ = "192.0.2.1", .ttl_ = 300, .priority_ = std::nullopt, .proxied_ = false});
@@ -304,7 +307,7 @@ ruvia::task<void> verify_dns_sync(ruvia::db_handle& db, read_context& context, s
         running(dns_marker, 4, service::sync_runtime::marker_resource_type::dns_zone, zone,
             std::chrono::steady_clock::now()),
         true, completed.to_json(pool));
-    require(second.event_recorded_, "dns completion recorded");
+    require(second.kind() == service::sync_runtime::result_kind::recorded, "dns completion recorded");
 
     const auto data = co_await history(context, "dns_zone", zone);
     const auto& list = data.get<"list">();
@@ -312,8 +315,8 @@ ruvia::task<void> verify_dns_sync(ruvia::db_handle& db, read_context& context, s
     const auto& success = list[0];
     const auto& failure = list[1];
     require(success.get<"attempt">().value_ == 2 && failure.get<"attempt">().value_ == 1 &&
-                success.get<"id">().view() == std::to_string(*second.event_id_) &&
-                failure.get<"id">().view() == std::to_string(*first.event_id_) &&
+                success.get<"id">().view() == std::to_string(*second.event_id()) &&
+                failure.get<"id">().view() == std::to_string(*first.event_id()) &&
                 success.get<"operation">().view() == "sync" && failure.get<"operation">().view() == "sync",
         "attempt order, ids and operation");
     require(success.get<"outcome">().view() == "completed" && success.get<"error">().view().empty(),
@@ -624,7 +627,7 @@ ruvia::task<void> verify_bounds_and_failures(ruvia::db_handle& db, read_context&
             running(dns_marker, 4, service::sync_runtime::marker_resource_type::dns_zone, zone,
                 std::chrono::steady_clock::now()),
             false, unusable, "detail rejected");
-        require(transition.marker_transitioned_ && transition.event_recorded_, "result survives an unusable detail");
+        require(transition.kind() == service::sync_runtime::result_kind::recorded, "result survives an unusable detail");
         const auto data = co_await history(context, "dns_zone", zone);
         const auto none = parse_detail<none_detail_input>(newest(data));
         require(none.get<"kind">().view() == "none" && none.get<"truncated">().value_ &&
@@ -658,16 +661,16 @@ ruvia::task<void> verify_live_history(ruvia::db_handle& db, read_context& contex
         std::chrono::steady_clock::now());
     co_await lease(db, dns_marker);
     auto transaction = co_await db.begin_transaction();
-    const auto transition = co_await service::sync_runtime::record_running_result(transaction,
-        running_lease, service::sync_runtime::attempt_result::retry("live failure"), service::sync_runtime::detail_none_json);
+    service::sync_runtime::running_result_writer writer(transaction, running_lease);
+    const auto transition = co_await writer.record(
+        service::sync_runtime::attempt_result::retry("live failure"), service::sync_runtime::detail_none_json);
     service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::dns_sync, "dns-sync",
         std::chrono::steady_clock::now());
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, worker, running_lease, transition,
-        trace);
+    co_await writer.commit(worker, trace);
     require(worker.sent_.size() == 1 && worker.committed_[0], "one notification, sent after the commit");
     const auto& sent = worker.sent_[0];
     require(sent.tenant_id_ == tenant && sent.task_attempts_.size() == 1 && sent.task_attempts_[0].task_id_ == zone &&
-                sent.task_attempts_[0].notice_.event_id_ == *transition.event_id_ && sent.changes_.size() == 2 &&
+                sent.task_attempts_[0].notice_.event_id_ == *transition.event_id() && sent.changes_.size() == 2 &&
                 sent.changes_[0].resource_ == resource::tasks && sent.changes_[0].id_ == zone &&
                 sent.changes_[1].resource_ == resource::dns_zones,
         "the notification names the zone's task, the recorded attempt and the zone");
@@ -679,7 +682,7 @@ ruvia::task<void> verify_live_history(ruvia::db_handle& db, read_context& contex
     require(events.size() == 1, "one attempt event");
     const auto event = ruvia::from_json<service::task::task_attempt_event_dto>(events[0]);
     const auto snapshot = co_await history(context, "dns_zone", zone);
-    require(event && event->get<"item">().get<"id">().view() == std::to_string(*transition.event_id_) &&
+    require(event && event->get<"item">().get<"id">().view() == std::to_string(*transition.event_id()) &&
                 event->get<"item">().get<"attempt">().value_ == newest(snapshot).get<"attempt">().value_ &&
                 event->get<"item">().get<"error">().view() == "live failure" &&
                 event->get<"summary">().get<"attempt_count">().value_ ==

@@ -7,12 +7,14 @@
 #include <condition_variable>
 #include <exception>
 #include <iostream>
+#include <memory_resource>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -154,6 +156,8 @@ private:
             body = R"({"status":"pending","identifier":{"type":"dns","value":"dependency.example.com"},"challenges":[{"type":"dns-01","url":"https://acme-v02.api.letsencrypt.org/challenge/fresh","token":"qa-token"}]})";
         } else if (target == "/challenge/fresh") {
             body = "{}";
+        } else if (target == "/order/fresh") {
+            body = R"({"status":"processing","finalize":"https://acme-v02.api.letsencrypt.org/finalize/fresh"})";
         } else {
             status = 500;
             body = R"({"detail":"unexpected ACME request"})";
@@ -248,8 +252,85 @@ service::dns_sync::zone_runtime_data challenge_runtime(bool synced, std::int64_t
     return data;
 }
 
-issuance::issuance_state progress(std::int64_t revision = 1) {
-    return {.revision_ = revision, .phase_ = issuance::issuance_phase::validation, .account_url_ = std::string(account_url), .order_url_ = "https://acme-v02.api.letsencrypt.org/order/fresh", .authorizations_ = {{.authorization_url_ = "https://acme-v02.api.letsencrypt.org/auth/fresh", .challenge_url_ = "https://acme-v02.api.letsencrypt.org/challenge/fresh"}}, .dns_revision_ = 10};
+issuance::validation_progress progress(std::int64_t revision = 1) {
+    return issuance::validation_progress(
+        {.revision_ = revision, .account_url_ = std::string(account_url),
+            .order_url_ = "https://acme-v02.api.letsencrypt.org/order/fresh"},
+        {{.authorization_url_ = "https://acme-v02.api.letsencrypt.org/auth/fresh",
+            .challenge_url_ = "https://acme-v02.api.letsencrypt.org/challenge/fresh"}}, 10);
+}
+
+static_assert(!std::is_default_constructible_v<issuance::validation_progress>);
+static_assert(!std::is_default_constructible_v<issuance::finalize_progress>);
+static_assert(!std::is_constructible_v<issuance::issuance_progress, issuance::unpublished_order>);
+
+void verify_progress_values(std::pmr::memory_resource* resource) {
+    const auto validation = progress();
+    const auto json = issuance::serialize_issuance_progress(validation, resource);
+    const auto restored = issuance::parse_issuance_progress(json, 1, resource);
+    require(restored && std::holds_alternative<issuance::validation_progress>(*restored),
+        "published validation resumes as its own phase value");
+    const auto& resumed = std::get<issuance::validation_progress>(*restored);
+    require(resumed.dns_revision() == 10 && resumed.authorizations().size() == 1 &&
+        resumed.authorizations().front().challenge_url_ == validation.authorizations().front().challenge_url_,
+        "validation preserves the publication revision and challenge URLs");
+    require(!issuance::parse_issuance_progress(json, 2, resource), "progress from another issuance revision is rejected");
+    const auto parse = [&](std::string_view phase, std::optional<std::int64_t> dns_revision,
+                           std::string_view key, std::string_view order_url = "order") {
+        issuance::issuance_state_dto output({.resource_ = resource});
+        output.set<"revision">(1);
+        output.set<"phase">(phase);
+        output.set<"account_url">(account_url);
+        output.set<"order_url">(order_url);
+        (void)output.ensure<"authorizations">();
+        output.set<"private_key_envelope">(key);
+        if (dns_revision) {
+            output.set<"dns_revision">(*dns_revision);
+        }
+        const auto wire = ruvia::to_json(output, {.resource_ = resource});
+        return issuance::parse_issuance_progress(std::string_view(wire), 1, resource);
+    };
+    require(!parse("validation", std::nullopt, "") && !parse("validation", 0, "") &&
+        !parse("validation", -1, ""), "legacy or nonpositive DNS revisions cannot enter validation");
+    require(!parse("finalize", 10, "") && !parse("unknown", 10, "key") &&
+        !parse("validation", 10, "", ""), "missing keys, unknown phases and empty orders are rejected");
+    const auto legacy_finalize = parse("finalize", std::nullopt, "stored-key");
+    require(legacy_finalize && std::get<issuance::finalize_progress>(*legacy_finalize).private_key_envelope() == "stored-key",
+        "legacy finalize progress remains resumable without a DNS revision");
+    auto validated = progress();
+    const issuance::finalize_progress finalized(std::move(validated), "stored-key");
+    const auto final_json = issuance::serialize_issuance_progress(finalized, resource);
+    const auto final_dto = ruvia::from_json<issuance::issuance_state_dto>(final_json, {.resource_ = resource});
+    require(final_dto && final_dto->get<"phase">().view() == "finalize" &&
+        final_dto->get<"authorizations">().empty() &&
+        final_dto->get<"private_key_envelope">().view() == "stored-key" &&
+        final_dto->get<"dns_revision">()->value_ == 10,
+        "finalize serializes the unchanged JSON contract without validation-only fields");
+    bool rejected_validation{}, rejected_finalize{};
+    try {
+        (void)issuance::validation_progress(validation.order(), {}, 0);
+    } catch (const std::invalid_argument&) {
+        rejected_validation = true;
+    }
+    try {
+        (void)issuance::finalize_progress(validation.order(), "");
+    } catch (const std::invalid_argument&) {
+        rejected_finalize = true;
+    }
+    require(rejected_validation && rejected_finalize, "phase constructors reject missing publication or certificate keys");
+    using disposition = issuance::failure_disposition;
+    const auto check_failure = [](const std::exception_ptr& exception, disposition expected) {
+        const auto failure = issuance::classify_issuance_failure(exception);
+        require(failure.disposition_ == expected && !failure.message_.empty(),
+            "each exception has one explicit issuance disposition and an error message");
+    };
+    check_failure(std::make_exception_ptr(issuance::acme_pending("pending")), disposition::resume_order);
+    check_failure(std::make_exception_ptr(service::outbound_http::transport_error("network")), disposition::resume_order);
+    check_failure(std::make_exception_ptr(issuance::acme_error("invalid order", false)), disposition::restart_order);
+    check_failure(std::make_exception_ptr(issuance::acme_error("credentials", true)), disposition::terminal);
+    check_failure(std::make_exception_ptr(std::invalid_argument("stored input")), disposition::terminal);
+    check_failure(std::make_exception_ptr(std::runtime_error("storage")), disposition::restart_order);
+    check_failure(std::make_exception_ptr(42), disposition::restart_order);
 }
 
 ruvia::task<void> reset(task_context& context, bool legacy = false) {
@@ -257,14 +338,11 @@ ruvia::task<void> reset(task_context& context, bool legacy = false) {
     (void)co_await db.execute("TRUNCATE sys_sync_event_trace, sys_sync_event, sys_sync_task, sys_notification_outbox");
     const auto runtime = ruvia::to_json(service::dns_sync::to_output(challenge_runtime(false)));
     (void)co_await db.execute("UPDATE sys_dns_zone SET desired_revision=10, synced_revision=9, runtime=$1::jsonb, sync_status='pending', last_error=NULL", std::string_view(runtime));
-    auto value = progress();
-    if (legacy) {
-        value.dns_revision_ = 0;
-        value.order_url_ = "https://acme-v02.api.letsencrypt.org/order/legacy";
-        value.authorizations_.front().authorization_url_ = "https://acme-v02.api.letsencrypt.org/auth/legacy";
-        value.authorizations_.front().challenge_url_ = "https://acme-v02.api.letsencrypt.org/challenge/legacy";
-    }
-    const auto state = issuance::serialize_issuance_state(value, context.pool());
+    // Deliberately malformed legacy wire data cannot be constructed as a
+    // validation_progress: it has no proof of a published DNS revision.
+    const auto state = legacy
+        ? std::string(R"({"revision":1,"phase":"validation","account_url":"https://acme-v02.api.letsencrypt.org/account/qa","order_url":"https://acme-v02.api.letsencrypt.org/order/legacy","authorizations":[{"authorization_url":"https://acme-v02.api.letsencrypt.org/auth/legacy","challenge_url":"https://acme-v02.api.letsencrypt.org/challenge/legacy"}],"private_key_envelope":""})")
+        : issuance::serialize_issuance_progress(progress(), context.pool());
     (void)co_await db.execute("UPDATE sys_certificate SET issuance_revision=1, issuance_state=$1::jsonb, status='issuing', last_error=NULL", std::string_view(state));
     auto transaction = co_await db.begin_transaction();
     service::background::queued_work work;
@@ -366,10 +444,12 @@ ruvia::task<void> verify_result_during_gate(ruvia::web_worker_context& web, task
         std::int64_t{success ? 10 : 9}, std::string_view(runtime), success ? std::string_view{"synced"} : std::string_view{"failed"}, zone);
     const auto lease = sync::make_running_lease(tenant, dns_marker->id_, dns_marker->version_, context.lease_owner(),
         dns_marker->claimed_at_, sync::marker_resource_type::dns_zone, zone);
-    const auto result = co_await sync::record_running_result(holder, lease,
+    sync::running_result_writer writer(holder, lease);
+    const auto result = co_await writer.record(
         success ? sync::attempt_result::completed() : sync::attempt_result::failed("failed during gate"), sync::detail_none_json);
+    require(result.kind() == sync::result_kind::recorded, "the dependency result owns its lease");
     service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::dns_sync, "web", dns_marker->claimed_at_);
-    co_await sync::commit_and_publish_result_event(holder, context, lease, result, trace);
+    co_await writer.commit(context, trace);
     co_await tasks.join();
     if (failure) {
         std::rethrow_exception(failure);
@@ -454,9 +534,79 @@ ruvia::task<void> verify_running_lease(ruvia::web_worker_context& web, task_cont
     }
 }
 
+ruvia::task<void> verify_failure_dispositions(task_context& context) {
+    using disposition = issuance::failure_disposition;
+    for (const auto decision : {disposition::resume_order, disposition::restart_order, disposition::terminal}) {
+        co_await reset(context);
+        const auto marker = co_await sync::claim_marker(context, sync::marker_resource_type::certificate);
+        require(marker.has_value(), "disposition regression acquires the certificate lease");
+        const issuance::worker_detail::certificate_task task{.id_ = marker->id_, .tenant_id_ = marker->tenant_id_,
+            .certificate_id_ = marker->resource_id_, .version_ = marker->version_, .failures_ = marker->failures_,
+            .operation_ = std::string(sync::marker_operation_name(marker->operation_)), .claimed_at_ = marker->claimed_at_};
+        service::attempt_trace::recorder trace(service::attempt_trace::trace_kind::certificate, "web", marker->claimed_at_);
+        const issuance::certificate_attempt attempt{.operation_ = task.operation_, .provider_ = "letsencrypt",
+            .domains_ = {"dependency.example.com"}, .stage_ = issuance::certificate_stage::validation, .issued_ = std::nullopt};
+        co_await issuance::worker_detail::fail_certificate_task(context, trace, task, "DNS-01 disposition",
+            decision, attempt.to_json(context.pool()));
+        const auto rows = co_await context.db().query(
+            "SELECT certificate.issuance_state IS NOT NULL, task.is_done, task.is_ok, zone.runtime::text "
+            "FROM sys_certificate certificate JOIN sys_sync_task task ON task.certificate_id=certificate.id "
+            "JOIN sys_dns_zone zone ON zone.id=certificate.dns_zone_id WHERE task.resource_type='certificate'");
+        const auto runtime = service::dns_sync::parse_stored_runtime(rows.front()[3].value().value_or(""));
+        require(runtime && rows.front()[0].as<bool>().value() == (decision == disposition::resume_order) &&
+            runtime->challenge_records_.empty() == (decision != disposition::resume_order),
+            "only resume_order preserves durable progress and published challenge records");
+        require(rows.front()[1].as<bool>().value() == (decision == disposition::terminal) &&
+            !rows.front()[2].as<bool>().value(), "only terminal completes the failed task");
+        if (decision == disposition::terminal) {
+            co_await require_terminal(context);
+        }
+    }
+}
+
+ruvia::task<void> verify_finalize_recovery(ruvia::web_worker_context& web, task_context& context,
+    const acme_origin& origin) {
+    co_await reset(context);
+    const auto marker = co_await sync::claim_marker(context, sync::marker_resource_type::certificate);
+    require(marker.has_value(), "finalize recovery acquires the certificate lease");
+    const issuance::worker_detail::certificate_task task{.id_ = marker->id_, .tenant_id_ = marker->tenant_id_,
+        .certificate_id_ = marker->resource_id_, .version_ = marker->version_, .failures_ = marker->failures_,
+        .operation_ = std::string(sync::marker_operation_name(marker->operation_)), .claimed_at_ = marker->claimed_at_};
+    const auto lease = sync::make_running_lease(tenant, marker->id_, marker->version_, context.lease_owner(),
+        marker->claimed_at_, sync::marker_resource_type::certificate, certificate);
+    const auto work = co_await issuance::worker_detail::load_work(context, task);
+    const auto key = issuance::detail::private_key_pem(issuance::detail::generate_rsa_key().get());
+    const auto envelope = service::utils::seal_secret(key);
+    const issuance::finalize_progress finalized(progress().order(), envelope, 10);
+    require(co_await issuance::worker_detail::enter_finalize(context, task, lease, work, finalized),
+        "finalize stores the certificate key before any finalization request");
+    // Simulate a process exiting after that commit. Lease recovery must not
+    // discard or regenerate the certificate key of this already-valid order.
+    (void)co_await context.db().execute("UPDATE sys_sync_task SET lease_until=NOW()-INTERVAL '1 second' WHERE id=$1", marker->id_);
+    co_await sync::recover_stale_running(context, sync::marker_resource_type::certificate);
+    const auto before_orders = origin.count("/orders");
+    const auto before_authorizations = origin.count("/auth/fresh");
+    const auto before_challenges = origin.count("/challenge/fresh");
+    const auto before_finalize = origin.count("/order/fresh");
+    task_context restarted(web);
+    (void)co_await run_certificate(restarted, true);
+    const auto rows = co_await context.db().query("SELECT issuance_state::text FROM sys_certificate WHERE id=$1", certificate);
+    const auto restored = issuance::parse_issuance_progress(rows.front()[0].value().value_or(""), 1, context.pool());
+    require(restored && std::holds_alternative<issuance::finalize_progress>(*restored),
+        "pending finalization resumes and keeps its distinct durable phase");
+    const auto& final_state = std::get<issuance::finalize_progress>(*restored);
+    require(final_state.private_key_envelope() == envelope &&
+        service::utils::open_secret(final_state.private_key_envelope()) == key,
+        "restart and pending finalization preserve the original certificate private key");
+    require(origin.count("/orders") == before_orders && origin.count("/auth/fresh") == before_authorizations &&
+        origin.count("/challenge/fresh") == before_challenges && origin.count("/order/fresh") > before_finalize,
+        "finalize recovery bypasses DNS validation and resumes the same order");
+}
+
 ruvia::task<void> verify(ruvia::web_worker_context& web, acme_origin& origin) {
     task_context context(web);
     co_await prepare(context.db());
+    verify_progress_values(context.pool());
     co_await reset(context);
     auto before = origin.count();
     (void)co_await run_certificate(context);
@@ -548,6 +698,8 @@ ruvia::task<void> verify(ruvia::web_worker_context& web, acme_origin& origin) {
     require(legacy.front()[0].as<bool>().value(), "legacy replacement persists a fresh DNS dependency");
     co_await verify_running_lease(web, context, origin, false);
     co_await verify_running_lease(web, context, origin, true);
+    co_await verify_failure_dispositions(context);
+    co_await verify_finalize_recovery(web, context, origin);
 }
 
 }  // namespace

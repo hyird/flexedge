@@ -4,12 +4,10 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <ranges>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -41,9 +39,6 @@ class invalid_website final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
-
-// Regex patterns of one website's route rules, compiled once while it is validated.
-using route_patterns = std::unordered_map<const v2::RouteRule*, std::shared_ptr<const RE2>>;
 
 [[nodiscard]] inline bool http_token(std::string_view value) noexcept {
     return flexedge::route_policy::http_token(value, value.size());
@@ -270,8 +265,7 @@ inline bool route_origin_group(const v2::RouteRule& rule, const v2::Website& web
     return false;
 }
 
-// Regex patterns compiled on the way are kept in `patterns` when given.
-inline void validate_route_rules(const v2::Website& website, route_patterns* patterns = nullptr) {
+inline void validate_route_rules(const v2::Website& website) {
     if (static_cast<std::size_t>(website.route_rules_size()) > max_route_rules) {
         throw invalid_website("too many website route rules");
     }
@@ -284,9 +278,6 @@ inline void validate_route_rules(const v2::Website& website, route_patterns* pat
                 !policy::capture_template(rule.rewrite_path(), pattern->NumberOfCapturingGroups()) ||
                 !policy::capture_template(rule.redirect_url(), pattern->NumberOfCapturingGroups())) {
                 throw invalid_website("invalid route regex or capture template");
-            }
-            if (patterns) {
-                patterns->emplace(&rule, std::move(pattern));
             }
         }
         if (static_cast<std::size_t>(rule.conditions_size()) > max_route_conditions) {
@@ -404,12 +395,12 @@ inline void validate_website_domains(const v2::Website& website) {
 // The protocol rules of one published website, checked by the control plane before it
 // publishes and by the node before it serves. Disabled websites are delivered but never
 // served, so they are not checked.
-inline void validate_website(const v2::Website& website, route_patterns* patterns = nullptr) {
+inline void validate_website(const v2::Website& website) {
     if (!website.enabled()) {
         return;
     }
     validate_website_basics(website);
-    validate_route_rules(website, patterns);
+    validate_route_rules(website);
     validate_website_origins(website);
     validate_website_domains(website);
 }

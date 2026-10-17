@@ -77,8 +77,9 @@ load_current_runtime(service::background::task_context& context, const verificat
         co_return std::string(rows.front()[0].value().value_or("{}"));
     }
     auto transaction = co_await db.begin_transaction();
-    (void)co_await service::sync_runtime::release_running(transaction, lease);
-    co_await transaction.commit();
+    service::sync_runtime::running_result_writer writer(transaction, lease);
+    (void)co_await writer.quiet(service::sync_runtime::quiet_action::release);
+    co_await writer.commit(context);
     co_return std::nullopt;
 }
 
@@ -90,14 +91,15 @@ inline ruvia::task<void> complete_verification(service::background::task_context
         task.tenant_id_, task.id_, task.generation_, context.lease_owner(), task.claimed_at_,
         service::sync_runtime::marker_resource_type::provider, task.provider_id_);
     auto transaction = co_await context.db().begin_transaction();
+    service::sync_runtime::running_result_writer writer(transaction, lease);
     const auto rows = co_await transaction.query(
         "SELECT runtime::text FROM sys_provider WHERE id = $1 AND tenant_id = $2 AND kind = $3 "
         "AND revision = $4 AND verification_generation = $5 AND deleted_at IS NULL LIMIT 1 FOR "
         "UPDATE",
         task.provider_id_, task.tenant_id_, task.kind_, task.provider_revision_, task.generation_);
     if (rows.empty()) {
-        (void)co_await service::sync_runtime::release_running(transaction, lease);
-        co_await transaction.commit();
+        (void)co_await writer.quiet(service::sync_runtime::quiet_action::release);
+        co_await writer.commit(context);
         co_return;
     }
     if (!co_await service::sync_runtime::renew_running_lease(transaction, lease)) {
@@ -125,23 +127,21 @@ inline ruvia::task<void> complete_verification(service::background::task_context
         "revision = $4 AND verification_generation = $5 AND deleted_at IS NULL",
         std::string_view(runtime_json), task.provider_id_, task.tenant_id_, task.provider_revision_,
         task.generation_);
-    service::sync_runtime::running_result_transition result_transition;
     // A verified DNS provider re-syncs its zones.
     service::background::queued_work work;
     if (updated.affected_rows() == 0) {
-        (void)co_await service::sync_runtime::release_running(transaction, lease);
+        (void)co_await writer.quiet(service::sync_runtime::quiet_action::release);
     } else {
         if (dns) {
             co_await service::dns_sync::mark_provider_zones_dirty(transaction, task.tenant_id_,
                 task.provider_id_, work);
         }
-        result_transition = co_await service::sync_runtime::record_running_result(transaction, lease, service::sync_runtime::attempt_result::completed(), detail);
-        if (!result_transition.marker_transitioned_) {
+        const auto result = co_await writer.record(service::sync_runtime::attempt_result::completed(), detail);
+        if (!result.changed()) {
             throw std::runtime_error("供应商检测标记 lease 已失效");
         }
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease,
-        result_transition, trace, false, &work);
+    co_await writer.commit(context, trace, false, &work);
     co_return;
 }
 
@@ -153,18 +153,18 @@ inline ruvia::task<void> fail_verification(service::background::task_context& co
         task.tenant_id_, task.id_, task.generation_, context.lease_owner(), task.claimed_at_,
         service::sync_runtime::marker_resource_type::provider, task.provider_id_);
     auto transaction = co_await context.db().begin_transaction();
-    const auto result_transition = co_await service::sync_runtime::record_running_result(
-        transaction, lease, permanent ? service::sync_runtime::attempt_result::failed(message) : service::sync_runtime::attempt_result::retry(message), detail);
-    if (result_transition.marker_transitioned_) {
+    service::sync_runtime::running_result_writer writer(transaction, lease);
+    const auto result = co_await writer.record(
+        permanent ? service::sync_runtime::attempt_result::failed(message) : service::sync_runtime::attempt_result::retry(message), detail);
+    if (result.changed()) {
         (void)co_await transaction.execute(
             "UPDATE sys_provider SET status = CASE WHEN $1::BOOLEAN THEN 'invalid' ELSE status "
             "END, last_error = $2, updated_at = NOW() WHERE id = $3 AND tenant_id = $4 AND "
             "verification_generation = $5 AND deleted_at IS NULL",
             permanent, std::string_view(message), task.provider_id_, task.tenant_id_, task.generation_);
     }
-    co_await service::sync_runtime::commit_and_publish_result_event(transaction, context, lease,
-        result_transition, trace);
-    if (result_transition.marker_transitioned_) {
+    co_await writer.commit(context, trace);
+    if (result.changed()) {
         service::sync_runtime::log_attempt_failure("Provider verification marker", task.id_, message);
     }
     co_return;

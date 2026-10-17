@@ -93,34 +93,42 @@ public:
         client.use_account(account);
         account_step.complete();
 
-        auto progress = std::move(work.progress_);
-        if (progress && progress->account_url_ != account.account_url_) {
+        auto& progress = work.progress_;
+        if (progress && progress_order(*progress).account_url_ != account.account_url_) {
             trace_.log(service::attempt_trace::log_level::warning, "ACME 账户已变化，重新创建订单");
             progress.reset();
         }
-        if (!progress) {
-            progress = co_await start_order(client, work, account.account_url_);
-            if (!progress) {
-                co_return;
-            }
-        } else {
+        if (progress) {
             trace_.log(service::attempt_trace::log_level::info,
-                "继续上次的订单（" + std::string(issuance_phase_name(progress->phase_)) + " 阶段）");
+                "继续上次的订单（" + std::string(progress_phase_name(*progress)) + " 阶段）");
+            co_await continue_order(client, work, *progress);
+            co_return;
         }
-        if (progress->phase_ == issuance_phase::validation) {
-            co_await validate(client, *progress);
-            if (!co_await finish_validation(work, *progress)) {
-                co_return;
-            }
+        auto started = co_await start_order(client, work, account.account_url_);
+        if (started) {
+            co_await continue_order(client, work, *started);
         }
-        co_await finalize(client, work, *progress);
     }
 
 private:
+    ruvia::task<void> continue_order(acme_client& client, const certificate_work& work,
+        issuance_progress& progress) {
+        if (auto* validation = std::get_if<validation_progress>(&progress)) {
+            co_await validate(client, *validation);
+            auto finalized = co_await finish_validation(work, std::move(*validation));
+            if (!finalized) {
+                co_return;
+            }
+            co_await finalize(client, work, *finalized);
+        } else {
+            co_await finalize(client, work, std::get<finalize_progress>(progress));
+        }
+    }
+
     // Creates the order. Returns the progress to continue with in this
     // attempt, or nullopt when the attempt ends here (the task is parked on
     // the DNS sync, or the issuance revision is gone).
-    ruvia::task<std::optional<issuance_state>> start_order(acme_client& client, const certificate_work& work,
+    ruvia::task<std::optional<issuance_progress>> start_order(acme_client& client, const certificate_work& work,
         std::string_view account_url) {
         using service::attempt_trace::step_code;
         attempt_.stage_ = certificate_stage::order;
@@ -128,15 +136,15 @@ private:
             co_return std::nullopt;
         }
         auto order_step = trace_.begin_step(step_code::order);
-        const auto order = co_await client.create_order(context_, work.domains_);
+        auto order = co_await client.create_order(context_, work.domains_);
         order_step.complete();
 
         attempt_.stage_ = certificate_stage::authorization;
         auto authorization_step = trace_.begin_step(step_code::authorization);
-        issuance_state progress{.revision_ = task_.version_,
-            .phase_ = issuance_phase::validation,
+        unpublished_order progress{.order_ = {.revision_ = task_.version_,
             .account_url_ = std::string(account_url),
-            .order_url_ = order.url_};
+            .order_url_ = std::move(order.url_)},
+            .authorizations_ = {}};
         std::vector<service::dns_sync::challenge_record_spec> records;
         for (const auto& url : order.authorizations_) {
             const auto authorization = co_await client.load_authorization(context_, url);
@@ -162,61 +170,60 @@ private:
         if (records.empty()) {
             trace_.begin_step(step_code::dns_challenge).skip("授权均已有效");
             trace_.begin_step(step_code::validation).skip("授权均已有效");
-            if (!co_await enter_finalize_phase(work, progress)) {
+            finalize_progress finalized(std::move(progress.order_), new_certificate_key());
+            if (!co_await enter_finalize(context_, task_, lease_, work, finalized)) {
                 co_return std::nullopt;
             }
-            co_return progress;
+            co_return issuance_progress(std::move(finalized));
         }
         attempt_.stage_ = certificate_stage::dns_challenge;
         auto challenge_step = trace_.begin_step(step_code::dns_challenge, work.zone_domain_);
-        co_await publish_challenges(context_, trace_, challenge_step, task_, lease_, work, progress, records,
-            attempt_);
+        co_await publish_challenges(context_, trace_, challenge_step, task_, lease_, work, std::move(progress),
+            records, attempt_);
         co_return std::nullopt;
     }
 
     // Answers the published challenges and polls their authorizations.
-    ruvia::task<void> validate(acme_client& client, const issuance_state& progress) {
+    ruvia::task<void> validate(acme_client& client, const validation_progress& progress) {
         using service::attempt_trace::step_code;
         attempt_.stage_ = certificate_stage::validation;
         auto validation_step = trace_.begin_step(step_code::validation);
-        for (const auto& pending : progress.authorizations_) {
+        for (const auto& pending : progress.authorizations()) {
             const auto authorization = co_await client.load_authorization(context_, pending.authorization_url_);
             if (authorization.status_ == "pending") {
                 co_await client.respond_challenge(context_, pending.challenge_url_);
             }
         }
-        for (const auto& pending : progress.authorizations_) {
+        for (const auto& pending : progress.authorizations()) {
             co_await client.wait_for_authorization(context_, pending.authorization_url_, deadline_);
         }
         validation_step.complete();
     }
 
     // Retires the challenge records and stores the finalize progress.
-    ruvia::task<bool> finish_validation(const certificate_work& work, issuance_state& progress) {
+    ruvia::task<std::optional<finalize_progress>> finish_validation(const certificate_work& work,
+        validation_progress progress) {
         attempt_.stage_ = certificate_stage::cleanup;
         auto cleanup_step = trace_.begin_step(service::attempt_trace::step_code::cleanup);
-        if (!co_await enter_finalize_phase(work, progress)) {
-            co_return false;
+        finalize_progress finalized(std::move(progress), new_certificate_key());
+        if (!co_await enter_finalize(context_, task_, lease_, work, finalized)) {
+            co_return std::nullopt;
         }
         trace_.log(service::attempt_trace::log_level::info, "已移除 DNS 验证记录");
         cleanup_step.complete();
-        co_return true;
+        co_return std::move(finalized);
     }
 
-    ruvia::task<bool> enter_finalize_phase(const certificate_work& work, issuance_state& progress) {
-        progress.phase_ = issuance_phase::finalize;
-        progress.authorizations_.clear();
-        progress.private_key_envelope_ =
-            service::utils::seal_secret(detail::private_key_pem(detail::generate_rsa_key().get()));
-        co_return co_await enter_finalize(context_, task_, lease_, work, progress);
+    [[nodiscard]] static std::string new_certificate_key() {
+        return service::utils::seal_secret(detail::private_key_pem(detail::generate_rsa_key().get()));
     }
 
-    ruvia::task<void> finalize(acme_client& client, const certificate_work& work, const issuance_state& progress) {
+    ruvia::task<void> finalize(acme_client& client, const certificate_work& work, const finalize_progress& progress) {
         using service::attempt_trace::step_code;
         attempt_.stage_ = certificate_stage::finalize;
         auto finalize_step = trace_.begin_step(step_code::finalize);
-        service::utils::sensitive_string private_key(service::utils::open_secret(progress.private_key_envelope_));
-        auto order = co_await client.load_order(context_, progress.order_url_);
+        service::utils::sensitive_string private_key(service::utils::open_secret(progress.private_key_envelope()));
+        auto order = co_await client.load_order(context_, progress.order().order_url_);
         if (order.status_ == "invalid") {
             throw acme_error(trace_.redact_error(order.error_.empty() ? "ACME 证书订单已失效"
                                                                       : "ACME 证书订单失败：" + order.error_),
@@ -227,7 +234,7 @@ private:
             const auto csr = detail::create_certificate_request(key.get(), work.domains_);
             co_await client.finalize_order(context_, order, csr);
         }
-        order = co_await client.wait_for_order(context_, progress.order_url_, deadline_);
+        order = co_await client.wait_for_order(context_, progress.order().order_url_, deadline_);
         finalize_step.complete();
 
         attempt_.stage_ = certificate_stage::download;
@@ -251,19 +258,6 @@ private:
     const std::chrono::steady_clock::time_point deadline_;
 };
 
-// The order survives a failure the ACME server or the network may still
-// resolve: the next attempt resumes it.
-[[nodiscard]] inline bool keeps_progress(const std::exception_ptr& exception) {
-    try {
-        std::rethrow_exception(exception);
-    } catch (const acme_pending&) {
-        return true;
-    } catch (const service::outbound_http::transport_error&) {
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
 
 inline ruvia::task<void> process_task(service::background::task_context& context,
     const service::sync_runtime::claimed_marker& marker) {
@@ -322,12 +316,12 @@ inline ruvia::task<void> process_task(service::background::task_context& context
     operations.request_stop();
     co_await operations.join();
     if (!context.get_stop_token().stop_requested() && !lease_lost && exception) {
-        const auto failure = service::outbound_http::classify_attempt_failure(exception, "证书任务发生未知错误");
-        const bool keep_progress = !failure.permanent_ && keeps_progress(exception);
+        const auto failure = classify_issuance_failure(exception);
         auto step = service::sync_runtime::record_attempt_failure_step(trace, failure.message_,
-            failure.permanent_, "永久失败，不再自动重试",
-            keep_progress ? "将在 15 秒后自动重试并继续当前订单" : "将在 15 秒后自动重试");
-        co_await fail_certificate_task(context, trace, task, failure.message_, failure.permanent_, keep_progress,
+            failure.disposition_ == failure_disposition::terminal, "永久失败，不再自动重试",
+            failure.disposition_ == failure_disposition::resume_order
+                ? "将在 15 秒后自动重试并继续当前订单" : "将在 15 秒后自动重试");
+        co_await fail_certificate_task(context, trace, task, failure.message_, failure.disposition_,
             attempt.to_json(context.pool()));
         step.complete();
     }
