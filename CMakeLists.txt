@@ -340,7 +340,7 @@ if(BUILD_TESTING)
     set_tests_properties(flexedge_website_aggregate PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     flexedge_add_test(deployment_source
         SOURCES tests/deployment_source.cpp
-        LIBRARIES ruvia::web
+        LIBRARIES flexedge_route_policy ruvia::web
     )
     set_tests_properties(flexedge_deployment_source PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     flexedge_add_test(delivery_object

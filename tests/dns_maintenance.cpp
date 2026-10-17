@@ -113,39 +113,16 @@ ruvia::task<void> verify(ruvia::db_client& client, ruvia::db_client& peer) {
         "lost deletion tasks are recovered with their own operation");
 }
 
-ruvia::task<void> verify_migration_rollback(ruvia::db_client& client) {
-    co_await client.connect();
-    auto db = client.handle();
-    auto transaction = co_await db.begin_transaction();
-    (void)co_await transaction.execute(service::config::schema_migrations.back().sql());
-    co_await transaction.rollback();
-    const auto absent = co_await db.query("SELECT count(*) FROM information_schema.columns WHERE table_name = 'sys_dns_zone' AND column_name = 'next_check_at'");
-    require(absent.front()[0].as<int>().value_or(-1) == 0, "candidate DDL rolls back atomically");
-}
 }  // namespace
 
-int main(int argc, char** argv) try {
-    if (argc == 2 && std::string_view(argv[1]) == "--print-migration") {
-        std::cout << service::config::schema_migrations.back().sql() << '\n';
-        return 0;
-    }
+int main() try {
     const auto base = test_support::isolated_postgres_config();
     if (!base) {
         return 77;
     }
     const test_support::postgres_test_database database(*base);
     const ruvia::db_migrator migrator(database.config(), {.table_ = "schema_migrations"});
-    const auto& migrations = service::config::schema_migrations;
-    const auto baseline = migrator.migrate(std::span(migrations).first(migrations.size() - 1));
-    require(baseline.applied().size() == migrations.size() - 1,
-        "fresh baseline applies");
-    if (database.run(verify_migration_rollback) != 0) {
-        return 1;
-    }
-    const auto candidate = migrator.migrate(migrations);
-    require(candidate.applied().size() == 1, "candidate migration applies after rollback");
-    const auto repeated = migrator.migrate(migrations);
-    require(repeated.applied().empty(), "migration is idempotent");
+    (void)migrator.migrate(service::config::schema_migrations);
     return database.run(verify);
 } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

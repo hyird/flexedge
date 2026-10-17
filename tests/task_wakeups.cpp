@@ -225,8 +225,10 @@ int main() {
         std::exception_ptr failure;
         std::jthread producer([&](std::stop_token stop) {
             try {
-                await_condition([&] { return stop.stop_requested() || observed.started_.load(std::memory_order_acquire) == 14; },
-                    "all seven task types must subscribe on both workers");
+                // Wait for this fixture's receivers before publishing any wakeup.
+                const auto receivers = observed.awakened_.size() * available::types.size();
+                await_condition([&] { return stop.stop_requested() || observed.started_.load(std::memory_order_acquire) == receivers; },
+                    "task receivers did not become ready");
                 if (stop.stop_requested()) {
                     return;
                 }
@@ -259,7 +261,7 @@ int main() {
                     (void)inspector.request({"CLIENT", "KILL", "ID", id});
                 }
                 await_condition([&] { return inspector.blocked_readers().size() == 2; }, "recovered readers must still use one connection each");
-                std::cout << "Redis CLIENT LIST: two real Web Workers, seven waiting task types each, exactly two blocked XREAD connections\n";
+                std::cout << "Redis CLIENT LIST: notification readers recovered without extra blocking connections\n";
             } catch (...) {
                 failure = std::current_exception();
             }
