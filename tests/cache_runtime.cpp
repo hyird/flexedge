@@ -95,6 +95,43 @@ private:
                 }
                 ++hits_;
                 const std::string request_text(asio::buffers_begin(request->data()), asio::buffers_end(request->data()));
+                if (request_text.starts_with("GET /origin-error ")) {
+                    auto data = std::make_shared<std::string>("HTTP/1.1 502 Bad Gateway\r\nCache-Control: no-store\r\nContent-Type: text/plain\r\nContent-Length: 8\r\nConnection: close\r\n\r\nupstream");
+                    asio::async_write(*peer, asio::buffer(*data), [peer, data](std::error_code, std::size_t) { std::error_code ignored; peer->close(ignored); });
+                    return;
+                }
+                if (request_text.starts_with("GET /read-timeout ")) {
+                    auto timer = std::make_shared<asio::steady_timer>(io_);
+                    timer->expires_after(std::chrono::milliseconds(1500));
+                    timer->async_wait([peer, timer](std::error_code) { std::error_code ignored; peer->close(ignored); });
+                    return;
+                }
+                if (request_text.starts_with("GET /ranges/")) {
+                    constexpr std::size_t total = 3 * origin_range_block_bytes + 47;
+                    const auto start = request_text.find("Range: ");
+                    std::optional<cache_byte_range> selected;
+                    if (start != std::string::npos && !request_text.starts_with("GET /ranges/ignore ")) {
+                        const auto end = request_text.find("\r\n", start);
+                        selected = parse_cache_range(std::string_view(request_text).substr(start + 7, end - start - 7), total);
+                    }
+                    const bool private_response = request_text.starts_with("GET /ranges/private ");
+                    const auto offset = selected && selected->satisfiable_ ? selected->offset_ : 0;
+                    const auto length = selected ? selected->length_ : total;
+                    std::string body(length, '\0');
+                    for (std::size_t index = 0; index < length; ++index) {
+                        body[index] = static_cast<char>('a' + (offset + index) / origin_range_block_bytes);
+                    }
+                    std::string wire = selected ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n";
+                    wire += private_response ? "Cache-Control: private\r\n" : "Cache-Control: public, max-age=600\r\n";
+                    wire += "ETag: \"ranges-v1\"\r\nContent-Type: application/octet-stream\r\n";
+                    if (selected) {
+                        wire += "Content-Range: bytes " + std::to_string(offset) + '-' + std::to_string(offset + length - 1) + '/' + std::to_string(total) + "\r\n";
+                    }
+                    wire += "Content-Length: " + std::to_string(length) + "\r\nConnection: close\r\n\r\n" + body;
+                    auto data = std::make_shared<std::string>(std::move(wire));
+                    asio::async_write(*peer, asio::buffer(*data), [peer, data](std::error_code, std::size_t) { std::error_code ignored; peer->close(ignored); });
+                    return;
+                }
                 if (request_text.starts_with("GET /no-cache ") || request_text.starts_with("GET /private ") || request_text.starts_with("GET /no-store ")) {
                     const auto control = request_text.starts_with("GET /private ") ? "private" : request_text.starts_with("GET /no-store ") ? "no-store"
                                                                                                                                             : "no-cache";
@@ -103,7 +140,7 @@ private:
                     asio::async_write(*peer, asio::buffer(*data), [peer, data](std::error_code, std::size_t) { std::error_code ignored; peer->close(ignored); });
                     return;
                 }
-                if (request_text.starts_with("GET /revalidate ") || request_text.starts_with("GET /stale ")) {
+                if (request_text.starts_with("GET /revalidate ") || request_text.starts_with("GET /stale ") || request_text.starts_with("GET /updating ")) {
                     const bool validation = request_text.find("If-None-Match: \"cache-v1\"") != std::string::npos;
                     const bool origin_failure = request_text.starts_with("GET /stale ") && fail_stale_;
                     if (validation) {
@@ -116,6 +153,9 @@ private:
                         wire = "HTTP/1.1 304 Not Modified\r\nETag: \"cache-v1\"\r\nCache-Control: public, max-age=1\r\nConnection: close\r\n\r\n";
                     } else {
                         wire = "HTTP/1.1 200 OK\r\nETag: \"cache-v1\"\r\nCache-Control: public, max-age=1\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nvalidated";
+                        if (request_text.starts_with("GET /updating ")) {
+                            wire.insert(wire.find("\r\nContent-Type"), ", stale-while-revalidate=60");
+                        }
                     }
                     auto data = std::make_shared<std::string>(std::move(wire));
                     asio::async_write(*peer, asio::buffer(*data), [peer, data](std::error_code, std::size_t) {std::error_code ignored; peer->close(ignored); });
@@ -210,7 +250,7 @@ void verify() {
     origin source;
     ruvia::event_loop_pool workers({.loop_count_ = 2}), control({.loop_count_ = 1});
     runtime_state runtime;
-    auto [logs, log_receiver] = ruvia::make_channel<owned_log_batch>(control.loop(0).handle(), {.capacity_ = 64});
+    auto [logs, log_receiver] = ruvia::make_channel<owned_log_batch>(control.loop(0).handle(), {.capacity_ = 128});
     flexedge::testing::temporary_cache_directory cache_directory;
     data_plane plane(workers, control.loop(0), runtime, logs, cache_directory.path_);
     loop_shutdown shutdown(workers, control);
@@ -240,6 +280,8 @@ void verify() {
     rule.id_ = "all";
     rule.name_ = "all";
     rule.match_type_ = "all";
+    rule.skip_request_cookie_ = true;
+    rule.respect_request_no_cache_ = true;
     policy.rules_.push_back(rule);
     flexedge::cache::to_proto(policy, *site->mutable_response_cache());
     config.finalize();
@@ -259,8 +301,8 @@ void verify() {
     const auto filled_cache = cache_usage();
     FLEXEDGE_REQUIRE(filled_cache.load_ && filled_cache.cache_memory_bytes_ > 4 && filled_cache.cache_disk_bytes_ > 4);
     FLEXEDGE_REQUIRE(source.hits() == 1);
-    FLEXEDGE_REQUIRE(flexedge::testing::request(port, "assets.example.com", {}, "/asset").find("X-Cache: HIT") != std::string::npos);
-    FLEXEDGE_REQUIRE(source.hits() == 1);
+    FLEXEDGE_REQUIRE(flexedge::testing::request(port, "assets.example.com", {}, "/asset").find("X-Cache: MISS") != std::string::npos);
+    FLEXEDGE_REQUIRE(source.hits() == 2);
     const auto head = request({}, "HEAD");
     FLEXEDGE_REQUIRE(head.find("X-Cache: HIT") != std::string::npos && !head.ends_with("body"));
     FLEXEDGE_REQUIRE(request("If-None-Match: \"test\"\r\n").starts_with("HTTP/1.1 304"));
@@ -271,9 +313,9 @@ void verify() {
     FLEXEDGE_REQUIRE(request("Range: bytes=99-\r\n").starts_with("HTTP/1.1 416"));
     const auto if_range = request("Range: bytes=1-2\r\nIf-Range: \"different\"\r\n");
     FLEXEDGE_REQUIRE(if_range.starts_with("HTTP/1.1 200") && if_range.ends_with("body"));
-    FLEXEDGE_REQUIRE(source.hits() == 1);
-    FLEXEDGE_REQUIRE(request("Cookie: private=1\r\n").find("X-Cache: BYPASS") != std::string::npos);
     FLEXEDGE_REQUIRE(source.hits() == 2);
+    FLEXEDGE_REQUIRE(request("Cookie: private=1\r\n").find("X-Cache: BYPASS") != std::string::npos);
+    FLEXEDGE_REQUIRE(source.hits() == 3);
     v2::CacheCommand command;
     command.set_task_id("task");
     command.set_generation(1);
@@ -284,10 +326,10 @@ void verify() {
     command.set_scope("all");
     command.set_expires_unix_ms(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() + 600000);
     auto result = control.loop(0).start(plane.execute_cache(command)).get();
-    FLEXEDGE_REQUIRE(result.ok() && result.affected_objects() == 1);
+    FLEXEDGE_REQUIRE(result.ok() && result.affected_objects() == 2);
     const auto cleared_cache = cache_usage();
     FLEXEDGE_REQUIRE(cleared_cache.load_ && cleared_cache.cache_memory_bytes_ == 0 && cleared_cache.cache_disk_bytes_ == 0);
-    FLEXEDGE_REQUIRE(request().find("X-Cache: MISS") != std::string::npos && source.hits() == 3);
+    FLEXEDGE_REQUIRE(request().find("X-Cache: MISS") != std::string::npos && source.hits() == 4);
     command.set_attempt_id("prewarm");
     command.set_operation("prewarm");
     command.set_scope("urls");
@@ -297,16 +339,23 @@ void verify() {
     const auto before = source.hits();
     FLEXEDGE_REQUIRE(request("Accept-Encoding: identity\r\n", "GET", "/prewarm").find("X-Cache: HIT") != std::string::npos);
     FLEXEDGE_REQUIRE(source.hits() == before);
-    FLEXEDGE_REQUIRE(flexedge::testing::request(port, "assets.example.com", "Accept-Encoding: identity\r\n", "/prewarm").find("X-Cache: HIT") != std::string::npos);
-    FLEXEDGE_REQUIRE(source.hits() == before);
+    FLEXEDGE_REQUIRE(flexedge::testing::request(port, "assets.example.com", "Accept-Encoding: identity\r\n", "/prewarm").find("X-Cache: MISS") != std::string::npos);
+    FLEXEDGE_REQUIRE(source.hits() == before + 1);
     command.set_attempt_id("refresh-alias");
     command.set_operation("refresh");
     command.clear_urls();
     command.add_urls("http://assets.example.com/prewarm");
     result = control.loop(0).start(plane.execute_cache(command)).get();
     FLEXEDGE_REQUIRE(result.ok() && result.affected_objects() == 1);
-    FLEXEDGE_REQUIRE(request("Accept-Encoding: identity\r\n", "GET", "/prewarm").find("X-Cache: MISS") != std::string::npos);
+    FLEXEDGE_REQUIRE(request("Accept-Encoding: identity\r\n", "GET", "/prewarm").find("X-Cache: HIT") != std::string::npos);
     FLEXEDGE_REQUIRE(source.hits() == before + 1);
+    {
+        const auto before_head = source.hits();
+        const auto cold_head = request({}, "HEAD", "/cold-head");
+        FLEXEDGE_REQUIRE(cold_head.find("X-Cache: MISS") != std::string::npos && cold_head.ends_with("\r\n\r\n"));
+        FLEXEDGE_REQUIRE(request({}, "GET", "/cold-head").find("X-Cache: HIT") != std::string::npos);
+        FLEXEDGE_REQUIRE(source.hits() == before_head + 1);
+    }
     {
         const auto expected = std::string(262144, 'a') + std::string(262144, 'b');
         FLEXEDGE_REQUIRE(request({}, "GET", "/large").ends_with(expected));
@@ -427,6 +476,9 @@ void verify() {
     std::this_thread::sleep_for(std::chrono::milliseconds(1150));
     const auto before_validation = source.validations();
     const auto validated = request({}, "GET", "/revalidate");
+    if (validated.find("X-Cache: REVALIDATED") == std::string::npos) {
+        std::cerr << validated.substr(0, validated.find("\r\n\r\n")) << '\n';
+    }
     FLEXEDGE_REQUIRE(validated.starts_with("HTTP/1.1 200") && validated.ends_with("validated"));
     FLEXEDGE_REQUIRE(validated.find("X-Cache: REVALIDATED") != std::string::npos);
     FLEXEDGE_REQUIRE(source.validations() == before_validation + 1);
@@ -444,10 +496,14 @@ void verify() {
         control.loop(0).start(activate(plane, std::make_shared<const compiled_config>(config.active, config.objects))).get();
     };
     policy.rules_[0].ttl_seconds_ = 600;
+    policy.rules_[0].ttl_mode_ = "origin";
     configure_rule();
+    const auto before_no_cache_revalidation = source.hits();
     for (unsigned repeat = 0; repeat < 2; ++repeat) {
-        FLEXEDGE_REQUIRE(request({}, "GET", "/no-cache").find("X-Cache: BYPASS") != std::string::npos);
+        FLEXEDGE_REQUIRE(request({}, "GET", "/no-cache").find("X-Cache: MISS") != std::string::npos);
     }
+    FLEXEDGE_REQUIRE(source.hits() == before_no_cache_revalidation + 2);
+    policy.rules_[0].ttl_mode_ = "fixed";
     policy.rules_[0].skip_no_cache_ = false;
     configure_rule();
     FLEXEDGE_REQUIRE(request({}, "GET", "/no-cache").find("X-Cache: MISS") != std::string::npos);
@@ -455,7 +511,7 @@ void verify() {
     FLEXEDGE_REQUIRE(cached_no_cache.find("X-Cache: HIT") != std::string::npos);
     FLEXEDGE_REQUIRE(cached_no_cache.find("Cache-Control: no-cache") != std::string::npos);
     for (const auto directive : {"Cache-Control: no-cache\r\n", "Cache-Control: max-age=0\r\n", "Pragma: no-cache\r\n"}) {
-        FLEXEDGE_REQUIRE(request(directive, "GET", "/no-cache").find("X-Cache: BYPASS") != std::string::npos);
+        FLEXEDGE_REQUIRE(request(directive, "GET", "/no-cache").find("X-Cache: HIT") != std::string::npos);
     }
     FLEXEDGE_REQUIRE(request({}, "GET", "/no-cache").find("X-Cache: HIT") != std::string::npos);
     policy.rules_[0].respect_request_no_cache_ = false;
@@ -466,13 +522,117 @@ void verify() {
         FLEXEDGE_REQUIRE(request(directive, "GET", "/no-cache").find("X-Cache: HIT") != std::string::npos);
     }
     FLEXEDGE_REQUIRE(source.hits() == before_ignored_refresh);
+    FLEXEDGE_REQUIRE(request("Cookie: session=first\r\n", "GET", "/static.js").find("X-Cache: BYPASS") != std::string::npos);
+    policy.rules_[0].skip_request_cookie_ = false;
+    configure_rule();
+    FLEXEDGE_REQUIRE(request("Cookie: session=first\r\n", "GET", "/static.js").find("X-Cache: MISS") != std::string::npos);
+    const auto before_cookie_refresh = source.hits();
+    for (const auto directive : {"", "Cache-Control: no-cache\r\n", "Cache-Control: max-age=0\r\n", "Pragma: no-cache\r\n"}) {
+        FLEXEDGE_REQUIRE(request(std::string("Cookie: session=second\r\n") + directive, "GET", "/static.js").find("X-Cache: HIT") != std::string::npos);
+    }
+    FLEXEDGE_REQUIRE(request("Cookie: session=second\r\n", "HEAD", "/static.js").find("X-Cache: HIT") != std::string::npos);
+    FLEXEDGE_REQUIRE(source.hits() == before_cookie_refresh);
+    FLEXEDGE_REQUIRE(request("Cookie: session=first\r\nAuthorization: Bearer token\r\n", "GET", "/static.js").find("X-Cache: HIT") != std::string::npos);
+    FLEXEDGE_REQUIRE(request("Cookie: session=first\r\nCache-Control: no-store\r\n", "GET", "/static.js").find("X-Cache: BYPASS") != std::string::npos);
+    for (const auto target : {"/private", "/no-store"}) {
+        const auto miss_response = request("Cookie: session=first\r\n", "GET", target);
+        FLEXEDGE_REQUIRE(miss_response.find("X-Cache: MISS") != std::string::npos);
+        const auto before_override_hit = source.hits();
+        FLEXEDGE_REQUIRE(request("Cookie: session=second\r\n", "GET", target).find("X-Cache: HIT") != std::string::npos);
+        FLEXEDGE_REQUIRE(source.hits() == before_override_hit);
+    }
+    policy.rules_[0].ttl_mode_ = "origin";
+    configure_rule();
     for (const auto target : {"/private", "/no-store"}) {
         for (unsigned repeat = 0; repeat < 2; ++repeat) {
-            FLEXEDGE_REQUIRE(request({}, "GET", target).find("X-Cache: BYPASS") != std::string::npos);
+            FLEXEDGE_REQUIRE(request("Cookie: session=first\r\n", "GET", target).find("X-Cache: BYPASS") != std::string::npos);
         }
     }
+    policy.rules_[0].ttl_mode_ = "origin";
+    auto& updating_settings = policy.rules_[0].settings_.emplace();
+    updating_settings.enabled_ = {"edge", "stale"};
+    updating_settings.serve_stale_ = true;
+    configure_rule();
+    FLEXEDGE_REQUIRE(request({}, "GET", "/updating").find("X-Cache: MISS") != std::string::npos);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1150));
+    const auto before_updating = source.validations();
+    FLEXEDGE_REQUIRE(request({}, "GET", "/updating").find("X-Cache: UPDATING") != std::string::npos);
+    for (unsigned attempt = 0; attempt < 50 && source.validations() == before_updating; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    FLEXEDGE_REQUIRE(source.validations() == before_updating + 1);
+    const auto refreshed_updating = request({}, "GET", "/updating");
+    FLEXEDGE_REQUIRE(refreshed_updating.ends_with("validated"));
+    updating_settings.serve_stale_ = false;
+    configure_rule();
+    FLEXEDGE_REQUIRE(request({}, "GET", "/updating").find("X-Cache: MISS") != std::string::npos);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1150));
+    FLEXEDGE_REQUIRE(request({}, "GET", "/updating").find("X-Cache: REVALIDATED") != std::string::npos);
+    {
+        const auto cross = std::string("Range: bytes=") + std::to_string(origin_range_block_bytes - 2) + '-' + std::to_string(origin_range_block_bytes + 1) + "\r\n";
+        const auto before_cold_range = source.hits();
+        const auto cold = request(cross, "GET", "/ranges/off");
+        FLEXEDGE_REQUIRE(cold.starts_with("HTTP/1.1 206") && cold.ends_with("aabb"));
+        const auto complete = request({}, "GET", "/ranges/off");
+        FLEXEDGE_REQUIRE(complete.find("X-Cache: HIT") != std::string::npos && source.hits() == before_cold_range + 1);
+        const auto multipart = request("Range: bytes=0-1,1048576-1048577\r\n", "GET", "/ranges/off");
+        FLEXEDGE_REQUIRE(multipart.find("multipart/byteranges; boundary=") != std::string::npos);
+        FLEXEDGE_REQUIRE(multipart.find("\r\n\r\naa\r\n--") != std::string::npos && multipart.find("\r\n\r\nbb\r\n--") != std::string::npos);
+        const auto range_head = request("Range: bytes=0-1\r\n", "HEAD", "/ranges/off");
+        FLEXEDGE_REQUIRE(range_head.starts_with("HTTP/1.1 206") && range_head.ends_with("\r\n\r\n"));
+        auto& settings = policy.rules_[0].settings_.emplace();
+        settings.enabled_ = {"edge", "range"};
+        settings.origin_range_ = "on";
+        configure_rule();
+        const auto before_blocks = source.hits();
+        const auto partial = request(cross, "GET", "/ranges/on");
+        FLEXEDGE_REQUIRE(partial.starts_with("HTTP/1.1 206") && partial.ends_with("aabb"));
+        FLEXEDGE_REQUIRE(source.hits() == before_blocks + 2);
+        const auto from_blocks = request(cross, "GET", "/ranges/on");
+        FLEXEDGE_REQUIRE(from_blocks.find("X-Cache: HIT") != std::string::npos && from_blocks.ends_with("aabb"));
+        FLEXEDGE_REQUIRE(source.hits() == before_blocks + 2);
+        const auto suffix = request("Range: bytes=-5\r\n", "GET", "/ranges/on");
+        FLEXEDGE_REQUIRE(suffix.starts_with("HTTP/1.1 206") && suffix.ends_with("ddddd"));
+        const auto ignored = request(cross, "GET", "/ranges/ignore");
+        FLEXEDGE_REQUIRE(ignored.starts_with("HTTP/1.1 206") && ignored.ends_with("aabb"));
+        const auto before_ignore_hit = source.hits();
+        FLEXEDGE_REQUIRE(request(cross, "GET", "/ranges/ignore").find("X-Cache: HIT") != std::string::npos);
+        FLEXEDGE_REQUIRE(source.hits() == before_ignore_hit);
+        const auto before_private = source.hits();
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            const auto private_range = request(cross, "GET", "/ranges/private");
+            FLEXEDGE_REQUIRE(private_range.starts_with("HTTP/1.1 206") && private_range.ends_with("aabb"));
+        }
+        FLEXEDGE_REQUIRE(source.hits() == before_private + 4);
+        const auto mismatch = request("Range: bytes=1-3\r\nIf-Range: \"different\"\r\n", "GET", "/ranges/on");
+        FLEXEDGE_REQUIRE(mismatch.starts_with("HTTP/1.1 200") && mismatch.size() - mismatch.find("\r\n\r\n") - 4 == 3 * origin_range_block_bytes + 47);
+        settings.enabled_.push_back("errors");
+        settings.error_passthrough_ = false;
+        configure_rule();
+        const auto replaced_error = request({}, "GET", "/origin-error");
+        FLEXEDGE_REQUIRE(replaced_error.starts_with("HTTP/1.1 502") && replaced_error.ends_with("\r\n\r\n"));
+        settings.error_passthrough_ = true;
+        configure_rule();
+        FLEXEDGE_REQUIRE(request({}, "GET", "/origin-error").ends_with("upstream"));
+        const auto on_port = [&] { return flexedge::testing::request(port, "www.example.com:8888", {}, "/port.js"); };
+        FLEXEDGE_REQUIRE(on_port().find("X-Cache: BYPASS") != std::string::npos);
+        settings.enabled_.push_back("ports");
+        settings.ports_ = {8888};
+        configure_rule();
+        FLEXEDGE_REQUIRE(on_port().find("X-Cache: MISS") != std::string::npos);
+        FLEXEDGE_REQUIRE(on_port().find("X-Cache: HIT") != std::string::npos);
+        settings.enabled_.push_back("timeout");
+        settings.read_timeout_ = 1;
+        configure_rule();
+        const auto started = std::chrono::steady_clock::now();
+        FLEXEDGE_REQUIRE(request({}, "GET", "/read-timeout").starts_with("HTTP/1.1 524"));
+        FLEXEDGE_REQUIRE(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(1400));
+    }
     const auto states = control.loop(0).start(cache_log_states(log_receiver)).get();
-    for (const auto state : {"miss", "hit_memory", "hit_disk", "revalidated", "bypass", "origin_not_modified", "origin_no_cache", "request_no_cache", "origin_private", "origin_no_store", "fresh"}) {
+    for (const auto state : {"miss", "hit_memory", "hit_disk", "revalidated", "bypass", "origin_not_modified", "origin_private", "origin_no_store", "fresh"}) {
+        if (std::ranges::find(states, state) == states.end()) {
+            std::cerr << "missing cache log state: " << state << '\n';
+        }
         FLEXEDGE_REQUIRE(std::ranges::find(states, state) != states.end());
     }
     std::string large_body(3 * 65536 + 17, '\0');

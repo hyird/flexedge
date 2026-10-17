@@ -293,6 +293,17 @@ message ClusterReleaseContent {
     bool enabled = 5;
     repeated ObjectRef objects = 6;
     uint32 schema_version = 7;
+    CountryDatabase countries = 8;
+}
+
+message CountryRange {
+    bytes first = 1;
+    bytes last = 2;
+    string country = 3;
+}
+message CountryDatabase {
+    repeated CountryRange ipv4 = 1;
+    repeated CountryRange ipv6 = 2;
 }
 
 enum ObjectKind {
@@ -407,6 +418,55 @@ message CachePolicy {
     int64 disk_reserved_bytes = 13;
 }
 
+message CacheStatusTTL {
+    int64 from = 1;
+    int64 to = 2;
+    int64 seconds = 3;
+}
+
+message CacheHeaderKey {
+    string name = 1;
+    repeated string values = 2;
+}
+
+message CacheKeySettings {
+    string query_mode = 1;
+    repeated string query_parameters = 2;
+    repeated string headers = 3;
+    repeated string header_presence = 4;
+    repeated CacheHeaderKey header_values = 5;
+    repeated string cookies = 6;
+    repeated string cookie_presence = 7;
+    bool include_origin = 8;
+    string host = 9;
+    bool country = 10;
+    bool language = 11;
+}
+
+message CacheVaryHeader {
+    string name = 1;
+    string action = 2;
+    repeated string values = 3;
+}
+
+message CacheRuleSettings {
+    repeated string enabled = 1;
+    repeated CacheStatusTTL status_ttl = 2;
+    CacheKeySettings key = 3;
+    bool armor = 4;
+    bool device = 5;
+    bool sort_query = 6;
+    bool serve_stale = 7;
+    bool strong_etags = 8;
+    bool origin_control = 9;
+    string vary_default = 10;
+    repeated CacheVaryHeader vary_headers = 11;
+    string origin_range = 12;
+    repeated int64 ports = 13;
+    int64 read_timeout = 14;
+    bool error_passthrough = 15;
+}
+
 message CacheRule {
     string id = 1;
     string name = 2;
@@ -425,6 +485,9 @@ message CacheRule {
     int64 browser_ttl_seconds = 15;
     optional bool skip_no_cache = 16;
     optional bool respect_request_no_cache = 17;
+    optional bool skip_request_cookie = 18;
+    optional string browser_ttl_mode = 19;
+    CacheRuleSettings settings = 20;
 }
 
 message CacheCommand {

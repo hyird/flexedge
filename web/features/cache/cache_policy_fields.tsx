@@ -108,7 +108,7 @@ export function CachePolicyFields({
             unit={1024 ** 2}
             value={config.max_object_bytes}
             onChange={(max_object_bytes) => change({ max_object_bytes })}
-            hint='最多256MiB，超出上限的响应正常回源。'
+            hint='最多512MiB，超出上限的响应正常回源。'
             error={errors['config.max_object_bytes']}
           />
           {config.storage !== 'disk' && (

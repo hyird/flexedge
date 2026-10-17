@@ -15,6 +15,7 @@
 #include "node/proto/website_validation.h"
 #include "service/common/domain_name.h"
 #include "service/common/http.h"
+#include "service/features/geoip/runtime_database.h"
 #include "service/features/node_config/mapper.h"
 #include "service/features/node_dispatch/deployment_source.h"
 #include "service/features/node_dispatch/dispatch_error.h"
@@ -265,12 +266,21 @@ inline cluster_release_artifact build_cluster_release(std::string_view release_i
     manifest.set_schema_version(flexedge::node::cluster_release_schema_version);
 
     std::unordered_map<std::string, std::string> certificate_digests;
+    bool needs_countries = false;
     for (const auto& source : deployment.websites_) {
+        if (source.enabled_ && source.response_cache_ && source.response_cache_->enabled_) {
+            needs_countries = needs_countries || std::ranges::any_of(source.response_cache_->rules_, [](const auto& rule) {
+                return rule.enabled_ && flexedge::cache::configured(rule, "key") && rule.settings_->key_.country_;
+            });
+        }
         auto object = build_website_object(source, deployment, certificate_digests, manifest, result);
         auto* reference = manifest.add_objects();
         reference->set_kind(flexedge::node::v2::OBJECT_KIND_WEBSITE);
         reference->set_digest_sha256(object.digest_sha256());
         result.objects_.push_back(std::move(object));
+    }
+    if (needs_countries) {
+        *manifest.mutable_countries() = service::geoip::get_country_snapshot();
     }
     result.manifest_ = flexedge::node::pack_artifact<flexedge::node::v2::ClusterReleaseManifest>(manifest);
     return result;

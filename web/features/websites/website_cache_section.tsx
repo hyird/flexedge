@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Choice, Notice, Toggle } from '@/components/forms'
+import { Choice, Notice } from '@/components/forms'
 import { LinkButton } from '@/components/link-button'
 import { QueryNotice } from '@/components/page'
 import { Section } from '@/components/section'
@@ -10,7 +10,7 @@ import type { WebsiteSectionProps } from './website-sections'
 export function WebsiteCacheSection({
   values,
   errors,
-  update,
+  replace,
 }: WebsiteSectionProps) {
   const query = useQuery(cachePolicyOptionsQuery)
   const selected = query.data?.find(
@@ -31,11 +31,6 @@ export function WebsiteCacheSection({
         }
       >
         <div className='flex flex-col gap-4'>
-          <Toggle
-            label='启用缓存'
-            selected={values.cache_enabled}
-            onChange={(enabled) => update('cache_enabled', enabled)}
-          />
           <QueryNotice
             query={query}
             title='缓存策略加载失败'
@@ -44,9 +39,15 @@ export function WebsiteCacheSection({
           <Choice
             label='缓存策略'
             value={values.cache_policy_id}
-            onChange={(id) => update('cache_policy_id', id)}
+            onChange={(id) =>
+              replace((current) => ({
+                ...current,
+                cache_policy_id: id,
+                cache_enabled: Boolean(id),
+              }))
+            }
             items={[
-              { id: '', label: '未选择' },
+              { id: '', label: '无' },
               ...options.map((item) => ({
                 id: item.id,
                 label:
@@ -54,7 +55,7 @@ export function WebsiteCacheSection({
               })),
             ]}
             error={errors.cache_policy_id}
-            hint='启用缓存时必须选择策略；关闭缓存后可保留或解除策略引用。'
+            hint='选择“无”不启用缓存；选择策略后，保存并分发即可应用。'
           />
           {!query.isPending && !query.isError && !query.data?.length && (
             <Notice>尚无缓存策略，请先前往缓存中心创建。</Notice>
@@ -95,9 +96,7 @@ export function WebsiteCacheSection({
               >
                 {selected.status === 'disabled'
                   ? '策略已停用，当前绕过缓存。'
-                  : values.cache_enabled
-                    ? '保存并分发后应用此策略。'
-                    : '缓存已关闭，保留当前策略引用。'}
+                  : '保存并分发后应用此策略。'}
               </p>
             </div>
           )}

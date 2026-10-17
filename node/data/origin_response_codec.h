@@ -5,6 +5,7 @@
 #include <ruvia/http/http1_client_response_parser.h>
 #include <ruvia/http/http1_close_policy.h>
 #include <ruvia/http/http_client_response_head.h>
+#include <ruvia/http/http_conditional_request.h>
 #include <ruvia/http/http_status.h>
 
 #include <algorithm>
@@ -20,6 +21,7 @@
 #include <utility>
 
 #include "common/route_policy.h"
+#include "node/data/cache_range_response.h"
 #include "node/data/cache_response_head.h"
 #include "node/data/origin_request_codec.h"
 #include "node/data/response_cache.h"
@@ -78,9 +80,22 @@ public:
     void set_cache_status(std::string value) {
         cache_status_ = std::move(value);
     }
+    void set_client_range(std::string_view range, std::optional<std::string_view> if_range = std::nullopt) noexcept {
+        client_range_ = range;
+        client_if_range_ = if_range;
+    }
+    void set_origin_range(origin_range_request& range) noexcept {
+        origin_range_ = &range;
+    }
+    [[nodiscard]] std::uint16_t client_status_code() const noexcept {
+        const auto* range = active_range();
+        return range ? static_cast<std::uint16_t>(range->status()) : status_code_.value_or(502);
+    }
     // The immutable rule must outlive this codec.
-    void set_cache_rule(const flexedge::cache::rule& rule) noexcept {
+    void set_cache_rule(const flexedge::cache::rule& rule, bool authorization = false, std::string_view target = {}) noexcept {
         cache_rule_ = &rule;
+        cache_target_ = target;
+        cache_authorization_ = authorization;
         browser_cache_ttl_ = rule.browser_ttl_seconds_;
     }
     [[nodiscard]] std::string_view cache_bypass_reason() const noexcept {
@@ -175,6 +190,16 @@ private:
             tunnel_ = parsed->plan().protocol_upgrade() != nullptr;
             status_code_ = static_cast<std::uint16_t>(parsed->head().status().value());
             configure_body(parsed->plan());
+            if (origin_range_ && !configure_origin_range(parsed->head(), parsed->plan())) {
+                return origin_response_head_status::failure;
+            }
+            const auto* range_length = parsed->plan().known_length() ? parsed->plan().known_length() : parsed->plan().zero_content() ? parsed->plan().zero_content()->known_length()
+                                                                                                                                     : nullptr;
+            if (!client_range_.empty() && *status_code_ == 200 && range_length &&
+                response_header(parsed->head(), "Content-Encoding").empty() &&
+                allows_client_range(client_if_range_, parsed->head())) {
+                range_response_.emplace(client_range_, range_length->content_length(), false, response_header(parsed->head(), "Content-Type"));
+            }
             if (tunnel_ || is_event_stream_content_type(response_header(parsed->head(), "Content-Type"))) {
                 cache_bypass_reason_ = tunnel_ ? "origin_upgrade" : "origin_event_stream";
                 stop_cache_capture();
@@ -184,19 +209,12 @@ private:
                 }
             }
             configure_compression(parsed->head(), parsed->plan());
-            if (browser_cache_ttl_ > 0) {
+            if (cache_rule_ && !tunnel_ && !is_event_stream_content_type(response_header(parsed->head(), "Content-Type"))) {
                 cache_headers headers;
                 for (const auto& header : parsed->head().headers()) {
                     headers.emplace_back(header.name(), header.value());
                 }
-                const auto control = cache_header(headers, "Cache-Control");
-                if (cache_has_directive(control, "private") || cache_has_directive(control, "no-store") ||
-                    (cache_has_directive(control, "no-cache") && cache_rule_->skip_no_cache_) ||
-                    !cache_header(headers, "Set-Cookie").empty() ||
-                    std::ranges::find(cache_rule_->status_codes_, *status_code_) == cache_rule_->status_codes_.end() ||
-                    (route_ && std::ranges::any_of(route_->response_headers(), [](const auto& field) { return flexedge::route_policy::ascii_equal(field.name(), "Cache-Control"); }))) {
-                    browser_cache_ttl_ = 0;
-                }
+                browser_cache_ttl_ = cache_browser_ttl(*cache_rule_, {*status_code_, std::move(headers)});
             }
             const auto body = std::string_view(head_bytes_).substr(head_offset_);
             const auto nominations = connection_fields(parsed->head());
@@ -205,14 +223,27 @@ private:
                 captured_->status_ = *status_code_;
                 capture_fields(parsed->head(), *captured_, nominations);
                 if (cache_rule_ && *status_code_ != 304) {
-                    cache_bypass_reason_ = response_cache::response_bypass_reason(*cache_rule_, *captured_);
+                    cache_bypass_reason_ = response_cache::response_bypass_reason(*cache_rule_, *captured_, cache_authorization_, cache_target_);
                     if (!cache_bypass_reason_.empty()) {
                         cache_status_ = "BYPASS";
                         stop_cache_capture();
                     }
                 }
+                if (captured_ && cache_rule_ && (flexedge::cache::overrides_origin(*cache_rule_, *status_code_) || !cache_origin_control(*cache_rule_, captured_->headers_))) {
+                    strip_set_cookie_ = true;
+                    std::erase_if(captured_->headers_, [](const auto& field) { return flexedge::route_policy::ascii_equal(field.first, "Set-Cookie"); });
+                    browser_cache_ttl_ = cache_browser_ttl(*cache_rule_, *captured_);
+                }
             }
-            append_head(parsed->head(), nominations);
+            if (route_ && std::ranges::any_of(route_->response_headers(), [](const auto& field) { return flexedge::route_policy::ascii_equal(field.name(), "Cache-Control"); })) {
+                browser_cache_ttl_ = 0;
+            }
+            if (!origin_range_ || !origin_range_->head_started_) {
+                append_head(parsed->head(), nominations);
+                if (origin_range_) {
+                    origin_range_->head_started_ = true;
+                }
+            }
             const auto status = consume_body_impl(body);
             release_head();
             switch (status) {
@@ -240,7 +271,12 @@ private:
                 remaining_ -= bytes.size();
                 retain(bytes);
                 if (!compressed_) {
-                    output_.append(bytes);
+                    if (auto* range = active_range()) {
+                        output_ += range->consume(bytes, range_offset_);
+                        range_offset_ += bytes.size();
+                    } else {
+                        output_.append(bytes);
+                    }
                 }
                 if (remaining_ == 0) {
                     finish_body();
@@ -265,6 +301,63 @@ private:
         }
         return bytes.empty() ? origin_response_body_status::accepted
                              : origin_response_body_status::failure;
+    }
+
+    cache_range_response* active_range() noexcept {
+        return origin_range_ && origin_range_->response_ ? &*origin_range_->response_ : range_response_ ? &*range_response_
+                                                                                                        : nullptr;
+    }
+    const cache_range_response* active_range() const noexcept {
+        return origin_range_ && origin_range_->response_ ? &*origin_range_->response_ : range_response_ ? &*range_response_
+                                                                                                        : nullptr;
+    }
+    bool configure_origin_range(const ruvia::http_client_response_head& head, const ruvia::http1_client_response_plan& plan) {
+        auto& range = *origin_range_;
+        const auto encoding = response_header(head, "Content-Encoding");
+        if (head.status().value() != 206) {
+            if (range.head_started_) {
+                return false;
+            }
+            const auto* length = plan.known_length() ? plan.known_length() : plan.zero_content() ? plan.zero_content()->known_length()
+                                                                                                 : nullptr;
+            range.full_response_ = true;
+            if (head.status().value() == 200 && length && encoding.empty()) {
+                const auto matches = allows_client_range(range.if_range_, head);
+                range.response_.emplace(matches ? range.client_range_ : std::string_view{}, length->content_length(), true, response_header(head, "Content-Type"));
+            }
+            return true;
+        }
+        const auto parsed = parse_origin_content_range(response_header(head, "Content-Range"));
+        const auto* length = plan.known_length();
+        if (!encoding.empty() && encoding != "identity") {
+            if (range.head_started_) {
+                return false;
+            }
+            range.passthrough_ = true;
+            stop_cache_capture();
+            return true;
+        }
+        if (!parsed || !length || !response_header(head, "Transfer-Encoding").empty() || parsed->first_ != range.first_ ||
+            parsed->last_ != (std::min)(range.last_, parsed->total_ - 1) || length->content_length() != parsed->last_ - parsed->first_ + 1 ||
+            (range.total_ && *range.total_ != parsed->total_)) {
+            return false;
+        }
+        auto etag = response_header(head, "ETag");
+        if (cache_rule_ && flexedge::cache::configured(*cache_rule_, "etag") && !cache_rule_->settings_->strong_etags_ && etag.starts_with('"')) {
+            etag.insert(0, "W/");
+        }
+        if (range.has_validator_ && range.etag_ != etag) {
+            return false;
+        }
+        range.has_validator_ = true;
+        range.etag_ = std::move(etag);
+        range.total_ = parsed->total_;
+        range_offset_ = parsed->first_;
+        if (!range.response_) {
+            const auto matches = allows_client_range(range.if_range_, head);
+            range.response_.emplace(matches ? range.client_range_ : std::string_view{}, parsed->total_, true, response_header(head, "Content-Type"));
+        }
+        return true;
     }
 
     static constexpr std::size_t max_head_bytes = 1024 * 1024;
@@ -316,6 +409,42 @@ private:
         return nominated;
     }
 
+    std::string_view response_validator(const ruvia::http_client_response_head& head, std::string_view name) const noexcept {
+        std::string_view value;
+        std::size_t count{};
+        if (route_) {
+            for (const auto& field : route_->response_headers()) {
+                if (flexedge::route_policy::ascii_equal(field.name(), name)) {
+                    value = field.value();
+                    ++count;
+                }
+            }
+        }
+        if (count == 0) {
+            for (const auto& field : head.headers()) {
+                if (flexedge::route_policy::ascii_equal(field.name(), name)) {
+                    value = field.value();
+                    ++count;
+                }
+            }
+        }
+        return count == 1 ? value : std::string_view{};
+    }
+    bool allows_client_range(std::optional<std::string_view> condition, const ruvia::http_client_response_head& head) const noexcept {
+        if (!condition) {
+            return true;
+        }
+        std::optional<std::time_t> modified;
+        bool strong_date{};
+        if (!condition->starts_with('"') && !condition->starts_with("W/")) {
+            modified = ruvia::parse_http_date(response_validator(head, "Last-Modified"));
+            if (modified) {
+                const auto date = ruvia::parse_http_date(response_validator(head, "Date"));
+                strong_date = date && std::difftime(*date, *modified) >= 60;
+            }
+        }
+        return ruvia::http_if_range_allows(*condition, response_validator(head, "ETag"), modified, strong_date);
+    }
     std::string response_header(const ruvia::http_client_response_head& head, std::string_view name) const {
         std::string value;
         bool replaced_by_route{};
@@ -344,6 +473,12 @@ private:
     }
     void configure_compression(const ruvia::http_client_response_head& head,
         const ruvia::http1_client_response_plan& plan) {
+        if (active_range()) {
+            return;
+        }
+        if (cache_rule_ && flexedge::cache::configured(*cache_rule_, "etag") && cache_rule_->settings_->strong_etags_) {
+            return;
+        }
         if (!compression_website_ || tunnel_ || plan.without_content() || plan.zero_content()) {
             return;
         }
@@ -402,6 +537,13 @@ private:
 
     // Apply representation changes equally to client headers and cache metadata.
     void representation_field(std::string_view name, std::string_view value, const auto& emit) const {
+        if (cache_rule_ && flexedge::cache::configured(*cache_rule_, "etag") && !cache_rule_->settings_->strong_etags_ && flexedge::route_policy::ascii_equal(name, "ETag") && value.starts_with('"')) {
+            emit(name, "W/" + std::string(value));
+            return;
+        }
+        if (strip_set_cookie_ && flexedge::route_policy::ascii_equal(name, "Set-Cookie")) {
+            return;
+        }
         if (!vary_.empty() && flexedge::route_policy::ascii_equal(name, "Vary")) {
             return;
         }
@@ -436,7 +578,13 @@ private:
 
     // Fields the proxy sets itself.
     [[nodiscard]] bool replaced(std::string_view name, bool for_cache = false) const noexcept {
-        if (!for_cache && browser_cache_ttl_ > 0 && (flexedge::route_policy::ascii_equal(name, "Cache-Control") || flexedge::route_policy::ascii_equal(name, "Expires"))) {
+        if (!for_cache && flexedge::route_policy::ascii_equal(name, "Cloudflare-CDN-Cache-Control")) {
+            return true;
+        }
+        if (strip_set_cookie_ && flexedge::route_policy::ascii_equal(name, "Set-Cookie")) {
+            return true;
+        }
+        if (!for_cache && browser_cache_ttl_ != 0 && (flexedge::route_policy::ascii_equal(name, "Cache-Control") || flexedge::route_policy::ascii_equal(name, "Expires"))) {
             return true;
         }
         if (!cache_status_.empty() && flexedge::route_policy::ascii_equal(name, "X-Cache")) {
@@ -466,6 +614,9 @@ private:
             return;
         }
         for (const auto& mutation : route_->response_headers()) {
+            if (flexedge::route_policy::ascii_equal(mutation.name(), "Cloudflare-CDN-Cache-Control")) {
+                continue;
+            }
             representation_field(mutation.name(), mutation.value(),
                 [&](auto name, auto value) { append_field(output, name, value); });
         }
@@ -476,6 +627,10 @@ private:
     void append_closing_headers(std::string& output) const {
         if (browser_cache_ttl_ > 0) {
             append_field(output, "Cache-Control", "public, max-age=" + std::to_string(browser_cache_ttl_));
+        } else if (browser_cache_ttl_ == -2) {
+            append_field(output, "Cache-Control", "public, max-age=0");
+        } else if (browser_cache_ttl_ < 0) {
+            append_field(output, "Cache-Control", "no-store");
         }
         if (!cache_status_.empty()) {
             append_field(output, "X-Cache", cache_status_);
@@ -506,12 +661,15 @@ private:
 
     // The relayed body keeps its framing, so the streaming head keeps Transfer-Encoding.
     void append_head(const ruvia::http_client_response_head& head, std::uint64_t nominations) {
-        append_status_line(output_, status_code_.value_or(502));
+        append_status_line(output_, client_status_code());
         const auto framing_forbidden = head.status().value() < 200 || head.status().value() == 204;
         for (const auto& header : head.headers()) {
             const auto nominated = (nominations & 1) != 0;
             nominations >>= 1;
             const auto name = header.name();
+            if (active_range() && (flexedge::route_policy::ascii_equal(name, "Content-Length") || flexedge::route_policy::ascii_equal(name, "Content-Range") || flexedge::route_policy::ascii_equal(name, "Content-Type"))) {
+                continue;
+            }
             const auto upgrade_field =
                 tunnel_ && (flexedge::route_policy::ascii_equal(name, "Connection") ||
                                flexedge::route_policy::ascii_equal(name, "Upgrade"));
@@ -529,6 +687,15 @@ private:
         representation_fields([&](auto name, auto value) { append_field(output_, name, value); });
         if (compressed_) {
             append_field(output_, "Transfer-Encoding", "chunked");
+        }
+        if (const auto* range = active_range()) {
+            append_field(output_, "Content-Length", std::to_string(range->length()));
+            if (!range->content_type().empty()) {
+                append_field(output_, "Content-Type", range->content_type());
+            }
+            if (!range->content_range().empty()) {
+                append_field(output_, "Content-Range", range->content_range());
+            }
         }
         append_closing_headers(output_);
     }
@@ -704,15 +871,23 @@ private:
     std::optional<cache_response_head> captured_;
     std::string capture_output_{};
     bool capture_enabled_{};
+    bool strip_set_cookie_{};
+    bool cache_authorization_{};
     std::int64_t browser_cache_ttl_{};
     std::string cache_status_;
     const flexedge::cache::rule* cache_rule_{};
+    std::string_view cache_target_{};
     std::string_view cache_bypass_reason_{};
     body_kind body_kind_{body_kind::none};
     std::size_t remaining_{};
     std::optional<ruvia::http1_chunked_body_decoder> chunked_;
     std::string chunk_framing_;
     std::optional<std::uint16_t> status_code_;
+    std::string_view client_range_{};
+    std::optional<std::string_view> client_if_range_{};
+    std::optional<cache_range_response> range_response_{};
+    origin_range_request* origin_range_{};
+    std::size_t range_offset_{};
     bool hsts_enabled_{};
     const evaluated_route_policy* route_{};
     bool tunnel_{};

@@ -419,6 +419,9 @@ if(BUILD_TESTING)
     flexedge_add_test(cache_features
         SOURCES tests/cache_features.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::http Threads::Threads)
+    flexedge_add_test(cache_config
+        SOURCES tests/cache_config.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::web)
     flexedge_add_test(response_streaming
         SOURCES tests/response_streaming.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::http OpenSSL::Crypto)

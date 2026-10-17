@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "common/route_policy.h"
+#include "node/data/cache_vary.h"
 #include "node/data/http1_request_reader.h"
 #include "node/data/http_content_type.h"
 #include "node/data/route_rules.h"
@@ -81,7 +82,8 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
     std::string_view incoming_host, std::string_view client_address, bool secure,
     bool upgrade_requested, bool close_after_response,
     bool force_identity_encoding = false, const evaluated_route_policy* route = nullptr,
-    origin_cache_validation validation = {}) {
+    origin_cache_validation validation = {}, const flexedge::cache::rule* cache_rule = nullptr,
+    bool remove_range = false, std::string_view origin_range = {}) {
     const auto authority =
         website.origin_host_header().empty() || website.origin_host_header() == "$host"
             ? flexedge::route_policy::hostname(incoming_host)
@@ -126,7 +128,46 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
     // incoming set can shrink when a route replaces repeated field names.
     std::array<ruvia::http_header_view, ruvia::max_http_header_fields> headers;
     std::size_t header_count{};
+    constexpr std::array<std::string_view, 3> normalized_names{"accept", "accept-language", "accept-encoding"};
+    std::array<std::string, 3> normalized_values;
+    std::array<bool, 3> normalize{};
+    for (std::size_t index = 0; cache_rule && index < normalized_names.size(); ++index) {
+        const auto name = normalized_names[index];
+        const auto* field = cache_vary_header(*cache_rule, name);
+        normalize[index] = flexedge::cache::configured(*cache_rule, "vary") && cache_vary_action(*cache_rule, name) == "normalize" && (index != 2 || (flexedge::cache::configured(*cache_rule, "etag") && cache_rule->settings_->strong_etags_));
+        if (!normalize[index] || (index == 2 && force_identity_encoding)) {
+            continue;
+        }
+        std::string raw;
+        const auto append_raw = [&](std::string_view text) { if (!raw.empty()) { raw += ','; } raw += text; };
+        const auto replaced = std::ranges::any_of(mutations, [&](const auto& mutation) { return flexedge::route_policy::ascii_equal(name, mutation.name()); });
+        if (replaced) {
+            for (const auto& mutation : mutations) {
+                if (flexedge::route_policy::ascii_equal(name, mutation.name())) {
+                    append_raw(mutation.value());
+                }
+            }
+        } else {
+            for (const auto& header : incoming.headers_) {
+                if (flexedge::route_policy::ascii_equal(name, header.name())) {
+                    append_raw(header.value());
+                }
+            }
+        }
+        normalized_values[index] = normalize_cache_vary(raw, name, field ? field->values_ : std::vector<std::string>{});
+    }
+    bool emitting_normalized{};
     const auto append = [&](std::string_view name, std::string_view value, bool replacement = false) {
+        if (remove_range && (flexedge::route_policy::ascii_equal(name, "Range") || flexedge::route_policy::ascii_equal(name, "If-Range"))) {
+            return true;
+        }
+        if (!emitting_normalized) {
+            for (std::size_t index = 0; index < normalized_names.size(); ++index) {
+                if (normalize[index] && flexedge::route_policy::ascii_equal(name, normalized_names[index]) && !(index == 2 && force_identity_encoding)) {
+                    return true;
+                }
+            }
+        }
         if (!replacement && std::ranges::any_of(mutations, [&](const auto& mutation) {
                 return flexedge::route_policy::ascii_equal(name, mutation.name());
             })) {
@@ -176,6 +217,18 @@ prepare_origin_request(const origin_request_view& incoming, const v2::Website& w
         }
     }
 
+    emitting_normalized = true;
+    if (!origin_range.empty()) {
+        if (header_count == headers.size()) {
+            return std::nullopt;
+        }
+        headers[header_count++] = ruvia::http_header_view("Range", origin_range);
+    }
+    for (std::size_t index = 0; index < normalized_names.size(); ++index) {
+        if (normalize[index] && !normalized_values[index].empty() && !append(normalized_names[index], normalized_values[index], true)) {
+            return std::nullopt;
+        }
+    }
     if (validation.enabled_) {
         if (!validation.etag_.empty()) {
             if (!append("If-None-Match", validation.etag_, true)) {
@@ -234,18 +287,19 @@ prepare_origin_request(const http1_request_reader& parsed, const v2::Website& we
     std::string_view incoming_host, std::string_view client_address, bool secure,
     bool upgrade_requested, bool close_after_response,
     bool force_identity_encoding = false, const evaluated_route_policy* route = nullptr,
-    origin_cache_validation validation = {}) {
+    origin_cache_validation validation = {}, bool cache_head_fill = false, const flexedge::cache::rule* cache_rule = nullptr,
+    bool remove_range = false, std::string_view origin_range = {}) {
     const auto body = parsed.body();
     if (!body) {
         return std::nullopt;
     }
-    return prepare_origin_request({.method_ = parsed.request().method(),
+    return prepare_origin_request({.method_ = cache_head_fill ? std::string_view("GET") : parsed.request().method(),
                                       .target_ = parsed.request().target(),
                                       .headers_ = parsed.request().headers(),
                                       .body_ = *body,
                                       .has_body_ = parsed.has_body()},
         website, incoming_host, client_address, secure, upgrade_requested,
-        close_after_response, force_identity_encoding, route, validation);
+        close_after_response, force_identity_encoding, route, validation, cache_rule, remove_range, origin_range);
 }
 
 }  // namespace flexedge::node

@@ -206,10 +206,18 @@ void cache_validation_headers() {
         true, nullptr, {{}, "Wed, 01 Jan 2025 00:00:00 GMT", true});
     FLEXEDGE_REQUIRE(conditional_date && conditional_date->bytes_.find("If-Modified-Since: Wed, 01 Jan 2025 00:00:00 GMT\r\n") != std::string::npos);
     FLEXEDGE_REQUIRE(conditional_date->bytes_.find("If-None-Match:") == std::string::npos);
+    flexedge::cache::rule normalize_rule;
+    auto& normalize = normalize_rule.settings_.emplace();
+    normalize.enabled_ = {"vary"};
+    normalize.vary_headers_ = {{"accept-language", "normalize", {"en", "fr"}}};
+    const std::array<ruvia::http_header_view, 1> languages{{{"Accept-Language", "fr;q=0.8, en-GB"}}};
+    const auto normalized = prepare_origin_request(origin_request_view{.method_ = "GET", .target_ = "/", .headers_ = languages}, site, "example.com", "127.0.0.1", false, false, false, false, nullptr, {}, &normalize_rule);
+    FLEXEDGE_REQUIRE(normalized && normalized->bytes_.find("accept-language: en,fr\r\n") != std::string::npos);
+    FLEXEDGE_REQUIRE(normalized->bytes_.find("en-GB") == std::string::npos);
 }
 void independent_cache_directives() {
     auto site = policy("gzip");
-    flexedge::cache::rule rule{.browser_ttl_seconds_ = 120};
+    flexedge::cache::rule rule{.browser_ttl_seconds_ = 120, .browser_ttl_mode_ = "override_origin"};
     for (const auto control : {"no-cache, max-age=600", "private", "no-store"}) {
         rule.skip_no_cache_ = false;
         origin_response_codec codec(exchange(site), false, nullptr);
@@ -220,7 +228,7 @@ void independent_cache_directives() {
         FLEXEDGE_REQUIRE(codec.consume_head(wire) == origin_response_head_status::ready);
         const auto outgoing = codec.take_output();
         if (std::string_view(control).starts_with("no-cache")) {
-            FLEXEDGE_REQUIRE(outgoing.find("Cache-Control: public, max-age=120") != std::string::npos);
+            FLEXEDGE_REQUIRE(outgoing.find("Cache-Control: no-cache, max-age=600") != std::string::npos);
             FLEXEDGE_REQUIRE(codec.cache_head() && cache_header(codec.cache_head()->headers_, "Cache-Control") == control);
         } else {
             FLEXEDGE_REQUIRE(!codec.cache_head());
@@ -234,8 +242,17 @@ void independent_cache_directives() {
     codec.set_cache_status("MISS");
     codec.capture_for_cache();
     FLEXEDGE_REQUIRE(codec.consume_head("HTTP/1.1 200 OK\r\nCache-Control: no-cache\r\nContent-Length: 0\r\n\r\n") == origin_response_head_status::ready);
-    FLEXEDGE_REQUIRE(!codec.cache_head() && codec.cache_bypass_reason() == "origin_no_cache");
-    const flexedge::cache::rule selected{.status_codes_ = {201, 404}, .browser_ttl_seconds_ = 120};
+    FLEXEDGE_REQUIRE(codec.cache_head() && codec.cache_bypass_reason().empty());
+    origin_response_codec cdn(exchange(site), false, nullptr);
+    cdn.set_cache_rule(rule);
+    cdn.capture_for_cache();
+    FLEXEDGE_REQUIRE(cdn.consume_head("HTTP/1.1 200 OK\r\nCache-Control: private\r\nCloudflare-CDN-Cache-Control: public, max-age=600\r\nCDN-Cache-Control: public, max-age=300\r\nContent-Length: 0\r\n\r\n") == origin_response_head_status::ready);
+    const auto cdn_wire = cdn.take_output();
+    FLEXEDGE_REQUIRE(cdn_wire.find("Cloudflare-CDN-Cache-Control") == std::string::npos);
+    FLEXEDGE_REQUIRE(cdn_wire.find("CDN-Cache-Control: public, max-age=300") != std::string::npos);
+    FLEXEDGE_REQUIRE(cdn_wire.find("Cache-Control: private") != std::string::npos);
+    FLEXEDGE_REQUIRE(cdn.cache_head() && cache_edge_control(cdn.cache_head()->headers_) == "public, max-age=600");
+    const flexedge::cache::rule selected{.status_codes_ = {201, 404}, .browser_ttl_seconds_ = 120, .browser_ttl_mode_ = "override_origin"};
     for (const auto status : {200, 201, 404, 500}) {
         origin_response_codec response(exchange(site), false, nullptr);
         response.set_cache_rule(selected);
@@ -447,6 +464,74 @@ void large_stream() {
     FLEXEDGE_REQUIRE(budget.used_bytes() == 0);
     std::cout << "72 MiB stream: peak codec budget " << peak << " bytes, wire " << bytes << " bytes\n";
 }
+void range_projection() {
+    auto site = policy("gzip");
+    origin_response_codec codec(exchange(site), false, nullptr);
+    codec.set_client_range("bytes=2-3,8-9");
+    codec.capture_for_cache();
+    FLEXEDGE_REQUIRE(codec.consume_head("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 10\r\n\r\n01234") == origin_response_head_status::ready);
+    std::string wire = codec.take_output();
+    std::string captured = codec.take_cache_output();
+    FLEXEDGE_REQUIRE(codec.consume_body("56789") == origin_response_body_status::accepted);
+    wire += codec.take_output();
+    captured += codec.take_cache_output();
+    FLEXEDGE_REQUIRE(wire.starts_with("HTTP/1.1 206"));
+    FLEXEDGE_REQUIRE(wire.find("multipart/byteranges; boundary=") != std::string::npos);
+    FLEXEDGE_REQUIRE(wire.find("bytes 2-3/10\r\n\r\n23") != std::string::npos);
+    FLEXEDGE_REQUIRE(wire.find("bytes 8-9/10\r\n\r\n89") != std::string::npos);
+    FLEXEDGE_REQUIRE(captured == "0123456789" && codec.cache_head()->status_ == 200);
+    for (const auto [condition, allowed] : {
+             std::pair<std::string_view, bool>{"\"v1\"", true},
+             {"W/\"v1\"", false},
+             {"", false},
+             {"Wed, 21 Oct 2015 07:28:00 GMT", true},
+             {"Wed, 21 Oct 2015 07:29:00 GMT", false}}) {
+        origin_response_codec conditional(exchange(site), false, nullptr);
+        conditional.set_client_range("bytes=2-3", condition);
+        FLEXEDGE_REQUIRE(conditional.consume_head("HTTP/1.1 200 OK\r\nContent-Length: 10\r\nETag: \"v1\"\r\nDate: Wed, 21 Oct 2015 07:30:00 GMT\r\nLast-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\n\r\n0123456789") == origin_response_head_status::ready);
+        FLEXEDGE_REQUIRE(conditional.take_output().starts_with(allowed ? "HTTP/1.1 206" : "HTTP/1.1 200"));
+    }
+    origin_range_request range;
+    range.client_range_ = "bytes=1048574-1048577";
+    origin_response_codec first(exchange(site), false, nullptr);
+    first.set_origin_range(range);
+    FLEXEDGE_REQUIRE(first.consume_head("HTTP/1.1 206 Partial Content\r\nContent-Type: text/plain\r\nETag: \"v1\"\r\nContent-Range: bytes 0-1048575/2097152\r\nContent-Length: 1048576\r\n\r\n") == origin_response_head_status::ready);
+    FLEXEDGE_REQUIRE(first.take_output().find("Content-Length: 4\r\n") != std::string::npos);
+    FLEXEDGE_REQUIRE(first.consume_body(std::string(1048576, 'a')) == origin_response_body_status::accepted);
+    FLEXEDGE_REQUIRE(first.take_output() == "aa" && !range.response_->done());
+    range.first_ = 1048576;
+    range.last_ = 2097151;
+    origin_response_codec second(exchange(site), false, nullptr);
+    second.set_origin_range(range);
+    FLEXEDGE_REQUIRE(second.consume_head("HTTP/1.1 206 Partial Content\r\nContent-Type: text/plain\r\nETag: \"v1\"\r\nContent-Range: bytes 1048576-2097151/2097152\r\nContent-Length: 1048576\r\n\r\n") == origin_response_head_status::ready);
+    FLEXEDGE_REQUIRE(second.take_output().empty());
+    FLEXEDGE_REQUIRE(second.consume_body(std::string(1048576, 'b')) == origin_response_body_status::accepted);
+    FLEXEDGE_REQUIRE(second.take_output() == "bb" && range.response_->done());
+    origin_response_codec changed(exchange(site), false, nullptr);
+    changed.set_origin_range(range);
+    FLEXEDGE_REQUIRE(changed.consume_head("HTTP/1.1 206 Partial Content\r\nETag: \"v2\"\r\nContent-Range: bytes 1048576-2097151/2097152\r\nContent-Length: 1048576\r\n\r\n") == origin_response_head_status::failure);
+    FLEXEDGE_REQUIRE(select_cache_ranges("bytes=2-1", 10, false).ranges_.empty());
+    FLEXEDGE_REQUIRE(select_cache_ranges("bytes=0-3,2-5", 10, false).ignore_);
+    FLEXEDGE_REQUIRE(!select_cache_ranges("bytes=0-3,2-5", 10, true).ignore_);
+    FLEXEDGE_REQUIRE(select_cache_ranges("bytes=999999999999999999999-", 10, true).ignore_);
+    FLEXEDGE_REQUIRE(select_cache_ranges("bytes=-0", 10, true).ranges_.empty());
+    FLEXEDGE_REQUIRE(!parse_origin_content_range("bytes 0-10/*"));
+    for (const bool strong : {false, true}) {
+        flexedge::cache::rule rule;
+        auto& settings = rule.settings_.emplace();
+        settings.enabled_ = {"etag", "browser"};
+        settings.strong_etags_ = strong;
+        rule.browser_ttl_mode_ = "override_origin";
+        rule.browser_ttl_seconds_ = 0;
+        origin_response_codec tagged(exchange(site), false, nullptr);
+        tagged.set_cache_rule(rule);
+        tagged.capture_for_cache();
+        FLEXEDGE_REQUIRE(tagged.consume_head("HTTP/1.1 200 OK\r\nETag: \"tag\"\r\nContent-Length: 2\r\n\r\nok") == origin_response_head_status::ready);
+        const auto output = tagged.take_output();
+        FLEXEDGE_REQUIRE(output.find(strong ? "ETag: \"tag\"" : "ETag: W/\"tag\"") != std::string::npos);
+        FLEXEDGE_REQUIRE(output.find("Cache-Control: public, max-age=0\r\n") != std::string::npos);
+    }
+}
 }  // namespace
 int main() {
     try {
@@ -458,6 +543,7 @@ int main() {
         informational_progress();
         connection_field_boundaries();
         large_stream();
+        range_projection();
         std::cout << "response streaming passed\n";
         return 0;
     } catch (const std::exception& error) {

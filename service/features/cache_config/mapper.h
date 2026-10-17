@@ -2,6 +2,7 @@
 #include <ruvia/web/model_json.h>
 
 #include "common/cache_policy.h"
+#include "service/features/cache_config/settings_mapper.h"
 #include "service/features/cache_config/transport.h"
 namespace service::cache_config {
 inline flexedge::cache::rule from_dto(const rule_dto& input) {
@@ -31,7 +32,13 @@ inline flexedge::cache::rule from_dto(const rule_dto& input) {
     result.skip_set_cookie_ = input.get<"skip_set_cookie">().value_;
     result.browser_ttl_seconds_ = input.get<"browser_ttl_seconds">().value_;
     result.skip_no_cache_ = input.get<"skip_no_cache">() ? input.get<"skip_no_cache">()->value_ : true;
-    result.respect_request_no_cache_ = input.get<"respect_request_no_cache">() ? input.get<"respect_request_no_cache">()->value_ : true;
+    result.respect_request_no_cache_ = input.get<"respect_request_no_cache">() ? input.get<"respect_request_no_cache">()->value_ : false;
+    result.skip_request_cookie_ = input.get<"skip_request_cookie">() ? input.get<"skip_request_cookie">()->value_ : false;
+    result.browser_ttl_mode_ = input.get<"browser_ttl_mode">() ? std::string(input.get<"browser_ttl_mode">()->view()) : result.browser_ttl_seconds_ > 0 ? "override_origin"
+                                                                                                                                                        : "default";
+    if (input.get<"settings">()) {
+        result.settings_ = from_dto(*input.get<"settings">());
+    }
     return result;
 }
 inline flexedge::cache::policy from_dto(const policy_dto& input) {
@@ -67,6 +74,7 @@ inline rule_dto to_dto(const flexedge::cache::rule& input, ruvia::model_options 
     for (const auto& value : input.methods_) {
         result.ensure<"methods">().emplace_back(value, options);
     }
+    (void)result.ensure<"status_codes">();
     for (const auto& value : input.status_codes_) {
         result.ensure<"status_codes">().push_back(value);
     }
@@ -76,6 +84,11 @@ inline rule_dto to_dto(const flexedge::cache::rule& input, ruvia::model_options 
     result.set<"browser_ttl_seconds">(input.browser_ttl_seconds_);
     result.set<"skip_no_cache">(input.skip_no_cache_);
     result.set<"respect_request_no_cache">(input.respect_request_no_cache_);
+    result.set<"skip_request_cookie">(input.skip_request_cookie_);
+    result.set<"browser_ttl_mode">(input.browser_ttl_mode_);
+    if (input.settings_) {
+        result.set<"settings">(to_dto(*input.settings_, options));
+    }
     return result;
 }
 inline policy_dto to_dto(const flexedge::cache::policy& input, ruvia::model_options options = {}) {

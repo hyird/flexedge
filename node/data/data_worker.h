@@ -279,7 +279,7 @@ private:
     }
 
     [[nodiscard]] http_session_context session_context() noexcept {
-        return {.runtime_ = runtime_, .health_ = *health_, .metrics_ = metrics_, .clients_ = clients_, .logs_ = logs_, .origin_connections_ = origin_connections_, .request_buffers_ = request_buffers_, .response_buffers_ = response_buffers_, .cache_ = &cache_};
+        return {.runtime_ = runtime_, .health_ = *health_, .metrics_ = metrics_, .clients_ = clients_, .logs_ = logs_, .origin_connections_ = origin_connections_, .request_buffers_ = request_buffers_, .response_buffers_ = response_buffers_, .cache_ = &cache_, .refresh_ = &cache_refresh_};
     }
 
     ruvia::task<std::pair<bool, std::string>> prewarm_url(const v2::CacheCommand& command,
@@ -561,6 +561,7 @@ private:
     ruvia::channel_sender<owned_data_worker_result> cache_results_;
     response_cache cache_;
     ruvia::task_scope operations_;
+    cache_refresh_runtime cache_refresh_{loop_, operations_};
     runtime_state runtime_;
     worker_metrics metrics_;
     connected_clients clients_;

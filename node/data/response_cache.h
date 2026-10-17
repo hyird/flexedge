@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -20,12 +21,17 @@
 #include <utility>
 #include <vector>
 
-#include "common/cache_policy.h"
+#include "common/cache_defaults.h"
 #include "common/cache_url.h"
 #include "node/data/buffered_bytes_budget.h"
 #include "node/data/cache_capacity.h"
+#include "node/data/cache_deception.h"
 #include "node/data/cache_disk_record.h"
+#include "node/data/cache_expression.h"
+#include "node/data/cache_key.h"
+#include "node/data/cache_range.h"
 #include "node/data/cache_response_head.h"
+#include "node/data/cache_vary.h"
 #include "node/data/response_compression.h"
 #include "node/proto/edge_control.pb.h"
 
@@ -37,15 +43,14 @@ struct cache_invalidation_url final {
     flexedge::cache::url url_{};
 };
 
-// The website owns the cached representation. Its domain aliases do not create
-// separate objects; protocol, target and Vary still distinguish representations.
+// The complete origin (scheme and authority) participates in the default key.
 inline std::pair<std::string_view, std::string_view> cache_resource_address(std::string_view url) {
     const auto separator = url.find("://");
     const auto target = separator == std::string_view::npos ? separator : url.find('/', separator + 3);
     if (target == std::string_view::npos) {
         throw std::invalid_argument("cache URL must be normalized");
     }
-    return {url.substr(0, separator), url.substr(target)};
+    return {url.substr(0, target), url.substr(target)};
 }
 
 inline std::string cache_file_name() {
@@ -67,12 +72,62 @@ inline std::string cache_file_name() {
 
 inline std::string cache_header(const cache_headers& headers, std::string_view name) {
     std::string result;
+    bool found = false;
     for (const auto& [key, value] : headers) {
         if (flexedge::route_policy::ascii_equal(key, name)) {
-            if (!result.empty()) {
+            if (found) {
                 result.append(",");
             }
             result.append(value);
+            found = true;
+        }
+    }
+    return result;
+}
+inline std::string cache_request_vary(const flexedge::cache::rule& rule, const cache_headers& headers, std::string_view name, std::string_view encoding) {
+    if (cache_vary_action(rule, name) == "normalize" && name != "accept" && name != "accept-language" && name != "accept-encoding") {
+        std::string result;
+        bool found = false;
+        for (const auto& field : headers) {
+            if (!flexedge::route_policy::ascii_equal(name, field.first)) {
+                continue;
+            }
+            if (found) {
+                result += ',';
+            }
+            result += flexedge::route_policy::trim_ows(field.second);
+            found = true;
+        }
+        return result;
+    }
+    return cache_vary_value(rule, name, cache_header(headers, name), encoding);
+}
+inline bool cache_has_header(const cache_headers& headers, std::string_view name) {
+    return std::ranges::any_of(headers, [&](const auto& field) { return flexedge::route_policy::ascii_equal(field.first, name); });
+}
+inline std::string cache_edge_control(const cache_headers& headers) {
+    for (const auto name : {"Cloudflare-CDN-Cache-Control", "CDN-Cache-Control"}) {
+        if (cache_has_header(headers, name)) {
+            return cache_header(headers, name);
+        }
+    }
+    return cache_has_header(headers, "Surrogate-Control") ? std::string{} : cache_header(headers, "Cache-Control");
+}
+inline std::string cache_cookie_value(const cache_headers& headers, std::string_view name) {
+    std::string result;
+    for (const auto& [key, text] : headers) {
+        if (!flexedge::route_policy::ascii_equal(key, "Cookie")) {
+            continue;
+        }
+        auto input = std::string_view(text);
+        while (!input.empty()) {
+            const auto separator = input.find(';');
+            const auto token = flexedge::route_policy::trim_ows(input.substr(0, separator));
+            const auto equal = token.find('=');
+            if (equal != std::string_view::npos && flexedge::route_policy::trim_ows(token.substr(0, equal)) == name) {
+                append_cache_key_part(result, flexedge::route_policy::trim_ows(token.substr(equal + 1)));
+            }
+            input = separator == std::string_view::npos ? std::string_view{} : input.substr(separator + 1);
         }
     }
     return result;
@@ -148,6 +203,43 @@ inline bool cache_has_directive(std::string_view input, std::string_view name) {
     }
     return false;
 }
+// Qualified private/no-cache directives apply only to their named fields.
+// Invalid field lists are treated as an unqualified restriction.
+inline bool cache_directive_applies(std::string_view input, std::string_view name, std::string_view field = {}) {
+    while (!input.empty()) {
+        const auto token = cache_next_directive(input);
+        const auto equal = token.find('=');
+        if (!flexedge::route_policy::ascii_equal(flexedge::route_policy::trim_ows(token.substr(0, equal)), name)) {
+            continue;
+        }
+        if (equal == std::string_view::npos) {
+            return true;
+        }
+        auto fields = flexedge::route_policy::trim_ows(token.substr(equal + 1));
+        if (fields.size() < 2 || fields.front() != '"' || fields.back() != '"') {
+            return true;
+        }
+        fields = fields.substr(1, fields.size() - 2);
+        bool matches{};
+        while (!fields.empty()) {
+            const auto comma = fields.find(',');
+            const auto current = flexedge::route_policy::trim_ows(fields.substr(0, comma));
+            if (!flexedge::route_policy::http_token(current)) {
+                return true;
+            }
+            matches = matches || flexedge::route_policy::ascii_equal(current, field);
+            fields = comma == std::string_view::npos ? std::string_view{} : fields.substr(comma + 1);
+        }
+        if (matches) {
+            return true;
+        }
+    }
+    return false;
+}
+inline bool cache_requires_validation(std::string_view control, const cache_headers& headers) {
+    return cache_directive_applies(control, "no-cache") ||
+           std::ranges::any_of(headers, [&](const auto& field) { return cache_directive_applies(control, "no-cache", field.first); });
+}
 inline std::optional<std::int64_t> cache_directive_seconds(std::string_view input, std::string_view name) {
     std::optional<std::int64_t> result;
     while (!input.empty()) {
@@ -196,6 +288,48 @@ inline std::string cache_http_date(std::time_t timestamp) {
     stream << std::put_time(&value, "%a, %d %b %Y %H:%M:%S GMT");
     return stream.str();
 }
+
+// Zero preserves origin headers; -1 disables browser storage. The zone default
+// is a four-hour minimum; explicit Cache Rules can respect or override origin.
+inline std::int64_t cache_browser_ttl(const flexedge::cache::rule& rule, const cache_response_head& head) {
+    if (rule.browser_ttl_mode_ == "bypass") {
+        return -1;
+    }
+    if (rule.browser_ttl_mode_ == "respect_origin") {
+        return 0;
+    }
+    if (!rule.status_codes_.empty() && std::ranges::find(rule.status_codes_, head.status_) == rule.status_codes_.end()) {
+        return 0;
+    }
+    const auto control = cache_header(head.headers_, "Cache-Control");
+    if (((flexedge::cache::origin_control_enabled(rule) || cache_has_header(head.headers_, "Cloudflare-CDN-Cache-Control")) && cache_has_directive(control, "private")) || cache_has_directive(control, "no-store") ||
+        cache_has_directive(control, "no-cache") || !cache_header(head.headers_, "Set-Cookie").empty()) {
+        return 0;
+    }
+    const auto configured = rule.browser_ttl_seconds_ > 0 ? rule.browser_ttl_seconds_ : 14400;
+    if (rule.browser_ttl_mode_ == "override_origin") {
+        return rule.browser_ttl_seconds_ == 0 ? -2 : rule.browser_ttl_seconds_;
+    }
+    auto origin = cache_directive_seconds(control, "max-age");
+    if (!origin) {
+        if (const auto expires = ruvia::parse_http_date(cache_header(head.headers_, "Expires"))) {
+            const auto date = ruvia::parse_http_date(cache_header(head.headers_, "Date")).value_or(std::time(nullptr));
+            origin = static_cast<std::int64_t>(*expires - date);
+        }
+    }
+    return origin && *origin >= configured ? 0 : configured;
+}
+inline bool cache_allows_authorization(const cache_headers& headers, bool origin_control = true) {
+    if (!origin_control && !cache_has_header(headers, "Cloudflare-CDN-Cache-Control")) {
+        return true;
+    }
+    const auto control = cache_edge_control(headers);
+    return cache_has_directive(control, "public") || cache_has_directive(control, "must-revalidate") ||
+           cache_directive_seconds(control, "s-maxage").has_value();
+}
+inline bool cache_origin_control(const flexedge::cache::rule& rule, const cache_headers& headers) {
+    return flexedge::cache::origin_control_enabled(rule) || cache_has_header(headers, "Cloudflare-CDN-Cache-Control");
+}
 inline bool cache_wildcard(std::string_view value, std::string_view pattern) {
     std::size_t at{}, next{}, star = std::string_view::npos, retry{};
     while (at < value.size()) {
@@ -216,50 +350,6 @@ inline bool cache_wildcard(std::string_view value, std::string_view pattern) {
         ++next;
     }
     return next == pattern.size();
-}
-
-struct cache_byte_range final {
-    std::size_t offset_{}, length_{};
-    bool satisfiable_{};
-};
-inline std::optional<cache_byte_range> parse_cache_range(std::string_view field, std::size_t size) {
-    if (!field.starts_with("bytes=") || field.find(',') != std::string_view::npos) {
-        return std::nullopt;
-    }
-    field.remove_prefix(6);
-    const auto dash = field.find('-');
-    if (dash == std::string_view::npos) {
-        return std::nullopt;
-    }
-    const auto number = [](std::string_view value) -> std::optional<std::size_t> {
-        std::size_t result{};
-        const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
-        if (value.empty() || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()) {
-            return std::nullopt;
-        }
-        return result;
-    };
-    if (dash == 0) {
-        const auto suffix = number(field.substr(1));
-        if (!suffix) {
-            return std::nullopt;
-        }
-        const auto length = (std::min)(*suffix, size);
-        return cache_byte_range{size - length, length, length != 0};
-    }
-    const auto start = number(field.substr(0, dash));
-    if (!start) {
-        return std::nullopt;
-    }
-    const auto tail = field.substr(dash + 1);
-    const auto end = tail.empty() ? std::optional<std::size_t>{size ? size - 1 : 0} : number(tail);
-    if (!end) {
-        return std::nullopt;
-    }
-    if (*start >= size || *end < *start) {
-        return cache_byte_range{};
-    }
-    return cache_byte_range{*start, (std::min)(*end, size - 1) - *start + 1, true};
 }
 
 // Published objects and every value reachable from them are immutable.
@@ -641,7 +731,7 @@ private:
                 record.values_[2] > flexedge::cache::maximum_object_bytes || record.values_[3] < 200 || record.values_[3] > 599 ||
                 record.values_[7] <= static_cast<std::uint64_t>(std::time(nullptr)) || record.vary_.size() > 16 ||
                 record.values_[4] > 31536000 || record.values_[5] > 4102444800ULL || record.values_[6] > 4102444800ULL || record.values_[7] > 4102444800ULL ||
-                record.values_[8] > 31536000 || record.values_[9] > 3600 || record.website_.size() > 128 || record.policy_.size() > 128 || record.url_.size() > 8192 ||
+                (record.values_[8] > 31536000 && record.values_[8] < (std::numeric_limits<std::uint64_t>::max)() - 1) || record.values_[9] > 31536000 || record.website_.size() > 128 || record.policy_.size() > 128 || record.url_.size() > 8192 ||
                 record.values_[11] != root.epochs_["website:" + record.website_] ||
                 record.values_[12] != root.epochs_["policy:" + record.policy_] ||
                 std::filesystem::file_size(body) != record.values_[2]) {
@@ -670,7 +760,8 @@ private:
             item->stored_at_ = now;
             item->expires_at_ = now + std::chrono::seconds(static_cast<std::int64_t>(record.values_[6]) - wall);
             item->retain_until_ = now + std::chrono::seconds(static_cast<std::int64_t>(record.values_[7]) - wall);
-            item->browser_ttl_seconds_ = static_cast<std::int64_t>(record.values_[8]);
+            item->browser_ttl_seconds_ = record.values_[8] == (std::numeric_limits<std::uint64_t>::max)() ? -1 : record.values_[8] == (std::numeric_limits<std::uint64_t>::max)() - 1 ? -2
+                                                                                                                                                                                      : static_cast<std::int64_t>(record.values_[8]);
             item->stale_if_error_seconds_ = static_cast<std::int64_t>(record.values_[9]);
             item->ignore_query_ = record.values_[10] != 0;
             item->website_epoch_ = record.values_[11];
@@ -717,14 +808,11 @@ public:
         const auto found = snapshot.epochs_.find(key);
         return found == snapshot.epochs_.end() ? 0 : found->second;
     }
-    static std::string_view request_bypass_reason(std::string_view method, const cache_headers& headers) {
+    static std::string_view request_bypass_reason(const flexedge::cache::rule& rule, std::string_view method, const cache_headers& headers) {
         if (method != "GET" && method != "HEAD") {
             return "request_method";
         }
-        if (!cache_header(headers, "Authorization").empty()) {
-            return "request_authorization";
-        }
-        if (!cache_header(headers, "Cookie").empty()) {
+        if (rule.skip_request_cookie_ && !cache_header(headers, "Cookie").empty()) {
             return "request_cookie";
         }
         if (!cache_header(headers, "Upgrade").empty()) {
@@ -738,43 +826,51 @@ public:
         }
         return {};
     }
-    static bool requires_validation(const cache_headers& headers) {
-        const auto control = cache_header(headers, "Cache-Control");
-        return cache_has_directive(control, "no-cache") ||
-               cache_has_directive(cache_header(headers, "Pragma"), "no-cache") ||
-               cache_directive_seconds(control, "max-age").value_or(1) == 0;
-    }
-    bool eligible(std::string_view method, const cache_headers& headers) const {
-        return request_bypass_reason(method, headers).empty();
-    }
-    static std::string_view response_bypass_reason(const flexedge::cache::rule& rule, const cache_response_head& head) {
-        const auto control = cache_header(head.headers_, "Cache-Control");
-        if (cache_has_directive(control, "private")) {
+    static std::string_view response_bypass_reason(const flexedge::cache::rule& rule, const cache_response_head& head, bool authorization = false, std::string_view target = {}) {
+        const auto control = cache_edge_control(head.headers_);
+        const auto override_origin = flexedge::cache::overrides_origin(rule, head.status_);
+        if (flexedge::cache::status_cache_ttl(rule, head.status_) == -1) {
+            return "origin_status_ttl";
+        }
+        if (flexedge::cache::configured(rule, "armor") && rule.settings_->armor_ && !override_origin &&
+            !cache_has_directive(control, "public") && !cache_directive_seconds(control, "max-age") && !cache_directive_seconds(control, "s-maxage") &&
+            !cache_content_type_matches(target, cache_header(head.headers_, "Content-Type"))) {
+            return "origin_cache_deception";
+        }
+        if (!override_origin && cache_directive_applies(control, "private")) {
             return "origin_private";
         }
-        if (cache_has_directive(control, "no-store")) {
+        if (!override_origin && cache_has_directive(control, "no-store")) {
             return "origin_no_store";
         }
-        if (rule.skip_no_cache_ && cache_has_directive(control, "no-cache")) {
-            return "origin_no_cache";
+        if (authorization && !cache_allows_authorization(head.headers_, flexedge::cache::origin_control_enabled(rule))) {
+            return "origin_authorization";
         }
-        if (rule.skip_set_cookie_ && !cache_header(head.headers_, "Set-Cookie").empty()) {
+        if (!override_origin && cache_origin_control(rule, head.headers_) && !cache_header(head.headers_, "Set-Cookie").empty()) {
             return "origin_set_cookie";
         }
-        if (std::ranges::find(rule.status_codes_, head.status_) == rule.status_codes_.end()) {
+        if (!rule.status_codes_.empty() && std::ranges::find(rule.status_codes_, head.status_) == rule.status_codes_.end()) {
             return "origin_status";
         }
         if (is_event_stream_content_type(cache_header(head.headers_, "Content-Type"))) {
             return "origin_event_stream";
         }
         const auto vary = cache_tokens(cache_header(head.headers_, "Vary"));
-        if (vary.size() > 16 || std::ranges::find(vary, "*") != vary.end() ||
+        if (vary.size() > 64 || std::ranges::find(vary, "*") != vary.end() ||
             !std::ranges::all_of(vary, [](const auto& field) { return flexedge::route_policy::http_token(field); })) {
             return "origin_vary";
         }
+        if (std::ranges::any_of(vary, [&](const auto& name) { return cache_vary_action(rule, name) == "bypass"; })) {
+            return "origin_vary";
+        }
+        if (!override_origin && !cache_origin_control(rule, head.headers_) &&
+            (cache_has_directive(control, "no-cache") || cache_directive_seconds(control, "max-age") == 0 || cache_directive_seconds(control, "s-maxage") == 0)) {
+            return "origin_no_cache";
+        }
         return {};
     }
-    const flexedge::cache::rule* matching(const v2::Website& website, std::string_view target, std::string_view method) {
+    const flexedge::cache::rule* matching(const v2::Website& website, std::string_view target, std::string_view method,
+        const cache_headers& headers = {}, bool secure = false) {
         if (!website.has_response_cache() || !website.response_cache().enabled()) {
             return nullptr;
         }
@@ -787,7 +883,11 @@ public:
             compiled_policy value;
             value.policy_ = flexedge::cache::from_proto(website.response_cache());
             value.patterns_.resize(value.policy_.rules_.size());
+            value.expressions_.resize(value.policy_.rules_.size());
             for (std::size_t i = 0; i < value.policy_.rules_.size(); ++i) {
+                if (value.policy_.rules_[i].match_type_ == "expression") {
+                    value.expressions_[i].emplace(value.policy_.rules_[i].patterns_.front());
+                }
                 if (value.policy_.rules_[i].match_type_ == "regex") {
                     for (const auto& pattern : value.policy_.rules_[i].patterns_) {
                         value.patterns_[i].push_back(flexedge::route_policy::compile_pattern(pattern));
@@ -797,12 +897,19 @@ public:
             found = policies_.emplace(identity, std::move(value)).first;
         }
         const auto path = target.substr(0, target.find('?'));
+        auto& merged = found->second.merged_rule_;
+        merged = {};
+        const flexedge::cache::rule* selected{};
         for (std::size_t i = 0; i < found->second.policy_.rules_.size(); ++i) {
             const auto& rule = found->second.policy_.rules_[i];
             if (!rule.enabled_ || std::ranges::find(rule.methods_, method) == rule.methods_.end()) {
                 continue;
             }
             bool matches = rule.match_type_ == "all";
+            if (found->second.expressions_[i]) {
+                const auto host = flexedge::route_policy::hostname(cache_header(headers, "Host"));
+                matches = found->second.expressions_[i]->matches({target, method, host, secure, headers});
+            }
             for (std::size_t p = 0; !matches && p < rule.patterns_.size(); ++p) {
                 const auto& pattern = rule.patterns_[p];
                 if (rule.match_type_ == "exact") {
@@ -818,22 +925,43 @@ public:
                 }
             }
             if (matches) {
-                return &rule;
+                flexedge::cache::apply_rule(merged, rule);
+                selected = &merged;
             }
         }
-        return nullptr;
+        return selected;
     }
     cache_lookup lookup(const v2::Website& website, const flexedge::cache::rule& rule,
-        std::string url, const cache_headers& headers, bool acquire = true, bool existing_only = false) {
+        std::string url, const cache_headers& headers, bool acquire = true, bool existing_only = false,
+        std::string_view origin_hostname = {}, std::string_view country = "XX", std::string_view representation = {}) {
         trim_for_pressure(website.response_cache());
-        if (rule.ignore_query_) {
-            url.resize(url.find('?') == std::string::npos ? url.size() : url.find('?'));
-        }
         const auto encoding = cache_header(headers, "Range").empty() ? ruvia::http_content_coding_token(preferred_response_coding(website, cache_header(headers, "Accept-Encoding"))) : std::string_view("identity");
         const auto website_revision = std::to_string(website.revision());
         const auto policy_revision = std::to_string(website.response_cache().revision());
-        const auto [scheme, target] = cache_resource_address(url);
-        const std::array<std::string_view, 8> parts{website.id(), website_revision, website.response_cache().id(), policy_revision, rule.id_, scheme, target, encoding};
+        const auto [origin, target] = cache_resource_address(url);
+        const auto query_target = cache_query_target(target, rule);
+        const auto* custom = flexedge::cache::configured(rule, "key") ? &rule.settings_->key_ : nullptr;
+        std::string resolved_origin;
+        if (custom && custom->host_ == "resolved" && !origin_hostname.empty()) {
+            const auto scheme = origin.find("://");
+            resolved_origin = std::string(origin.substr(0, scheme + 3)) + std::string(origin_hostname);
+        }
+        const auto resolved_host = resolved_origin.empty() ? origin : std::string_view(resolved_origin);
+        constexpr std::array<std::string_view, 10> header_names{"Origin", "x-http-method-override", "x-http-method", "x-method-override",
+            "x-forwarded-host", "x-host", "x-forwarded-scheme", "x-original-url", "x-rewrite-url", "forwarded"};
+        std::array<std::string, 10> key_headers;
+        std::array<std::string_view, 18> parts{website.id(), website_revision, website.response_cache().id(), policy_revision, rule.id_, resolved_host, query_target, encoding};
+        for (std::size_t index = 0; index < header_names.size(); ++index) {
+            key_headers[index] = cache_header(headers, header_names[index]);
+            if (index == 0 && custom && !custom->include_origin_) {
+                key_headers[index].clear();
+            }
+            if (header_names[index] == "x-forwarded-scheme" &&
+                (flexedge::route_policy::ascii_equal(key_headers[index], "http") || flexedge::route_policy::ascii_equal(key_headers[index], "https"))) {
+                key_headers[index].clear();
+            }
+            parts[index + 8] = key_headers[index];
+        }
         std::string key;
         std::size_t capacity{};
         for (const auto part : parts) {
@@ -846,20 +974,64 @@ public:
         for (const auto part : parts) {
             key.append(std::to_string(part.size())).append(":").append(part);
         }
+        if (!representation.empty()) {
+            append_cache_key_part(key, representation);
+        }
+        if (flexedge::cache::configured(rule, "etag") && rule.settings_->strong_etags_) {
+            const auto raw = cache_header(headers, "Accept-Encoding");
+            append_cache_key_part(key, flexedge::cache::configured(rule, "vary") && cache_vary_action(rule, "accept-encoding") == "normalize" ? normalize_cache_vary(raw, "accept-encoding") : raw);
+        }
+        if (custom) {
+            if (custom->country_) {
+                append_cache_key_part(key, country);
+            }
+            for (const auto& name : custom->headers_) {
+                append_cache_key_part(key, cache_header(headers, name));
+            }
+            for (const auto& name : custom->header_presence_) {
+                append_cache_key_part(key, cache_has_header(headers, name) ? "1" : "0");
+            }
+            for (const auto& field : custom->header_values_) {
+                const auto text = cache_header(headers, field.name_);
+                std::string matches;
+                for (const auto& value : field.values_) {
+                    if (text.find(value) != std::string::npos) {
+                        append_cache_key_part(matches, value);
+                    }
+                }
+                append_cache_key_part(key, matches);
+            }
+            for (const auto& name : custom->cookies_) {
+                append_cache_key_part(key, cache_cookie_value(headers, name));
+            }
+            for (const auto& name : custom->cookie_presence_) {
+                append_cache_key_part(key, cache_cookie_value(headers, name).empty() ? "0" : "1");
+            }
+            if (custom->language_) {
+                auto language = cache_header(headers, "Accept-Language");
+                language.resize((std::min)(language.find_first_of(",;-"), language.size()));
+                std::ranges::transform(language, language.begin(), [](unsigned char c) { return flexedge::route_policy::lower_ascii(c); });
+                append_cache_key_part(key, language);
+            }
+        }
+        if (flexedge::cache::configured(rule, "device") && rule.settings_->device_) {
+            append_cache_key_part(key, cache_device_type(cache_header(headers, "User-Agent")));
+        }
         auto root = publication_->snapshot();
         for (;;) {
             const auto now = std::chrono::steady_clock::now();
             std::shared_ptr<const cached_response> stale;
             if (const auto entries = root->entries_.find(key); entries != root->entries_.end()) {
                 for (const auto& item : entries->second) {
+                    if (cache_has_header(headers, "Authorization") && !cache_allows_authorization(item->headers_, flexedge::cache::origin_control_enabled(rule))) {
+                        continue;
+                    }
                     if (item->retain_until_ <= now || !std::ranges::all_of(item->vary_, [&](const auto& vary) {
-                            return (vary.first == "accept-encoding" ? encoding : cache_header(headers, vary.first)) == vary.second;
+                            return cache_request_vary(rule, headers, vary.first, encoding) == vary.second;
                         })) {
                         continue;
                     }
-                    const auto age = item->initial_age_ + std::chrono::duration_cast<std::chrono::seconds>(now - item->stored_at_).count();
-                    const auto max_age = rule.respect_request_no_cache_ ? cache_directive_seconds(cache_header(headers, "Cache-Control"), "max-age") : std::nullopt;
-                    if (item->expires_at_ > now && (!max_age || age <= *max_age)) {
+                    if (item->expires_at_ > now) {
                         return {.response_ = record_hit(key, item), .tier_ = item->body_ ? "hit_memory" : "hit_disk", .key_ = std::move(key)};
                     }
                     if (!stale || item->sequence_ > stale->sequence_) {
@@ -913,6 +1085,21 @@ public:
     static bool usable_stale(const cached_response& object) {
         return object.stale_if_error_seconds_ > 0 && std::chrono::steady_clock::now() < object.expires_at_ + std::chrono::seconds(object.stale_if_error_seconds_);
     }
+    static bool updating_stale(const flexedge::cache::rule& rule, const cached_response& object) {
+        if (flexedge::cache::configured(rule, "stale") && !rule.settings_->serve_stale_) {
+            return false;
+        }
+        if (flexedge::cache::status_cache_ttl(rule, object.status_) == 0) {
+            return false;
+        }
+        const auto control = cache_edge_control(object.headers_);
+        if (!flexedge::cache::overrides_origin(rule, object.status_) && cache_origin_control(rule, object.headers_) &&
+            (cache_requires_validation(control, object.headers_) || cache_has_directive(control, "must-revalidate") || cache_has_directive(control, "proxy-revalidate") || cache_directive_seconds(control, "s-maxage").has_value())) {
+            return false;
+        }
+        const auto seconds = cache_directive_seconds(control, "stale-while-revalidate").value_or(0);
+        return seconds > 0 && std::chrono::steady_clock::now() < object.expires_at_ + std::chrono::seconds(seconds);
+    }
     void abandon(const cache_ticket& ticket) {
         auto root = publication_->snapshot();
         for (;;) {
@@ -928,8 +1115,8 @@ public:
         }
     }
     std::unique_ptr<cache_fill> begin_fill(const v2::CachePolicy& policy, const flexedge::cache::rule& rule,
-        const cache_response_head& head, buffered_bytes_lease reservation) {
-        if (!response_bypass_reason(rule, head).empty()) {
+        const cache_response_head& head, buffered_bytes_lease reservation, bool authorization = false) {
+        if (!response_bypass_reason(rule, head, authorization).empty()) {
             return {};
         }
         const auto limits = capacity_limits(policy, *publication_->snapshot());
@@ -949,10 +1136,23 @@ public:
         flush_touches();
         trim_for_pressure(policy, true);
         const auto& response = fill.head_;
-        const auto control = cache_header(response.headers_, "Cache-Control");
+        if (response.status_ == 206) {
+            const auto range = parse_origin_content_range(cache_header(response.headers_, "Content-Range"));
+            const auto maximum = rule.max_object_bytes_ ? rule.max_object_bytes_ : policy.max_object_bytes();
+            if (!range || range->total_ > static_cast<std::uint64_t>(maximum) || fill.body_bytes_ != range->last_ - range->first_ + 1) {
+                fill.failure_reason_ = "object_size_limit";
+                abandon(ticket);
+                return false;
+            }
+        }
+        if (const auto reason = response_bypass_reason(rule, response, cache_has_header(request, "Authorization"), ticket.url_); !reason.empty()) {
+            fill.failure_reason_ = std::string(reason);
+            abandon(ticket);
+            return false;
+        }
         const auto content_encoding = cache_header(response.headers_, "Content-Encoding");
         if (!fill.active_ || fill.body_bytes_ < static_cast<std::size_t>(rule.min_object_bytes_) ||
-            (!content_encoding.empty() && !flexedge::route_policy::ascii_equal(content_encoding, "identity") &&
+            (!(flexedge::cache::configured(rule, "etag") && rule.settings_->strong_etags_) && !content_encoding.empty() && !flexedge::route_policy::ascii_equal(content_encoding, "identity") &&
                 !flexedge::route_policy::ascii_equal(content_encoding, ticket.encoding_))) {
             abandon(ticket);
             return false;
@@ -1168,9 +1368,9 @@ public:
                     }
                     if (matched && (command.scope() == "urls" || command.scope() == "prefix")) {
                         matched = false;
-                        const auto [scheme, target] = cache_resource_address(item->url_);
+                        const auto [origin, target] = cache_resource_address(item->url_);
                         for (const auto& url : urls) {
-                            if (url.website_id_ != item->website_id_ || url.url_.scheme_ != scheme) {
+                            if (url.website_id_ != item->website_id_ || cache_resource_address(url.url_.value_).first != origin) {
                                 continue;
                             }
                             std::string_view candidate = url.url_.target_;
@@ -1260,8 +1460,8 @@ private:
     }
     static bool metadata(cached_response& item, const cache_response_head& response,
         const flexedge::cache::rule& rule, const cache_headers& request, const std::string& encoding) {
-        const auto control = cache_header(response.headers_, "Cache-Control");
-        if (!response_bypass_reason(rule, response).empty()) {
+        const auto control = cache_edge_control(response.headers_);
+        if (!response_bypass_reason(rule, response, cache_has_header(request, "Authorization")).empty()) {
             return false;
         }
         const auto wall = std::time(nullptr);
@@ -1276,55 +1476,78 @@ private:
             }
         }
         item.initial_age_ = (std::max)(age, upstream_age);
-        auto seconds = rule.ttl_seconds_;
-        if (rule.ttl_mode_ == "origin") {
+        if (item.initial_age_ > 31536000) {
+            return false;
+        }
+        const auto override_origin = flexedge::cache::overrides_origin(rule, response.status_);
+        auto seconds = flexedge::cache::status_cache_ttl(rule, response.status_).value_or(rule.ttl_seconds_);
+        if (!override_origin) {
+            const auto requires_validation = cache_requires_validation(control, response.headers_);
             auto ttl = cache_directive_seconds(control, "s-maxage");
             if (!ttl) {
                 ttl = cache_directive_seconds(control, "max-age");
             }
-            if (!ttl) {
+            if (!ttl && !cache_has_header(response.headers_, "Cloudflare-CDN-Cache-Control") && !cache_has_header(response.headers_, "CDN-Cache-Control")) {
                 if (const auto expires = ruvia::parse_http_date(cache_header(response.headers_, "Expires"))) {
                     ttl = static_cast<std::int64_t>(*expires - date);
                 }
             }
-            seconds = ttl.value_or(0);
+            const auto fallback = response.status_ == 200 || response.status_ == 206 || response.status_ == 301 ? 7200 : response.status_ == 302 || response.status_ == 303 ? 1200
+                                                                                                                     : response.status_ == 404 || response.status_ == 410   ? 180
+                                                                                                                                                                            : 0;
+            if (!ttl && (fallback == 0 || rule.ttl_mode_ == "origin_strict") && !requires_validation) {
+                return false;
+            }
+            seconds = ttl.value_or(fallback);
+            if (requires_validation) {
+                seconds = 0;
+            }
         }
-        if (seconds <= item.initial_age_) {
+        if (override_origin && seconds < 0) {
             return false;
         }
         item.headers_ = response.headers_;
+        if (override_origin || !cache_origin_control(rule, response.headers_)) {
+            std::erase_if(item.headers_, [](const auto& field) { return flexedge::route_policy::ascii_equal(field.first, "Set-Cookie"); });
+        } else {
+            std::erase_if(item.headers_, [&](const auto& field) { return cache_directive_applies(control, "private", field.first); });
+        }
         item.status_ = response.status_;
         item.bytes_ = item.body_bytes_ + 256;
         for (const auto& field : item.headers_) {
             item.bytes_ += field.first.size() + field.second.size();
         }
-        item.browser_ttl_seconds_ = rule.browser_ttl_seconds_;
+        item.browser_ttl_seconds_ = cache_browser_ttl(rule, {response.status_, item.headers_});
         item.ignore_query_ = rule.ignore_query_;
         item.stored_at_ = std::chrono::steady_clock::now();
-        item.expires_at_ = item.stored_at_ + std::chrono::seconds(seconds - item.initial_age_);
-        item.stale_if_error_seconds_ = cache_directive_seconds(control, "stale-if-error").value_or(300);
-        item.stale_if_error_seconds_ = (std::min)(item.stale_if_error_seconds_, std::int64_t{3600});
-        if (cache_has_directive(control, "must-revalidate") || cache_has_directive(control, "proxy-revalidate") || cache_directive_seconds(control, "s-maxage").has_value()) {
+        item.expires_at_ = item.stored_at_ + std::chrono::seconds(seconds - (override_origin ? 0 : item.initial_age_));
+        item.stale_if_error_seconds_ = cache_directive_seconds(control, "stale-if-error").value_or(31536000);
+        if (seconds == 0 || (!override_origin && cache_origin_control(rule, response.headers_) && (cache_requires_validation(control, response.headers_) || cache_has_directive(control, "must-revalidate") || cache_has_directive(control, "proxy-revalidate") || cache_directive_seconds(control, "s-maxage").has_value()))) {
             item.stale_if_error_seconds_ = 0;
         }
         const bool validator = !cache_header(item.headers_, "ETag").empty() || !cache_header(item.headers_, "Last-Modified").empty();
         item.retain_until_ = item.expires_at_ + std::chrono::seconds((std::max)(item.stale_if_error_seconds_, validator ? std::int64_t{86400} : std::int64_t{300}));
+        item.retain_until_ = (std::max)(item.retain_until_, item.expires_at_ + std::chrono::seconds(cache_directive_seconds(control, "stale-while-revalidate").value_or(0)));
         item.vary_.clear();
         const auto vary = cache_tokens(cache_header(response.headers_, "Vary"));
-        if (vary.size() > 16 || std::ranges::find(vary, "*") != vary.end()) {
+        if (vary.size() > 64 || std::ranges::find(vary, "*") != vary.end()) {
             return false;
         }
         for (const auto& field : vary) {
             if (!flexedge::route_policy::http_token(field)) {
                 return false;
             }
-            item.vary_.emplace_back(field, field == "accept-encoding" ? encoding : cache_header(request, field));
+            if (cache_vary_action(rule, field) != "ignore") {
+                item.vary_.emplace_back(field, cache_request_vary(rule, request, field, encoding));
+            }
         }
         return true;
     }
     struct compiled_policy final {
         flexedge::cache::policy policy_{};
+        flexedge::cache::rule merged_rule_{};
         std::vector<std::vector<std::shared_ptr<const RE2>>> patterns_{};
+        std::vector<std::optional<cache_expression_program>> expressions_{};
     };
     struct capacity final {
         std::uint64_t memory_{}, disk_{};

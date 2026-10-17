@@ -15,6 +15,7 @@
 #include "node/proto/edge_control.pb.h"
 #include "node/proto/schema_version.h"
 #include "node/proto/website_validation.h"
+#include "node/runtime/country_database.h"
 
 namespace flexedge::node {
 
@@ -109,6 +110,7 @@ private:
         node_spec_ = std::move(spec);
         release_digest_ = state.release().digest_sha256();
         release_ = std::move(release);
+        validate_country_database(release_.countries());
     }
 
     void index_objects(const std::vector<v2::DeliveryObject>& objects) {

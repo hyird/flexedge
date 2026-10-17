@@ -9,7 +9,10 @@ import {
   websiteFormSchema,
   websiteHostnames,
 } from './website-form'
-import { websiteFormToConfig } from './website-form-mapping'
+import {
+  websiteFormToConfig,
+  websiteToFormValues,
+} from './website-form-mapping'
 import { collectWebsiteFormErrors } from './website-sections'
 
 function values() {
@@ -41,6 +44,33 @@ function values() {
 }
 
 describe('website settings validation', () => {
+  it('uses the selected cache policy as the only enablement choice', () => {
+    const policyId = '12345678-1234-4234-8234-123456789099'
+    const selected = websiteFormSchema.parse({
+      ...values(),
+      cache_policy_id: policyId,
+      cache_enabled: false,
+    })
+    expect(websiteFormToConfig(selected).cache_enabled).toBe(true)
+    expect(
+      websiteFormToConfig({
+        ...selected,
+        cache_policy_id: '',
+        cache_enabled: false,
+      }).cache_enabled
+    ).toBe(false)
+    const disabled = websiteToFormValues({
+      cluster_id: selected.cluster_id,
+      status: 'enabled',
+      config: {
+        ...defaultWebsiteConfig(),
+        cache_policy_id: policyId,
+        cache_enabled: false,
+      },
+    })
+    expect(disabled.cache_policy_id).toBe('')
+    expect(disabled.cache_enabled).toBe(false)
+  })
   it('requires certificate bindings exactly when HTTPS is enabled', () => {
     const certificate_ids = ['12345678-1234-4234-8234-123456789020']
     for (const input of [

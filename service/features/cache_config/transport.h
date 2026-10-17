@@ -1,5 +1,7 @@
 #pragma once
 #include <ruvia/web/model.h>
+
+#include "service/features/cache_config/settings_transport.h"
 namespace service::cache_config {
 RUVIA_MODEL(rule_dto,
     RUVIA_REQUIRED_FIELD(id, ruvia::string),
@@ -18,7 +20,10 @@ RUVIA_MODEL(rule_dto,
     RUVIA_REQUIRED_FIELD(skip_set_cookie, ruvia::bool_value),
     RUVIA_REQUIRED_FIELD(browser_ttl_seconds, ruvia::int64),
     RUVIA_OPTIONAL_FIELD(skip_no_cache, ruvia::bool_value),
-    RUVIA_OPTIONAL_FIELD(respect_request_no_cache, ruvia::bool_value));
+    RUVIA_OPTIONAL_FIELD(respect_request_no_cache, ruvia::bool_value),
+    RUVIA_OPTIONAL_FIELD(skip_request_cookie, ruvia::bool_value),
+    RUVIA_OPTIONAL_FIELD(browser_ttl_mode, ruvia::string),
+    RUVIA_OPTIONAL_FIELD(settings, rule_settings_dto));
 RUVIA_MODEL(policy_dto,
     RUVIA_REQUIRED_FIELD(storage, ruvia::string),
     RUVIA_REQUIRED_FIELD(memory_bytes, ruvia::int64),

@@ -128,6 +128,29 @@ public:
         return std::nullopt;
     }
 
+    template <typename visitor_type>
+    void visit_countries(const visitor_type& visitor) const {
+        for (std::size_t offset = index_start_; offset <= index_end_; offset += record_length_) {
+            const auto* record = content_.data() + offset;
+            const auto length = read_little_endian16(record + address_length_ * 2);
+            const auto pointer = read_little_endian32(record + address_length_ * 2 + 2);
+            if (length == 0 || length > xdb_maximum_region_length || pointer > content_.size() || length > content_.size() - pointer) {
+                continue;
+            }
+            const auto location = parse_location(std::string_view(reinterpret_cast<const char*>(content_.data() + pointer), length));
+            if (!location || location->country_.empty()) {
+                continue;
+            }
+            std::string first(address_length_, '\0'), last(address_length_, '\0');
+            for (std::size_t index = 0; index < address_length_; ++index) {
+                const auto stored = ip_version_ == 4 ? address_length_ - 1 - index : index;
+                first[index] = static_cast<char>(record[stored]);
+                last[index] = static_cast<char>(record[address_length_ + stored]);
+            }
+            visitor(ip_version_, std::move(first), std::move(last), location->country_);
+        }
+    }
+
 private:
     explicit xdb_reader(std::vector<std::uint8_t> content)
         : content_(std::move(content)) {}
@@ -215,6 +238,15 @@ public:
             return std::nullopt;
         }
         return location->country_;
+    }
+    template <typename visitor_type>
+    void visit_countries(const visitor_type& visitor) const {
+        if (ipv4_) {
+            ipv4_->visit_countries(visitor);
+        }
+        if (ipv6_) {
+            ipv6_->visit_countries(visitor);
+        }
     }
 
 private:

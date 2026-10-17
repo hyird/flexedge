@@ -2,13 +2,13 @@
 
 #include <string_view>
 
-#include "common/cache_policy.h"
+#include "common/cache_defaults.h"
 
 namespace service::cache_config {
 
 inline constexpr std::string_view default_policy_name{"默认缓存策略"};
 inline constexpr std::string_view default_policy_description{
-    "系统预置策略，可直接编辑。静态资源缓存一天。"};
+    "安全静态预设：仅缓存静态文件白名单，未匹配请求绕过缓存，遵循源站缓存限制，启用缓存欺骗防护。"};
 
 // Initial values only: persisted policies own their configuration after creation.
 inline flexedge::cache::policy default_policy() {
@@ -17,14 +17,7 @@ inline flexedge::cache::policy default_policy() {
     result.disk_percent_ = 50;
     result.memory_reserved_bytes_ = 512 * 1024 * 1024;
     result.disk_reserved_bytes_ = std::int64_t{5} * 1024 * 1024 * 1024;
-    result.rules_ = {
-        {.id_ = "cache-static",
-            .name_ = "静态资源缓存一天",
-            .patterns_ = {".html", ".css", ".js", ".mjs", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif",
-                ".svg", ".ico", ".woff", ".woff2", ".ttf", ".otf"},
-            .ttl_mode_ = "fixed",
-            .ttl_seconds_ = 86400},
-    };
+    result.rules_ = flexedge::cache::safe_static_rules();
     return result;
 }
 

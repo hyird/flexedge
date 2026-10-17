@@ -73,8 +73,8 @@ void verify_existing_tenants(const ruvia::db_config& base) {
                     "seeded policy only caches static resources for one day");
                 require(policy.memory_percent_ == 10 && policy.disk_percent_ == 50,
                     "seeded policy uses percentage capacity limits");
-                require(policy.rules_[0].skip_no_cache_ && policy.rules_[0].respect_request_no_cache_,
-                    "saved rules without no-cache fields preserve their previous behavior");
+                require(policy.rules_[0].skip_no_cache_ && !policy.rules_[0].respect_request_no_cache_,
+                    "omitted request refresh flags follow the CF default");
                 require(row[2].value().value() == "enabled", "default policy is available for website selection");
                 ++seeded;
             } else {
@@ -135,8 +135,8 @@ void verify_fresh_install(const ruvia::db_config& base) {
             "fresh installation creates a default policy with its tenant");
         require(service::cache_config::parse(rows.front()[2].value().value()).rules_.size() == 1,
             "fresh installation policy has default rules");
-        require(service::cache_config::parse(rows.front()[2].value().value()).max_object_bytes_ == 64 * 1024 * 1024,
-            "fresh installation defaults to 64MiB cache objects");
+        require(service::cache_config::parse(rows.front()[2].value().value()).max_object_bytes_ == 512 * 1024 * 1024,
+            "fresh installation uses the Cloudflare 512MiB object limit");
         require(service::cache_config::parse(rows.front()[2].value().value()).memory_percent_ == 50,
             "fresh installation defaults to 50 percent L1 memory");
         require(rows.front()[3].as<bool>().value(), "fresh installation policy is built-in");

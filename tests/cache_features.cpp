@@ -55,8 +55,8 @@ void expire(const std::shared_ptr<response_cache_publication>& publication, cons
 }
 void verify_large_objects() {
     auto policy = flexedge::cache::policy{};
-    FLEXEDGE_REQUIRE(policy.max_object_bytes_ == 64 * 1024 * 1024);
-    policy.max_object_bytes_ = 256 * 1024 * 1024;
+    FLEXEDGE_REQUIRE(policy.max_object_bytes_ == 512 * 1024 * 1024);
+    policy.max_object_bytes_ = 512 * 1024 * 1024;
     FLEXEDGE_REQUIRE(flexedge::cache::validate(policy).empty());
     ++policy.max_object_bytes_;
     FLEXEDGE_REQUIRE(!flexedge::cache::validate(policy).empty());
@@ -145,7 +145,9 @@ void verify() {
     cache.invalidate(clear, {});
     FLEXEDGE_REQUIRE(!cache.renew(*pending.ticket_));
     FLEXEDGE_REQUIRE(!cache.current(key, *fresh));
-    auto strict = insert(cache, site, rule, "public, max-age=600, must-revalidate");
+    auto origin_rule = rule;
+    origin_rule.ttl_mode_ = "origin";
+    auto strict = insert(cache, site, origin_rule, "public, max-age=600, must-revalidate");
     FLEXEDGE_REQUIRE(!response_cache::usable_stale(*strict));
 
     const auto range = parse_cache_range("bytes=2-5", 10);

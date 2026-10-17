@@ -32,6 +32,7 @@ import {
   cacheMatchLabels,
   cachePolicyInputSchema,
   cachePolicySchema,
+  defaultCacheRules,
   newCacheRule,
   type CachePolicy,
   type CachePolicyInput,
@@ -113,6 +114,7 @@ function PolicyEditor({
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [editing, setEditing] = useState<CacheRule>()
   const [removing, setRemoving] = useState(false)
+  const [applyingPreset, setApplyingPreset] = useState(false)
   const draft = useRevisionDraft({
     server: policy,
     save: (values: CachePolicyInput, revision) =>
@@ -242,7 +244,9 @@ function PolicyEditor({
           ? '—'
           : rule.ttl_mode === 'origin'
             ? '遵循源站'
-            : rule.ttl_seconds + ' 秒',
+            : rule.ttl_mode === 'origin_strict'
+              ? '遵循源站；无缓存头时绕过'
+              : rule.ttl_seconds + ' 秒',
     },
     {
       id: 'actions',
@@ -302,6 +306,30 @@ function PolicyEditor({
       },
     },
   ]
+  if (editing)
+    return (
+      <CacheRuleEditor
+        key={editing.id}
+        rule={editing}
+        onClose={() => {
+          setEditing(undefined)
+          draft.discard()
+        }}
+        onSave={async (rule) => {
+          const existing = value.config.rules.some(
+            (item) => item.id === rule.id
+          )
+          await saveRules(
+            existing
+              ? value.config.rules.map((item) =>
+                  item.id === rule.id ? rule : item
+                )
+              : [...value.config.rules, rule]
+          )
+          setEditing(undefined)
+        }}
+      />
+    )
   return (
     <Page
       title={base.name}
@@ -348,16 +376,28 @@ function PolicyEditor({
         {tab === 'rules' ? (
           <Section
             title='缓存规则'
-            description='从上到下匹配，首条命中生效；没有匹配规则时绕过缓存。'
+            description='从上到下应用，相同设置以后匹配的规则为准；未匹配启用规则的请求直接绕过缓存。'
             actions={
-              <Button
-                size='sm'
-                isDisabled={draft.isSaving || value.config.rules.length >= 128}
-                onPress={() => openRule(newCacheRule())}
-              >
-                <Plus />
-                添加规则
-              </Button>
+              <>
+                <Button
+                  size='sm'
+                  variant='secondary'
+                  isDisabled={draft.isSaving}
+                  onPress={() => setApplyingPreset(true)}
+                >
+                  使用安全静态预设
+                </Button>
+                <Button
+                  size='sm'
+                  isDisabled={
+                    draft.isSaving || value.config.rules.length >= 128
+                  }
+                  onPress={() => openRule(newCacheRule())}
+                >
+                  <Plus />
+                  添加规则
+                </Button>
+              </>
             }
           >
             <DataTable
@@ -368,7 +408,7 @@ function PolicyEditor({
               variant='secondary'
               empty={{
                 title: '尚未添加缓存规则',
-                description: '添加缓存条件后，匹配的内容才会缓存。',
+                description: '未匹配启用规则的请求直接绕过缓存。',
               }}
             />
             {draft.error && !editing && (
@@ -415,29 +455,17 @@ function PolicyEditor({
           <CachePolicyWebsites policyId={base.id} />
         )}
       </PageTabs>
-      {editing && (
-        <CacheRuleEditor
-          key={editing.id}
-          rule={editing}
-          onClose={() => {
-            setEditing(undefined)
-            draft.discard()
-          }}
-          onSave={async (rule) => {
-            const existing = value.config.rules.some(
-              (item) => item.id === rule.id
-            )
-            await saveRules(
-              existing
-                ? value.config.rules.map((item) =>
-                    item.id === rule.id ? rule : item
-                  )
-                : [...value.config.rules, rule]
-            )
-            setEditing(undefined)
-          }}
-        />
-      )}
+      <ConfirmDialog
+        isOpen={applyingPreset}
+        onClose={() => setApplyingPreset(false)}
+        title='使用安全静态预设？'
+        description='将当前规则替换为一条“静态资源”规则，包含97种静态扩展名；未匹配请求绕过缓存。遵循源站缓存限制和浏览器时间，开启缓存欺骗防护；保留策略容量配置。'
+        confirmLabel='应用预设'
+        tone='accent'
+        onConfirm={async () => {
+          await saveRules(defaultCacheRules())
+        }}
+      />
       <ConfirmDialog
         isOpen={removing}
         onClose={() => setRemoving(false)}

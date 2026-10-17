@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ruvia/core/channel.h>
+#include <ruvia/core/task_scope.h>
 #include <ruvia/http/http_cache.h>
 #include <ruvia/http/http_conditional_request.h>
 #include <ruvia/http/http_status.h>
@@ -49,6 +51,11 @@
 namespace flexedge::node {
 
 class tls_context_set;
+struct cache_refresh_runtime final {
+    ruvia::event_loop& loop_;
+    ruvia::task_scope& tasks_;
+    std::size_t pending_{};
+};
 
 // Worker-owned services shared by the sessions a listener admits on that worker.
 struct http_session_context final {
@@ -61,6 +68,7 @@ struct http_session_context final {
     buffered_bytes_budget& request_buffers_;
     buffered_bytes_budget& response_buffers_;
     response_cache* cache_{};
+    cache_refresh_runtime* refresh_{};
 };
 
 // One accepted client connection as its listener sees it, from accept until the session
@@ -167,7 +175,10 @@ public:
         }
     }
 
-    void prewarm(std::string request, std::function<void(bool, std::string)> completion) {
+    void prewarm(std::string request, std::function<void(bool, std::string)> completion, std::string client_address = {}) {
+        if (!client_address.empty()) {
+            client_address_ = std::move(client_address);
+        }
         prewarm_completion_ = std::move(completion);
         if (!request_reservation_.try_grow(request.size())) {
             close();
@@ -231,10 +242,35 @@ public:
 
 private:
     static constexpr std::size_t max_request_bytes = 2 * 1024 * 1024;
+    static ruvia::task<void> refresh_cache(http_session_context context, std::string request, bool secure, std::string client_address, std::uint64_t sequence) {
+        auto& runtime = *context.refresh_;
+        struct pending_guard final {
+            std::size_t& pending_;
+            ~pending_guard() {
+                --pending_;
+            }
+        } guard{runtime.pending_};
+        auto [completed, completion] = ruvia::make_channel<bool>(runtime.loop_.handle(), {.capacity_ = 1});
+        auto [retired, retirement] = ruvia::make_channel<bool>(runtime.loop_.handle(), {.capacity_ = 1});
+        auto connection = std::make_shared<edge_connection>([retired] { (void)retired.send(true); });
+        auto session = std::make_shared<basic_http_session<asio::ip::tcp::socket>>(
+            asio::ip::tcp::socket(runtime.loop_.executor()), context, sequence, std::move(connection), secure, std::string{}, true, false);
+        try {
+            session->prewarm(std::move(request), [completed](bool ok, std::string) { (void)completed.send(ok); }, std::move(client_address));
+            (void)co_await completion.receive_for(std::chrono::seconds(6010), runtime.tasks_.get_stop_token());
+        } catch (...) {
+        }
+        session->close();
+        session.reset();
+        (void)co_await retirement.receive();
+        // A refresh failure leaves the retained entry available; the next request may retry.
+        // Cleanup and completion retirement still finish before the Worker can shut down.
+    }
     using cached_file_buffer = std::array<char, 65536>;
 
     enum class timeout_action { close,
-        failover };
+        failover,
+        read_failover };
 
     struct tunnel_state final {
         std::string client_upgrade_remainder_;
@@ -441,11 +477,11 @@ private:
             return;
         }
         upgrade_requested_ = parsed.request().header("Upgrade").has_value();
-        if (try_cache(parsed, host)) {
-            return;
-        }
         if (!select_origin_candidates(*website_)) {
             reply(ruvia::http_status::bad_gateway);
+            return;
+        }
+        if (try_cache(parsed, host)) {
             return;
         }
         proxy(parsed, host);
@@ -476,15 +512,17 @@ private:
         const auto accept = parsed.request().header("Accept");
         force_identity_encoding_ = accept && accepts_event_stream(*accept);
         const auto accept_encoding = parsed.request().header("Accept-Encoding");
+        const bool strong_etags = cache_rule_ && flexedge::cache::configured(*cache_rule_, "etag") && cache_rule_->settings_->strong_etags_;
         compress_response_ = website_->response_compression_enabled() &&
-                             !upgrade_requested_ && !force_identity_encoding_;
+                             !upgrade_requested_ && !force_identity_encoding_ && !strong_etags;
         accept_encoding_ = accept_encoding.value_or(std::string_view{});
         validation_etag_ = revalidation_response_ ? cache_header(revalidation_response_->headers_, "ETag") : std::string{};
         validation_modified_ = revalidation_response_ ? cache_header(revalidation_response_->headers_, "Last-Modified") : std::string{};
+        cache_head_fill_ = cache_ticket_.has_value() && parsed.request().method() == "HEAD";
         auto prepared = prepare_origin_request(parsed, *website_, host, client_address_,
             secure_, upgrade_requested_, false,
-            force_identity_encoding_ || compress_response_ || cache_ticket_.has_value(), route_,
-            {validation_etag_, validation_modified_, revalidation_response_ && cache_ticket_});
+            force_identity_encoding_ || compress_response_ || (cache_ticket_.has_value() && !strong_etags) || cache_full_range_ || origin_ranges_ != nullptr, route_,
+            {validation_etag_, validation_modified_, revalidation_response_ && cache_ticket_}, cache_head_fill_, cache_rule_ ? &*cache_rule_ : nullptr, cache_full_range_ || cache_head_fill_ || origin_ranges_ != nullptr, origin_range_wire_);
         if (!prepared) {
             reply(ruvia::http_status::bad_gateway);
             return;
@@ -492,6 +530,9 @@ private:
         prepared_request_.emplace(std::move(*prepared));
         connect_timeout_ = std::chrono::seconds(website_->origin_connect_timeout_seconds());
         read_timeout_ = std::chrono::seconds(website_->origin_read_timeout_seconds());
+        if (cache_rule_ && flexedge::cache::configured(*cache_rule_, "timeout")) {
+            read_timeout_ = std::chrono::seconds(cache_rule_->settings_->read_timeout_);
+        }
         try_next_origin();
     }
 
@@ -508,42 +549,82 @@ private:
         for (const auto& header : parsed.request().headers()) {
             request_headers_.emplace_back(header.name(), header.value());
         }
-        if (const auto reason = response_cache::request_bypass_reason(parsed.request().method(), request_headers_); !reason.empty()) {
-            access_log_.cache_status("bypass", reason);
-            return false;
-        }
-        const auto* rule = context_.cache_->matching(*website_, parsed.request().target(), parsed.request().method());
+        const auto* rule = context_.cache_->matching(*website_, parsed.request().target(), parsed.request().method(), request_headers_, secure_);
         if (!rule || rule->action_ != "cache") {
             access_log_.cache_status("bypass", rule ? "rule_bypass" : "no_rule");
             return false;
         }
-        cache_rule_ = *rule;
-        if (rule->respect_request_no_cache_ && response_cache::requires_validation(request_headers_)) {
-            access_log_.cache_status("bypass", "request_no_cache");
+        if (const auto reason = response_cache::request_bypass_reason(*rule, parsed.request().method(), request_headers_); !reason.empty()) {
+            access_log_.cache_status("bypass", reason);
             return false;
         }
+        cache_rule_ = *rule;
         cache_url_ = flexedge::cache::parse_url(std::string(secure_ ? "https://" : "http://") + std::string(host) + std::string(parsed.request().target()));
         if (!cache_url_) {
             access_log_.cache_status("bypass", "request_url");
             return false;
         }
         access_log_.cache_status("miss", "cache_empty");
-        const auto range = parsed.request().header("Range");
-        if (range && (!range->starts_with("bytes=") || range->find(',') != std::string_view::npos)) {
-            access_log_.cache_status("bypass", "range_unsupported");
+        const auto authority = std::string_view(cache_url_->authority_);
+        const auto colon = authority.rfind(':');
+        const auto port = colon == std::string_view::npos ? (secure_ ? 443 : 80) : std::stoi(std::string(authority.substr(colon + 1)));
+        if (port != 80 && port != 443 && (!flexedge::cache::configured(*cache_rule_, "ports") || std::ranges::find(cache_rule_->settings_->ports_, port) == cache_rule_->settings_->ports_.end())) {
+            access_log_.cache_status("bypass", "request_port");
             return false;
         }
+        const auto range = parsed.request().header("Range");
+        auto cache_origin_cursor = origins_;
+        const auto* cache_origin = cache_origin_cursor.next();
+        const auto country = flexedge::cache::configured(*cache_rule_, "key") && cache_rule_->settings_->key_.country_
+                                 ? country_for_address(active_execution_->config().release().countries(), client_address_)
+                                 : std::string_view("XX");
         auto lookup = context_.cache_->lookup(*website_, *cache_rule_, cache_url_->value_, request_headers_,
-            !range, parsed.request().method() == "HEAD");
+            true, false, cache_origin ? std::string_view(cache_origin->host()) : std::string_view{}, country);
         cached_key_ = std::move(lookup.key_);
         if (lookup.response_) {
             access_log_.cache_status(lookup.tier_, "fresh");
             send_cached(std::move(lookup.response_), parsed);
             return true;
         }
-        if (range) {
-            access_log_.cache_status("bypass", "range_not_cached");
+        if (range && parsed.request().method() == "GET" && flexedge::cache::configured(*cache_rule_, "range") && cache_rule_->settings_->origin_range_ == "on") {
+            if (lookup.ticket_) {
+                context_.cache_->abandon(*lookup.ticket_);
+            }
+            origin_ranges_ = std::make_unique<origin_range_request>();
+            origin_ranges_->client_range_ = *range;
+            origin_ranges_->if_range_ = parsed.request().header("If-Range");
+            origin_range_host_ = cache_origin ? cache_origin->host() : std::string{};
+            origin_range_country_ = country;
+            origin_range_wire_ = "bytes=0-" + std::to_string(origin_range_block_bytes - 1);
+            prepare_range_cache();
             return false;
+        }
+        cache_full_range_ = range && parsed.request().method() == "GET";
+        if (!cache_prewarm_ && !parsed.has_body() && lookup.stale_ && response_cache::updating_stale(*cache_rule_, *lookup.stale_)) {
+            auto* refresh = context_.refresh_;
+            if (lookup.filling_ || (lookup.ticket_ && refresh && refresh->pending_ < 64)) {
+                if (lookup.ticket_) {
+                    context_.cache_->abandon(*lookup.ticket_);
+                    std::string request("GET ");
+                    request.append(parsed.request().target()).append(" HTTP/1.1\r\n");
+                    for (const auto& header : request_headers_) {
+                        if (!flexedge::route_policy::ascii_equal(header.first, "Content-Length") && !flexedge::route_policy::ascii_equal(header.first, "Transfer-Encoding") && !flexedge::route_policy::ascii_equal(header.first, "Expect")) {
+                            request.append(header.first).append(": ").append(header.second).append("\r\n");
+                        }
+                    }
+                    request.append("\r\n");
+                    ++refresh->pending_;
+                    try {
+                        refresh->tasks_.spawn(refresh_cache(context_, std::move(request), secure_, client_address_, sequence_));
+                    } catch (...) {
+                        --refresh->pending_;
+                        throw;
+                    }
+                }
+                access_log_.cache_status(lookup.stale_->body_ ? "hit_memory" : "hit_disk", "cache_updating");
+                send_cached(std::move(lookup.stale_), parsed, true, false, true);
+                return true;
+            }
         }
         revalidation_response_ = std::move(lookup.stale_);
         if (revalidation_response_) {
@@ -623,8 +704,8 @@ private:
             cache_ticket_.reset();
         }
         cache_fill_.reset();
-        if (exchange_) {
-            exchange_->response().stop_cache_capture();
+        if (exchange_ || partial_codec_) {
+            current_response().stop_cache_capture();
         }
     }
     bool try_stale() {
@@ -668,14 +749,14 @@ private:
         }
     }
     void capture_origin_bytes() {
-        auto& response = exchange_->response();
+        auto& response = current_response();
         if (!cache_ticket_) {
             return;
         }
         try {
             if (!cache_fill_ && response.cache_head()) {
                 cache_fill_ = context_.cache_->begin_fill(website_->response_cache(), *cache_rule_,
-                    *response.cache_head(), context_.response_buffers_.lease());
+                    *response.cache_head(), context_.response_buffers_.lease(), cache_has_header(request_headers_, "Authorization"));
             }
             if (cache_fill_ && cache_fill_->append(response.take_cache_output())) {
                 return;
@@ -690,7 +771,7 @@ private:
         stop_cache_fill();
     }
 
-    void send_cached(std::shared_ptr<const cached_response> response, const http1_request_reader& parsed, bool stale = false, bool revalidated = false) {
+    void send_cached(std::shared_ptr<const cached_response> response, const http1_request_reader& parsed, bool stale = false, bool revalidated = false, bool updating = false) {
         if (cache_prewarm_) {
             cache_stored_ = true;
             send({}, 200);
@@ -719,7 +800,7 @@ private:
             unchanged = modified && requested && *modified <= *requested;
         }
         cached_status_ = unchanged ? 304 : cached_response_->status_;
-        if (!unchanged && cached_status_ == 200 && parsed.request().method() == "GET") {
+        if (!unchanged && cached_status_ == 200 && (parsed.request().method() == "GET" || parsed.request().method() == "HEAD")) {
             if (const auto range = parsed.request().header("Range")) {
                 bool allowed = true;
                 if (const auto condition = parsed.request().header("If-Range")) {
@@ -736,10 +817,13 @@ private:
                     allowed = ruvia::http_if_range_allows(*condition, etag, modified, strong_date);
                 }
                 if (allowed) {
-                    if (const auto selected = parse_cache_range(*range, cached_response_->body_bytes_)) {
-                        cached_status_ = selected->satisfiable_ ? 206 : 416;
-                        cached_offset_ = selected->offset_;
-                        cached_end_ = cached_offset_ + selected->length_;
+                    const bool partial_file = cache_rule_ && flexedge::cache::configured(*cache_rule_, "range") && cache_rule_->settings_->origin_range_ == "on";
+                    cached_range_.emplace(*range, cached_response_->body_bytes_, partial_file, cache_header(cached_response_->headers_, "Content-Type"));
+                    cached_status_ = cached_range_->status();
+                    if (cached_range_->ignored()) {
+                        cached_range_.reset();
+                    } else {
+                        cached_offset_ = cached_range_->next_offset();
                     }
                 }
             }
@@ -748,12 +832,13 @@ private:
                           std::string(ruvia::http_reason_phrase(ruvia::http_status_code::from_value(static_cast<std::uint16_t>(cached_status_)))) + "\r\n";
         bool has_date{};
         for (const auto& [name, value] : cached_response_->headers_) {
-            if (flexedge::route_policy::ascii_equal(name, "Age") || flexedge::route_policy::ascii_equal(name, "X-Cache") ||
+            if (flexedge::route_policy::ascii_equal(name, "Cloudflare-CDN-Cache-Control") || flexedge::route_policy::ascii_equal(name, "Age") || flexedge::route_policy::ascii_equal(name, "X-Cache") ||
                 flexedge::route_policy::ascii_equal(name, "Connection") || flexedge::route_policy::ascii_equal(name, "Content-Length") ||
                 flexedge::route_policy::ascii_equal(name, "Content-Range") || flexedge::route_policy::ascii_equal(name, "Accept-Ranges") ||
+                (cached_range_ && flexedge::route_policy::ascii_equal(name, "Content-Type")) ||
                 (hsts_enabled_ && flexedge::route_policy::ascii_equal(name, "Strict-Transport-Security")) ||
-                (cached_response_->browser_ttl_seconds_ > 0 && (flexedge::route_policy::ascii_equal(name, "Cache-Control") ||
-                                                                   flexedge::route_policy::ascii_equal(name, "Expires"))) ||
+                (cached_response_->browser_ttl_seconds_ != 0 && (flexedge::route_policy::ascii_equal(name, "Cache-Control") ||
+                                                                    flexedge::route_policy::ascii_equal(name, "Expires"))) ||
                 (route_ && std::ranges::any_of(route_->response_headers(), [&](const auto& mutation) { return flexedge::route_policy::ascii_equal(name, mutation.name()); }))) {
                 continue;
             }
@@ -764,6 +849,9 @@ private:
         }
         if (route_) {
             for (const auto& mutation : route_->response_headers()) {
+                if (flexedge::route_policy::ascii_equal(mutation.name(), "Cloudflare-CDN-Cache-Control")) {
+                    continue;
+                }
                 response_bytes_.append(mutation.name()).append(": ").append(mutation.value()).append("\r\n");
             }
         }
@@ -771,22 +859,31 @@ private:
             response_bytes_.append("Date: ").append(cache_http_date(std::time(nullptr))).append("\r\n");
         }
         const auto age = cached_response_->initial_age_ + std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - cached_response_->stored_at_).count();
-        response_bytes_.append("Age: ").append(std::to_string(age)).append(stale ? "\r\nX-Cache: STALE\r\n" : revalidated ? "\r\nX-Cache: REVALIDATED\r\n"
-                                                                                                                          : "\r\nX-Cache: HIT\r\n");
+        response_bytes_.append("Age: ").append(std::to_string(age)).append(updating ? "\r\nX-Cache: UPDATING\r\n" : stale     ? "\r\nX-Cache: STALE\r\n"
+                                                                                                                : revalidated ? "\r\nX-Cache: REVALIDATED\r\n"
+                                                                                                                              : "\r\nX-Cache: HIT\r\n");
         response_bytes_.append("Connection: close\r\nAccept-Ranges: bytes\r\n");
-        if (cached_status_ == 206) {
-            response_bytes_.append("Content-Range: bytes ").append(std::to_string(cached_offset_)).append("-").append(std::to_string(cached_end_ - 1)).append("/").append(std::to_string(cached_response_->body_bytes_)).append("\r\n");
-        } else if (cached_status_ == 416) {
-            response_bytes_.append("Content-Range: bytes */").append(std::to_string(cached_response_->body_bytes_)).append("\r\n");
+        if (cached_range_) {
+            if (!cached_range_->content_range().empty()) {
+                response_bytes_.append("Content-Range: ").append(cached_range_->content_range()).append("\r\n");
+            }
+            if (!cached_range_->content_type().empty()) {
+                response_bytes_.append("Content-Type: ").append(cached_range_->content_type()).append("\r\n");
+            }
         }
-        if (cached_response_->browser_ttl_seconds_ > 0) {
+        const auto route_cache_control = route_ && std::ranges::any_of(route_->response_headers(), [](const auto& field) { return flexedge::route_policy::ascii_equal(field.name(), "Cache-Control"); });
+        if (!route_cache_control && cached_response_->browser_ttl_seconds_ > 0) {
             response_bytes_.append("Cache-Control: public, max-age=").append(std::to_string(cached_response_->browser_ttl_seconds_)).append("\r\n");
+        } else if (!route_cache_control && cached_response_->browser_ttl_seconds_ == -2) {
+            response_bytes_.append("Cache-Control: public, max-age=0\r\n");
+        } else if (!route_cache_control && cached_response_->browser_ttl_seconds_ < 0) {
+            response_bytes_.append("Cache-Control: no-store\r\n");
         }
         if (hsts_enabled_) {
             response_bytes_.append("Strict-Transport-Security: max-age=31536000\r\n");
         }
         if (!unchanged) {
-            response_bytes_.append("Content-Length: ").append(std::to_string(cached_end_ - cached_offset_)).append("\r\n");
+            response_bytes_.append("Content-Length: ").append(std::to_string(cached_range_ ? cached_range_->length() : cached_end_ - cached_offset_)).append("\r\n");
         }
         response_bytes_.append("\r\n");
         access_log_.response_head(response_bytes_);
@@ -807,7 +904,7 @@ private:
         }
         response_pending_ = true;
         const auto self = this->shared_from_this();
-        if (cached_response_->body_ && !cached_head_only_) {
+        if (cached_response_->body_ && !cached_head_only_ && !cached_range_) {
             // Both buffers stay owned by this session until completion. A memory
             // hit needs one composed write without copying its body into the head.
             const std::array<asio::const_buffer, 2> buffers{
@@ -847,16 +944,22 @@ private:
         if (closed_) {
             return;
         }
-        if (cached_offset_ == cached_end_) {
+        if (cached_offset_ == cached_end_ || (cached_range_ && cached_range_->done())) {
             finish_cached({});
             return;
+        }
+        if (cached_range_) {
+            cached_offset_ = cached_range_->next_offset();
         }
         const auto remaining = cached_end_ - cached_offset_;
         asio::const_buffer bytes;
         if (cached_response_->body_) {
-            bytes = asio::buffer(cached_response_->body_->data() + cached_offset_, remaining);
+            bytes = asio::buffer(cached_response_->body_->data() + cached_offset_, cached_range_ ? (std::min)(remaining, std::size_t{65536}) : remaining);
         } else {
             const auto size = (std::min)(remaining, cached_buffer_->size());
+            if (cached_range_) {
+                cached_file_.seekg(static_cast<std::streamoff>(cached_offset_));
+            }
             cached_file_.read(cached_buffer_->data(), static_cast<std::streamsize>(size));
             if (static_cast<std::size_t>(cached_file_.gcount()) != size) {
                 finish_cached(std::make_error_code(std::errc::io_error));
@@ -867,11 +970,16 @@ private:
                 cache_promotion_.reset();
             }
         }
+        const auto consumed = bytes.size();
+        if (cached_range_) {
+            cached_range_output_ = cached_range_->consume(std::string_view(static_cast<const char*>(bytes.data()), bytes.size()), cached_offset_);
+            bytes = asio::buffer(cached_range_output_);
+        }
         const auto self = this->shared_from_this();
-        asio::async_write(stream_, bytes, [self](const std::error_code& error, std::size_t size) {
+        asio::async_write(stream_, bytes, [self, consumed](const std::error_code& error, std::size_t size) {
             self->context_.metrics_.traffic_out(size);
             self->proxied_response_bytes_ += size;
-            self->cached_offset_ += size;
+            self->cached_offset_ += self->cached_range_ ? consumed : size;
             if (error) {
                 self->finish_cached(error);
                 return;
@@ -889,7 +997,12 @@ private:
             }
             self->log("origin attempt timed out");
             self->current_health_.failure(self->unhealthy_threshold_);
-            if (action == timeout_action::failover) {
+            if (action != timeout_action::close) {
+                if (self->origin_ranges_ && self->origin_ranges_->head_started_) {
+                    self->close("timeout");
+                    return;
+                }
+                self->cache_read_timed_out_ = action == timeout_action::read_failover && self->cache_rule_ && flexedge::cache::configured(*self->cache_rule_, "timeout");
                 self->try_next_origin();
             } else {
                 self->close("timeout");
@@ -902,10 +1015,29 @@ private:
         timer_.cancel(ignored);
     }
 
+    origin_response_codec& current_response() noexcept {
+        return partial_codec_ ? *partial_codec_ : exchange_->response();
+    }
+    void prepare_range_cache() {
+        const auto representation = "range:" + std::to_string(origin_ranges_->first_);
+        auto lookup = context_.cache_->lookup(*website_, *cache_rule_, cache_url_->value_, request_headers_, true, false,
+            origin_range_host_, origin_range_country_, representation);
+        range_cache_hit_ = std::move(lookup.response_);
+        if (lookup.ticket_) {
+            cache_ticket_ = std::move(lookup.ticket_);
+            renew_cache_lease();
+        }
+        cached_key_ = std::move(lookup.key_);
+    }
     void discard_exchange() noexcept {
         if (exchange_) {
             exchange_->close();
             exchange_.reset();
+        }
+        partial_codec_.reset();
+        partial_cached_.reset();
+        if (partial_file_.is_open()) {
+            partial_file_.close();
         }
     }
 
@@ -915,6 +1047,10 @@ private:
 
     void origin_failed(std::uint64_t attempt) {
         if (origin_attempt_current(attempt)) {
+            if (origin_ranges_ && origin_ranges_->head_started_) {
+                close("origin_error");
+                return;
+            }
             current_health_.failure(unhealthy_threshold_);
             try_next_origin();
         }
@@ -930,7 +1066,11 @@ private:
             if (try_stale()) {
                 return;
             }
-            reply(ruvia::http_status::bad_gateway);
+            if (cache_read_timed_out_) {
+                reply(ruvia::http_status_code::from_value(524));
+            } else {
+                reply(ruvia::http_status::bad_gateway);
+            }
             return;
         }
         current_health_ = context_.health_.target(website_->id(), origin->id());
@@ -938,21 +1078,49 @@ private:
     }
 
     void start_origin_attempt(const v2::Origin& origin, std::uint64_t attempt) {
+        range_origin_ = &origin;
         auto response = origin_response_codec(prepared_request_->make_exchange_state(), hsts_enabled_, route_);
+        if (cache_full_range_) {
+            response.set_client_range(*request_reader_.request().header("Range"), request_reader_.request().header("If-Range"));
+        }
+        if (origin_ranges_) {
+            response.set_origin_range(*origin_ranges_);
+        }
         response.set_forward_informational(!cache_prewarm_ &&
                                            request_reader_.request().protocol_version() != ruvia::http_protocol_version::http10);
         if (compress_response_) {
             response.set_compression(*website_, prepared_request_->target_, accept_encoding_,
                 context_.response_buffers_.lease());
         }
-        if (cache_ticket_ && cache_rule_) {
-            response.set_cache_rule(*cache_rule_);
+        if (cache_rule_) {
+            response.set_cache_rule(*cache_rule_, cache_has_header(request_headers_, "Authorization"), prepared_request_->target_);
         }
         if (website_->has_response_cache()) {
             response.set_cache_status(access_log_.cache_status() == "miss" ? "MISS" : "BYPASS");
         }
         if (cache_ticket_) {
             response.capture_for_cache();
+        }
+        if (origin_ranges_ && range_cache_hit_) {
+            response.set_cache_status("HIT");
+            response.stop_cache_capture();
+            partial_codec_.emplace(std::move(response));
+            partial_cached_ = std::exchange(range_cache_hit_, {});
+            partial_offset_ = 0;
+            if (!partial_cached_->body_) {
+                partial_file_.open(partial_cached_->file_->path_, std::ios::binary);
+                if (!partial_file_) {
+                    close("cache_read_error");
+                    return;
+                }
+            }
+            std::string head = "HTTP/1.1 206 Partial Content\r\n";
+            for (const auto& field : partial_cached_->headers_) {
+                head.append(field.first).append(": ").append(field.second).append("\r\n");
+            }
+            head.append("Content-Length: ").append(std::to_string(partial_cached_->body_bytes_)).append("\r\n\r\n");
+            consume_origin_head(attempt, head);
+            return;
         }
         exchange_ = std::make_shared<origin_exchange>(context_.origin_connections_,
             origin_connection_key{
@@ -979,7 +1147,7 @@ private:
     }
 
     void read_origin_head(std::uint64_t attempt) {
-        arm(read_timeout_, attempt, timeout_action::failover);
+        arm(read_timeout_, attempt, timeout_action::read_failover);
         const auto self = this->shared_from_this();
         exchange_->read([self, attempt](const std::error_code& error, std::string_view bytes) {
             if (!self->origin_attempt_current(attempt)) {
@@ -995,7 +1163,7 @@ private:
     }
 
     void consume_origin_head(std::uint64_t attempt, std::string_view bytes) {
-        auto& response = exchange_->response();
+        auto& response = current_response();
         switch (response.consume_head(bytes)) {
             case origin_response_head_status::need_more:
                 relay_bytes_ = response.take_output();
@@ -1016,7 +1184,27 @@ private:
                 break;
         }
         const auto status = response.status_code().value_or(502);
+        if (origin_ranges_ && origin_ranges_->full_response_ && status == 200) {
+            if (cache_ticket_) {
+                context_.cache_->abandon(*cache_ticket_);
+                cache_ticket_.reset();
+            }
+            auto full = context_.cache_->lookup(*website_, *cache_rule_, cache_url_->value_, request_headers_, true, false, origin_range_host_, origin_range_country_);
+            if (full.ticket_) {
+                cache_ticket_ = std::move(full.ticket_);
+                renew_cache_lease();
+            } else {
+                response.stop_cache_capture();
+            }
+        }
         if ((status == 500 || status == 502 || status == 503 || status == 504) && try_stale()) {
+            return;
+        }
+        if ((status == 502 || status == 504) && cache_rule_ &&
+            !(flexedge::cache::configured(*cache_rule_, "errors") && cache_rule_->settings_->error_passthrough_)) {
+            stop_cache_fill();
+            discard_exchange();
+            reply(ruvia::http_status_code::from_value(static_cast<std::uint16_t>(status)));
             return;
         }
         if (status == 304 && revalidation_response_ && cache_ticket_ && response.cache_head()) {
@@ -1044,25 +1232,24 @@ private:
         } else if (revalidation_response_) {
             access_log_.cache_status("miss", "origin_changed");
         }
-        if (cache_ticket_ && request_reader_.request().method() == "HEAD") {
-            if (revalidation_response_ && status < 500) {
-                context_.cache_->discard(cached_key_, revalidation_response_->identity_);
-            }
-            stop_cache_fill();
-        }
         current_health_.success(healthy_threshold_);
         tunnel_ = response.tunnel();
-        access_log_.response_status(status);
+        access_log_.response_status(response.client_status_code());
         if (tunnel_) {
             access_log_.websocket();
         }
         relay_bytes_ = response.take_output();
-        access_log_.response_head(relay_bytes_);
+        if (cache_head_fill_) {
+            relay_bytes_.resize(relay_bytes_.find("\r\n\r\n") + 4);
+        }
+        if (!relay_bytes_.empty()) {
+            access_log_.response_head(relay_bytes_);
+        }
         relay_origin_bytes(attempt);
     }
 
     void continue_origin_response(std::uint64_t attempt) {
-        auto& response = exchange_->response();
+        auto& response = current_response();
         if (!response.status_code()) {
             consume_origin_head(attempt, {});
             return;
@@ -1079,8 +1266,27 @@ private:
                 commit_cache(*cache_fill_);
                 cache_fill_.reset();
             }
-            const auto status = response.status_code().value_or(502);
-            exchange_->release();
+            const auto status = response.client_status_code();
+            if (exchange_) {
+                exchange_->release();
+            }
+            if (origin_ranges_ && !origin_ranges_->passthrough_ && !origin_ranges_->full_response_ && origin_ranges_->response_ && !origin_ranges_->response_->done()) {
+                const auto offset = origin_ranges_->response_->next_offset();
+                origin_ranges_->first_ = offset / origin_range_block_bytes * origin_range_block_bytes;
+                origin_ranges_->last_ = (std::min)(origin_ranges_->first_ + origin_range_block_bytes - 1, *origin_ranges_->total_ - 1);
+                origin_range_wire_ = "bytes=" + std::to_string(origin_ranges_->first_) + '-' + std::to_string(origin_ranges_->last_);
+                stop_cache_fill();
+                discard_exchange();
+                prepare_range_cache();
+                auto prepared = prepare_origin_request(request_reader_, *website_, *request_reader_.request().header("Host"), client_address_, secure_, false, false, true, route_, {}, false, &*cache_rule_, true, origin_range_wire_);
+                if (!prepared) {
+                    close("protocol_error");
+                    return;
+                }
+                prepared_request_.emplace(std::move(*prepared));
+                start_origin_attempt(*range_origin_, ++origin_attempt_);
+                return;
+            }
             if (cache_prewarm_) {
                 send({}, status);
             } else {
@@ -1119,6 +1325,42 @@ private:
     }
 
     void read_origin_body(std::uint64_t attempt) {
+        if (partial_codec_) {
+            asio::post(stream_.get_executor(), [self = this->shared_from_this(), attempt] {
+                if (self->origin_attempt_current(attempt)) {
+                    self->read_partial_body(attempt);
+                }
+            });
+            return;
+        }
+        read_network_origin_body(attempt);
+    }
+    void read_partial_body(std::uint64_t attempt) {
+        const auto remaining = partial_cached_->body_bytes_ - partial_offset_;
+        const auto size = (std::min)(remaining, std::size_t{65536});
+        std::string_view bytes;
+        if (partial_cached_->body_) {
+            bytes = std::string_view(*partial_cached_->body_).substr(partial_offset_, size);
+        } else {
+            if (!partial_buffer_) {
+                partial_buffer_ = std::make_unique_for_overwrite<cached_file_buffer>();
+            }
+            partial_file_.read(partial_buffer_->data(), static_cast<std::streamsize>(size));
+            if (static_cast<std::size_t>(partial_file_.gcount()) != size) {
+                close("cache_read_error");
+                return;
+            }
+            bytes = std::string_view(partial_buffer_->data(), size);
+        }
+        partial_offset_ += size;
+        if (partial_codec_->consume_body(bytes) != origin_response_body_status::accepted) {
+            close("protocol_error");
+            return;
+        }
+        relay_bytes_ = partial_codec_->take_output();
+        relay_origin_bytes(attempt);
+    }
+    void read_network_origin_body(std::uint64_t attempt) {
         arm(read_timeout_, attempt, timeout_action::close);
         const auto self = this->shared_from_this();
         exchange_->read([self, attempt](const std::error_code& error, std::string_view bytes) {
@@ -1144,6 +1386,9 @@ private:
                 return;
             }
             self->relay_bytes_ = response.take_output();
+            if (self->cache_head_fill_) {
+                self->relay_bytes_.clear();
+            }
             self->relay_origin_bytes(attempt);
         });
     }
@@ -1355,6 +1600,20 @@ private:
     std::function<void(bool, std::string)> prewarm_completion_{};
     std::optional<cache_ticket> cache_ticket_{};
     std::optional<flexedge::cache::rule> cache_rule_{};
+    bool cache_head_fill_{};
+    bool cache_full_range_{};
+    bool cache_read_timed_out_{};
+    std::unique_ptr<origin_range_request> origin_ranges_{};
+    const v2::Origin* range_origin_{};
+    std::string origin_range_wire_{};
+    std::string origin_range_host_{};
+    std::string origin_range_country_{};
+    std::shared_ptr<const cached_response> range_cache_hit_{};
+    std::shared_ptr<const cached_response> partial_cached_{};
+    std::optional<origin_response_codec> partial_codec_{};
+    std::ifstream partial_file_{};
+    std::unique_ptr<cached_file_buffer> partial_buffer_{};
+    std::size_t partial_offset_{};
     std::optional<flexedge::cache::url> cache_url_{};
     cache_headers request_headers_{};
     unsigned cache_waits_{};
@@ -1369,6 +1628,8 @@ private:
     std::unique_ptr<cached_file_buffer> cached_buffer_;
     std::size_t cached_offset_{};
     std::size_t cached_end_{};
+    std::optional<cache_range_response> cached_range_{};
+    std::string cached_range_output_{};
     bool cached_stale_{};
     std::uint32_t cached_status_{};
     bool cached_head_only_{};

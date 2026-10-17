@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { RE2JS } from 're2js'
+import { cacheSettingsSchema, newCacheSettings } from './cache_settings'
 
 export const cacheMatchLabels = {
   all: '全站',
@@ -8,6 +9,7 @@ export const cacheMatchLabels = {
   prefix: '路径前缀',
   wildcard: '通配符',
   regex: '正则表达式',
+  expression: '请求表达式',
 } as const
 const bytes = z
   .number()
@@ -26,11 +28,12 @@ export const cacheRuleSchema = z
       'prefix',
       'wildcard',
       'regex',
+      'expression',
     ]),
-    patterns: z.array(z.string().trim().min(1).max(512)).max(64),
+    patterns: z.array(z.string().trim().min(1).max(4096)).max(128),
     action: z.enum(['cache', 'bypass']),
-    ttl_mode: z.enum(['origin', 'fixed']),
-    ttl_seconds: z.number().int().min(1).max(31536000),
+    ttl_mode: z.enum(['origin', 'origin_strict', 'fixed']),
+    ttl_seconds: z.number().int().min(0).max(31536000),
     ignore_query: z.boolean(),
     methods: z
       .array(z.enum(['GET', 'HEAD']))
@@ -45,24 +48,41 @@ export const cacheRuleSchema = z
           .max(599)
           .refine((v) => v !== 206 && v !== 304, '请输入完整响应状态码')
       )
-      .min(1)
       .max(32),
     min_object_bytes: bytes,
     max_object_bytes: bytes,
     skip_set_cookie: z.boolean(),
     skip_no_cache: z.boolean().default(true),
-    respect_request_no_cache: z.boolean().default(true),
+    respect_request_no_cache: z.boolean().default(false),
+    skip_request_cookie: z.boolean().default(false),
+    browser_ttl_mode: z
+      .enum(['default', 'respect_origin', 'override_origin', 'bypass'])
+      .optional(),
     browser_ttl_seconds: z.number().int().min(0).max(31536000),
+    settings: cacheSettingsSchema.optional(),
   })
+  .transform((rule) => ({
+    ...rule,
+    browser_ttl_mode:
+      rule.browser_ttl_mode ??
+      (rule.browser_ttl_seconds > 0
+        ? ('override_origin' as const)
+        : ('default' as const)),
+  }))
   .superRefine((rule, ctx) => {
     const issue = (message: string) =>
       ctx.addIssue({ code: 'custom', path: ['patterns'], message })
+    if (rule.match_type === 'expression') {
+      if (rule.patterns.length !== 1) issue('每条规则需要一个组合表达式')
+      return
+    }
     if (rule.match_type === 'all') {
       if (rule.patterns.length) issue('全站匹配无需填写条件')
       return
     }
     if (!rule.patterns.length) issue('请填写匹配内容')
     for (const pattern of rule.patterns) {
+      if (pattern.length > 512) issue('匹配内容最多512个字符')
       if (
         [...pattern].some(
           (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127
@@ -99,7 +119,7 @@ export const cacheConfigSchema = z
     disk_reserved_bytes: bytes.default(0),
     max_object_bytes: bytes
       .min(1)
-      .max(256 * 1024 ** 2, '单对象大小不能超过256MiB'),
+      .max(512 * 1024 ** 2, '单对象大小不能超过512MiB'),
     directory: z
       .string()
       .min(1)
@@ -262,7 +282,7 @@ export function defaultCacheConfig(): CacheConfig {
     disk_percent: 50,
     memory_reserved_bytes: 512 * 1024 ** 2,
     disk_reserved_bytes: 5 * 1024 ** 3,
-    max_object_bytes: 64 * 1024 ** 2,
+    max_object_bytes: 512 * 1024 ** 2,
     directory: 'cache',
     rules: defaultCacheRules(),
   }
@@ -279,40 +299,129 @@ export function newCacheRule(): CacheRule {
     ttl_seconds: 86400,
     ignore_query: false,
     methods: ['GET', 'HEAD'],
-    status_codes: [200],
+    status_codes: [],
     min_object_bytes: 0,
     max_object_bytes: 0,
     skip_set_cookie: true,
     skip_no_cache: true,
-    respect_request_no_cache: true,
+    respect_request_no_cache: false,
+    skip_request_cookie: false,
+    browser_ttl_mode: 'default',
     browser_ttl_seconds: 0,
+    settings: newCacheSettings(),
   }
 }
 export function defaultCacheRules(): CacheRule[] {
+  const safeSettings = () => ({
+    ...newCacheSettings(),
+    enabled: ['edge', 'browser', 'armor', 'origin'] as const,
+    armor: true,
+  })
   return [
     {
       ...newCacheRule(),
-      name: '静态资源缓存一天',
+      name: '静态资源',
+      browser_ttl_mode: 'respect_origin',
+      settings: { ...safeSettings(), enabled: [...safeSettings().enabled] },
       patterns: [
-        '.html',
+        '.7z',
+        '.avi',
+        '.avif',
+        '.apk',
+        '.bin',
+        '.bmp',
+        '.bz',
+        '.bz2',
+        '.class',
         '.css',
-        '.js',
-        '.mjs',
+        '.csv',
+        '.doc',
+        '.docx',
+        '.dmg',
+        '.eot',
+        '.eps',
+        '.exe',
+        '.flac',
+        '.gif',
+        '.gz',
+        '.ico',
+        '.iso',
+        '.jar',
         '.jpg',
         '.jpeg',
+        '.js',
+        '.mid',
+        '.midi',
+        '.mkv',
+        '.mp3',
+        '.mp4',
+        '.ogg',
+        '.otf',
+        '.pdf',
+        '.pict',
+        '.pls',
         '.png',
-        '.gif',
-        '.webp',
-        '.avif',
+        '.ppt',
+        '.pptx',
+        '.ps',
+        '.rar',
         '.svg',
-        '.ico',
+        '.svgz',
+        '.swf',
+        '.tar',
+        '.tif',
+        '.tiff',
+        '.ttf',
+        '.webm',
+        '.webp',
         '.woff',
         '.woff2',
-        '.ttf',
-        '.otf',
+        '.xls',
+        '.xlsx',
+        '.zip',
+        '.zst',
+        '.mjs',
+        '.wasm',
+        '.apng',
+        '.jxl',
+        '.heic',
+        '.heif',
+        '.jfif',
+        '.cur',
+        '.ttc',
+        '.otc',
+        '.sfnt',
+        '.aac',
+        '.wav',
+        '.m4a',
+        '.opus',
+        '.oga',
+        '.weba',
+        '.m4v',
+        '.mov',
+        '.mpeg',
+        '.mpg',
+        '.ogv',
+        '.m3u8',
+        '.mpd',
+        '.m4s',
+        '.xz',
+        '.txz',
+        '.tgz',
+        '.deb',
+        '.rpm',
+        '.cab',
+        '.msi',
+        '.msix',
+        '.msixbundle',
+        '.appx',
+        '.appxbundle',
+        '.epub',
+        '.rtf',
+        '.odp',
+        '.ods',
+        '.odt',
       ],
-      ttl_mode: 'fixed',
-      ttl_seconds: 86400,
     },
   ]
 }

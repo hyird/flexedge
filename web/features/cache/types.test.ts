@@ -11,27 +11,38 @@ import {
 } from './types'
 
 describe('cache policy boundaries', () => {
-  it('keeps no-cache controls enabled for saved rules without the new fields', () => {
+  it('uses CF refresh defaults when optional fields are omitted', () => {
     const config = defaultCacheConfig()
     const legacy = structuredClone(config.rules[0])
     Reflect.deleteProperty(legacy, 'skip_no_cache')
     Reflect.deleteProperty(legacy, 'respect_request_no_cache')
+    Reflect.deleteProperty(legacy, 'skip_request_cookie')
     const parsed = cacheConfigSchema.parse({ ...config, rules: [legacy] })
     expect(parsed.rules[0].skip_no_cache).toBe(true)
-    expect(parsed.rules[0].respect_request_no_cache).toBe(true)
+    expect(parsed.rules[0].respect_request_no_cache).toBe(false)
+    expect(parsed.rules[0].skip_request_cookie).toBe(false)
     const customized = cacheConfigSchema.parse({
       ...config,
       rules: [
-        { ...legacy, skip_no_cache: false, respect_request_no_cache: false },
+        {
+          ...legacy,
+          skip_no_cache: false,
+          respect_request_no_cache: false,
+          skip_request_cookie: false,
+        },
       ],
     })
     expect(customized.rules[0].skip_no_cache).toBe(false)
     expect(customized.rules[0].respect_request_no_cache).toBe(false)
+    expect(customized.rules[0].skip_request_cookie).toBe(false)
+    expect(
+      cacheConfigSchema.parse(JSON.parse(JSON.stringify(customized)))
+    ).toEqual(customized)
   })
-  it('defaults to 64MiB and permits objects up to 256MiB', () => {
+  it('defaults to the Cloudflare 512MiB object limit', () => {
     const config = defaultCacheConfig()
-    expect(config.max_object_bytes).toBe(64 * 1024 ** 2)
-    const maximum = 256 * 1024 ** 2
+    expect(config.max_object_bytes).toBe(512 * 1024 ** 2)
+    const maximum = 512 * 1024 ** 2
     expect(
       cacheConfigSchema.safeParse({ ...config, max_object_bytes: maximum })
         .success
@@ -94,7 +105,30 @@ describe('cache policy boundaries', () => {
     expect(first.disk_percent).toBe(50)
     expect(first.disk_reserved_bytes).toBe(5 * 1024 ** 3)
     expect(first.rules.map((rule) => rule.action)).toEqual(['cache'])
-    expect(first.rules[0].id).not.toBe(second.rules[0].id)
+    const assets = first.rules[0]
+    expect(assets.skip_request_cookie).toBe(false)
+    expect(assets.respect_request_no_cache).toBe(false)
+    expect(assets.ttl_mode).toBe('origin')
+    expect(assets.browser_ttl_mode).toBe('respect_origin')
+    expect(assets.settings?.armor).toBe(true)
+    expect(assets.settings?.origin_control).toBe(true)
+    expect(assets.ignore_query).toBe(false)
+    expect(assets.status_codes).toEqual([])
+    expect(assets.patterns.length).toBeGreaterThan(90)
+    for (const extension of [
+      '.js',
+      '.css',
+      '.mjs',
+      '.wasm',
+      '.avif',
+      '.woff2',
+      '.mp4',
+      '.zip',
+    ])
+      expect(assets.patterns).toContain(extension)
+    for (const extension of ['.html', '.json', '.ejs', '.php', '.map'])
+      expect(assets.patterns).not.toContain(extension)
+    expect(assets.id).not.toBe(second.rules[0].id)
     expect(
       cacheConfigSchema.safeParse({ ...first, memory_percent: 101 }).success
     ).toBe(false)
