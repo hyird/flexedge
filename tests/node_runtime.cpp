@@ -380,6 +380,74 @@ std::string tls_alpn(std::uint16_t port, std::string_view server_name, bool offe
     return std::string(reinterpret_cast<const char*>(selected), selected_size);
 }
 
+using tls_session = std::unique_ptr<SSL_SESSION, decltype(&SSL_SESSION_free)>;
+
+tls_session reusable_tls_session(std::uint16_t port, SSL_SESSION* previous = nullptr) {
+    asio::io_context context;
+    asio::ssl::context tls(asio::ssl::context::tls_client);
+    tls.set_verify_mode(asio::ssl::verify_none);
+    REQUIRE(SSL_CTX_set_max_proto_version(tls.native_handle(), TLS1_2_VERSION) == 1);
+    asio::ssl::stream<asio::ip::tcp::socket> stream(context, tls);
+    REQUIRE(SSL_set_tlsext_host_name(stream.native_handle(), "www.example.com") == 1);
+    if (previous != nullptr) {
+        REQUIRE(SSL_set_session(stream.native_handle(), previous) == 1);
+    }
+    stream.lowest_layer().connect({asio::ip::address_v4::loopback(), port});
+    stream.handshake(asio::ssl::stream_base::client);
+    if (previous != nullptr) {
+        REQUIRE(SSL_session_reused(stream.native_handle()) == 1);
+    }
+    tls_session session(SSL_get1_session(stream.native_handle()), &SSL_SESSION_free);
+    REQUIRE(session && SSL_SESSION_is_resumable(session.get()) == 1);
+    SSL_set_shutdown(stream.native_handle(), SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN);
+    return session;
+}
+
+void require_tls_rejection(std::uint16_t port, std::string_view server_name, int version, int expected_alert,
+    SSL_SESSION* previous = nullptr) {
+    asio::io_context context;
+    asio::ssl::context tls(asio::ssl::context::tls_client);
+    tls.set_verify_mode(asio::ssl::verify_none);
+    REQUIRE(SSL_CTX_set_min_proto_version(tls.native_handle(), version) == 1);
+    REQUIRE(SSL_CTX_set_max_proto_version(tls.native_handle(), version) == 1);
+    asio::ssl::stream<asio::ip::tcp::socket> stream(context, tls);
+    if (previous != nullptr) {
+        const tls_session copy(SSL_SESSION_dup(previous), &SSL_SESSION_free);
+        REQUIRE(copy && SSL_set_session(stream.native_handle(), copy.get()) == 1);
+    }
+    if (!server_name.empty()) {
+        REQUIRE(SSL_set_tlsext_host_name(stream.native_handle(), std::string(server_name).c_str()) == 1);
+    }
+    struct received_messages final {
+        int alert_{-1};
+        bool certificate_{};
+    } received;
+    SSL_set_msg_callback(stream.native_handle(),
+        [](int writing, int, int type, const void* bytes, std::size_t size, SSL*, void* argument) {
+            auto& result = *static_cast<received_messages*>(argument);
+            if (!writing && type == SSL3_RT_ALERT && size == 2) {
+                const auto* message = static_cast<const unsigned char*>(bytes);
+                result.alert_ = message[0] == SSL3_AL_FATAL ? message[1] : -2;
+            }
+            if (!writing && type == SSL3_RT_HANDSHAKE && size > 0 &&
+                *static_cast<const unsigned char*>(bytes) == SSL3_MT_CERTIFICATE) {
+                result.certificate_ = true;
+            }
+        });
+    SSL_set_msg_callback_arg(stream.native_handle(), &received);
+    stream.lowest_layer().connect({asio::ip::address_v4::loopback(), port});
+    std::error_code error;
+    stream.handshake(asio::ssl::stream_base::client, error);
+    REQUIRE(error);
+    REQUIRE(received.alert_ == expected_alert);
+    REQUIRE(!received.certificate_);
+    if (previous == nullptr) {
+        const auto certificate = std::unique_ptr<X509, decltype(&X509_free)>(
+            SSL_get1_peer_certificate(stream.native_handle()), &X509_free);
+        REQUIRE(!certificate);
+    }
+}
+
 // Writes raw request bytes in separate pieces, so the edge observes partial input,
 // then returns every response byte until the edge closes the connection.
 std::string exchange_raw(std::uint16_t port, std::initializer_list<std::string> pieces) {
@@ -1502,6 +1570,8 @@ int main(int argc, char* argv[]) {
         }
         const auto no_route_response = request(port, "unknown.example.com");
         REQUIRE(no_route_response.starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
+        REQUIRE(exchange_raw(port, {"GET / HTTP/1.1\r\nConnection: close\r\n\r\n"}).starts_with("HTTP/1.1 400 "));
+        REQUIRE(request(port, "www.example.com", "Host: unknown.example.com\r\n").starts_with("HTTP/1.1 400 "));
         REQUIRE(connections_reach(0));
         (void)collect_node_logs();
         // Invalid incoming Host values are request errors, not broken node configuration.
@@ -2150,6 +2220,23 @@ int main(int argc, char* argv[]) {
         const auto api_response = tls_request(https_port, "api.example.com");
         REQUIRE(api_response.peer_common_name_ == "api.example.com");
         REQUIRE(api_response.bytes_.starts_with("HTTP/1.1 200 OK\r\n"));
+        REQUIRE(tls_request(https_port, "WWW.Example.COM", "www.example.com.:443").bytes_.starts_with("HTTP/1.1 200 "));
+        // A valid SNI must not front another bound domain or an unbound Host.
+        for (const auto host : {"unknown.example.com", "api.example.com"}) {
+            const auto rejected = tls_request(https_port, "www.example.com", host).bytes_;
+            REQUIRE(rejected.starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
+            REQUIRE(rejected.ends_with("Content-Length: 0\r\nConnection: close\r\n\r\n"));
+        }
+        for (const auto version : {TLS1_2_VERSION, TLS1_3_VERSION}) {
+            require_tls_rejection(https_port, "unknown.example.com", version, SSL_AD_UNRECOGNIZED_NAME);
+            require_tls_rejection(https_port, "www.example.com:443", version, SSL_AD_UNRECOGNIZED_NAME);
+            require_tls_rejection(https_port, {}, version,
+                version == TLS1_3_VERSION ? SSL_AD_MISSING_EXTENSION : SSL_AD_HANDSHAKE_FAILURE);
+        }
+        const auto session = reusable_tls_session(https_port);
+        (void)reusable_tls_session(https_port, session.get());
+        require_tls_rejection(https_port, "unknown.example.com", TLS1_2_VERSION, SSL_AD_UNRECOGNIZED_NAME, session.get());
+        require_tls_rejection(https_port, {}, TLS1_2_VERSION, SSL_AD_HANDSHAKE_FAILURE, session.get());
 
         bool unknown_sni_rejected = false;
         try {
@@ -2188,6 +2275,11 @@ int main(int argc, char* argv[]) {
         refreshed_snapshot.mutableCertificate(0)->set_private_key_pem(refreshed_identity.private_key_);
         publish(std::move(refreshed_snapshot));
         publish_tls(loops.loop(0), tls_contexts, runtime.config());
+        // A single configured TLS domain must still require SNI and never expose its certificate.
+        for (const auto version : {TLS1_2_VERSION, TLS1_3_VERSION}) {
+            require_tls_rejection(https_port, {}, version,
+                version == TLS1_3_VERSION ? SSL_AD_MISSING_EXTENSION : SSL_AD_HANDSHAKE_FAILURE);
+        }
         const auto refreshed_response = tls_request(https_port, "www.example.com");
         REQUIRE(refreshed_response.peer_common_name_ == "refreshed.example.com");
         REQUIRE(refreshed_response.bytes_.starts_with("HTTP/1.1 200 OK\r\n"));

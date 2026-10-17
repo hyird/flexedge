@@ -16,9 +16,14 @@
 
 namespace flexedge::node {
 
+struct tls_client_hello final {
+    std::string server_name_;
+    std::string fingerprint_;
+};
+
 namespace detail {
 
-inline int tls_fingerprint_ex_index() noexcept {
+inline int tls_client_hello_ex_index() noexcept {
     static const int index = SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
     return index;
 }
@@ -141,31 +146,57 @@ inline std::string ja3_fingerprint(SSL* ssl) {
     return digest.empty() ? std::string{} : "ja3:" + digest;
 }
 
-inline int tls_fingerprint_callback(SSL* ssl, int*, void*) noexcept {
+inline int tls_client_hello_callback(SSL* ssl, int* alert, void*) noexcept {
+    const auto index = tls_client_hello_ex_index();
+    auto* output = index < 0 ? nullptr : static_cast<tls_client_hello*>(SSL_get_ex_data(ssl, index));
+    if (output == nullptr) {
+        *alert = SSL_AD_INTERNAL_ERROR;
+        return SSL_CLIENT_HELLO_ERROR;
+    }
     try {
-        const auto index = tls_fingerprint_ex_index();
-        auto* output = index < 0 ? nullptr : static_cast<std::string*>(SSL_get_ex_data(ssl, index));
-        if (output != nullptr) {
-            *output = ja3_fingerprint(ssl);
+        output->server_name_.clear();
+        const unsigned char* data{};
+        std::size_t size{};
+        if (SSL_client_hello_get0_ext(ssl, TLSEXT_TYPE_server_name, &data, &size) == 1) {
+            // This edge accepts exactly one DNS host_name. Read the current ClientHello:
+            // SSL_get_servername can return the original session's SNI on TLS 1.2 resumption.
+            if (size < 5 || u16(data) != size - 2 || data[2] != TLSEXT_NAMETYPE_host_name ||
+                u16(data + 3) != size - 5 || size == 5) {
+                *alert = SSL_AD_DECODE_ERROR;
+                return SSL_CLIENT_HELLO_ERROR;
+            }
+            output->server_name_.assign(reinterpret_cast<const char*>(data + 5), size - 5);
         }
     } catch (...) {
+        *alert = SSL_AD_INTERNAL_ERROR;
+        return SSL_CLIENT_HELLO_ERROR;
+    }
+    try {
+        output->fingerprint_ = ja3_fingerprint(ssl);
+    } catch (...) {
+        output->fingerprint_.clear();
     }
     return SSL_CLIENT_HELLO_SUCCESS;
 }
 
 }  // namespace detail
 
-inline void capture_tls_client_fingerprint(SSL* ssl, std::string& output) noexcept {
-    const auto index = detail::tls_fingerprint_ex_index();
+inline void capture_tls_client_hello(SSL* ssl, tls_client_hello& output) noexcept {
+    const auto index = detail::tls_client_hello_ex_index();
     if (index < 0) {
         return;
     }
     SSL_set_ex_data(ssl, index, &output);
-    SSL_CTX_set_client_hello_cb(SSL_get_SSL_CTX(ssl), &detail::tls_fingerprint_callback, nullptr);
+    SSL_CTX_set_client_hello_cb(SSL_get_SSL_CTX(ssl), &detail::tls_client_hello_callback, nullptr);
 }
 
-inline void release_tls_client_fingerprint(SSL* ssl) noexcept {
-    const auto index = detail::tls_fingerprint_ex_index();
+inline const tls_client_hello* current_tls_client_hello(SSL* ssl) noexcept {
+    const auto index = detail::tls_client_hello_ex_index();
+    return index < 0 ? nullptr : static_cast<const tls_client_hello*>(SSL_get_ex_data(ssl, index));
+}
+
+inline void release_tls_client_hello(SSL* ssl) noexcept {
+    const auto index = detail::tls_client_hello_ex_index();
     if (index >= 0) {
         SSL_set_ex_data(ssl, index, nullptr);
     }

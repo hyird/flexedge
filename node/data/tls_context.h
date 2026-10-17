@@ -13,6 +13,7 @@
 #include <openssl/ssl.h>
 
 #include "common/route_policy.h"
+#include "node/data/http_protocol.h"
 #include "node/runtime/compiled_config.h"
 
 namespace flexedge::node {
@@ -99,18 +100,30 @@ private:
                    : SSL_TLSEXT_ERR_NOACK;
     }
 
-    static int select_context(SSL* ssl, int*, void* argument) noexcept {
+    static int select_context(SSL* ssl, int* alert, void* argument) noexcept {
         const auto* set = static_cast<const tls_context_set*>(argument);
-        const auto* raw = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
-        if (raw == nullptr) {
-            return set->sni_.size() == 1 ? SSL_TLSEXT_ERR_OK : SSL_TLSEXT_ERR_ALERT_FATAL;
-        }
-        const auto found = set->sni_.find(flexedge::route_policy::hostname(raw));
-        if (found == set->sni_.end()) {
+        const auto* hello = current_tls_client_hello(ssl);
+        if (hello == nullptr || hello->server_name_.empty()) {
+            *alert = SSL_version(ssl) >= TLS1_3_VERSION ? SSL_AD_MISSING_EXTENSION : SSL_AD_HANDSHAKE_FAILURE;
             return SSL_TLSEXT_ERR_ALERT_FATAL;
         }
-        if (SSL_set_SSL_CTX(ssl, found->second) == nullptr ||
-            SSL_set_min_proto_version(ssl, SSL_CTX_get_min_proto_version(found->second)) != 1) {
+        const auto& raw = hello->server_name_;
+        *alert = SSL_AD_UNRECOGNIZED_NAME;
+        if (!flexedge::route_policy::exact_hostname(raw)) {
+            return SSL_TLSEXT_ERR_ALERT_FATAL;
+        }
+        try {
+            const auto found = set->sni_.find(flexedge::route_policy::hostname(raw));
+            if (found == set->sni_.end()) {
+                return SSL_TLSEXT_ERR_ALERT_FATAL;
+            }
+            if (SSL_set_SSL_CTX(ssl, found->second) == nullptr ||
+                SSL_set_min_proto_version(ssl, SSL_CTX_get_min_proto_version(found->second)) != 1) {
+                *alert = SSL_AD_INTERNAL_ERROR;
+                return SSL_TLSEXT_ERR_ALERT_FATAL;
+            }
+        } catch (...) {
+            *alert = SSL_AD_INTERNAL_ERROR;
             return SSL_TLSEXT_ERR_ALERT_FATAL;
         }
         return SSL_TLSEXT_ERR_OK;

@@ -48,7 +48,7 @@ public:
           timer_(stream_.get_executor()),
           sequence_(sequence),
           connection_(std::move(connection)) {
-        capture_tls_client_fingerprint(stream_.native_handle(), tls_fingerprint_);
+        capture_tls_client_hello(stream_.native_handle(), client_hello_);
     }
 
     void start() {
@@ -88,10 +88,10 @@ private:
             return;
         }
         try {
-            release_tls_client_fingerprint(stream_.native_handle());
-            connection_->retain_tls_context(contexts_);
+            release_tls_client_hello(stream_.native_handle());
+            connection_->retain_tls_context(contexts_, std::move(client_hello_.server_name_));
             auto session = std::make_shared<basic_http_session<stream>>(std::move(stream_), context_,
-                sequence_, connection_, true, std::move(tls_fingerprint_));
+                sequence_, connection_, true, std::move(client_hello_.fingerprint_));
             try {
                 session->start();
             } catch (...) {
@@ -107,7 +107,7 @@ private:
     std::shared_ptr<tls_context_set> contexts_;
     asio::steady_timer timer_;
     std::uint64_t sequence_{};
-    std::string tls_fingerprint_;
+    tls_client_hello client_hello_;
     std::shared_ptr<edge_connection> connection_;
 };
 

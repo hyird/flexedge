@@ -87,14 +87,20 @@ public:
     }
 
     // The worker-local TLS runtime must outlive this connection, including reloads.
-    void retain_tls_context(std::shared_ptr<tls_context_set> contexts) noexcept {
+    void retain_tls_context(std::shared_ptr<tls_context_set> contexts, std::string server_name) noexcept {
         tls_contexts_ = std::move(contexts);
+        tls_server_name_ = std::move(server_name);
+    }
+
+    [[nodiscard]] std::string_view tls_server_name() const noexcept {
+        return tls_server_name_;
     }
 
 private:
     std::function<void()> close_;
     std::function<void()> on_retired_;
     std::shared_ptr<tls_context_set> tls_contexts_;
+    std::string tls_server_name_;
 };
 
 // Serves one HTTP/1 request on a client connection: routing, local responses, proxying
@@ -332,6 +338,15 @@ private:
         if (website_ == nullptr) {
             reply(ruvia::http_status::misdirected_request);
             return;
+        }
+        if (secure_) {
+            const auto server_name = connection_->tls_server_name();
+            const auto* domain = active_config_->domain(hostname);
+            if (server_name.empty() || hostname != flexedge::route_policy::hostname(server_name) ||
+                domain == nullptr || !domain->https_enabled() || !website_->https_enabled()) {
+                reply(ruvia::http_status::misdirected_request);
+                return;
+            }
         }
         hsts_enabled_ = secure_ && website_->hsts_enabled();
         if (!resolve_route_policy(parsed, *website_, host)) {
