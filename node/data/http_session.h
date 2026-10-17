@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ruvia/http/http_cache.h>
 #include <ruvia/http/http_conditional_request.h>
 #include <ruvia/http/http_status.h>
 
@@ -8,6 +9,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -721,13 +723,17 @@ private:
             if (const auto range = parsed.request().header("Range")) {
                 bool allowed = true;
                 if (const auto condition = parsed.request().header("If-Range")) {
-                    if (condition->starts_with('"') || condition->starts_with("W/")) {
-                        allowed = !condition->starts_with("W/") && !etag.starts_with("W/") && *condition == etag;
-                    } else {
-                        const auto date = cache_http_time(*condition);
-                        const auto modified = cache_http_time(cache_header(cached_response_->headers_, "Last-Modified"));
-                        allowed = date && modified && *modified <= *date;
+                    std::optional<std::time_t> modified;
+                    bool strong_date{};
+                    if (!condition->starts_with('"') && !condition->starts_with("W/")) {
+                        modified = ruvia::parse_http_date(cache_header(cached_response_->headers_, "Last-Modified"));
+                        if (modified) {
+                            const auto date = ruvia::parse_http_date(cache_header(cached_response_->headers_, "Date"));
+                            // Without shared-clock provenance, retain a conservative clock-skew margin.
+                            strong_date = date && std::difftime(*date, *modified) >= 60;
+                        }
                     }
+                    allowed = ruvia::http_if_range_allows(*condition, etag, modified, strong_date);
                 }
                 if (allowed) {
                     if (const auto selected = parse_cache_range(*range, cached_response_->body_bytes_)) {

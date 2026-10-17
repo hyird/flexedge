@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <future>
 #include <iostream>
@@ -146,6 +147,15 @@ private:
                         "HTTP/1.1 200 OK\r\nCache-Control: public, max-age=600\r\nETag: \"large\"\r\nContent-Type: application/octet-stream\r\nContent-Length: 524288\r\nConnection: close\r\n\r\n" +
                         std::string(262144, 'a') + std::string(262144, 'b'));
                     asio::async_write(*peer, asio::buffer(*bytes), [peer, bytes](std::error_code, std::size_t) { std::error_code ignored; peer->close(ignored); });
+                    return;
+                }
+                if (request_text.starts_with("GET /date-range ") || request_text.starts_with("GET /weak-date-range ")) {
+                    const auto date = cache_http_date(std::time(nullptr));
+                    const auto modified = request_text.starts_with("GET /weak-date-range ") ? std::string_view(date) : "Wed, 21 Oct 2015 07:28:00 GMT";
+                    auto data = std::make_shared<std::string>();
+                    data->reserve(body_.size() + 256);
+                    data->append("HTTP/1.1 200 OK\r\nCache-Control: public, max-age=600\r\nDate: ").append(date).append("\r\nLast-Modified: ").append(modified).append("\r\nContent-Length: ").append(std::to_string(body_.size())).append("\r\nConnection: close\r\n\r\n").append(body_);
+                    asio::async_write(*peer, asio::buffer(*data), [peer, data](std::error_code, std::size_t) { std::error_code ignored; peer->close(ignored); });
                     return;
                 }
                 const auto etag = request_text.starts_with("GET /etag-comma ") ? "\"test\\,part\"" : "\"test\"";
@@ -486,6 +496,27 @@ void verify() {
     FLEXEDGE_REQUIRE(invalid_match.starts_with("HTTP/1.1 200"));
     FLEXEDGE_REQUIRE(invalid_match.substr(invalid_match.find("\r\n\r\n") + 4) == large_body);
     FLEXEDGE_REQUIRE(large_source.hits() == 2);
+    const auto dated = request({}, "GET", "/date-range");
+    FLEXEDGE_REQUIRE(dated.substr(dated.find("\r\n\r\n") + 4) == large_body);
+    const auto later_date = request("Range: bytes=1-3\r\nIf-Range: Wed, 21 Oct 2015 07:28:01 GMT\r\n", "GET", "/date-range");
+    FLEXEDGE_REQUIRE(later_date.starts_with("HTTP/1.1 200"));
+    FLEXEDGE_REQUIRE(later_date.substr(later_date.find("\r\n\r\n") + 4) == large_body);
+    const auto exact_date = request("Range: bytes=1-3\r\nIf-Range: Wed, 21 Oct 2015 07:28:00 GMT\r\n", "GET", "/date-range");
+    FLEXEDGE_REQUIRE(exact_date.starts_with("HTTP/1.1 206"));
+    FLEXEDGE_REQUIRE(exact_date.substr(exact_date.find("\r\n\r\n") + 4) == large_body.substr(1, 3));
+    const auto weak_dated = request({}, "GET", "/weak-date-range");
+    const auto weak_headers = std::string_view(weak_dated).substr(0, weak_dated.find("\r\n\r\n"));
+    constexpr std::string_view modified_name = "last-modified: ";
+    const auto modified_field = std::search(weak_headers.begin(), weak_headers.end(), modified_name.begin(), modified_name.end(),
+        [](char actual, char expected) { return flexedge::route_policy::lower_ascii(actual) == expected; });
+    FLEXEDGE_REQUIRE(modified_field != weak_headers.end());
+    const auto modified_at = static_cast<std::size_t>(modified_field - weak_headers.begin());
+    const auto modified_end = weak_dated.find("\r\n", modified_at);
+    const auto weak_date = weak_dated.substr(modified_at + 15, modified_end - modified_at - 15);
+    const auto weak_range = request("Range: bytes=1-3\r\nIf-Range: " + weak_date + "\r\n", "GET", "/weak-date-range");
+    FLEXEDGE_REQUIRE(weak_range.starts_with("HTTP/1.1 200"));
+    FLEXEDGE_REQUIRE(weak_range.substr(weak_range.find("\r\n\r\n") + 4) == large_body);
+    FLEXEDGE_REQUIRE(large_source.hits() == 4);
     shutdown.stop_and_join();
 }
 }  // namespace
