@@ -442,10 +442,10 @@ void verify(std::string_view storage) {
             asio::ip::tcp::socket socket(clients);
             socket.connect({asio::ip::address_v4::loopback(), port});
             before = plain.count();
-            const auto control = "/control" + path;
-            const auto responses = requests(socket, {path, control}, false, "www.example.com", upload, {}, false, true);
+            const auto control_path = "/control" + path;
+            const auto responses = requests(socket, {path, control_path}, false, "www.example.com", upload, {}, false, true);
             FLEXEDGE_REQUIRE(responses[0].status_ == 413 && responses[0].body_ == expected);
-            FLEXEDGE_REQUIRE(responses[1].status_ == 200 && responses[1].body_ == control);
+            FLEXEDGE_REQUIRE(responses[1].status_ == 200 && responses[1].body_ == control_path);
             FLEXEDGE_REQUIRE(plain.count() == before + 2);
         }
         const auto after = "/after-http2" + path;
