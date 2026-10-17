@@ -14,7 +14,7 @@ import {
 } from './website-sections'
 
 describe('website settings sections', () => {
-  it('lists the nine groups in navigation order', () => {
+  it('lists the settings groups in navigation order', () => {
     expect(websiteSectionIds).toEqual([
       'basic',
       'domains',
@@ -23,6 +23,7 @@ describe('website settings sections', () => {
       'origin-settings',
       'health',
       'routes',
+      'cache',
       'compression',
       'logs',
     ])

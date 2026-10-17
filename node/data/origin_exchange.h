@@ -107,7 +107,7 @@ private:
                     return;
                 }
                 self->write_request(std::move(handler));
-            });
+            },key_.allow_http2_,key_.require_http2_);
     }
 
     template <typename handler_type>

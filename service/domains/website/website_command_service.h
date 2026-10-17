@@ -16,6 +16,7 @@
 
 #include "service/common/database.h"
 #include "service/common/http.h"
+#include "service/domains/cache/cache_reference.h"
 #include "service/domains/certificate/certificate_reference.h"
 #include "service/domains/cluster/cluster_reference.h"
 #include "service/domains/dns_zone/dns_zone_reference.h"
@@ -41,6 +42,7 @@ public:
     ruvia::task<void> request_dns_probe(ruvia::context& c, const std::string& tenant_id,
         const std::string& id) {
         auto transaction = co_await c.db().begin_transaction();
+        co_await service::cache::lock_bindings(transaction, tenant_id);
         const auto revision = co_await lock_website_revision(transaction, tenant_id, id);
         if (!revision) {
             service::common::throw_app_error(website_error::not_found);
@@ -67,10 +69,12 @@ public:
         website_created_dto result({.resource_ = c.pool()});
         try {
             auto transaction = co_await c.db().begin_transaction();
+            co_await service::cache::lock_bindings(transaction, tenant_id);
             co_await require_cluster(transaction, tenant_id, cluster_id);
             const auto domain_claims =
                 co_await build_domain_claims(transaction, tenant_id, std::nullopt, config);
             co_await validate_certificates(transaction, tenant_id, config);
+            co_await service::cache::validate_website_reference(transaction, tenant_id, config.cache_enabled_, config.cache_policy_id_);
             const auto website_id = co_await insert_website(transaction, tenant_id, cluster_id, status, config_json);
             service::background::queued_work work;
             co_await replace_relation_projections(transaction, tenant_id, website_id, domain_claims,
@@ -106,6 +110,7 @@ public:
         const auto config_json = serialize_config(c, config);
         try {
             auto transaction = co_await c.db().begin_transaction();
+            co_await service::cache::lock_bindings(transaction, tenant_id);
             const auto previous = co_await lock_website_snapshot(transaction, tenant_id, id);
             service::common::require_current_revision(
                 previous ? std::optional<std::int64_t>{previous->revision_} : std::nullopt, expected_revision,
@@ -113,6 +118,7 @@ public:
             co_await require_cluster(transaction, tenant_id, cluster_id);
             const auto domain_claims = co_await build_domain_claims(transaction, tenant_id, id, config);
             co_await validate_certificates(transaction, tenant_id, config);
+            co_await service::cache::validate_website_reference(transaction, tenant_id, config.cache_enabled_, config.cache_policy_id_);
             const auto& previous_cluster_id = previous->cluster_id_;
             const auto revision = co_await update_website(transaction, tenant_id, id, expected_revision,
                 cluster_id, status, config_json);
@@ -143,6 +149,7 @@ public:
     ruvia::task<std::int64_t> remove(ruvia::context& c, const std::string& tenant_id,
         const std::string& id, std::int64_t expected_revision) {
         auto transaction = co_await c.db().begin_transaction();
+        co_await service::cache::lock_bindings(transaction, tenant_id);
         const auto previous = co_await soft_delete_website(transaction, tenant_id, id, expected_revision);
         co_await service::common::require_revision_written(transaction, previous.has_value(), "sys_website",
             tenant_id, id, revision_errors_);

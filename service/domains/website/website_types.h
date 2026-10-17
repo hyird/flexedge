@@ -154,7 +154,8 @@ RUVIA_MODEL(
     RUVIA_OPTIONAL_FIELD_NAME("tls_fingerprint", tls_fingerprint, ruvia::string, RUVIA_OMIT_EMPTY),
     RUVIA_OPTIONAL_FIELD_NAME("response_headers", response_headers, ruvia::string, RUVIA_OMIT_EMPTY),
     RUVIA_OPTIONAL_FIELD_NAME("query_string", query_string, ruvia::string, RUVIA_OMIT_EMPTY),
-    RUVIA_OPTIONAL_FIELD(cookies, ruvia::string, RUVIA_OMIT_EMPTY));
+    RUVIA_OPTIONAL_FIELD(cookies, ruvia::string, RUVIA_OMIT_EMPTY),
+    RUVIA_REQUIRED_FIELD(cache_status, ruvia::string));
 RUVIA_MODEL(website_access_log_tail_data_dto,
     RUVIA_REQUIRED_FIELD(list, ruvia::array<website_access_log_dto>),
     RUVIA_OPTIONAL_FIELD(cursor, ruvia::string, RUVIA_OMIT_EMPTY));

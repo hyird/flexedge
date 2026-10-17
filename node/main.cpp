@@ -100,7 +100,7 @@ int main(int argc, char* argv[]) {
         auto credentials = flexedge::node::node_credentials::load(argv[2]);
         auto startup_upgrade = flexedge::node::take_pending_upgrade_record(
             state_directory / "pending-upgrade", flexedge::crypto::file_sha256(binary_path));
-        flexedge::node::data_plane data_plane(worker_loops, loop, runtime, data_log_sender);
+        flexedge::node::data_plane data_plane(worker_loops, loop, runtime, data_log_sender, state_directory / "content_cache");
         ruvia::stop_source stop_source;
         std::atomic<bool> shutting_down{};
         std::atomic<bool> restart_requested{};

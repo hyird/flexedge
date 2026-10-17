@@ -37,6 +37,7 @@ import {
   OriginSettingsSection,
   OriginsSection,
 } from './website-origin-section'
+import { WebsiteCacheSection } from './website_cache_section'
 import { WebsiteRouteEditor } from './website-route-editor'
 import {
   collectWebsiteFormErrors,
@@ -60,6 +61,7 @@ const sectionComponents: Record<
   Exclude<WebsiteSectionId, 'routes'>,
   (props: WebsiteSectionProps) => ReactNode
 > = {
+  cache: WebsiteCacheSection,
   basic: BasicSection,
   domains: DomainsSection,
   https: HttpsSection,

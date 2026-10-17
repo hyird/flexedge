@@ -35,6 +35,7 @@ namespace flexedge::node {
 
 struct origin_probe_config final {
     std::string protocol_;
+    std::string http_version_{"auto"};
     std::string host_;
     std::uint16_t port_{};
     std::string path_{"/"};
@@ -47,7 +48,7 @@ struct origin_probe_config final {
 };
 
 [[nodiscard]] inline origin_probe_config make_origin_probe_config(const v2::Website& website, const v2::Origin& origin) {
-    return {.protocol_ = origin.protocol(), .host_ = origin.host(), .port_ = static_cast<std::uint16_t>(origin.port()), .path_ = website.health_check_path(), .timeout_ = std::chrono::seconds(website.health_check_timeout_seconds()), .expected_status_ = website.health_check_expected_status() == 0 ? 200 : website.health_check_expected_status(), .healthy_threshold_ = website.healthy_threshold(), .unhealthy_threshold_ = website.unhealthy_threshold()};
+    return {.protocol_ = origin.protocol(), .http_version_ = website.origin_http_version(), .host_ = origin.host(), .port_ = static_cast<std::uint16_t>(origin.port()), .path_ = website.health_check_path(), .timeout_ = std::chrono::seconds(website.health_check_timeout_seconds()), .expected_status_ = website.health_check_expected_status() == 0 ? 200 : website.health_check_expected_status(), .healthy_threshold_ = website.healthy_threshold(), .unhealthy_threshold_ = website.unhealthy_threshold()};
 }
 
 // Sends one HEAD request to an origin over its own origin_transport and records whether the
@@ -117,7 +118,7 @@ public:
                                 return;
                             }
                             self->write();
-                        });
+                        },config_.http_version_!="http1",config_.http_version_=="http2");
                 },
                 "async probe startup failed");
         } catch (const std::exception& error) {

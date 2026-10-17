@@ -22,8 +22,8 @@ inline constexpr std::string_view provider_verification_work{"provider-verificat
 inline constexpr std::string_view dns_sync_work{"dns-sync"};
 inline constexpr std::string_view certificate_work{"certificate"};
 inline constexpr std::string_view website_dispatch_work{"website-dispatch"};
-inline constexpr std::array<std::string_view, 7> types{provider_verification_work, dns_sync_work, certificate_work,
-    website_dispatch_work, "log-ingest", "outbox", "node-reports"};
+inline constexpr std::array<std::string_view, 8> types{provider_verification_work, dns_sync_work, certificate_work,
+    website_dispatch_work, "log-ingest", "outbox", "node-reports", "cache-tasks"};
 
 [[nodiscard]] inline bool valid_type(std::string_view type) noexcept {
     for (const auto candidate : types) {

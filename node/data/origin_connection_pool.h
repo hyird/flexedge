@@ -22,6 +22,8 @@ struct origin_connection_key final {
     std::string host_;
     std::uint16_t port_{};
     bool secure_{};
+    bool allow_http2_{true};
+    bool require_http2_{false};
 
     [[nodiscard]] bool operator==(const origin_connection_key&) const noexcept = default;
 };
@@ -89,7 +91,8 @@ public:
                 }
             }
             std::ranges::sort(keys, [](const auto& left, const auto& right) {
-                return std::tie(left.host_, left.port_, left.secure_) < std::tie(right.host_, right.port_, right.secure_);
+                return std::tie(left.host_, left.port_, left.secure_, left.allow_http2_, left.require_http2_) <
+                       std::tie(right.host_, right.port_, right.secure_, right.allow_http2_, right.require_http2_);
             });
             keys.erase(std::ranges::unique(keys).begin(), keys.end());
             for (const auto& key : keys) {

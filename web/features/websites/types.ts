@@ -95,11 +95,14 @@ export type WebsiteRouteRule = z.infer<typeof websiteRouteRuleSchema>
 
 /** `website_config_output`; `name` is omitted when never set. */
 const websiteConfigSchema = z.object({
+  cache_enabled: z.boolean().default(false),
+  cache_policy_id: z.string().default(''),
   name: z.string().optional(),
   domains: z.array(websiteDomainSchema),
   origins: z.array(websiteOriginSchema),
   default_origin_group: z.string(),
   origin_host_header: z.string(),
+  origin_http_version: z.enum(['auto','http1','http2']).default('auto'),
   origin_connect_timeout_seconds: z.number().int(),
   origin_read_timeout_seconds: z.number().int(),
   pass_client_ip: z.boolean(),

@@ -12,6 +12,8 @@
 #include <string_view>
 #include <type_traits>
 
+#include "tests/support/environment.h"
+
 namespace {
 
 void require(bool condition, std::string_view message) {
@@ -47,7 +49,7 @@ public:
     }
 };
 
-using access_log_row = std::array<access_log_field, 22>;
+using access_log_row = std::array<access_log_field, 23>;
 
 access_log_row make_row(std::optional<std::string> client_ip) {
     access_log_row row{};
@@ -65,6 +67,7 @@ access_log_row make_row(std::optional<std::string> client_ip) {
     row[11].text_ = "512";
     row[12].text_ = "3";
     row[17].text_ = "f";
+    row[22].text_ = "hit_disk";
     return row;
 }
 
@@ -122,6 +125,7 @@ void verify_with_xdb() {
 void verify_missing_xdb() {
     require(!service::geoip::get_xdb_database().available(), "absent XDB paths loaded a database");
     const auto json = map_to_json("1.2.3.4");
+    require(contains(json, "\"cache_status\":\"hit_disk\""), "cache tier must be present independently of response headers");
     require(contains(json, "\"client_ip\":\"1.2.3.4\""), "client IP missing without XDB");
     require(!contains(json, "\"client_ip_location\""), "location present without XDB");
     require_without_asn(json, "missing XDB");
@@ -133,8 +137,7 @@ int main(int argc, char** argv) {
     try {
         const std::string_view mode = argc > 1 ? argv[1] : "";
         const auto path = [](const char* name) {
-            const auto* value = std::getenv(name);
-            return std::filesystem::path(value ? value : "");
+            return std::filesystem::path(test_support::environment_variable(name).value_or(""));
         };
         service::geoip::configure_xdb_database({.ipv4_path_ = path("FLEXEDGE_XDB_V4_PATH"),
             .ipv6_path_ = path("FLEXEDGE_XDB_V6_PATH")});

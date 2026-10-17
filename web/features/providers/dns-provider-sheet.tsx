@@ -13,10 +13,7 @@ import {
   dnsProviderTokenLength,
   type DnsProviderFormValues,
 } from './dns-provider-form'
-import {
-  ProviderRemoval,
-  ProviderVerification,
-} from './provider-sheet-sections'
+import { ProviderRemoval } from './provider-sheet-sections'
 import type { DnsProvider } from './types'
 
 function toFormValues(provider?: DnsProvider): DnsProviderFormValues {
@@ -63,14 +60,11 @@ export function DnsProviderSheet({
   const base = draft.base ?? provider
   const clean = toFormValues(base)
   const values = edits ?? clean
-  const isDirty = (
-    Object.keys(clean) as (keyof DnsProviderFormValues)[]
-  ).some((key) => values[key] !== clean[key])
   const update = (name: keyof DnsProviderFormValues, value: string) => {
     const next = { ...values, [name]: value }
-    const dirty = (
-      Object.keys(clean) as (keyof DnsProviderFormValues)[]
-    ).some((key) => next[key] !== clean[key])
+    const dirty = (Object.keys(clean) as (keyof DnsProviderFormValues)[]).some(
+      (key) => next[key] !== clean[key]
+    )
     setEdits(dirty ? next : undefined)
     draft.track(dirty)
   }
@@ -93,7 +87,7 @@ export function DnsProviderSheet({
       description={
         provider
           ? '可修改账号名称或轮换访问密钥；平台和账户标识创建后不可修改。'
-          : '凭据用于读取和同步托管域名的解析记录；保存后在编辑中“验证凭据”，验证通过才能添加域名。'
+          : '凭据用于读取和同步托管域名的解析记录；保存后在列表中验证，验证通过才能添加域名。'
       }
       onSubmit={submit}
       submitLabel={provider ? '保存' : '添加账号'}
@@ -149,11 +143,6 @@ export function DnsProviderSheet({
       />
       {provider && (
         <>
-          <ProviderVerification
-            kind='dns'
-            provider={provider}
-            isDirty={isDirty}
-          />
           <ProviderRemoval
             kind='dns'
             provider={provider}

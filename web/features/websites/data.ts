@@ -125,6 +125,7 @@ export function removeWebsite(target: Pick<Website, 'id' | 'revision'>) {
 export function afterWebsiteWrite(client: QueryClient, websiteId?: string) {
   return Promise.all([
     client.invalidateQueries({ queryKey: websitesSnapshotKey }),
+    client.invalidateQueries({ queryKey: ['cache'] }),
     client.invalidateQueries({ queryKey: queryKeys.certificates }),
     client.invalidateQueries({ queryKey: queryKeys.dnsZones }),
     client.invalidateQueries({ queryKey: queryKeys.clusters }),
@@ -146,7 +147,10 @@ export function afterWebsiteRemove(client: QueryClient, id: string) {
     queryKey: queryKeys.websites,
     predicate: (query) => query.queryKey[2] === id,
   })
-  return client.invalidateQueries({ queryKey: queryKeys.websites })
+  return Promise.all([
+    client.invalidateQueries({ queryKey: queryKeys.websites }),
+    client.invalidateQueries({ queryKey: ['cache'] }),
+  ])
 }
 
 export type WebsitesListParams = {

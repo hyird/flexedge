@@ -11,6 +11,7 @@ import {
 
 /** Task name per resource type (one task per resource). */
 export const taskTypeLabels = {
+  cache: '缓存操作',
   website: '网站检查',
   dns_zone: 'DNS 同步',
   certificate: '证书签发',
@@ -20,6 +21,9 @@ export const taskTypeLabels = {
 
 /** Operation the task currently runs (and the operation of each attempt). */
 export const taskOperations = {
+  prewarm: '预热缓存',
+  refresh: '刷新缓存',
+  clean: '清理缓存',
   apply: '检查网站',
   sync: '同步',
   delete: '删除托管域',
@@ -86,6 +90,16 @@ export function operationLabel(operation: string) {
 /** `证书续期`, `删除托管域`: the type name, specialised by the operation
  * where it names a different job. */
 export function taskTypeLabel(task: Pick<Task, 'resource_type' | 'operation'>) {
+  if (task.resource_type === 'cache')
+    return (
+      (
+        {
+          prewarm: '缓存预热',
+          refresh: '刷新缓存',
+          clean: '清理缓存',
+        } as Record<string, string>
+      )[task.operation] ?? '缓存操作'
+    )
   if (task.resource_type === 'certificate' && task.operation === 'renew')
     return '证书续期'
   if (task.resource_type === 'dns_zone' && task.operation === 'delete')
@@ -133,6 +147,8 @@ export function taskTarget(
 ): string | undefined {
   const encoded = encodeURIComponent(task.resource_id)
   switch (task.resource_type) {
+    case 'cache':
+      return '/cache'
     case 'website':
       return `/websites/${encoded}`
     case 'node':

@@ -17,6 +17,7 @@ const accessLogSchema = z.object({
   host: z.string(),
   target: z.string(),
   status_code: z.number().int(),
+  cache_status: z.string().optional(),
   request_bytes: z.number().int(),
   response_bytes: z.number().int(),
   duration_ms: z.number().int(),

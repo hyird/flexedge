@@ -48,11 +48,27 @@ const liveStates = {
   'paused' | 'connected' | 'interrupted' | 'connecting'
 >
 const liveStateReserve = statusReserve(liveStates)
+const cacheStates = {
+  hit_memory: { label: 'L1 命中', tone: 'success' },
+  hit_disk: { label: 'L2 命中', tone: 'success' },
+  miss: { label: '未命中', tone: 'warning' },
+  bypass: { label: '绕过', tone: 'default' },
+} as const
+const cacheStateReserve = ['L1 命中', 'L2 命中', '未命中', '绕过', '未上报']
+function cacheState(log: AccessLog) {
+  return (
+    cacheStates[log.cache_status as keyof typeof cacheStates] ?? {
+      label: '未上报',
+      tone: 'default' as const,
+    }
+  )
+}
 
 const columnText = {
   time: (log: AccessLog) => formatDate(log.occurred_at),
   node: (log: AccessLog) => log.node_name,
   status: (log: AccessLog) => String(log.status_code),
+  cache: (log: AccessLog) => cacheState(log).label,
   client: (log: AccessLog) => log.client_ip || '—',
   location: (log: AccessLog) => formatClientLocation(log.client_ip_location),
   duration: (log: AccessLog) => `${log.duration_ms} ms`,
@@ -79,6 +95,7 @@ function useColumnWidths(
     time: 190,
     node: 120,
     status: 80,
+    cache: 100,
     client: 130,
     location: 150,
     duration: 90,
@@ -272,6 +289,13 @@ export function AccessLogs() {
         id: 'status',
         header: '状态',
         cell: (log) => <StatusChip {...accessLogStatus(log.status_code)} />,
+      },
+      {
+        id: 'cache',
+        header: '缓存',
+        cell: (log) => (
+          <StatusChip {...cacheState(log)} reserve={cacheStateReserve} />
+        ),
       },
       {
         id: 'client',
@@ -597,6 +621,12 @@ function AccessLogDetail({ log }: { log: AccessLog }) {
             value: <StatusChip {...accessLogStatus(log.status_code)} />,
           },
           { label: '协议', value: log.protocol },
+          {
+            label: '缓存',
+            value: (
+              <StatusChip {...cacheState(log)} reserve={cacheStateReserve} />
+            ),
+          },
           {
             label: '节点',
             value: (

@@ -538,10 +538,10 @@ private:
                 if (type != "dns-01") {
                     continue;
                 }
-                const auto url = detail::optional_string(challenge.get<"url">());
+                const auto challenge_url = detail::optional_string(challenge.get<"url">());
                 const auto token = detail::optional_string(challenge.get<"token">());
-                if (!url.empty() && !token.empty()) {
-                    result.dns_challenge_ = detail::challenge{url, token};
+                if (!challenge_url.empty() && !token.empty()) {
+                    result.dns_challenge_ = detail::challenge{challenge_url, token};
                 }
                 result.error_ = detail::problem_detail(challenge.get<"error">());
                 break;

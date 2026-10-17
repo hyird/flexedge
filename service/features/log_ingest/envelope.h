@@ -54,7 +54,8 @@ inline bool valid_access(const flexedge::node::v2::AccessLog& value) {
            bounded(value.response_headers(),
                flexedge::node::log_contract::max_response_headers_bytes) &&
            bounded(value.query_string(), flexedge::node::log_contract::max_query_string_bytes) &&
-           bounded(value.cookies(), flexedge::node::log_contract::max_cookies_bytes);
+           bounded(value.cookies(), flexedge::node::log_contract::max_cookies_bytes) &&
+           (value.cache_status().empty() || value.cache_status() == "hit_memory" || value.cache_status() == "hit_disk" || value.cache_status() == "miss" || value.cache_status() == "bypass");
 }
 
 inline bool valid_node_log(const flexedge::node::v2::NodeLog& value) {

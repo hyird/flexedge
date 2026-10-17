@@ -1,5 +1,4 @@
 #pragma once
-
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
@@ -13,6 +12,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "common/cache_policy.h"
 #include "common/route_match.h"
 #include "common/route_policy.h"
 #include "node/proto/edge_control.pb.h"
@@ -170,6 +170,9 @@ inline void validate_response_compression(const v2::Website& website) {
 }
 
 inline void validate_website_basics(const v2::Website& website) {
+    if(!website.origin_http_version().empty() && website.origin_http_version()!="auto" && website.origin_http_version()!="http1" && website.origin_http_version()!="http2") {
+        throw invalid_website("invalid origin HTTP version");
+    }
     if (website.id().empty() || website.revision() <= 0 || website.domains().empty()) {
         throw invalid_website("invalid enabled website");
     }
@@ -405,6 +408,12 @@ inline void validate_website_domains(const v2::Website& website) {
 // publishes and by the node before it serves. Disabled websites are delivered but never
 // served, so they are not checked.
 inline void validate_website(const v2::Website& website, route_patterns* patterns = nullptr) {
+    if (website.has_response_cache()) {
+        const auto error = flexedge::cache::validate(flexedge::cache::from_proto(website.response_cache()));
+        if (!error.empty() || website.response_cache().id().empty() || website.response_cache().revision() < 1) {
+            throw invalid_website("invalid response cache policy");
+        }
+    }
     if (!website.enabled()) {
         return;
     }

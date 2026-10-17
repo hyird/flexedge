@@ -77,6 +77,7 @@ inline log_rows to_log_rows(const v2::QueuedLogDelivery& envelope, std::int64_t 
             row.set<"response_headers">(access.response_headers());
             row.set<"query_string">(access.query_string());
             row.set<"cookies">(access.cookies());
+            row.set<"cache_status">(access.cache_status());
             rows.websites_.push_back(access.website_id());
         } else {
             const auto& item = event.node_log();

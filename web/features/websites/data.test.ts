@@ -178,6 +178,7 @@ it('invalidates dependent caches after a website write', async () => {
   await afterWebsiteWrite(client, 'site-1')
   expect(spy.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([
     websitesSnapshotKey,
+    ['cache'],
     queryKeys.certificates,
     queryKeys.dnsZones,
     queryKeys.clusters,

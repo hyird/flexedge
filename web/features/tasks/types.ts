@@ -34,6 +34,7 @@ export const taskStatusValues = [
   'completed',
 ] as const
 export const taskResourceTypes = [
+  'cache',
   'website',
   'dns_zone',
   'certificate',

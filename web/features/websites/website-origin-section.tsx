@@ -337,7 +337,20 @@ export function OriginSettingsSection({
             hint='$host 保留客户端请求域名，也可指定源站域名。'
             className='[&_input]:font-mono'
           />
-          <div className='hidden sm:block' />
+          <Choice
+            label='回源 HTTP 版本'
+            value={values.origin_http_version}
+            onChange={(value) =>
+              update('origin_http_version', value as 'auto' | 'http1' | 'http2')
+            }
+            items={[
+              { id: 'auto', label: '自动协商' },
+              { id: 'http1', label: 'HTTP/1.1' },
+              { id: 'http2', label: 'HTTP/2' },
+            ]}
+            hint='自动模式通过 TLS 协商；明文 HTTP/2 请选择 HTTP/2。'
+            error={errors.origin_http_version}
+          />
           <NumberField
             label='连接超时（秒）'
             value={values.origin_connect_timeout_seconds}

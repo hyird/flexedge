@@ -251,10 +251,14 @@ collect_enabled_origin_groups(const ruvia::array<website_origin_input>& origins)
     }
 
     website_config_data result;
+    result.cache_enabled_ = input.get<"cache_enabled">() && input.get<"cache_enabled">()->value_;
+    result.cache_policy_id_ = input.get<"cache_policy_id">() ? std::string(input.get<"cache_policy_id">()->view()) : "";
     if (const auto& name = input.get<"name">()) {
         result.name_ = std::string(name->view());
     }
     result.origin_host_header_ = std::string(origin_host_header->view());
+    const auto& version=input.get<"origin_http_version">();
+    result.origin_http_version_=version?std::string(version->view()):"auto";
     result.default_origin_group_ = std::string(default_origin_group->view());
     result.origin_connect_timeout_seconds_ = origin_connect_timeout_seconds->value_;
     result.origin_read_timeout_seconds_ = origin_read_timeout_seconds->value_;
@@ -349,10 +353,13 @@ parse_stored(std::string_view json, ruvia::model_parse_options options = {}) {
 [[nodiscard]] inline website_config_output to_output(const website_config_data& input,
     ruvia::model_options options = {}) {
     website_config_output output(options);
+    output.set<"cache_enabled">(input.cache_enabled_);
+    output.set<"cache_policy_id">(input.cache_policy_id_);
     if (input.name_) {
         output.set<"name">(*input.name_);
     }
     output.set<"origin_host_header">(input.origin_host_header_);
+    output.set<"origin_http_version">(input.origin_http_version_);
     output.set<"default_origin_group">(input.default_origin_group_);
     output.set<"origin_connect_timeout_seconds">(input.origin_connect_timeout_seconds_);
     output.set<"origin_read_timeout_seconds">(input.origin_read_timeout_seconds_);

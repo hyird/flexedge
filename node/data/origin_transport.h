@@ -16,6 +16,7 @@
 #include <asio/ssl/stream.hpp>
 #include <asio/write.hpp>
 
+#include "node/data/origin_http2_connection.h"
 #include "node/data/origin_tls.h"
 #include "node/runtime/dns_resolution.h"
 
@@ -30,9 +31,14 @@ public:
           resolver_(executor_),
           socket_(executor_),
           tls_context_(tls_context) {}
+    ~origin_transport() {
+        close();
+    }
 
-    void connect(std::string host, std::uint16_t port, bool secure, completion completion_value) {
+    void connect(std::string host, std::uint16_t port, bool secure, completion completion_value, bool allow_http2 = true, bool require_http2 = false) {
         reset();
+        allow_http2_ = allow_http2;
+        require_http2_ = require_http2;
         const auto generation = generation_;
         connect_generation_ = generation;
         connect_host_ = std::move(host);
@@ -47,7 +53,10 @@ public:
 
     template <typename const_buffer_type, typename handler_type>
     void write(const const_buffer_type& buffer, handler_type&& handler) {
-        if (tls_stream_) {
+        if (http2_) {
+            const asio::const_buffer bytes(buffer);
+            http2_->request(std::string_view(static_cast<const char*>(bytes.data()), bytes.size()), std::forward<handler_type>(handler));
+        } else if (tls_stream_) {
             asio::async_write(*tls_stream_, buffer, std::forward<handler_type>(handler));
         } else {
             asio::async_write(socket_, buffer, std::forward<handler_type>(handler));
@@ -56,7 +65,9 @@ public:
 
     template <typename mutable_buffer_type, typename handler_type>
     void read(const mutable_buffer_type& buffer, handler_type&& handler) {
-        if (tls_stream_) {
+        if (http2_) {
+            http2_->read(asio::mutable_buffer(buffer), std::forward<handler_type>(handler));
+        } else if (tls_stream_) {
             tls_stream_->async_read_some(buffer, std::forward<handler_type>(handler));
         } else {
             socket_.async_read_some(buffer, std::forward<handler_type>(handler));
@@ -65,6 +76,10 @@ public:
 
     void reset() noexcept {
         ++generation_;
+        if (http2_) {
+            http2_->close();
+            http2_.reset();
+        }
         connected_ = false;
         reusable_ = true;
         tunnel_ = false;
@@ -90,6 +105,9 @@ public:
         // socket or start a TLS handshake after its owner has stopped the exchange/probe.
         ++generation_;
         connected_ = false;
+        if (http2_) {
+            http2_->close();
+        }
         resolver_.cancel();
         std::error_code ignored;
         if (tls_stream_) {
@@ -99,7 +117,7 @@ public:
     }
 
     [[nodiscard]] bool connected() const noexcept {
-        return connected_ && reusable_;
+        return connected_ && reusable_ && (!http2_ || http2_->reusable());
     }
 
     [[nodiscard]] const dns_addresses& addresses() const noexcept {
@@ -155,7 +173,7 @@ private:
 
     origin_tls_context::stream* prepare_tls(std::uint64_t generation) {
         try {
-            tls_stream_.emplace(tls_context_.get_stream(std::move(socket_), connect_host_));
+            tls_stream_.emplace(tls_context_.get_stream(std::move(socket_), connect_host_, allow_http2_));
         } catch (const std::exception& error) {
             std::cerr << "flexedge node origin transport: TLS stream preparation failed for "
                       << connect_host_ << ": " << error.what() << '\n';
@@ -181,6 +199,10 @@ private:
             return;
         }
         if (!secure) {
+            if (require_http2_) {
+                http2_ = std::make_shared<origin_http2_connection>(std::move(socket_), false);
+                http2_->start();
+            }
             connected_ = true;
             complete_connect(generation, {});
             return;
@@ -210,6 +232,18 @@ private:
             complete_connect(generation, std::make_error_code(std::errc::protocol_error));
             return;
         }
+        const unsigned char* protocol = nullptr;
+        unsigned int size{};
+        SSL_get0_alpn_selected(tls_stream_->native_handle(), &protocol, &size);
+        if (require_http2_ && !(size == 2 && std::string_view(reinterpret_cast<const char*>(protocol), size) == "h2")) {
+            complete_connect(generation, std::make_error_code(std::errc::protocol_not_supported));
+            return;
+        }
+        if (size == 2 && std::string_view(reinterpret_cast<const char*>(protocol), size) == "h2") {
+            http2_ = std::make_shared<origin_http2_connection>(std::move(*tls_stream_), true);
+            tls_stream_.reset();
+            http2_->start();
+        }
         connected_ = true;
         complete_connect(generation, {});
     }
@@ -219,6 +253,9 @@ private:
     asio::ip::tcp::socket socket_;
     origin_tls_context& tls_context_;
     std::optional<origin_tls_context::stream> tls_stream_;
+    std::shared_ptr<origin_http2_connection> http2_{};
+    bool allow_http2_{true};
+    bool require_http2_{false};
     std::string connect_host_;
     completion connect_completion_;
     std::uint64_t connect_generation_{};

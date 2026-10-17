@@ -567,6 +567,10 @@ private:
             [](const auto& v) { return is_origin_group(v.view()); }, "custom",
             "默认源站组名称不正确");
         const auto& origin_host_header = body.get<"origin_host_header">();
+        const auto& origin_http_version = body.get<"origin_http_version">();
+        if(origin_http_version && origin_http_version->view()!="auto" && origin_http_version->view()!="http1" && origin_http_version->view()!="http2") {
+            validator.add(field_path(prefix,"origin_http_version"),"enum","回源 HTTP 版本不正确");
+        }
         require_field(validator, prefix, origin_host_header, "origin_host_header",
             "回源 Host 不能为空");
         validator.max_length(origin_host_header, field_path(prefix, "origin_host_header"), 253,

@@ -177,8 +177,8 @@ int main() {
             return 77;
         }
         const auto& migrations = service::config::schema_migrations;
-        require(migrations.size() == 1 && migrations[0].id() == "0001_initial",
-            "fresh installations have one final-schema baseline");
+        require(!migrations.empty() && migrations[0].id() == "0001_initial",
+            "fresh installations start with the final-schema baseline");
         const test_support::postgres_test_database fresh(*config), conflict(*config);
         migrate(fresh, migrations, migrations.size());
         require(fresh.run(verify_indexes) == 0, "fresh install");
@@ -189,7 +189,7 @@ int main() {
         require(conflict.run(create_conflict) == 0, "prepare an isolated conflicting object");
         require_rejected(conflict, migrations);
         require(conflict.run(verify_rollback) == 0, "failed installation rolls back atomically");
-        migrate(conflict, migrations, 1);
+        migrate(conflict, migrations, migrations.size());
         require(conflict.run(verify_indexes) == 0, "retry the same baseline after removing conflict");
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

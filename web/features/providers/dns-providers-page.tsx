@@ -17,6 +17,7 @@ import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { dnsProvidersQuery } from './data'
 import { DnsProviderSheet } from './dns-provider-sheet'
+import { useProviderActions } from './provider-actions'
 import {
   providerLabel,
   providerStatuses,
@@ -40,13 +41,14 @@ export function DnsProvidersPage() {
     placeholderData: keepPreviousData,
   })
   const editing = useListSheetTarget(sheet, query)
+  const actions = useProviderActions()
   const filtered = hasListFilters(list.search, [])
   const columns: DataGridColumn<DnsProvider>[] = [
     {
       id: 'name',
       header: '账号',
       isRowHeader: true,
-      minWidth: 180,
+      minWidth: 160,
       cell: (item) => (
         <span className='block truncate font-medium'>{item.name}</span>
       ),
@@ -54,19 +56,19 @@ export function DnsProvidersPage() {
     {
       id: 'provider',
       header: '服务商',
-      minWidth: 110,
+      minWidth: 100,
       cell: (item) => providerLabel(item.provider),
     },
     {
       id: 'account',
       header: '账户标识',
-      minWidth: 180,
+      minWidth: 140,
       cell: (item) => <Mono truncate>{item.account_id}</Mono>,
     },
     {
       id: 'token',
       header: '凭据',
-      minWidth: 110,
+      minWidth: 100,
       cell: (item) => (
         <Mono className='text-muted'>{item.token_hint || '—'}</Mono>
       ),
@@ -74,7 +76,7 @@ export function DnsProvidersPage() {
     {
       id: 'zones',
       header: '托管域名',
-      minWidth: 100,
+      minWidth: 90,
       align: 'end',
       cell: (item) =>
         item.zone_count ? (
@@ -91,7 +93,7 @@ export function DnsProvidersPage() {
     {
       id: 'status',
       header: '状态',
-      minWidth: 120,
+      minWidth: 110,
       cell: (item) => {
         const chip = (
           <StatusChip
@@ -116,7 +118,7 @@ export function DnsProvidersPage() {
     {
       id: 'verified',
       header: '最近验证',
-      minWidth: 120,
+      minWidth: 110,
       cell: (item) => (
         <RelativeTime
           value={item.last_verified_at}
@@ -127,17 +129,35 @@ export function DnsProvidersPage() {
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      width: 72,
+      width: 128,
       cell: (item) => (
-        <Button
-          size='sm'
-          variant='tertiary'
-          className='px-2'
-          aria-label={`编辑 DNS 账号 ${item.name}`}
-          onPress={() => void sheet.openEdit(item.id)}
-        >
-          编辑
-        </Button>
+        <div className='flex items-center gap-1'>
+          <Button
+            size='sm'
+            variant='tertiary'
+            className='px-2'
+            aria-label={`验证 DNS 账号 ${item.name}`}
+            isPending={actions.isVerifying(item.id)}
+            onPress={() =>
+              actions.verify({
+                kind: 'dns',
+                id: item.id,
+                revision: item.revision,
+              })
+            }
+          >
+            验证
+          </Button>
+          <Button
+            size='sm'
+            variant='tertiary'
+            className='px-2'
+            aria-label={`编辑 DNS 账号 ${item.name}`}
+            onPress={() => void sheet.openEdit(item.id)}
+          >
+            编辑
+          </Button>
+        </div>
       ),
     },
   ]

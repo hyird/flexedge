@@ -3,7 +3,7 @@ import { toastWriteSuccess } from '@/features/tasks/write-toast'
 import { afterProviderWrite, removeProvider, verifyProvider } from './data'
 import type { ProviderTarget } from './types'
 
-/** Verify and delete actions of both providers' edit sheets. `remove` is
+/** Shared provider list and edit actions. `remove` is
  * awaited by `ConfirmDialog`, which shows failures inline. */
 export function useProviderActions() {
   const client = useQueryClient()

@@ -40,7 +40,7 @@ private:
     // The `:type` path parameter: a task resource type.
     static std::string require_type(ruvia::context& c) {
         const auto value = c.req().param("type").value_or("");
-        for (const auto option : {"website", "dns_zone", "certificate", "provider", "node"}) {
+        for (const auto option : {"website", "dns_zone", "certificate", "provider", "node", "cache"}) {
             if (value == option) {
                 return std::string(value);
             }
@@ -60,7 +60,7 @@ private:
                     "任务筛选条件不正确")
                     .value_or(""),
                 .type_ = service::common::require_enum_query(c, "type",
-                    {"website", "dns_zone", "certificate", "provider", "node"}, "任务筛选条件不正确")
+                    {"website", "dns_zone", "certificate", "provider", "node", "cache"}, "任务筛选条件不正确")
                     .value_or(""),
                 .keyword_ = service::common::require_keyword(c.req().query("keyword")).value_or(""),
             }};

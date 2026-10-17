@@ -18,9 +18,12 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+// Windows headers require this dependency order.
+// clang-format off
 #include <winsock2.h>
 #include <windows.h>
 #include <wincrypt.h>
+// clang-format on
 #endif
 
 #include <ruvia/core/task.h>
@@ -57,6 +60,7 @@
 // 业务控制器（RUVIA_CONTROLLER_GROUP 在静态阶段把路由表注册到 ruvia::app()）。
 #include "service/domains/agent/agent_controller.h"
 #include "service/domains/auth/auth_controller.h"
+#include "service/domains/cache/cache_controller.h"
 #include "service/domains/certificate/certificate_controller.h"
 #include "service/domains/cluster/cluster_controller.h"
 #include "service/domains/dns_zone/dns_zone_controller.h"
@@ -67,6 +71,7 @@
 #include "service/domains/website/website_controller.h"
 #include "service/features/background/task_context.h"
 #include "service/features/background/work_available.h"
+#include "service/features/cache_tasks/worker.h"
 #include "service/features/certificate/worker.h"
 #include "service/features/dns_sync/worker.h"
 #include "service/features/initial_admin/bootstrap.h"
@@ -429,6 +434,9 @@ int main(int argc, char* argv[]) {
                 });
                 post_task_worker([](service::background::task_context& task) -> ruvia::task<void> {
                     co_await service::provider_verification::run_worker(task);
+                });
+                post_task_worker([](service::background::task_context& task) -> ruvia::task<void> {
+                    co_await service::cache_tasks::run_worker(task);
                 });
                 post_task_worker([](service::background::task_context& task) -> ruvia::task<void> {
                     co_await service::dns_sync::run_worker(task);

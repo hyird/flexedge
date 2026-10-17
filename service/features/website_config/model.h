@@ -59,11 +59,14 @@ struct website_route_rule_data final {
 };
 
 struct website_config_data final {
+    bool cache_enabled_{false};
+    std::string cache_policy_id_{};
     std::optional<std::string> name_;
     std::vector<website_domain_data> domains_;
     std::vector<website_origin_data> origins_;
     std::string default_origin_group_;
     std::string origin_host_header_;
+    std::string origin_http_version_{"auto"};
     std::int64_t origin_connect_timeout_seconds_;
     std::int64_t origin_read_timeout_seconds_;
     bool pass_client_ip_;

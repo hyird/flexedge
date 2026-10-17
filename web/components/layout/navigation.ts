@@ -49,6 +49,13 @@ export const navigation: NavigationItem[] = [
     keywords: 'websites sites',
   },
   {
+    href: '/cache',
+    label: '缓存',
+    icon: Layers,
+    group: '业务',
+    keywords: 'cache caching purge prewarm',
+  },
+  {
     href: '/certificates',
     label: '证书',
     icon: ShieldCheck,

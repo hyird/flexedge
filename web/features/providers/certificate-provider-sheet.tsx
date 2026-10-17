@@ -13,10 +13,7 @@ import {
 } from './certificate-provider-form'
 import { afterProviderWrite, saveCertificateProvider } from './data'
 import { providerLabel } from './provider-display'
-import {
-  ProviderRemoval,
-  ProviderVerification,
-} from './provider-sheet-sections'
+import { ProviderRemoval } from './provider-sheet-sections'
 import type { CertificateProvider } from './types'
 
 function toFormValues(
@@ -65,9 +62,6 @@ export function CertificateProviderSheet({
   const base = draft.base ?? provider
   const clean = toFormValues(base)
   const values = edits ?? clean
-  const isDirty = (
-    Object.keys(clean) as (keyof CertificateProviderFormValues)[]
-  ).some((key) => values[key] !== clean[key])
   const update = (patch: Partial<CertificateProviderFormValues>) => {
     const next = { ...values, ...patch }
     const dirty = (
@@ -95,7 +89,7 @@ export function CertificateProviderSheet({
           ? `编辑证书服务商 ${providerLabel(provider.provider)}`
           : '添加证书服务商'
       }
-      description='用于 ACME 签发与续期证书；保存后在编辑中“验证凭据”，验证通过才能申请证书。'
+      description='用于 ACME 签发与续期证书；保存后在列表中验证，验证通过才能申请证书。'
       onSubmit={submit}
       submitLabel={provider ? '保存' : '添加服务商'}
       isSubmitting={draft.isSaving}
@@ -171,11 +165,6 @@ export function CertificateProviderSheet({
       )}
       {provider && (
         <>
-          <ProviderVerification
-            kind='certificate'
-            provider={provider}
-            isDirty={isDirty}
-          />
           <ProviderRemoval
             kind='certificate'
             provider={provider}

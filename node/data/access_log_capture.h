@@ -45,6 +45,9 @@ public:
     [[nodiscard]] bool client_abort_enabled() const noexcept {
         return client_abort_enabled_;
     }
+    void cache_status(std::string_view value) {
+        cache_status_ = value;
+    }
 
     // `wire` starts with the HTTP/1.1 response head sent to the client.
     void response_head(std::string_view wire) {
@@ -84,6 +87,7 @@ public:
                 .response_headers_ = response_headers_,
                 .query_string_ = query_string_,
                 .cookies_ = cookies_,
+                .cache_status_ = cache_status_,
             });
         } catch (...) {
             // A record that cannot be queued is dropped like one rejected by a full buffer.
@@ -222,6 +226,7 @@ private:
     std::string query_string_;
     std::string cookies_;
     std::string tls_fingerprint_;
+    std::string cache_status_{"bypass"};
     std::array<bool, 5> status_code_ranges_{true, true, true, true, true};
     bool secure_{};
     bool enabled_{};

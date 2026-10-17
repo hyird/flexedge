@@ -36,7 +36,7 @@ class channel_service final {
 public:
     template <typename context_type>
     ruvia::task<agent_principal> authenticate(context_type& context,
-        const std::string& agent_id, std::string_view secret) const {
+        const std::string& agent_id, std::string_view secret, std::uint32_t cache_protocol = 0) const {
         const auto identity = co_await node_channel::identity(context.redis(), agent_id);
         if (!identity || !service::utils::token_hash_matches(secret, identity->secret_hash_)) {
             service::common::throw_app_error(agent_unauthorized);
@@ -44,6 +44,7 @@ public:
         agent_principal principal{.node_id_ = identity->node_id_, .cluster_id_ = identity->cluster_id_, .tenant_id_ = identity->tenant_id_, .agent_id_ = identity->agent_id_};
         flexedge::node::v2::ClientEnvelope envelope;
         envelope.mutable_authenticate()->set_node_id(agent_id);
+        envelope.mutable_authenticate()->set_response_cache_protocol(cache_protocol);
         co_await commit_report(context, principal, std::move(envelope));
         co_return principal;
     }
@@ -171,6 +172,14 @@ public:
         flexedge::node::v2::ClientEnvelope envelope;
         *envelope.mutable_apply_result() = result;
         co_await commit_report(context, principal, std::move(envelope), elapsed, trace.finish(), std::move(stop));
+    }
+
+    template <typename context_type>
+    ruvia::task<void> cache_result(context_type& context, const agent_principal& principal,
+        const flexedge::node::v2::CacheResult& value) const {
+        flexedge::node::v2::ClientEnvelope envelope;
+        *envelope.mutable_cache_result() = value;
+        co_await commit_report(context, principal, std::move(envelope));
     }
 
 private:

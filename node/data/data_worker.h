@@ -34,7 +34,8 @@ enum class data_worker_operation { prepare,
     report,
     drain,
     stop_accepting,
-    retired };
+    retired,
+    cache_command };
 
 // Cross-loop messages contain owned immutable business values, never runtime objects,
 // listener handles, completion callbacks or channels back into another worker.
@@ -43,6 +44,7 @@ struct data_worker_request final {
     std::uint64_t sequence_{};
     std::uint64_t committed_sequence_{};
     std::shared_ptr<const compiled_config> config_{};
+    std::shared_ptr<const v2::CacheCommand> cache_command_{};
     std::chrono::steady_clock::duration timeout_{};
     std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
 };
@@ -70,6 +72,7 @@ struct data_worker_result final {
     std::size_t added_listeners_{};
     std::size_t retired_listeners_{};
     std::optional<data_worker_snapshot> snapshot_{};
+    std::shared_ptr<const v2::CacheResult> cache_result_{};
 };
 using owned_data_worker_result = std::unique_ptr<const data_worker_result>;
 
@@ -81,12 +84,16 @@ public:
     data_worker(ruvia::event_loop loop, std::size_t identity,
         ruvia::channel_receiver<owned_data_worker_request> requests,
         ruvia::channel_sender<owned_data_worker_result> results,
-        ruvia::channel_sender<owned_log_batch> logs, std::size_t worker_count)
+        ruvia::channel_sender<owned_log_batch> logs, std::size_t worker_count,
+        std::shared_ptr<response_cache_publication> cache,
+        ruvia::channel_sender<owned_data_worker_result> cache_results)
         : loop_(std::move(loop)),
           worker_(loop_.handle()),
           identity_(identity),
           requests_(std::move(requests)),
           results_(std::move(results)),
+          cache_results_(std::move(cache_results)),
+          cache_(std::move(cache)),
           operations_(worker_),
           origin_connections_(loop_.executor(), origin_tls_),
           logs_(loop_, std::move(logs)),
@@ -214,6 +221,9 @@ private:
                         finalize(committed_->sequence_);
                     }
                     switch (request->operation_) {
+                        case data_worker_operation::cache_command:
+                            operations_.spawn(execute_cache(request->sequence_, request->cache_command_));
+                            continue;
                         case data_worker_operation::prepare:
                             prepare(*request);
                             result.added_listeners_ = pending_->additions_.size();
@@ -261,7 +271,96 @@ private:
     }
 
     [[nodiscard]] http_session_context session_context() noexcept {
-        return {.runtime_ = runtime_, .health_ = *health_, .metrics_ = metrics_, .clients_ = clients_, .logs_ = logs_, .origin_connections_ = origin_connections_, .request_buffers_ = request_buffers_, .response_buffers_ = response_buffers_};
+        return {.runtime_ = runtime_, .health_ = *health_, .metrics_ = metrics_, .clients_ = clients_, .logs_ = logs_, .origin_connections_ = origin_connections_, .request_buffers_ = request_buffers_, .response_buffers_ = response_buffers_, .cache_ = &cache_};
+    }
+
+    ruvia::task<std::pair<bool, std::string>> prewarm_url(const v2::CacheCommand& command,
+        const std::string& value) {
+        const auto url = flexedge::cache::parse_url(value);
+        const auto config = runtime_.config();
+        const auto* site = url && config ? config->website(url->hostname_) : nullptr;
+        if (!site || std::ranges::find(command.website_ids(), site->id()) == command.website_ids().end() ||
+            !site->has_response_cache() || site->response_cache().id() != command.policy_id()) {
+            co_return std::pair{false, std::string("网站缓存策略已改变或 URL 不属于该网站")};
+        }
+        auto [completed, completion] = ruvia::make_channel<std::pair<bool, std::string>>(worker_, {.capacity_ = 1});
+        auto [retired, retirement] = ruvia::make_channel<bool>(worker_, {.capacity_ = 1});
+        auto connection = std::make_shared<edge_connection>([retired] { (void)retired.send(true); });
+        auto session = std::make_shared<basic_http_session<asio::ip::tcp::socket>>(
+            asio::ip::tcp::socket(loop_.executor()), session_context(), ++prewarm_sequence_,
+            std::move(connection), url->scheme_ == "https", std::string{}, true);
+        session->prewarm("GET " + url->target_ + " HTTP/1.1\r\nHost: " + url->authority_ +
+                             "\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+            [completed](bool ok, std::string error) { (void)completed.send({ok, std::move(error)}); });
+        const auto result = co_await completion.receive_for(std::chrono::seconds(15), operations_.get_stop_token());
+        session->close();
+        session.reset();
+        // All callbacks retaining the synthetic session must retire on this loop before
+        // its worker-owned dependencies can be destroyed.
+        (void)co_await retirement.receive();
+        if (!result.has_value()) {
+            co_return std::pair{false, std::string("预热超时或节点正在停止")};
+        }
+        co_return result.value();
+    }
+
+    ruvia::task<void> execute_cache(std::uint64_t sequence, std::shared_ptr<const v2::CacheCommand> command) {
+        if (!command) {
+            co_return;
+        }
+        auto result = cache_.command_result(command->attempt_id());
+        if (!result && cache_.claim_command(command->attempt_id())) {
+            v2::CacheResult value;
+            value.set_task_id(command->task_id());
+            value.set_generation(command->generation());
+            value.set_attempt_id(command->attempt_id());
+            value.set_ok(true);
+            try {
+                const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                                     .count();
+                if (command->expires_unix_ms() <= now) {
+                    throw std::runtime_error("缓存操作已过期");
+                }
+                if (command->operation() == "prewarm") {
+                    for (const auto& url : command->urls()) {
+                        if (operations_.stop_requested()) {
+                            throw std::runtime_error("节点正在停止");
+                        }
+                        const auto clock = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                                               .count();
+                        auto outcome = clock >= command->expires_unix_ms()
+                                           ? std::pair{false, std::string("缓存操作已过期")}
+                                           : co_await prewarm_url(*command, url);
+                        if (outcome.first) {
+                            value.set_completed_urls(value.completed_urls() + 1);
+                        } else {
+                            value.set_ok(false);
+                            value.add_failures("第 " + std::to_string(value.completed_urls() + value.failures_size() + 1) + " 个 URL：" + outcome.second);
+                        }
+                    }
+                    if (!value.ok()) {
+                        value.set_error("部分 URL 未能写入缓存");
+                    }
+                } else if (command->operation() == "refresh" || command->operation() == "clean") {
+                    const auto [objects, bytes] = cache_.invalidate(*command);
+                    value.set_affected_objects(objects);
+                    value.set_affected_bytes(bytes);
+                } else {
+                    throw std::runtime_error("不支持的缓存操作");
+                }
+            } catch (const std::exception& error) {
+                value.set_ok(false);
+                value.set_error(error.what());
+            }
+            cache_.complete_command(value);
+            result = cache_.command_result(command->attempt_id());
+        }
+        if (result) {
+            (void)cache_results_.send(std::make_unique<const data_worker_result>(data_worker_result{
+                .operation_ = data_worker_operation::cache_command, .sequence_ = sequence, .worker_id_ = identity_, .cache_result_ = std::move(result)}));
+        }
     }
 
     void prepare(const data_worker_request& request) {
@@ -440,6 +539,8 @@ private:
     std::size_t identity_;
     ruvia::channel_receiver<owned_data_worker_request> requests_;
     ruvia::channel_sender<owned_data_worker_result> results_;
+    ruvia::channel_sender<owned_data_worker_result> cache_results_;
+    response_cache cache_;
     ruvia::task_scope operations_;
     runtime_state runtime_;
     worker_metrics metrics_;
@@ -456,6 +557,7 @@ private:
     std::unique_ptr<prepared_reload> pending_;
     std::unique_ptr<committed_reload> committed_;
     std::uint64_t settled_sequence_{};
+    std::uint64_t prewarm_sequence_{};
     bool stopping_{};
     ruvia::event_loop_stop_registration stop_registration_;
 };

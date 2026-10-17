@@ -26,6 +26,7 @@
 #include "service/common/connection_error.h"
 #include "service/common/http.h"
 #include "service/features/attempt_trace/recorder.h"
+#include "service/features/cache_tasks/transport.h"
 #include "service/features/log_ingest/enqueue.h"
 #include "service/features/node_channel/channel_service.h"
 #include "service/features/node_channel/error.h"
@@ -107,6 +108,7 @@ private:
         std::uint32_t heartbeat_interval_{};
         bool require_apply_ack_{};
         bool multiplex_logs_{};
+        std::uint32_t response_cache_protocol_{};
         std::unique_ptr<response_lane> responses_;
         ruvia::stop_token stop_;
         // Release of the last desired state sent on this connection and when it
@@ -313,7 +315,7 @@ private:
         auto* serialized_secret = envelope.mutable_authenticate()->mutable_secret();
         OPENSSL_cleanse(serialized_secret->data(), serialized_secret->size());
         serialized_secret->clear();
-        auto principal = co_await get_channel_service().authenticate(c, agent_id, secret.view());
+        auto principal = co_await get_channel_service().authenticate(c, agent_id, secret.view(), authentication.response_cache_protocol());
         co_return state{
             .request_id_ = envelope.request_id(),
             .principal_ = std::move(principal),
@@ -324,6 +326,7 @@ private:
             .heartbeat_interval_ = heartbeat_interval_seconds,
             .require_apply_ack_ = authentication.require_apply_ack(),
             .multiplex_logs_ = authentication.multiplex_logs(),
+            .response_cache_protocol_ = authentication.response_cache_protocol(),
             .responses_ = std::make_unique<response_lane>(c.worker()),
             .stop_ = c.get_stop_token(),
             .dispatched_release_id_ = {},
@@ -543,6 +546,11 @@ private:
         acknowledgement.set_request_id(incoming.request_id());
         auto* ack = acknowledgement.mutable_heartbeat_ack();
         ack->set_next_interval_seconds(session.heartbeat_interval_);
+        if (session.response_cache_protocol_ >= 1) {
+            for (auto& command : co_await service::cache_tasks::pending(c.redis(), session.principal_.node_id_)) {
+                *ack->add_cache_commands() = std::move(command);
+            }
+        }
         ack->set_node_binary_sha256(service::node_release::current(c)->binary().digest());
         co_await send(c, acknowledgement, session);
         co_return true;
@@ -604,6 +612,21 @@ private:
                 if (!co_await handle_node_release_request(c, session, release_transfer, incoming)) {
                     co_return;
                 }
+                continue;
+            }
+            if (incoming.has_cache_result()) {
+                const auto& value = incoming.cache_result();
+                if (session.response_cache_protocol_ < 1 || value.node_id() != session.principal_.node_id_ ||
+                    !service::common::parse_uuid(value.task_id()) || value.generation() < 1 || !valid_request_id(value.attempt_id()) ||
+                    value.error().size() > 1000 || value.failures_size() > 100) {
+                    co_await close_authenticated(c, session, {.code_ = 1008, .reason_ = "invalid cache result"});
+                    co_return;
+                }
+                co_await get_channel_service().cache_result(c, session.principal_, value);
+                flexedge::node::v2::ServerEnvelope acknowledgement;
+                acknowledgement.set_request_id(incoming.request_id());
+                acknowledgement.mutable_cache_result_ack()->set_attempt_id(value.attempt_id());
+                co_await send(c, acknowledgement, session);
                 continue;
             }
             if (incoming.has_apply_result()) {

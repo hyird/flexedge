@@ -11,6 +11,8 @@ export function websiteToFormValues(
 ): WebsiteFormValues {
   const config = structuredClone(website?.config ?? defaultWebsiteConfig())
   return {
+    cache_enabled: config.cache_enabled,
+    cache_policy_id: config.cache_policy_id,
     cluster_id: website?.cluster_id ?? '',
     status: website?.status ?? 'enabled',
     name: config.name ?? '',
@@ -41,6 +43,7 @@ export function websiteToFormValues(
           ],
     default_origin_group: config.default_origin_group,
     origin_host_header: config.origin_host_header,
+    origin_http_version: config.origin_http_version,
     origin_connect_timeout_seconds: config.origin_connect_timeout_seconds,
     origin_read_timeout_seconds: config.origin_read_timeout_seconds,
     pass_client_ip: config.pass_client_ip,

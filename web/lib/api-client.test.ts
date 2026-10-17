@@ -31,6 +31,17 @@ function unauthorized(config: InternalAxiosRequestConfig) {
 }
 
 describe('session refresh ownership', () => {
+  it('returns one unauthorized response for a signed-out session probe', async () => {
+    const client = createApiClient()
+    const calls: string[] = []
+    client.defaults.adapter = async (config) => {
+      calls.push(config.url!)
+      throw unauthorized(config)
+    }
+    await expect(client.get('/auth/me')).rejects.toBeInstanceOf(AxiosError)
+    expect(calls).toEqual(['/auth/me'])
+  })
+
   it('shares one refresh for concurrent failures and replays each request once', async () => {
     const client = createApiClient()
     const started = deferred()

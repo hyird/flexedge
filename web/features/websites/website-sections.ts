@@ -40,6 +40,11 @@ export const websiteSections = [
     description: 'URL 跳转、URL 重写与按规则选择源站。',
   },
   {
+    id: 'cache',
+    label: '缓存',
+    description: '启用缓存并选择缓存策略。',
+  },
+  {
     id: 'compression',
     label: '压缩',
     description: '响应压缩算法与适用内容。',
@@ -70,6 +75,8 @@ export function websiteSectionFrom(id: string | undefined): WebsiteSectionId {
 /** Every form field belongs to exactly one group; the record type keeps the
  * mapping exhaustive when the form schema gains a field. */
 const fieldSections: Record<keyof WebsiteFormValues, WebsiteSectionId> = {
+  cache_enabled: 'cache',
+  cache_policy_id: 'cache',
   name: 'basic',
   cluster_id: 'basic',
   status: 'basic',
@@ -82,6 +89,7 @@ const fieldSections: Record<keyof WebsiteFormValues, WebsiteSectionId> = {
   origins: 'origins',
   default_origin_group: 'origins',
   origin_host_header: 'origin-settings',
+  origin_http_version: 'origin-settings',
   origin_connect_timeout_seconds: 'origin-settings',
   origin_read_timeout_seconds: 'origin-settings',
   pass_client_ip: 'origin-settings',

@@ -335,6 +335,10 @@ const routeRuleSchema = z
 
 export const websiteFormSchema = z
   .object({
+    cache_enabled: z.boolean().default(false),
+    cache_policy_id: z
+      .union([z.literal(''), z.string().uuid('请选择缓存策略')])
+      .default(''),
     cluster_id: z.string().uuid('请选择所属集群'),
     status: z.enum(['enabled', 'disabled']),
     name: z.string().trim().min(1, '请输入网站名称').max(100),
@@ -342,6 +346,7 @@ export const websiteFormSchema = z
     origins: z.array(originSchema).min(1, '至少添加一个源站').max(100),
     default_origin_group: z.string().trim().min(1, '请选择默认源站组').max(100),
     origin_host_header: z.string().trim().min(1, '请输入回源 Host').max(253),
+    origin_http_version: z.enum(['auto', 'http1', 'http2']).default('auto'),
     origin_connect_timeout_seconds: z.number().int().min(1).max(300),
     origin_read_timeout_seconds: z.number().int().min(1).max(600),
     pass_client_ip: z.boolean(),
@@ -384,6 +389,13 @@ export const websiteFormSchema = z
     route_rules: z.array(routeRuleSchema).max(100),
   })
   .superRefine((values, context) => {
+    if (values.cache_enabled && !values.cache_policy_id) {
+      context.addIssue({
+        code: 'custom',
+        path: ['cache_policy_id'],
+        message: '启用缓存必须选择缓存策略',
+      })
+    }
     if (values.https_enabled && values.certificate_ids.length === 0) {
       context.addIssue({
         code: 'custom',
@@ -621,11 +633,14 @@ export function routeRuleToForm(
 }
 export function defaultWebsiteConfig(): WebsiteConfig {
   return {
+    cache_enabled: false,
+    cache_policy_id: '',
     name: '',
     domains: [],
     origins: [],
     default_origin_group: 'default',
     origin_host_header: '$host',
+    origin_http_version: 'auto',
     origin_connect_timeout_seconds: 10,
     origin_read_timeout_seconds: 30,
     pass_client_ip: true,

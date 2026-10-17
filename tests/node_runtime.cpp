@@ -1587,14 +1587,14 @@ int main(int argc, char* argv[]) {
         }
         // Reset a real client only after its request reaches the origin. Both buffered
         // responses and streamed relays must record its departure at info level.
-        for (const auto buffered : {false, true}) {
+        for (const auto buffer_response : {false, true}) {
             asio::io_context reset_context;
             asio::ip::tcp::acceptor reset_acceptor(reset_context,
                 {asio::ip::address_v4::loopback(), 0});
             auto reset_config = snapshot(false);
             reset_config.setGeneration(next_generation++);
             auto* website = reset_config.mutableWebsite();
-            website->set_response_compression_enabled(buffered);
+            website->set_response_compression_enabled(buffer_response);
             website->set_health_check_enabled(false);
             website->mutable_origins(0)->set_host("127.0.0.1");
             website->mutable_origins(0)->set_port(reset_acceptor.local_endpoint().port());
@@ -1633,7 +1633,7 @@ int main(int argc, char* argv[]) {
             const auto entries = collect_node_logs();
             REQUIRE(entries.size() == 1);
             REQUIRE(entries.front().level() == "info");
-            REQUIRE(entries.front().message().starts_with(buffered
+            REQUIRE(entries.front().message().starts_with(buffer_response
                                                               ? "client response write failed:"
                                                               : "client relay write failed:"));
         }
@@ -1943,9 +1943,9 @@ int main(int argc, char* argv[]) {
             for (const std::string_view invalid :
                 {"zz\r\nWiki\r\n0\r\n\r\n", "4\r\nWikiXX0\r\n\r\n", "4\nWiki\r\n0\r\n\r\n",
                     "4\r\nWiki\r\n0\r\nbad trailer\r\n\r\n"}) {
-                const auto rejected = exchange_raw(
+                const auto invalid_chunk_response = exchange_raw(
                     port, {head + "Transfer-Encoding: chunked\r\n\r\n" + std::string(invalid)});
-                REQUIRE(rejected.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+                REQUIRE(invalid_chunk_response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
             }
             REQUIRE(echoed_count() == 2);
 
@@ -2209,8 +2209,8 @@ int main(int argc, char* argv[]) {
             asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0), &tls_contexts);
         const auto https_port = https_listener->local_endpoint().port();
         start(https_listener);
-        // Only HTTP/1.1 is offered downstream, even to clients that also offer h2.
-        REQUIRE(tls_alpn(https_port, "www.example.com", true) == "http/1.1");
+        // Downstream ALPN selects HTTP/2 when offered and keeps HTTP/1.1 available.
+        REQUIRE(tls_alpn(https_port, "www.example.com", true) == "h2");
         REQUIRE(tls_alpn(https_port, "www.example.com", false) == "http/1.1");
         const auto www_response = tls_request(https_port, "www.example.com");
         REQUIRE(www_response.peer_common_name_ == "www.example.com");
@@ -2223,9 +2223,9 @@ int main(int argc, char* argv[]) {
         REQUIRE(tls_request(https_port, "WWW.Example.COM", "www.example.com.:443").bytes_.starts_with("HTTP/1.1 200 "));
         // A valid SNI must not front another bound domain or an unbound Host.
         for (const auto host : {"unknown.example.com", "api.example.com"}) {
-            const auto rejected = tls_request(https_port, "www.example.com", host).bytes_;
-            REQUIRE(rejected.starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
-            REQUIRE(rejected.ends_with("Content-Length: 0\r\nConnection: close\r\n\r\n"));
+            const auto mismatched_host_response = tls_request(https_port, "www.example.com", host).bytes_;
+            REQUIRE(mismatched_host_response.starts_with("HTTP/1.1 421 Misdirected Request\r\n"));
+            REQUIRE(mismatched_host_response.ends_with("Content-Length: 0\r\nConnection: close\r\n\r\n"));
         }
         for (const auto version : {TLS1_2_VERSION, TLS1_3_VERSION}) {
             require_tls_rejection(https_port, "unknown.example.com", version, SSL_AD_UNRECOGNIZED_NAME);
@@ -2357,18 +2357,18 @@ int main(int argc, char* argv[]) {
             asio::buffer(localhost_identity.certificate_));
         buffered_origin_server_context.use_private_key(asio::buffer(localhost_identity.private_key_),
             asio::ssl::context::pem);
-        // The node must offer only HTTP/1.1 to origins; record the client's ALPN offer.
-        std::atomic<bool> buffered_origin_used_http1{};
+        // Auto mode offers HTTP/2 and HTTP/1.1; this origin declines ALPN and uses HTTP/1.1.
+        std::atomic<bool> buffered_origin_offered_both{};
         SSL_CTX_set_alpn_select_cb(
             buffered_origin_server_context.native_handle(),
             [](SSL*, const unsigned char**, unsigned char*, const unsigned char* input,
                 unsigned int input_size, void* argument) -> int {
                 static_cast<std::atomic<bool>*>(argument)->store(
                     std::string_view(reinterpret_cast<const char*>(input), input_size) ==
-                    std::string_view("\x08http/1.1", 9));
+                    std::string_view("\x02h2\x08http/1.1", 12));
                 return SSL_TLSEXT_ERR_NOACK;
             },
-            &buffered_origin_used_http1);
+            &buffered_origin_offered_both);
         asio::ip::tcp::acceptor buffered_origin_acceptor(
             origin_context, asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         const auto buffered_origin_port = buffered_origin_acceptor.local_endpoint().port();
@@ -2415,7 +2415,7 @@ int main(int argc, char* argv[]) {
             request(buffered_origin_edge_port, "WWW.Example.COM:80", "Accept-Encoding: gzip\r\n");
         const auto second_buffered_origin_response =
             request(buffered_origin_edge_port, "WWW.Example.COM:80", "Accept-Encoding: gzip\r\n");
-        REQUIRE(buffered_origin_used_http1.load());
+        REQUIRE(buffered_origin_offered_both.load());
         REQUIRE(first_buffered_origin_response.ends_with("\r\n\r\nH1ORIGIN"));
         REQUIRE(second_buffered_origin_response.ends_with("\r\n\r\nH1ORIGIN"));
         REQUIRE(buffered_origin_connections.load() == 1);

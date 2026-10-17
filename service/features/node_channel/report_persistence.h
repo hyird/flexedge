@@ -13,6 +13,7 @@
 
 #include "service/features/background/stream_consumers.h"
 #include "service/features/background/work_available.h"
+#include "service/features/cache_tasks/worker.h"
 #include "service/features/live_resource/notification_outbox.h"
 #include "service/features/logging/logger.h"
 #include "service/features/node_channel/projection.h"
@@ -93,6 +94,8 @@ ruvia::task<bool> persist_report(context_type& context, std::string_view consume
     if (value.envelope_.has_authenticate()) {
         const auto principal = co_await record_authentication(transaction, value.principal_.agent_id_,
             value.verified_hash_, value.received_unix_ms_);
+        (void)co_await transaction.execute("UPDATE sys_node SET response_cache_protocol=$3 WHERE tenant_id=$1 AND id=$2",
+            value.principal_.tenant_id_, value.principal_.node_id_, static_cast<std::int64_t>(value.envelope_.authenticate().response_cache_protocol()));
         if (principal.node_id_ != value.principal_.node_id_ || principal.cluster_id_ != value.principal_.cluster_id_ ||
             principal.tenant_id_ != value.principal_.tenant_id_) {
             throw invalid_report("report_authenticated_identity_changed");
@@ -100,6 +103,8 @@ ruvia::task<bool> persist_report(context_type& context, std::string_view consume
     } else if (value.envelope_.has_heartbeat()) {
         co_await record_heartbeat(context, transaction, value.principal_,
             to_heartbeat_report(value.envelope_.heartbeat()), value.received_unix_ms_);
+    } else if (value.envelope_.has_cache_result()) {
+        co_await service::cache_tasks::record_result(transaction, value.principal_.tenant_id_, value.principal_.node_id_, value.envelope_.cache_result());
     } else {
         co_await record_apply_result(context, transaction, value.principal_, value.envelope_.apply_result(),
             value.elapsed_milliseconds_, value.trace_);
@@ -120,6 +125,9 @@ ruvia::task<void> persist_claim(context_type& context, std::string_view consumer
         try {
             if (!(co_await persist_report(context, consumer, entry, *value))) {
                 co_return;
+            }
+            if (value->envelope_.has_cache_result()) {
+                co_await service::cache_tasks::acknowledge(context.redis(), value->principal_.node_id_, value->envelope_.cache_result());
             }
             if (value->envelope_.has_authenticate()) {
                 co_await service::node_channel::refresh(context, std::string_view(value->principal_.tenant_id_));

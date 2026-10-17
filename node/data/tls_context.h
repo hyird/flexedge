@@ -92,9 +92,9 @@ private:
 
     static int select_alpn(SSL*, const unsigned char** output, unsigned char* output_size,
         const unsigned char* input, unsigned int input_size, void*) noexcept {
-        static constexpr unsigned char http1[] = {8, 'h', 't', 't', 'p', '/', '1', '.', '1'};
-        return SSL_select_next_proto(const_cast<unsigned char**>(output), output_size, http1,
-                   static_cast<unsigned int>(sizeof(http1)), input,
+        static constexpr unsigned char protocols[] = {2,'h','2',8, 'h', 't', 't', 'p', '/', '1', '.', '1'};
+        return SSL_select_next_proto(const_cast<unsigned char**>(output), output_size, protocols,
+                   static_cast<unsigned int>(sizeof(protocols)), input,
                    input_size) == OPENSSL_NPN_NEGOTIATED
                    ? SSL_TLSEXT_ERR_OK
                    : SSL_TLSEXT_ERR_NOACK;

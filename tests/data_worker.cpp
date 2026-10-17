@@ -220,12 +220,14 @@ void verify_workers() {
     ruvia::event_loop_pool control({.loop_count_ = 1});
     auto [logs, log_receiver] = ruvia::make_channel<owned_log_batch>(control.loop(0).handle(), {.capacity_ = 32});
     auto [results, receiver] = ruvia::make_channel<owned_data_worker_result>(control.loop(0).handle(), {.capacity_ = 16});
+    auto cache = std::make_shared<response_cache_publication>();
+    auto [cache_results, cache_receiver] = ruvia::make_channel<owned_data_worker_result>(control.loop(0).handle(), {.capacity_ = 16});
     std::vector<std::unique_ptr<data_worker>> workers;
     std::vector<ruvia::channel_sender<owned_data_worker_request>> requests;
     workers.reserve(worker_count);
     for (std::size_t identity = 0; identity != worker_count; ++identity) {
         auto [sender, input] = ruvia::make_channel<owned_data_worker_request>(loops.loop(identity).handle(), {.capacity_ = 16});
-        workers.push_back(std::make_unique<data_worker>(loops.loop(identity), identity, std::move(input), results, logs, worker_count));
+        workers.push_back(std::make_unique<data_worker>(loops.loop(identity), identity, std::move(input), results, logs, worker_count, cache, cache_results));
         requests.push_back(std::move(sender));
     }
     loop_shutdown shutdown(loops, control);
@@ -437,7 +439,9 @@ void verify_workers() {
     config.mutableCertificate(0)->set_private_key_pem(refreshed.private_key_);
     // Keep the business origin id but replace its endpoint. The old request's eventual
     // failure must be ignored by the replacement health membership on either worker.
-    config.mutableWebsite()->mutable_origins(0)->set_host("localhost");
+    origin_server replacement_origin;
+    replacement_origin.hold_probes();
+    config.mutableWebsite()->mutable_origins(0)->set_port(replacement_origin.port());
     activate(config);
     origin.close_held();
     std::array<char, 4096> failed_request{};
@@ -454,11 +458,11 @@ void verify_workers() {
     for (std::size_t attempt = 0; attempt != 4; ++attempt) {
         FLEXEDGE_REQUIRE(flexedge::testing::tls_request(https_port, "www.example.com", "unknown.example.com").peer_common_name_ == "refreshed.example.com");
     }
-    const auto before_stop = origin.heads();
+    const auto before_stop = replacement_origin.heads();
     config.setGeneration(8);
     config.mutableWebsite()->set_health_check_enabled(true);
     activate(config);
-    FLEXEDGE_REQUIRE(waitUntil([&] { return origin.heads() >= before_stop + worker_count; }, std::chrono::seconds(3)));
+    FLEXEDGE_REQUIRE(waitUntil([&] { return replacement_origin.heads() >= before_stop + worker_count; }, std::chrono::seconds(3)));
     asio::ip::tcp::socket incomplete_tls(clients);
     incomplete_tls.connect({asio::ip::address_v4::loopback(), https_port});
     // Retire listeners while their sessions, TLS handshakes and origin callbacks are

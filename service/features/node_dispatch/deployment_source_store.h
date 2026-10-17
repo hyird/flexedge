@@ -10,9 +10,11 @@
 #include <utility>
 #include <vector>
 
+#include "service/domains/cache/cache_reference.h"
 #include "service/features/certificate_material/model.h"
 #include "service/features/node_dispatch/deployment_source.h"
 #include "service/features/node_dispatch/dispatch_entity.h"
+#include "service/features/website_config/mapper.h"
 
 namespace service::node_dispatch {
 
@@ -46,6 +48,10 @@ load_cluster_deployment_source(ruvia::db_transaction& transaction, std::string t
     result.websites_.reserve(website_rows.size());
     for (const auto& website : website_rows) {
         result.websites_.push_back({.id_ = std::string(website.get<"id">()), .revision_ = website.get<"revision">(), .enabled_ = website.get<"enabled">(), .config_json_ = std::string(website.get<"config">())});
+        const auto config = service::website_config::parse_stored(website.get<"config">());
+        if (config && config->cache_enabled_ && !config->cache_policy_id_.empty()) {
+            result.websites_.back().response_cache_ = co_await service::cache::published_policy(transaction, result.tenant_id_, config->cache_policy_id_);
+        }
     }
     auto certificates = transaction.get_repository<dispatch_binding_entity>().create_query_builder("binding");
     certificates.select({{"website_id", {}}, {"id", expressions.column("id", "certificate")},

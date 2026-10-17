@@ -91,6 +91,7 @@ public:
         std::string response_headers_{};
         std::string query_string_{};
         std::string cookies_{};
+        std::string cache_status_{};
     };
 
     static constexpr std::size_t max_request_headers_bytes{log_contract::max_request_headers_bytes};
@@ -312,6 +313,7 @@ private:
         value->set_response_headers(record.response_headers_);
         value->set_query_string(record.query_string_);
         value->set_cookies(record.cookies_);
+        value->set_cache_status(record.cache_status_);
         return event;
     }
 

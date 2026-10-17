@@ -27,6 +27,9 @@
 #include <sys/socket.h>
 #endif
 
+#include <ruvia/http/http2_cleartext_preface.h>
+
+#include "node/data/http2_session.h"
 #include "node/data/http_protocol.h"
 #include "node/data/http_session.h"
 #include "node/data/tls_context.h"
@@ -90,6 +93,13 @@ private:
         try {
             release_tls_client_hello(stream_.native_handle());
             connection_->retain_tls_context(contexts_, std::move(client_hello_.server_name_));
+            const unsigned char* protocol = nullptr;
+            unsigned int size{};
+            SSL_get0_alpn_selected(stream_.native_handle(), &protocol, &size);
+            if (size == 2 && std::string_view(reinterpret_cast<const char*>(protocol), size) == "h2") {
+                std::make_shared<http2_session>(std::move(stream_), context_, sequence_, connection_, true, std::move(client_hello_.fingerprint_))->start();
+                return;
+            }
             auto session = std::make_shared<basic_http_session<stream>>(std::move(stream_), context_,
                 sequence_, connection_, true, std::move(client_hello_.fingerprint_));
             try {
@@ -109,6 +119,79 @@ private:
     std::uint64_t sequence_{};
     tls_client_hello client_hello_;
     std::shared_ptr<edge_connection> connection_;
+};
+
+class cleartext_http_session final : public std::enable_shared_from_this<cleartext_http_session> {
+public:
+    cleartext_http_session(asio::ip::tcp::socket socket, const http_session_context& context,
+        std::uint64_t sequence, std::shared_ptr<edge_connection> connection)
+        : socket_(std::move(socket)),
+          context_(context),
+          sequence_(sequence),
+          connection_(std::move(connection)),
+          timer_(socket_.get_executor()) {
+        std::error_code error;
+        const auto peer = socket_.remote_endpoint(error);
+        if (!error) {
+            client_ = connected_clients::get_key(peer.address());
+            context_.clients_.opened(*client_);
+        }
+        context_.metrics_.connection_opened();
+    }
+    ~cleartext_http_session() {
+        if (client_) {
+            context_.clients_.closed(*client_);
+        }
+        context_.metrics_.connection_closed();
+    }
+    void start() {
+        connection_->set_close([weak = weak_from_this()] {if(auto self=weak.lock()){self->close();} });
+        timer_.expires_after(std::chrono::seconds(10));
+        timer_.async_wait([self = shared_from_this()](auto error) {if(!error){self->close();} });
+        read();
+    }
+    void close() {
+        std::error_code ignored;
+        timer_.cancel(ignored);
+        socket_.close(ignored);
+    }
+
+private:
+    void read() {
+        socket_.async_read_some(asio::buffer(buffer_), [self = shared_from_this()](std::error_code error, std::size_t size) {
+            if (error) {
+                self->close();
+                return;
+            }
+            self->input_.append(self->buffer_.data(), size);
+            const auto protocol = ruvia::probe_http2_cleartext_preface(self->input_);
+            if (protocol == ruvia::http2_cleartext_preface_probe::need_more_preface) {
+                self->read();
+                return;
+            }
+            std::error_code ignored;
+            self->timer_.cancel(ignored);
+            try {
+                if (protocol == ruvia::http2_cleartext_preface_probe::complete_preface) {
+                    std::make_shared<http2_session>(std::move(self->socket_), self->context_, self->sequence_, self->connection_, false)->start(std::move(self->input_));
+                } else if (protocol == ruvia::http2_cleartext_preface_probe::http1) {
+                    std::make_shared<basic_http_session<asio::ip::tcp::socket>>(std::move(self->socket_), self->context_, self->sequence_, self->connection_, false)->start(std::move(self->input_));
+                } else {
+                    self->close();
+                }
+            } catch (...) {
+                self->close();
+            }
+        });
+    }
+    asio::ip::tcp::socket socket_;
+    http_session_context context_;
+    std::uint64_t sequence_;
+    std::shared_ptr<edge_connection> connection_;
+    asio::steady_timer timer_;
+    std::array<char, 24> buffer_{};
+    std::string input_;
+    std::optional<connected_clients::address_key> client_;
 };
 
 // Accepts edge connections for one endpoint on one data worker. Plain HTTP connections go
@@ -355,8 +438,8 @@ private:
                     ++sequence_, connection)
                     ->start();
             } else {
-                auto session = std::make_shared<basic_http_session<asio::ip::tcp::socket>>(
-                    std::move(socket), context_, ++sequence_, connection, false);
+                auto session = std::make_shared<cleartext_http_session>(
+                    std::move(socket), context_, ++sequence_, connection);
                 try {
                     session->start();
                 } catch (...) {

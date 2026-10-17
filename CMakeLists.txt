@@ -53,7 +53,7 @@ FetchContent_Declare(
     ruvia
     SYSTEM
     GIT_REPOSITORY https://github.com/hyird/Ruvia.git
-    GIT_TAG df03f1c7b6cc9214832145d77650c49b83fe5cb0 # file input reset fix, 2026-10-17
+    GIT_TAG 34949a6a7458f85fa93a383a3f2bdc4c3637fab2 # HTTP/2 server/client and worker-owned AcceptEx, 2026-10-17
 )
 FetchContent_MakeAvailable(ruvia)
 # CMAKE_COMPILE_WARNING_AS_ERROR applies to FlexEdge code only; Ruvia is third-party.
@@ -387,6 +387,21 @@ if(BUILD_TESTING)
         SOURCES tests/origin_health.cpp
         LIBRARIES Threads::Threads
     )
+    flexedge_add_test(response_cache
+        SOURCES tests/response_cache.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::http Threads::Threads)
+    flexedge_add_test(cache_runtime
+        SOURCES tests/cache_runtime.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto)
+    set_tests_properties(flexedge_cache_runtime PROPERTIES TIMEOUT 45)
+    flexedge_add_test(http2_runtime
+        SOURCES tests/http2_runtime.cpp
+        LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto)
+    set_tests_properties(flexedge_http2_runtime PROPERTIES TIMEOUT 60)
+    flexedge_add_test(cache_migration
+        SOURCES tests/cache_migration.cpp
+        LIBRARIES flexedge_route_policy ruvia::web)
+    set_tests_properties(flexedge_cache_migration PROPERTIES SKIP_RETURN_CODE 77)
     flexedge_add_test(node_runtime BIG_OBJECT
         SOURCES tests/node_runtime.cpp
         LIBRARIES flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::SSL OpenSSL::Crypto

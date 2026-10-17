@@ -1,8 +1,11 @@
 #pragma once
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include "common/cache_policy.h"
 
 namespace service::node_dispatch {
 
@@ -18,6 +21,7 @@ struct deployment_website_source final {
     std::int64_t revision_;
     bool enabled_;
     std::string config_json_;
+    std::optional<flexedge::cache::policy> response_cache_{};
 };
 
 struct cluster_deployment_source final {

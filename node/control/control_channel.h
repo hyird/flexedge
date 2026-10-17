@@ -160,6 +160,7 @@ private:
         value->set_active_release_id(runtime_.active_release_id());
         value->set_active_manifest_digest(runtime_.active_manifest_digest());
         value->set_agent_version(config_.agent_version_);
+        value->set_response_cache_protocol(1);
         value->set_session_purpose(v2::AGENT_SESSION_PURPOSE_CONTROL);
         return envelope;
     }
@@ -383,6 +384,31 @@ private:
         co_return;
     }
 
+    ruvia::task<void> process_cache(control_stream& connection, std::string node_id,
+        std::vector<v2::CacheCommand> commands) {
+        struct release final {
+            bool& busy_;
+            ~release() {
+                busy_ = false;
+            }
+        } guard{cache_busy_};
+        for (auto& command : commands) {
+            if (connection.get_stop_token().stop_requested()) {
+                co_return;
+            }
+            auto result = co_await data_plane_.execute_cache(std::move(command), connection.get_stop_token());
+            result.set_node_id(node_id);
+            v2::ClientEnvelope envelope;
+            *envelope.mutable_cache_result() = std::move(result);
+            auto replies = connection.send(envelope);
+            const auto response = co_await replies.receive();
+            if (!response.has_cache_result_ack() ||
+                response.cache_result_ack().attempt_id() != envelope.cache_result().attempt_id()) {
+                throw std::runtime_error("控制面未确认缓存操作结果");
+            }
+        }
+    }
+
     ruvia::task<std::chrono::seconds>
     process_heartbeat(control_stream& connection, std::string_view node_id) {
         auto request = co_await heartbeat(node_id);
@@ -392,6 +418,10 @@ private:
             throw std::runtime_error("control plane did not acknowledge heartbeat");
         }
         const auto& value = acknowledgement.heartbeat_ack();
+        if (!cache_busy_ && !value.cache_commands().empty()) {
+            cache_busy_ = true;
+            connection.spawn_owned(process_cache(connection, std::string(node_id), {value.cache_commands().begin(), value.cache_commands().end()}));
+        }
         co_await update_node_release(connection, node_id, value.node_binary_sha256());
         const auto interval =
             std::chrono::seconds((std::max)(value.next_interval_seconds(), std::uint32_t{1}));
@@ -553,6 +583,7 @@ private:
     node_credentials& credentials_;
     runtime_state& runtime_;
     data_plane& data_plane_;
+    bool cache_busy_{};
     log_producer& logs_;
     self_updater& updater_;
     channel_log channel_log_;

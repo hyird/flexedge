@@ -176,11 +176,14 @@ private:
 class data_plane final {
 public:
     data_plane(ruvia::event_loop_pool& loops, ruvia::event_loop owner, runtime_state& runtime,
-        ruvia::channel_sender<owned_log_batch> logs)
+        ruvia::channel_sender<owned_log_batch> logs,
+        std::filesystem::path cache_directory = "cache")
         : owner_(std::move(owner)),
           runtime_(runtime),
           retired_workers_(loops.loop_count()),
           results_(ruvia::make_channel<owned_data_worker_result>(owner_.handle(), {.capacity_ = loops.loop_count() * 4})),
+          cache_results_(ruvia::make_channel<owned_data_worker_result>(owner_.handle(), {.capacity_ = loops.loop_count() * 64})),
+          cache_(std::make_shared<response_cache_publication>(std::move(cache_directory))),
           empty_health_(std::make_shared<const origin_health_snapshot>()),
           last_health_(empty_health_),
           stop_registration_(owner_.on_stop([this]() -> ruvia::task<void> {
@@ -193,8 +196,27 @@ public:
         for (std::size_t index = 0; index < loops.loop_count(); ++index) {
             data_loops_.push_back(loops.loop(index));
             auto [sender, receiver] = ruvia::make_channel<owned_data_worker_request>(loops.loop(index).handle(), {.capacity_ = 32});
-            workers_.push_back(std::make_unique<data_worker>(loops.loop(index), index, std::move(receiver), results_.first, logs, loops.loop_count()));
+            workers_.push_back(std::make_unique<data_worker>(loops.loop(index), index, std::move(receiver), results_.first, logs, loops.loop_count(), cache_, cache_results_.first));
             requests_.push_back(std::move(sender));
+        }
+    }
+
+    ruvia::task<v2::CacheResult> execute_cache(v2::CacheCommand command, ruvia::stop_token stop = {}) {
+        require_owner();
+        auto lease = co_await cache_operations_.acquire(owner_.handle(), std::chrono::minutes(11), stop);
+        require_running();
+        const auto sequence = ++cache_sequence_;
+        const auto attempt = command.attempt_id();
+        send({.operation_ = data_worker_operation::cache_command, .sequence_ = sequence, .cache_command_ = std::make_shared<const v2::CacheCommand>(std::move(command))});
+        for (;;) {
+            const auto received = co_await cache_results_.second.receive_for(std::chrono::minutes(11), stop);
+            if (!received.has_value()) {
+                throw std::runtime_error("缓存操作未返回结果");
+            }
+            const auto& value = received.value();
+            if (value->cache_result_ && value->cache_result_->attempt_id() == attempt) {
+                co_return *value->cache_result_;
+            }
         }
     }
 
@@ -477,12 +499,16 @@ private:
     runtime_state& runtime_;
     std::vector<bool> retired_workers_;
     data_plane_operations operations_;
+    data_plane_operations cache_operations_;
+    std::uint64_t cache_sequence_{};
     std::mutex start_mutex_;
     bool started_{};
     std::atomic<bool> stopping_{};
     std::uint64_t sequence_{};
     std::uint64_t committed_sequence_{};
     std::pair<ruvia::channel_sender<owned_data_worker_result>, ruvia::channel_receiver<owned_data_worker_result>> results_;
+    std::pair<ruvia::channel_sender<owned_data_worker_result>, ruvia::channel_receiver<owned_data_worker_result>> cache_results_;
+    std::shared_ptr<response_cache_publication> cache_;
     std::shared_ptr<const origin_health_snapshot> empty_health_;
     std::shared_ptr<const origin_health_snapshot> last_health_;
     std::vector<std::unique_ptr<data_worker>> workers_;

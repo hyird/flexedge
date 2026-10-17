@@ -17,6 +17,7 @@ import { StatusChip } from '@/components/status-chip'
 import { TablePagination } from '@/components/table-pagination'
 import { CertificateProviderSheet } from './certificate-provider-sheet'
 import { certificateProvidersQuery } from './data'
+import { useProviderActions } from './provider-actions'
 import {
   providerLabel,
   providerStatuses,
@@ -40,6 +41,7 @@ export function CertificateProvidersPage() {
     placeholderData: keepPreviousData,
   })
   const editing = useListSheetTarget(sheet, query)
+  const actions = useProviderActions()
   const filtered = hasListFilters(list.search, [])
   const columns: DataGridColumn<CertificateProvider>[] = [
     {
@@ -107,17 +109,35 @@ export function CertificateProvidersPage() {
     {
       id: 'actions',
       header: <span className='sr-only'>操作</span>,
-      width: 72,
+      width: 148,
       cell: (item) => (
-        <Button
-          size='sm'
-          variant='tertiary'
-          className='px-2'
-          aria-label={`编辑证书服务商 ${providerLabel(item.provider)}`}
-          onPress={() => void sheet.openEdit(item.id)}
-        >
-          编辑
-        </Button>
+        <div className='flex items-center gap-1'>
+          <Button
+            size='sm'
+            variant='tertiary'
+            className='px-2'
+            aria-label={`验证证书服务商 ${providerLabel(item.provider)}`}
+            isPending={actions.isVerifying(item.id)}
+            onPress={() =>
+              actions.verify({
+                kind: 'certificate',
+                id: item.id,
+                revision: item.revision,
+              })
+            }
+          >
+            验证
+          </Button>
+          <Button
+            size='sm'
+            variant='tertiary'
+            className='px-2'
+            aria-label={`编辑证书服务商 ${providerLabel(item.provider)}`}
+            onPress={() => void sheet.openEdit(item.id)}
+          >
+            编辑
+          </Button>
+        </div>
       ),
     },
   ]

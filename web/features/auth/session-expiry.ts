@@ -4,7 +4,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { sessionQueryOptions } from './data'
 import { replaceSession, sessionVersion } from './session-lifecycle'
 
-/** The API client has already attempted refresh before reporting a final 401. */
+/** Business requests try refresh; a session probe's 401 is already final. */
 export function createSessionExpiryHandler(
   client: QueryClient,
   onExpired: () => void | Promise<void>,
@@ -27,9 +27,7 @@ export function createSessionExpiryHandler(
   }
 }
 
-/** A stream has no Axios response to trigger the normal 401 interceptor. Probe
- * once through the same session query so refresh is shared by the API client;
- * only a failed probe ends the session. */
+/** A stream probes the same session once; an unauthorized probe ends it. */
 export async function recoverStreamSession(client: QueryClient) {
   const version = sessionVersion(client)
   try {

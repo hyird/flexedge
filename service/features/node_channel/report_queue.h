@@ -116,6 +116,19 @@ inline bool valid_report(const report& value) {
             !valid_apply_result(value.envelope_.apply_result())) {
             return false;
         }
+    } else if (value.envelope_.has_cache_result()) {
+        const auto& result = value.envelope_.cache_result();
+        if (result.node_id() != identity.node_id_ || !service::common::parse_uuid(result.task_id()) ||
+            result.generation() < 1 || !valid_request_id(result.attempt_id()) || result.error().size() > 1000 ||
+            result.failures_size() > 100 || result.completed_urls() > 100 ||
+            result.affected_objects() > 10000000 || result.affected_bytes() > (std::uint64_t{1} << 50)) {
+            return false;
+        }
+        for (const auto& error : result.failures()) {
+            if (error.size() > 512) {
+                return false;
+            }
+        }
     } else {
         return false;
     }

@@ -23,11 +23,12 @@ export function createApiClient() {
     },
     async (error: AxiosError) => {
       const request = error.config as RetryableRequest | undefined
-      const path = request?.url ?? ''
+      const path = (request?.url ?? '').split(/[?#]/, 1)[0].replace(/\/+$/, '')
       const canRefresh =
         error.response?.status === 401 &&
         request &&
         !request._retried &&
+        !path.endsWith('/auth/me') &&
         !path.includes('/auth/login') &&
         !path.includes('/auth/refresh')
 

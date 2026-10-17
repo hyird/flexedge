@@ -151,9 +151,13 @@ build_website_object(const deployment_website_source& source, const cluster_depl
     flexedge::node::v2::DeliveryObjectContent object_content;
     auto* website = object_content.mutable_website();
     website->set_id(source.id_);
+    if (source.response_cache_) {
+        flexedge::cache::to_proto(*source.response_cache_, *website->mutable_response_cache());
+    }
     website->set_enabled(source.enabled_);
     website->set_revision(source.revision_);
     website->set_origin_host_header(config->origin_host_header_);
+    website->set_origin_http_version(config->origin_http_version_);
     website->set_default_origin_group(config->default_origin_group_);
     website->set_origin_connect_timeout_seconds(
         static_cast<std::uint32_t>(config->origin_connect_timeout_seconds_));

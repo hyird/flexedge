@@ -13,8 +13,10 @@
 #include <vector>
 
 #include "service/common/database.h"
+#include "service/domains/cache/cache_entity.h"
 #include "service/domains/task/task_entity.h"
 #include "service/features/attempt_trace/model.h"
+#include "service/features/cache_tasks/cache_task_entity.h"
 #include "service/features/node_presence/node_connection.h"
 
 namespace service::task {
@@ -31,10 +33,10 @@ struct list_filter final {
 template <typename executor_type>
 class task_query final {
 public:
-    task_query(executor_type& database, std::string_view tenant, std::pmr::memory_resource* pool)
+    task_query(executor_type& database, std::string_view tenant_id, std::pmr::memory_resource* pool)
         : database_(database),
           expressions_(pool),
-          tenant_(tenant) {}
+          tenant_(tenant_id) {}
 
     auto list(const list_filter& filter, std::int64_t size, std::int64_t skip) {
         auto query = tasks();
@@ -344,10 +346,26 @@ private:
         return query;
     }
 
+    auto cache_tasks() {
+        auto query = source<service::cache_tasks::task_entity>("cache_task");
+        query.template join<website_entity>(ruvia::db_join_type::left, "cache_website", all({equal(column("cache_website", "tenant_id"), column("cache_task", "tenant_id")), equal(column("cache_website", "id"), column("cache_task", "website_id"))}))
+            .template join<service::cache::policy_entity>(ruvia::db_join_type::left, "cache_policy", all({equal(column("cache_policy", "tenant_id"), column("cache_task", "tenant_id")), equal(column("cache_policy", "id"), column("cache_task", "cache_policy_id"))}))
+            .where(equal(column("cache_task", "tenant_id"), value(tenant_)))
+            .select({{"resource_type", value("cache")}, {"resource_id", column("cache_task", "id")}, {"resource_kind", value("")},
+                {"name", expressions_.coalesce({json_text(column("cache_website", "config"), "name"), column("cache_policy", "name"), value("")})},
+                {"operation", column("cache_task", "operation")}, {"status", column("cache_task", "status")}, {"error", column("cache_task", "error")},
+                {"next_attempt_at", expressions_.case_when({{equal(column("cache_task", "status"), value("retrying")), column("cache_task", "next_attempt_at")}}, null_time())},
+                {"updated_at", column("cache_task", "updated_at")}, {"last_success_at", column("cache_task", "last_success_at")},
+                {"attempt_count", column("cache_task", "attempt_count")}, {"failure_count", column("cache_task", "failure_count")}, {"node_offline", value(false)}});
+        return query;
+    }
+
     auto tasks() {
         auto markers = marker_tasks();
         auto nodes = node_tasks();
         markers.combine(ruvia::db_set_operation::union_all, nodes);
+        auto cached = cache_tasks();
+        markers.combine(ruvia::db_set_operation::union_all, cached);
         auto query = source<marker_entity>("task");
         query.with("tasks", markers).from_cte("tasks").select({{"resource_type", column("task", "resource_type")}, {"resource_id", text(column("task", "resource_id"))}, {"resource_kind", column("task", "resource_kind")}, {"name", column("task", "name")}, {"operation", column("task", "operation")}, {"status", column("task", "status")}, {"error", column("task", "error")}, {"next_attempt_at", format_time(column("task", "next_attempt_at"))}, {"updated_at", format_time(column("task", "updated_at"))}, {"last_success_at", format_time(column("task", "last_success_at"))}, {"attempt_count", column("task", "attempt_count")}, {"failure_count", column("task", "failure_count")}, {"node_offline", column("task", "node_offline")}});
         return query;

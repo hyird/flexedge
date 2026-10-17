@@ -8,6 +8,7 @@ import { useLocation, type HistoryState } from '@tanstack/react-router'
  * reload may be stale; pages fall back to their defaults for unknown ones. */
 declare module '@tanstack/history' {
   interface HistoryState {
+    cache?: { tab?: 'prewarm' | 'refresh' | 'clean' | 'policies' }
     /** `/websites/new`. */
     website?: {
       /** Settings group (`websiteSectionIds`). */

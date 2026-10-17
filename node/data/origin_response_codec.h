@@ -21,6 +21,7 @@
 #include "common/route_policy.h"
 #include "node/data/buffered_proxy_response.h"
 #include "node/data/origin_request_codec.h"
+#include "node/data/response_cache.h"
 
 namespace flexedge::node {
 
@@ -59,6 +60,27 @@ public:
         buffered_->reservation_ = std::move(reservation);
     }
 
+    void capture_for_cache(std::size_t limit, buffered_bytes_lease reservation) {
+        captured_.emplace();
+        captured_->reservation_ = std::move(reservation);
+        capture_limit_ = limit;
+    }
+    [[nodiscard]] std::optional<buffered_proxy_response> take_capture() {
+        auto result = std::move(captured_);
+        captured_.reset();
+        return result;
+    }
+    [[nodiscard]] std::size_t buffered_body_size() const {
+        return buffered_ ? buffered_->body_.size() : 0;
+    }
+    void set_browser_cache_ttl(std::int64_t seconds, const std::vector<std::int64_t>& statuses) {
+        browser_cache_ttl_ = seconds;
+        browser_cache_statuses_ = statuses;
+    }
+    void set_cache_status(std::string value) {
+        cache_status_ = std::move(value);
+    }
+
     [[nodiscard]] origin_response_head_status consume_head(std::string_view bytes) {
         if (buffered_ && !buffered_->reservation_.try_grow(bytes.size())) {
             return origin_response_head_status::exhausted;
@@ -85,14 +107,38 @@ public:
             tunnel_ = parsed->plan().protocol_upgrade() != nullptr;
             status_code_ = static_cast<std::uint16_t>(parsed->head().status().value());
             configure_body(parsed->plan());
+            if (browser_cache_ttl_ > 0) {
+                cache_headers headers;
+                for (const auto& header : parsed->head().headers()) {
+                    headers.emplace_back(header.name(), header.value());
+                }
+                const auto control = cache_header(headers, "Cache-Control");
+                if (cache_has_directive(control, "private") || cache_has_directive(control, "no-store") || cache_has_directive(control, "no-cache") ||
+                    !cache_header(headers, "Set-Cookie").empty() ||
+                    std::ranges::find(browser_cache_statuses_, *status_code_) == browser_cache_statuses_.end() ||
+                    (route_ && std::ranges::any_of(route_->response_headers(), [](const auto& field) { return flexedge::route_policy::ascii_equal(field.name(), "Cache-Control"); }))) {
+                    browser_cache_ttl_ = 0;
+                }
+            }
             const auto body = std::string_view(head_bytes_).substr(head_offset_);
             origin_response_body_status status{};
+            if (captured_) {
+                captured_->status_ = *status_code_;
+                capture_fields(parsed->head(), *captured_);
+                std::size_t header_bytes{};
+                for (const auto& field : captured_->headers_) {
+                    header_bytes += field.first.size() + field.second.size();
+                }
+                if (tunnel_ || !captured_->reservation_.try_grow(header_bytes)) {
+                    captured_.reset();
+                }
+            }
             if (buffered_) {
                 if (tunnel_) {
                     return origin_response_head_status::failure;
                 }
                 buffered_->status_ = *status_code_;
-                capture_fields(parsed->head());
+                capture_fields(parsed->head(), *buffered_);
                 status = consume_body(body);
             } else {
                 // Informational responses are relayed as received.
@@ -244,6 +290,12 @@ private:
 
     // Fields the proxy sets itself.
     [[nodiscard]] bool replaced(std::string_view name) const noexcept {
+        if (browser_cache_ttl_ > 0 && (flexedge::route_policy::ascii_equal(name, "Cache-Control") || flexedge::route_policy::ascii_equal(name, "Expires"))) {
+            return true;
+        }
+        if (!cache_status_.empty() && flexedge::route_policy::ascii_equal(name, "X-Cache")) {
+            return true;
+        }
         if (hsts_enabled_ && flexedge::route_policy::ascii_equal(name, "Strict-Transport-Security")) {
             return true;
         }
@@ -279,6 +331,12 @@ private:
     // Each proxied response ends its client connection; an upgraded tunnel keeps the
     // origin's Connection and carries no HSTS.
     void append_closing_headers(std::string& output) const {
+        if (browser_cache_ttl_ > 0) {
+            append_field(output, "Cache-Control", "public, max-age=" + std::to_string(browser_cache_ttl_));
+        }
+        if (!cache_status_.empty()) {
+            append_field(output, "X-Cache", cache_status_);
+        }
         if (!tunnel_) {
             output.append("Connection: close\r\n");
             if (hsts_enabled_) {
@@ -311,7 +369,7 @@ private:
 
     // The buffered body is decoded and re-framed, so its framing fields and the trailer
     // declaration are dropped with the hop-by-hop fields.
-    void capture_fields(const ruvia::http_client_response_head& head) {
+    void capture_fields(const ruvia::http_client_response_head& head, buffered_proxy_response& target) {
         const auto options = connection_options(head);
         for (const auto& header : head.headers()) {
             const auto name = header.name();
@@ -320,7 +378,7 @@ private:
                 flexedge::route_policy::ascii_equal(name, "Trailer")) {
                 continue;
             }
-            buffered_->headers_.emplace_back(name, header.value());
+            target.headers_.emplace_back(name, header.value());
         }
     }
 
@@ -362,6 +420,13 @@ private:
 
     // Body bytes are relayed by the caller when streaming and kept when buffering.
     [[nodiscard]] origin_response_body_status retain(std::string_view bytes) {
+        if (captured_ && !bytes.empty()) {
+            if (bytes.size() > capture_limit_ - (std::min)(capture_limit_, captured_->body_.size()) || !captured_->reservation_.try_grow(bytes.size())) {
+                captured_.reset();
+            } else {
+                captured_->body_.append(bytes);
+            }
+        }
         if (!buffered_ || bytes.empty()) {
             return origin_response_body_status::accepted;
         }
@@ -444,6 +509,11 @@ private:
     std::size_t head_offset_{};
     std::string output_;
     std::optional<buffered_proxy_response> buffered_;
+    std::optional<buffered_proxy_response> captured_;
+    std::size_t capture_limit_{};
+    std::int64_t browser_cache_ttl_{};
+    std::vector<std::int64_t> browser_cache_statuses_{};
+    std::string cache_status_;
     body_kind body_kind_{body_kind::none};
     std::size_t remaining_{};
     std::optional<ruvia::http1_chunked_body_decoder> chunked_;

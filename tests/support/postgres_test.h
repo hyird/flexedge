@@ -19,29 +19,31 @@
 #include <asio/co_spawn.hpp>
 #include <asio/use_future.hpp>
 
+#include "tests/support/environment.h"
+
 namespace test_support {
 // PG* names only the administrative connection, never a test's working database.
 // Missing configuration skips the test; unsafe targets fail before any DDL.
 inline std::optional<ruvia::db_config> isolated_postgres_config() {
-    const auto* host = std::getenv("PGHOST");
-    const auto* database = std::getenv("PGDATABASE");
+    const auto host = environment_variable("PGHOST");
+    const auto database = environment_variable("PGDATABASE");
     if (!host || !database) {
         return std::nullopt;
     }
-    if (std::string(host) != "127.0.0.1" || !std::string(database).ends_with("_auth_qa")) {
+    if (*host != "127.0.0.1" || !database->ends_with("_auth_qa")) {
         throw std::runtime_error("Requires loopback isolated PostgreSQL database ending in _auth_qa");
     }
-    const auto* port = std::getenv("PGPORT");
-    const auto* user = std::getenv("PGUSER");
-    const auto* password = std::getenv("PGPASSWORD");
+    const auto port = environment_variable("PGPORT");
+    const auto user = environment_variable("PGUSER");
+    const auto password = environment_variable("PGPASSWORD");
     ruvia::db_config config;
     config.driver_ = ruvia::db_driver::postgresql;
-    config.host_ = host;
-    config.port_ = static_cast<std::uint16_t>(port ? std::stoi(port) : 5432);
-    config.username_ = user ? user : "auth_qa";
-    config.password_ = password ? password : "qa-only";
+    config.host_ = *host;
+    config.port_ = static_cast<std::uint16_t>(port ? std::stoi(*port) : 5432);
+    config.username_ = user.value_or("auth_qa");
+    config.password_ = password.value_or("qa-only");
     config.tls_.mode_ = ruvia::client_tls_mode::disabled;
-    config.database_ = database;
+    config.database_ = *database;
     return config;
 }
 
