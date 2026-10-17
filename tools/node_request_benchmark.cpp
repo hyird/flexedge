@@ -15,7 +15,9 @@
 #include "node/data/origin_health.h"
 #include "node/data/origin_request_codec.h"
 #include "node/data/origin_selection.h"
+#include "node/data/response_cache.h"
 #include "node/data/route_rules.h"
+#include "tests/support/cache_directory.h"
 #include "tools/node_request_allocations.h"
 
 namespace {
@@ -213,6 +215,78 @@ void benchmark_origins(std::string_view name, std::size_t origins, bool mixed,
         return static_cast<std::uint64_t>(candidates.next()->weight());
     });
 }
+
+flexedge::node::v2::Website make_cache_website(bool settings, std::size_t rule_count) {
+    flexedge::node::v2::Website website;
+    website.set_id("cache-benchmark-website-identity");
+    website.set_revision(17);
+    flexedge::cache::policy policy;
+    policy.id_ = "cache-benchmark-policy-identity";
+    policy.revision_ = 19;
+    policy.storage_ = "memory";
+    for (std::size_t index = 0; index != rule_count; ++index) {
+        flexedge::cache::rule rule;
+        rule.id_ = "cache-benchmark-rule-identity-" + std::to_string(index);
+        rule.name_ = "cache benchmark matching rule " + std::to_string(index);
+        rule.match_type_ = "prefix";
+        rule.patterns_ = {"/assets/cache-performance/"};
+        rule.ttl_mode_ = "fixed";
+        rule.ttl_seconds_ = 600;
+        rule.status_codes_ = {200, 301};
+        if (settings) {
+            auto& value = rule.settings_.emplace();
+            value.enabled_ = {"edge", "key", "status", "ports"};
+            value.key_.query_mode_ = "include";
+            value.key_.query_parameters_ = {"variant", "download_name_with_long_value"};
+            value.key_.headers_ = {"x-cache-benchmark-context-1", "x-cache-benchmark-context-2"};
+            value.status_ttl_ = {{200, 299, 600}, {404, 404, 30}};
+            value.ports_ = {80, 443, 8080, 8443};
+        }
+        policy.rules_.push_back(std::move(rule));
+    }
+    flexedge::cache::to_proto(policy, *website.mutable_response_cache());
+    return website;
+}
+
+void benchmark_cache_matching(std::string_view name, std::size_t iterations, bool settings, std::size_t rules, bool matched) {
+    flexedge::testing::temporary_cache_directory files;
+    flexedge::node::response_cache cache(std::make_shared<flexedge::node::response_cache_publication>(files.path_));
+    const auto website = make_cache_website(settings, rules);
+    const auto request_target = matched ? "/assets/cache-performance/object.css?color=blue&lang=en" : "/not-matched/object.css";
+    measure(name, iterations, [&](std::size_t) {
+        auto selected = cache.matching(website, request_target, "GET");
+        if (!selected) {
+            return std::uint64_t{7};
+        }
+        auto session_rule = std::move(*selected);
+        return static_cast<std::uint64_t>(session_rule.id_.size() + session_rule.methods_.size() + session_rule.ttl_seconds_);
+    });
+}
+
+void benchmark_cache_lookup(std::string_view name, std::size_t iterations, std::string_view request_target, bool ignore_query) {
+    flexedge::testing::temporary_cache_directory files;
+    flexedge::node::response_cache cache(std::make_shared<flexedge::node::response_cache_publication>(files.path_));
+    const auto website = make_cache_website(false, 1);
+    auto rule = flexedge::cache::from_proto(website.response_cache()).rules_.front();
+    rule.ignore_query_ = ignore_query;
+    const std::string address = "http://cache-benchmark.example" + std::string(request_target);
+    const auto ticket = cache.lookup(website, rule, address, {});
+    if (!ticket.ticket_) {
+        throw std::runtime_error("missing initial cache ticket");
+    }
+    auto fill = cache.begin_fill(website.response_cache(), rule,
+        {200, {{"Content-Type", "text/css"}, {"Cache-Control", "public, max-age=600"}}}, {});
+    if (!fill || !fill->append("a{color:blue}") || !cache.store(*ticket.ticket_, website.response_cache(), rule, *fill, {})) {
+        throw std::runtime_error("cannot populate cache benchmark entry");
+    }
+    measure(name, iterations, [&](std::size_t) {
+        const auto hit = cache.lookup(website, rule, address, {}, false);
+        if (!hit.response_ || !hit.response_->body_ || *hit.response_->body_ != "a{color:blue}") {
+            throw std::runtime_error("cache benchmark content mismatch");
+        }
+        return hit.response_->body_bytes_ + hit.key_.size();
+    });
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -237,6 +311,15 @@ int main(int argc, char** argv) {
         benchmark_request("request_head_20k", 0, 20000, false, true, iterations);
         benchmark_request("request_upgrade", 0, 32, true, true, iterations);
         benchmark_reads(iterations);
+        benchmark_cache_matching("cache_legacy_1", iterations, false, 1, true);
+        benchmark_cache_matching("cache_legacy_8", iterations, false, 8, true);
+        benchmark_cache_matching("cache_legacy_unmatched", iterations, false, 1, false);
+        benchmark_cache_matching("cache_settings_1", iterations, true, 1, true);
+        benchmark_cache_matching("cache_settings_8", iterations, true, 8, true);
+        benchmark_cache_matching("cache_settings_unmatched", iterations, true, 1, false);
+        benchmark_cache_lookup("cache_hit_path", iterations, "/assets/cache-performance/object-with-a-long-identity.css", false);
+        benchmark_cache_lookup("cache_hit_query", iterations, "/assets/cache-performance/object.css?variant=blue&language=english", false);
+        benchmark_cache_lookup("cache_hit_ignored_query", iterations, "/assets/cache-performance/object.css?variant=blue&language=english", true);
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());

@@ -869,14 +869,14 @@ public:
         }
         return {};
     }
-    const flexedge::cache::rule* matching(const v2::Website& website, std::string_view target, std::string_view method,
+    std::optional<flexedge::cache::rule> matching(const v2::Website& website, std::string_view target, std::string_view method,
         const cache_headers& headers = {}, bool secure = false) {
         if (!website.has_response_cache() || !website.response_cache().enabled()) {
-            return nullptr;
+            return std::nullopt;
         }
-        const auto identity = website.response_cache().id() + ":" + std::to_string(website.response_cache().revision());
+        const auto& identity = website.response_cache().id();
         auto found = policies_.find(identity);
-        if (found == policies_.end()) {
+        if (found == policies_.end() || found->second.policy_.revision_ != website.response_cache().revision()) {
             if (policies_.size() > 512) {
                 policies_.clear();
             }
@@ -894,12 +894,10 @@ public:
                     }
                 }
             }
-            found = policies_.emplace(identity, std::move(value)).first;
+            found = policies_.insert_or_assign(identity, std::move(value)).first;
         }
         const auto path = target.substr(0, target.find('?'));
-        auto& merged = found->second.merged_rule_;
-        merged = {};
-        const flexedge::cache::rule* selected{};
+        std::optional<flexedge::cache::rule> selected;
         for (std::size_t i = 0; i < found->second.policy_.rules_.size(); ++i) {
             const auto& rule = found->second.policy_.rules_[i];
             if (!rule.enabled_ || std::ranges::find(rule.methods_, method) == rule.methods_.end()) {
@@ -925,21 +923,24 @@ public:
                 }
             }
             if (matches) {
-                flexedge::cache::apply_rule(merged, rule);
-                selected = &merged;
+                if (!selected) {
+                    selected.emplace();
+                }
+                flexedge::cache::apply_rule(*selected, rule);
             }
         }
         return selected;
     }
     cache_lookup lookup(const v2::Website& website, const flexedge::cache::rule& rule,
-        std::string url, const cache_headers& headers, bool acquire = true, bool existing_only = false,
+        std::string_view url, const cache_headers& headers, bool acquire = true, bool existing_only = false,
         std::string_view origin_hostname = {}, std::string_view country = "XX", std::string_view representation = {}) {
         trim_for_pressure(website.response_cache());
         const auto encoding = cache_header(headers, "Range").empty() ? ruvia::http_content_coding_token(preferred_response_coding(website, cache_header(headers, "Accept-Encoding"))) : std::string_view("identity");
         const auto website_revision = std::to_string(website.revision());
         const auto policy_revision = std::to_string(website.response_cache().revision());
         const auto [origin, target] = cache_resource_address(url);
-        const auto query_target = cache_query_target(target, rule);
+        std::string rewritten_target;
+        const auto query_target = cache_query_target(target, rule, rewritten_target);
         const auto* custom = flexedge::cache::configured(rule, "key") ? &rule.settings_->key_ : nullptr;
         std::string resolved_origin;
         if (custom && custom->host_ == "resolved" && !origin_hostname.empty()) {
@@ -1055,7 +1056,7 @@ public:
             }
             const auto claim = ++next->sequence_;
             next->filling_[key] = {claim, now + std::chrono::seconds(30), website.id(), website.response_cache().id()};
-            cache_ticket ticket{.key_ = key, .website_id_ = website.id(), .policy_id_ = website.response_cache().id(), .url_ = url, .encoding_ = std::string(encoding), .claim_ = claim, .website_epoch_ = epoch(*root, "website:" + website.id()), .policy_epoch_ = epoch(*root, "policy:" + website.response_cache().id())};
+            cache_ticket ticket{.key_ = key, .website_id_ = website.id(), .policy_id_ = website.response_cache().id(), .url_ = std::string(url), .encoding_ = std::string(encoding), .claim_ = claim, .website_epoch_ = epoch(*root, "website:" + website.id()), .policy_epoch_ = epoch(*root, "policy:" + website.response_cache().id())};
             if (publication_->publish(root, std::shared_ptr<const response_cache_snapshot>(std::move(next)))) {
                 return {.stale_ = std::move(stale), .ticket_ = std::move(ticket), .key_ = std::move(key)};
             }
@@ -1545,7 +1546,6 @@ private:
     }
     struct compiled_policy final {
         flexedge::cache::policy policy_{};
-        flexedge::cache::rule merged_rule_{};
         std::vector<std::vector<std::shared_ptr<const RE2>>> patterns_{};
         std::vector<std::optional<cache_expression_program>> expressions_{};
     };

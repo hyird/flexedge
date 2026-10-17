@@ -158,7 +158,7 @@ add_executable(flexedge_node_request_benchmark EXCLUDE_FROM_ALL
 )
 target_include_directories(flexedge_node_request_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(flexedge_node_request_benchmark
-    PRIVATE flexedge_node_protocol flexedge_route_policy ruvia::http OpenSSL::Crypto
+    PRIVATE flexedge_node_protocol flexedge_route_policy ruvia::core ruvia::http OpenSSL::Crypto
 )
 if(MSVC)
     target_compile_options(flexedge_node_request_benchmark PRIVATE /W4 /bigobj /permissive- /utf-8 /wd4819)

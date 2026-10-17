@@ -211,7 +211,10 @@ private:
                 const auto etag = request_text.starts_with("GET /etag-comma ") ? "\"test\\,part\"" : "\"test\"";
                 auto bytes = std::make_shared<std::string>(
                     std::string("HTTP/1.1 200 OK\r\nCache-Control: public, max-age=600\r\nETag: ") + etag +
-                    "\r\nContent-Type: text/plain\r\nContent-Length: " + std::to_string(body_.size()) + "\r\nConnection: close\r\n\r\n" + body_);
+                    "\r\nContent-Type: text/plain\r\nContent-Length: " + std::to_string(body_.size()) + "\r\nConnection: close\r\n\r\n");
+                if (!request_text.starts_with("HEAD ")) {
+                    bytes->append(body_);
+                }
                 asio::async_write(*peer, asio::buffer(*bytes), [peer, bytes](std::error_code, std::size_t) {std::error_code ignored;peer->close(ignored); });
             });
             accept();
@@ -699,6 +702,97 @@ void verify() {
         FLEXEDGE_REQUIRE(old_date.substr(old_date.find("\r\n\r\n") + 4) == large_body);
     }
     FLEXEDGE_REQUIRE(large_source.hits() == old_date_fetches + 2);
+    {
+        flexedge::cache::rule base;
+        base.id_ = "composed-base";
+        base.name_ = "Composed cache policy";
+        base.match_type_ = "prefix";
+        base.patterns_ = {"/policy-compose/"};
+        base.ttl_mode_ = "fixed";
+        base.ttl_seconds_ = 600;
+        base.browser_ttl_mode_ = "override_origin";
+        base.browser_ttl_seconds_ = 120;
+        auto& base_settings = base.settings_.emplace();
+        base_settings.enabled_ = {"edge", "browser", "key"};
+        base_settings.key_.query_mode_ = "ignore";
+        auto overlay = base;
+        overlay.id_ = "composed-overlay";
+        overlay.patterns_ = {"/policy-compose/override/"};
+        overlay.browser_ttl_seconds_ = 30;
+        overlay.settings_->enabled_ = {"browser"};
+        auto disabled = base;
+        disabled.id_ = "disabled-bypass";
+        disabled.action_ = "bypass";
+        disabled.enabled_ = false;
+        auto head = base;
+        head.id_ = "head-bypass";
+        head.action_ = "bypass";
+        head.methods_ = {"HEAD"};
+        auto private_rule = base;
+        private_rule.id_ = "private-bypass";
+        private_rule.patterns_ = {"/policy-compose/private/"};
+        private_rule.action_ = "bypass";
+        policy.rules_ = {base, overlay, disabled, head, private_rule};
+        configure_rule();
+        const auto composed_policy = policy;
+        const auto composed_miss = request({}, "GET", "/policy-compose/override/object.css?variant=one");
+        FLEXEDGE_REQUIRE(composed_miss.find("X-Cache: MISS") != std::string::npos);
+        FLEXEDGE_REQUIRE(composed_miss.find("max-age=30") != std::string::npos);
+        const auto composed_hit = request({}, "GET", "/policy-compose/override/object.css?variant=two");
+        FLEXEDGE_REQUIRE(composed_hit.find("X-Cache: HIT") != std::string::npos);
+        FLEXEDGE_REQUIRE(composed_hit.find("max-age=30") != std::string::npos && composed_hit.ends_with(large_body));
+        const auto base_miss = request({}, "GET", "/policy-compose/base.css?variant=one");
+        FLEXEDGE_REQUIRE(base_miss.find("X-Cache: MISS") != std::string::npos && base_miss.find("max-age=120") != std::string::npos);
+        FLEXEDGE_REQUIRE(request({}, "GET", "/policy-compose/base.css?variant=two").find("X-Cache: HIT") != std::string::npos);
+        for (unsigned repeat = 0; repeat != 2; ++repeat) {
+            const auto bypassed = request({}, "GET", "/policy-compose/private/object.css");
+            FLEXEDGE_REQUIRE(bypassed.find("X-Cache: BYPASS") != std::string::npos && bypassed.ends_with(large_body));
+            FLEXEDGE_REQUIRE(request({}, "GET", "/policy-unmatched/object.css").find("X-Cache: BYPASS") != std::string::npos);
+        }
+        FLEXEDGE_REQUIRE(request({}, "HEAD", "/policy-compose/base.css").find("X-Cache: BYPASS") != std::string::npos);
+
+        base.id_ = "filtered-query";
+        base.patterns_ = {"/policy-query/"};
+        base.settings_->enabled_ = {"edge", "key", "sort"};
+        base.settings_->key_.query_mode_ = "include";
+        base.settings_->key_.query_parameters_ = {"keep"};
+        base.settings_->sort_query_ = true;
+        policy.rules_ = {base};
+        configure_rule();
+        FLEXEDGE_REQUIRE(request({}, "GET", "/policy-query/object.css?drop=one&keep=b&keep=a").find("X-Cache: MISS") != std::string::npos);
+        const auto filtered_hit = request({}, "GET", "/policy-query/object.css?keep=a&drop=two&keep=b");
+        FLEXEDGE_REQUIRE(filtered_hit.find("X-Cache: HIT") != std::string::npos && filtered_hit.ends_with(large_body));
+        FLEXEDGE_REQUIRE(request({}, "GET", "/policy-query/object.css?keep=c").find("X-Cache: MISS") != std::string::npos);
+        base.settings_->key_.query_mode_ = "exclude";
+        base.settings_->key_.query_parameters_ = {"drop"};
+        policy.rules_ = {base};
+        configure_rule();
+        FLEXEDGE_REQUIRE(request({}, "GET", "/policy-query/object.css?drop=one&keep=b&keep=a").find("X-Cache: MISS") != std::string::npos);
+        FLEXEDGE_REQUIRE(request({}, "GET", "/policy-query/object.css?keep=a&drop=two&keep=b").find("X-Cache: HIT") != std::string::npos);
+
+        base.id_ = "legacy-query";
+        base.patterns_ = {"/policy-legacy/"};
+        base.settings_.reset();
+        policy.rules_ = {base};
+        configure_rule();
+        FLEXEDGE_REQUIRE(request({}, "GET", "/policy-legacy/object.css?variant=one").find("X-Cache: MISS") != std::string::npos);
+        FLEXEDGE_REQUIRE(request({}, "GET", "/policy-legacy/object.css?variant=two").find("X-Cache: MISS") != std::string::npos);
+        FLEXEDGE_REQUIRE(request({}, "GET", "/policy-legacy/object.css?variant=one").find("X-Cache: HIT") != std::string::npos);
+        FLEXEDGE_REQUIRE(request({}, "GET", "/policy-legacy/object.css").find("X-Cache: MISS") != std::string::npos);
+        FLEXEDGE_REQUIRE(request({}, "GET", "/policy-legacy/object.css").find("X-Cache: HIT") != std::string::npos);
+
+        policy = composed_policy;
+        site->set_revision(site->revision() + 1);
+        site->clear_response_cache();
+        flexedge::cache::to_proto(policy, *site->mutable_response_cache());
+        config.setGeneration(config.release.generation() + 1);
+        config.finalize();
+        control.loop(0).start(activate(plane, std::make_shared<const compiled_config>(config.active, config.objects))).get();
+        const auto restored_miss = request({}, "GET", "/policy-compose/override/restored.css?variant=one");
+        FLEXEDGE_REQUIRE(restored_miss.find("X-Cache: MISS") != std::string::npos && restored_miss.find("max-age=30") != std::string::npos);
+        const auto restored_hit = request({}, "GET", "/policy-compose/override/restored.css?variant=two");
+        FLEXEDGE_REQUIRE(restored_hit.find("X-Cache: HIT") != std::string::npos && restored_hit.ends_with(large_body));
+    }
     shutdown.stop_and_join();
 }
 }  // namespace

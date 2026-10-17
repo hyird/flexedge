@@ -549,7 +549,7 @@ private:
         for (const auto& header : parsed.request().headers()) {
             request_headers_.emplace_back(header.name(), header.value());
         }
-        const auto* rule = context_.cache_->matching(*website_, parsed.request().target(), parsed.request().method(), request_headers_, secure_);
+        auto rule = context_.cache_->matching(*website_, parsed.request().target(), parsed.request().method(), request_headers_, secure_);
         if (!rule || rule->action_ != "cache") {
             access_log_.cache_status("bypass", rule ? "rule_bypass" : "no_rule");
             return false;
@@ -558,7 +558,7 @@ private:
             access_log_.cache_status("bypass", reason);
             return false;
         }
-        cache_rule_ = *rule;
+        cache_rule_ = std::move(*rule);
         cache_url_ = flexedge::cache::parse_url(std::string(secure_ ? "https://" : "http://") + std::string(host) + std::string(parsed.request().target()));
         if (!cache_url_) {
             access_log_.cache_status("bypass", "request_url");
