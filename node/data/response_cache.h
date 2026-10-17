@@ -91,9 +91,43 @@ inline std::vector<std::string> cache_tokens(std::string_view input) {
     }
     return result;
 }
+inline std::string_view cache_next_directive(std::string_view& input) noexcept {
+    std::size_t end{};
+    while (end < input.size()) {
+        const auto comma = input.find(',', end);
+        const auto part = input.substr(end, comma == std::string_view::npos ? comma : comma - end);
+        const auto opening = part.find('"');
+        if (opening == std::string_view::npos) {
+            end = comma == std::string_view::npos ? input.size() : comma;
+            break;
+        }
+        end += opening + 1;
+        while (end < input.size()) {
+            const auto closing = input.find('"', end);
+            if (closing == std::string_view::npos) {
+                end = input.size();
+                break;
+            }
+            auto escaped = closing;
+            while (escaped > end && input[escaped - 1] == '\\') {
+                --escaped;
+            }
+            const bool complete = (closing - escaped) % 2 == 0;
+            end = closing + 1;
+            if (complete) {
+                break;
+            }
+        }
+    }
+    const auto token = input.substr(0, end);
+    input = end == input.size() ? std::string_view{} : input.substr(end + 1);
+    return flexedge::route_policy::trim_ows(token);
+}
 inline bool cache_has_directive(std::string_view input, std::string_view name) {
-    for (const auto& token : cache_tokens(input)) {
-        if (flexedge::route_policy::trim_ows(std::string_view(token).substr(0, token.find('='))) == name) {
+    while (!input.empty()) {
+        const auto token = cache_next_directive(input);
+        if (flexedge::route_policy::ascii_equal(
+                flexedge::route_policy::trim_ows(token.substr(0, token.find('='))), name)) {
             return true;
         }
     }
@@ -101,21 +135,37 @@ inline bool cache_has_directive(std::string_view input, std::string_view name) {
 }
 inline std::optional<std::int64_t> cache_directive_seconds(std::string_view input, std::string_view name) {
     std::optional<std::int64_t> result;
-    for (const auto& token : cache_tokens(input)) {
+    while (!input.empty()) {
+        const auto token = cache_next_directive(input);
         const auto equal = token.find('=');
-        if (equal == std::string::npos || flexedge::route_policy::trim_ows(std::string_view(token).substr(0, equal)) != name) {
+        if (equal == std::string_view::npos ||
+            !flexedge::route_policy::ascii_equal(flexedge::route_policy::trim_ows(token.substr(0, equal)), name)) {
             continue;
         }
-        auto value = flexedge::route_policy::trim_ows(std::string_view(token).substr(equal + 1));
-        if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+        auto value = flexedge::route_policy::trim_ows(token.substr(equal + 1));
+        const bool quoted = value.size() >= 2 && value.front() == '"' && value.back() == '"';
+        if (quoted) {
             value = value.substr(1, value.size() - 2);
         }
-        std::int64_t seconds{};
-        const auto parsed = std::from_chars(value.data(), value.data() + value.size(), seconds);
-        if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || seconds < 0 || result) {
+        if (value.empty() || result) {
             return 0;
         }
-        result = (std::min)(seconds, std::int64_t{31536000});
+        std::int64_t seconds{};
+        for (std::size_t index = 0; index < value.size(); ++index) {
+            if (quoted && value[index] == '\\') {
+                ++index;
+                if (index == value.size()) {
+                    return 0;
+                }
+            }
+            const auto digit = value[index];
+            if (digit < '0' || digit > '9') {
+                return 0;
+            }
+            // Saturate at the existing local TTL cap, but validate the entire value.
+            seconds = (std::min)(seconds * 10 + digit - '0', std::int64_t{31536000});
+        }
+        result = seconds;
     }
     return result;
 }

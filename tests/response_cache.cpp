@@ -51,6 +51,25 @@ response_value response(std::string body = "body") {
     value.headers_ = {{"Content-Type", "text/plain"}, {"Cache-Control", "public, max-age=600"}};
     return value;
 }
+void directive_boundaries() {
+    FLEXEDGE_REQUIRE(!cache_has_directive(R"(public, extension="a,no-store,b")", "no-store"));
+    FLEXEDGE_REQUIRE(!cache_has_directive(R"(extension="a,private,b", public)", "private"));
+    FLEXEDGE_REQUIRE(!cache_has_directive(R"(extension="a\",no-cache,b", public)", "no-cache"));
+    FLEXEDGE_REQUIRE(cache_has_directive(R"(extension="a\\", No-StOrE)", "no-store"));
+    FLEXEDGE_REQUIRE(cache_has_directive(R"(extension="a,no-store,b", no-store)", "no-store"));
+    FLEXEDGE_REQUIRE(cache_directive_seconds(R"(extension="a,max-age=0,b", MaX-AgE="600")", "max-age") == 600);
+    FLEXEDGE_REQUIRE(cache_directive_seconds(R"(max-age="6\0")", "max-age") == 60);
+    FLEXEDGE_REQUIRE(cache_directive_seconds(" , max-age=60, , ", "max-age") == 60);
+    FLEXEDGE_REQUIRE(!cache_directive_seconds(R"(extension="max-age=60")", "max-age"));
+    const cache_headers combined{{"Cache-Control", "max-age=600"}, {"cache-control", "max-age=10"}};
+    FLEXEDGE_REQUIRE(cache_directive_seconds(cache_header(combined, "Cache-Control"), "max-age") == 0);
+    for (const auto value : {"max-age=", "max-age=-1", "max-age=60s", "max-age=\"60",
+             "max-age=9999999999999999999999999999999999999x"}) {
+        FLEXEDGE_REQUIRE(cache_directive_seconds(value, "max-age") == 0);
+    }
+    FLEXEDGE_REQUIRE(cache_directive_seconds("max-age=9999999999999999999999999999999999999", "max-age") == 31536000);
+}
+
 void verify() {
     const cache_resource_capacity host{1000, 200};
     FLEXEDGE_REQUIRE(cache_capacity_limit(host, 100, 999, 50, 100) == 200);
@@ -343,6 +362,7 @@ void verify() {
 }  // namespace
 int main() {
     try {
+        directive_boundaries();
         verify();
         std::cout << "response cache invariants passed\n";
         return 0;
